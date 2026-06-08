@@ -42,8 +42,8 @@ export function EmbeddingsProvider({ children }: { children: React.ReactNode }) 
       ready: imageReady && textReady,
       progress,
       error: err ? String(err) : null,
-      embedImage: async (uri: string) => normalize(await image.forward(uri)),
-      embedText: async (t: string) => normalize(await text.forward(t)),
+      embedImage: async (uri: string) => normalize(Array.from(await image.forward(uri))),
+      embedText: async (t: string) => normalize(Array.from(await text.forward(t))),
     };
   }, [image, text]);
 
