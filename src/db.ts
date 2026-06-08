@@ -44,6 +44,14 @@ export async function initDb(): Promise<void> {
       source_uri TEXT NOT NULL DEFAULT '',
       created_at INTEGER NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS index_errors (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      stage TEXT NOT NULL,
+      reason TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    );
   `);
   // Migrate v1 databases that predate the extra_terms column.
   const cols = await db.getAllAsync<{ name: string }>('PRAGMA table_info(memes)');
@@ -330,6 +338,46 @@ export async function countExemplars(): Promise<number> {
 export async function deleteExemplar(id: number): Promise<void> {
   const db = await getDb();
   await db.runAsync('DELETE FROM exemplars WHERE id = ?', id);
+}
+
+// ---- indexing errors (diagnostics) ------------------------------------------
+
+export interface IndexError {
+  name: string;
+  kind: string;
+  stage: string;
+  reason: string;
+}
+
+export async function clearIndexErrors(): Promise<void> {
+  const db = await getDb();
+  await db.execAsync('DELETE FROM index_errors;');
+}
+
+export async function addIndexError(e: IndexError): Promise<void> {
+  const db = await getDb();
+  await db.runAsync(
+    'INSERT INTO index_errors (name, kind, stage, reason, created_at) VALUES (?, ?, ?, ?, ?)',
+    e.name,
+    e.kind,
+    e.stage,
+    e.reason,
+    Date.now()
+  );
+}
+
+export async function getIndexErrors(limit = 300): Promise<IndexError[]> {
+  const db = await getDb();
+  return db.getAllAsync<IndexError>(
+    'SELECT name, kind, stage, reason FROM index_errors ORDER BY created_at DESC LIMIT ?',
+    limit
+  );
+}
+
+export async function countIndexErrors(): Promise<number> {
+  const db = await getDb();
+  const row = await db.getFirstAsync<{ c: number }>('SELECT COUNT(*) as c FROM index_errors');
+  return row?.c ?? 0;
 }
 
 function safeParseStrings(s: string): string[] {

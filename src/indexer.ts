@@ -2,6 +2,8 @@ import * as VideoThumbnails from 'expo-video-thumbnails';
 
 import { classifyImage, type EmbeddingsApi, type LabelVec } from './embeddings';
 import {
+  addIndexError,
+  clearIndexErrors,
   getAllMemeEmbeddings,
   getExemplars,
   getFolders,
@@ -117,6 +119,7 @@ export async function runIndex(
   opts: { onProgress?: (p: IndexProgress) => void; shouldCancel?: () => boolean } = {}
 ): Promise<IndexResult> {
   const know = await buildKnowledge(api);
+  await clearIndexErrors();
 
   const folders = await getFolders();
   const allFiles = [];
@@ -139,6 +142,7 @@ export async function runIndex(
     const file = allFiles[i];
     opts.onProgress?.({ processed: i, total, added, current: file.name });
 
+    let stage = 'copy';
     try {
       if (await memeExists(file.uri)) {
         skipped++;
@@ -150,15 +154,18 @@ export async function runIndex(
       let thumbForCleanup: string | null = null;
 
       if (file.kind === 'video') {
+        stage = 'thumbnail';
         const { uri } = await VideoThumbnails.getThumbnailAsync(work, { time: 1000 });
         frame = uri;
         thumbForCleanup = uri;
       }
 
+      stage = 'embed';
       const embedding = await api.embedImage(frame);
       const ocrText = await ocr(frame);
       const tags = classifyImage(embedding, know.labelVecs, know.exemplarVecs, know.negativeVecs);
 
+      stage = 'store';
       await insertMeme({
         uri: file.uri,
         name: file.name,
@@ -172,8 +179,10 @@ export async function runIndex(
 
       await deleteCache(work);
       if (thumbForCleanup) await deleteCache(thumbForCleanup);
-    } catch {
+    } catch (e) {
       errors++;
+      const reason = String((e as Error)?.message ?? e).slice(0, 300);
+      await addIndexError({ name: file.name, kind: file.kind, stage, reason }).catch(() => {});
     }
   }
 
