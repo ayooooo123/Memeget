@@ -13,7 +13,7 @@
 export interface LabelDef {
   label: string; // human-facing name shown as a tag
   prompt: string; // CLIP text prompt used for matching
-  category: 'format' | 'character' | 'emotion' | 'topic';
+  category: 'format' | 'character' | 'emotion' | 'topic' | 'person';
   associations?: string[]; // related search terms (world knowledge)
 }
 
@@ -39,6 +39,21 @@ export const MEME_LABELS: LabelDef[] = [
   { label: 'Milady', prompt: 'a Milady NFT meme, a cute glitchy neochibi anime girl avatar', category: 'character', associations: ['milady', 'remilia', 'neochibi', 'nft', 'ethereum', 'charlotte fang', 'pfp', 'network spirituality'] },
   { label: 'Bored Ape', prompt: 'a Bored Ape Yacht Club NFT cartoon ape avatar', category: 'character', associations: ['bored ape', 'bayc', 'nft', 'ethereum', 'pfp', 'yuga'] },
   { label: 'Nyan Cat', prompt: 'a Nyan Cat pop-tart rainbow cat meme', category: 'character', associations: ['nyan', 'cat', 'rainbow', 'pop tart'] },
+  { label: 'Apu Apustaja', prompt: 'an Apu Apustaja meme, a simple childlike Pepe-style frog with big round innocent eyes', category: 'character', associations: ['apu', 'apustaja', 'helper', 'fren', 'pepe', 'sproke'] },
+  { label: 'Bobo the Bear', prompt: 'a Bobo the Bear meme, a small blue cartoon bear', category: 'character', associations: ['bobo', 'bear', 'bear market'] },
+  { label: 'Groyper', prompt: 'a Groyper meme, a fat smug frog-toad resting its chin on interlocked hands', category: 'character', associations: ['groyper', 'frog', 'toad'] },
+
+  // --- Real people / characters (best-effort zero-shot; teach exemplars for
+  //     reliable recognition of specific faces) ---
+  { label: 'Donald Trump', prompt: 'a photo of Donald Trump', category: 'person', associations: ['trump', 'maga', 'president', 'politics'] },
+  { label: 'Barack Obama', prompt: 'a photo of Barack Obama', category: 'person', associations: ['obama', 'president', 'politics'] },
+  { label: 'Joe Biden', prompt: 'a photo of Joe Biden', category: 'person', associations: ['biden', 'president', 'politics'] },
+  { label: 'Elon Musk', prompt: 'a photo of Elon Musk', category: 'person', associations: ['elon', 'musk', 'tesla', 'spacex', 'twitter', 'x'] },
+  { label: 'Nigel Farage', prompt: 'a photo of Nigel Farage', category: 'person', associations: ['farage', 'brexit', 'uk politics'] },
+  { label: 'Tony Soprano', prompt: 'a photo of Tony Soprano from The Sopranos, James Gandolfini', category: 'person', associations: ['sopranos', 'tony soprano', 'gandolfini', 'mafia'] },
+  { label: 'Walter White', prompt: 'a photo of Walter White Heisenberg from Breaking Bad', category: 'person', associations: ['breaking bad', 'heisenberg', 'walter white'] },
+  { label: 'Patrick Bateman', prompt: 'a photo of Patrick Bateman from American Psycho', category: 'person', associations: ['american psycho', 'patrick bateman', 'sigma'] },
+  { label: 'The Joker', prompt: 'a photo of the Joker from a Batman movie', category: 'person', associations: ['joker', 'batman', 'we live in a society'] },
 
   // --- Classic image-macro formats ---
   { label: 'Drake format', prompt: 'the Drake hotline bling reaction meme, reject the top prefer the bottom', category: 'format', associations: ['drake', 'reject', 'prefer', 'hotline bling'] },
