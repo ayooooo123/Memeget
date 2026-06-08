@@ -1,15 +1,19 @@
 import * as VideoThumbnails from 'expo-video-thumbnails';
 
-import { classifyImage, type EmbeddingsApi } from './embeddings';
+import { classifyImage, type EmbeddingsApi, type LabelVec } from './embeddings';
 import {
+  getAllMemeEmbeddings,
+  getExemplars,
   getFolders,
   getLabelVectors,
   insertMeme,
   memeExists,
   putLabelVector,
+  updateMemeTags,
 } from './db';
-import { MEME_LABELS, NEGATIVE_ANCHORS } from './memeLabels';
+import { ASSOCIATIONS, MEME_LABELS, NEGATIVE_ANCHORS } from './memeLabels';
 import { copyToCache, deleteCache, listMedia } from './saf';
+import type { Tag } from './types';
 
 const NEG_PREFIX = 'neg::';
 
@@ -41,9 +45,18 @@ export interface IndexResult {
   errors: number;
 }
 
+// Everything needed to tag an image: zero-shot text labels, taught exemplars,
+// negative anchors, and the world-knowledge association lookup.
+interface Knowledge {
+  labelVecs: LabelVec[];
+  exemplarVecs: LabelVec[];
+  negativeVecs: Float32Array[];
+  assoc: Map<string, string[]>;
+}
+
 // Compute (and cache) CLIP text vectors for every curated label + negative
-// anchor. Runs once; subsequent indexes read straight from SQLite.
-export async function ensureLabelVectors(api: EmbeddingsApi) {
+// anchor, then load taught exemplars and build the association lookup.
+export async function buildKnowledge(api: EmbeddingsApi): Promise<Knowledge> {
   const cache = await getLabelVectors();
 
   for (const def of MEME_LABELS) {
@@ -62,16 +75,40 @@ export async function ensureLabelVectors(api: EmbeddingsApi) {
     }
   }
 
-  const labelVecs = MEME_LABELS.filter((d) => cache.has(d.label)).map((d) => ({
+  const labelVecs: LabelVec[] = MEME_LABELS.filter((d) => cache.has(d.label)).map((d) => ({
     label: d.label,
     category: d.category,
     vec: cache.get(d.label)!,
   }));
-  const negativeVecs = NEGATIVE_ANCHORS.map((_, i) => cache.get(`${NEG_PREFIX}${i}`)!).filter(
-    Boolean
-  );
+  const negativeVecs = NEGATIVE_ANCHORS.map((_, i) => cache.get(`${NEG_PREFIX}${i}`)!).filter(Boolean);
 
-  return { labelVecs, negativeVecs };
+  const exemplars = await getExemplars();
+  const exemplarVecs: LabelVec[] = exemplars.map((e) => ({
+    label: e.label,
+    category: e.category,
+    vec: Float32Array.from(e.vector),
+  }));
+
+  // Association lookup: curated terms + any added with an exemplar.
+  const assoc = new Map<string, string[]>(Object.entries(ASSOCIATIONS));
+  for (const e of exemplars) {
+    if (e.associations.length) {
+      assoc.set(e.label, [...(assoc.get(e.label) ?? []), ...e.associations]);
+    }
+  }
+
+  return { labelVecs, exemplarVecs, negativeVecs, assoc };
+}
+
+// Build the searchable world-knowledge string for a set of tags: the label
+// names plus their association terms, de-duplicated.
+function extraTermsFor(tags: Tag[], assoc: Map<string, string[]>): string {
+  const terms = new Set<string>();
+  for (const t of tags) {
+    terms.add(t.label.toLowerCase());
+    for (const a of assoc.get(t.label) ?? []) terms.add(a.toLowerCase());
+  }
+  return [...terms].join(' ');
 }
 
 // Walk every linked folder and index any media not already in the DB.
@@ -79,7 +116,7 @@ export async function runIndex(
   api: EmbeddingsApi,
   opts: { onProgress?: (p: IndexProgress) => void; shouldCancel?: () => boolean } = {}
 ): Promise<IndexResult> {
-  const { labelVecs, negativeVecs } = await ensureLabelVectors(api);
+  const know = await buildKnowledge(api);
 
   const folders = await getFolders();
   const allFiles = [];
@@ -120,7 +157,7 @@ export async function runIndex(
 
       const embedding = await api.embedImage(frame);
       const ocrText = await ocr(frame);
-      const tags = classifyImage(embedding, labelVecs, negativeVecs);
+      const tags = classifyImage(embedding, know.labelVecs, know.exemplarVecs, know.negativeVecs);
 
       await insertMeme({
         uri: file.uri,
@@ -129,6 +166,7 @@ export async function runIndex(
         embedding,
         ocrText,
         tags,
+        extraTerms: extraTermsFor(tags, know.assoc),
       });
       added++;
 
@@ -141,4 +179,29 @@ export async function runIndex(
 
   opts.onProgress?.({ processed: total, total, added, current: '' });
   return { added, skipped, errors };
+}
+
+export interface RetagResult {
+  updated: number;
+}
+
+// Re-run tagging over every already-indexed meme using current knowledge
+// (new exemplars, edited associations). Reuses stored embeddings, so there is
+// no image re-embedding — only cheap vector math.
+export async function retagAll(
+  api: EmbeddingsApi,
+  opts: { onProgress?: (done: number, total: number) => void } = {}
+): Promise<RetagResult> {
+  const know = await buildKnowledge(api);
+  const rows = await getAllMemeEmbeddings();
+
+  let updated = 0;
+  for (let i = 0; i < rows.length; i++) {
+    const vec = Array.from(rows[i].embedding);
+    const tags = classifyImage(vec, know.labelVecs, know.exemplarVecs, know.negativeVecs);
+    await updateMemeTags(rows[i].id, tags, extraTermsFor(tags, know.assoc));
+    updated++;
+    opts.onProgress?.(i + 1, rows.length);
+  }
+  return { updated };
 }

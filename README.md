@@ -61,6 +61,22 @@ src/memeLabels.ts       # curated meme-format/character/emotion prompts
 src/screens/            # Library (index), Search, Settings
 ```
 
+## Culture layer (keeping up with new memes)
+
+A frozen model never knows last week's meme, so the *knowledge* lives outside the
+weights — editable and on-device:
+
+- **Association graph** (`src/memeLabels.ts`) — each label carries related terms
+  (Milady → Remilia, NFT, Ethereum, neochibi…). Matching a label folds those into
+  the meme's searchable text, so "ethereum" finds a Milady meme that never says it.
+- **Teach-by-example** — tap any meme → *Teach a label* to name a character/format
+  (e.g. "Milady"). It stores that meme's image embedding as an **exemplar**;
+  future images are tagged by image-to-image similarity to your exemplars, so the
+  model doesn't need to have ever heard the word. New format drops? Teach it in
+  seconds.
+- **Re-tag library** (Settings) — re-applies all current knowledge to everything
+  already indexed, reusing stored embeddings (no re-scanning/re-embedding).
+
 ## Next steps / roadmap
 
 - Bundle the CLIP model in assets for zero-network-from-install.
