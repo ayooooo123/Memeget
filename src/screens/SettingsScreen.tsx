@@ -2,7 +2,15 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { ActivityIndicator, Alert, Linking, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import { useEmbeddings } from '../embeddings';
-import { clearIndex, countExemplars, countMemes, getFolders, removeFolder } from '../db';
+import {
+  clearIndex,
+  countExemplars,
+  countMemes,
+  getFolders,
+  getIndexErrors,
+  removeFolder,
+  type IndexError,
+} from '../db';
 import { retagAll } from '../indexer';
 import { MEME_LABELS } from '../memeLabels';
 import { colors } from '../theme';
@@ -13,12 +21,14 @@ export function SettingsScreen() {
   const [folders, setFolders] = useState<LinkedFolder[]>([]);
   const [count, setCount] = useState(0);
   const [taught, setTaught] = useState(0);
+  const [errors, setErrors] = useState<IndexError[]>([]);
   const [retagging, setRetagging] = useState<{ done: number; total: number } | null>(null);
 
   const refresh = useCallback(async () => {
     setFolders(await getFolders());
     setCount(await countMemes());
     setTaught(await countExemplars());
+    setErrors(await getIndexErrors());
   }, []);
 
   useEffect(() => {
@@ -96,6 +106,31 @@ export function SettingsScreen() {
         )}
       </Section>
 
+      {errors.length > 0 && (
+        <Section title={`Indexing errors (${errors.length})`}>
+          {Object.entries(
+            errors.reduce<Record<string, number>>((acc, e) => {
+              const key = `${e.stage} · ${e.kind}`;
+              acc[key] = (acc[key] ?? 0) + 1;
+              return acc;
+            }, {})
+          ).map(([k, n]) => (
+            <Row key={k} label={k} value={String(n)} />
+          ))}
+          <Text style={styles.sectionLabel}>Examples</Text>
+          {errors.slice(0, 12).map((e, i) => (
+            <View key={i} style={styles.errRow}>
+              <Text style={styles.errName} numberOfLines={1}>
+                {e.name}
+              </Text>
+              <Text style={styles.errReason} numberOfLines={2}>
+                [{e.stage}] {e.reason}
+              </Text>
+            </View>
+          ))}
+        </Section>
+      )}
+
       <Section title={`Linked folders (${folders.length})`}>
         {folders.length === 0 ? (
           <Text style={styles.note}>None yet. Link folders from the Library tab.</Text>
@@ -166,6 +201,10 @@ const styles = StyleSheet.create({
   primary: { backgroundColor: colors.accent, borderRadius: 10, paddingVertical: 11, alignItems: 'center' },
   primaryText: { color: '#0b0d12', fontWeight: '800' },
   retagRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  sectionLabel: { color: colors.muted, fontSize: 11, textTransform: 'uppercase', marginTop: 4 },
+  errRow: { gap: 1 },
+  errName: { color: colors.text, fontSize: 12, fontWeight: '600' },
+  errReason: { color: colors.muted, fontSize: 11, lineHeight: 15 },
   folderRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 12 },
   folderName: { color: colors.text, flex: 1, fontSize: 13 },
   unlink: { color: colors.danger, fontSize: 13, fontWeight: '600' },
