@@ -13,9 +13,24 @@ import {
   putLabelVector,
   updateMemeTags,
 } from './db';
-import { ASSOCIATIONS, MEME_LABELS, NEGATIVE_ANCHORS } from './memeLabels';
+import { ASSOCIATIONS, MEME_LABELS, NEGATIVE_ANCHORS, ocrTags } from './memeLabels';
 import { copyToCache, deleteCache, listMedia } from './saf';
 import type { Tag } from './types';
+
+// Merge visual (prompt/exemplar) tags with OCR-derived tags, de-duped by label.
+// Priority: ocr > exemplar > prompt (watermarks and the user's ground truth
+// beat shaky zero-shot guesses).
+function mergeTags(visual: Tag[], fromOcr: Tag[]): Tag[] {
+  const rank = (t: Tag) => (t.source === 'ocr' ? 3 : t.source === 'exemplar' ? 2 : 1);
+  const best = new Map<string, Tag>();
+  for (const t of [...visual, ...fromOcr]) {
+    const cur = best.get(t.label);
+    if (!cur || rank(t) > rank(cur) || (rank(t) === rank(cur) && t.score > cur.score)) {
+      best.set(t.label, t);
+    }
+  }
+  return [...best.values()].sort((a, b) => rank(b) - rank(a) || b.score - a.score).slice(0, 4);
+}
 
 const NEG_PREFIX = 'neg::';
 
@@ -163,7 +178,10 @@ export async function runIndex(
       stage = 'embed';
       const embedding = await api.embedImage(frame);
       const ocrText = await ocr(frame);
-      const tags = classifyImage(embedding, know.labelVecs, know.exemplarVecs, know.negativeVecs);
+      const tags = mergeTags(
+        classifyImage(embedding, know.labelVecs, know.exemplarVecs, know.negativeVecs),
+        ocrTags(ocrText)
+      );
 
       stage = 'store';
       await insertMeme({
@@ -207,7 +225,10 @@ export async function retagAll(
   let updated = 0;
   for (let i = 0; i < rows.length; i++) {
     const vec = Array.from(rows[i].embedding);
-    const tags = classifyImage(vec, know.labelVecs, know.exemplarVecs, know.negativeVecs);
+    const tags = mergeTags(
+      classifyImage(vec, know.labelVecs, know.exemplarVecs, know.negativeVecs),
+      ocrTags(rows[i].ocrText)
+    );
     await updateMemeTags(rows[i].id, tags, extraTermsFor(tags, know.assoc));
     updated++;
     opts.onProgress?.(i + 1, rows.length);

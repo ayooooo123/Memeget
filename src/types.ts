@@ -4,7 +4,7 @@ export interface Tag {
   label: string;
   category: string;
   score: number;
-  source?: 'prompt' | 'exemplar'; // how the label was matched
+  source?: 'prompt' | 'exemplar' | 'ocr'; // how the label was matched
 }
 
 export interface MemeRecord {
