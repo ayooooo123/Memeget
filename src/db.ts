@@ -146,12 +146,14 @@ function rowToRecord(row: MemeRow): MemeRecord & { embedding: Float32Array } {
 
 // Re-tagging reuses already-stored embeddings, so applying new knowledge
 // (exemplars, association edits) costs no re-embedding.
-export async function getAllMemeEmbeddings(): Promise<{ id: number; embedding: Float32Array }[]> {
+export async function getAllMemeEmbeddings(): Promise<
+  { id: number; embedding: Float32Array; ocrText: string }[]
+> {
   const db = await getDb();
-  const rows = await db.getAllAsync<{ id: number; embedding: Uint8Array }>(
-    'SELECT id, embedding FROM memes'
+  const rows = await db.getAllAsync<{ id: number; embedding: Uint8Array; ocr_text: string }>(
+    'SELECT id, embedding, ocr_text FROM memes'
   );
-  return rows.map((r) => ({ id: r.id, embedding: blobToVec(r.embedding) }));
+  return rows.map((r) => ({ id: r.id, embedding: blobToVec(r.embedding), ocrText: r.ocr_text ?? '' }));
 }
 
 export async function getMemeEmbedding(id: number): Promise<Float32Array | null> {

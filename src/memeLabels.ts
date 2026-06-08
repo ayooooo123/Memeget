@@ -10,6 +10,8 @@
 // picture nor its on-image text says those words. Edit freely — this list +
 // the user's taught exemplars ARE the curation surface of the app.
 
+import type { Tag } from './types';
+
 export interface LabelDef {
   label: string; // human-facing name shown as a tag
   prompt: string; // CLIP text prompt used for matching
@@ -107,3 +109,32 @@ export const NEGATIVE_ANCHORS: string[] = [
 export const ASSOCIATIONS: Record<string, string[]> = Object.fromEntries(
   MEME_LABELS.filter((l) => l.associations?.length).map((l) => [l.label, l.associations!])
 );
+
+// OCR-keyword rules: high-precision tags from text/watermarks the model can't
+// read meaning into. A "maker.remilia.org" watermark names a Milady far more
+// reliably than any visual classifier. Keep patterns unambiguous to avoid
+// false positives (e.g. require "apustaja", not bare "apu").
+export interface OcrRule {
+  pattern: RegExp;
+  label: string;
+  category: LabelDef['category'];
+}
+
+export const OCR_RULES: OcrRule[] = [
+  { pattern: /remilia|milady/i, label: 'Milady', category: 'character' },
+  { pattern: /apustaja/i, label: 'Apu Apustaja', category: 'character' },
+  { pattern: /pepe(\s|the|$)/i, label: 'Pepe the Frog', category: 'character' },
+  { pattern: /\bgroyper\b/i, label: 'Groyper', category: 'character' },
+  { pattern: /\bwagmi\b|\bngmi\b|\bhodl\b|diamond hands/i, label: 'Crypto / NFT', category: 'topic' },
+];
+
+// Tags inferred from a meme's OCR text. Marked source 'ocr' so they outrank
+// shaky visual guesses during merge.
+export function ocrTags(text: string): Tag[] {
+  if (!text) return [];
+  const out: Tag[] = [];
+  for (const r of OCR_RULES) {
+    if (r.pattern.test(text)) out.push({ label: r.label, category: r.category, score: 1, source: 'ocr' });
+  }
+  return out;
+}
