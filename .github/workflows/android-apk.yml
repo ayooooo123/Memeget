@@ -1,0 +1,88 @@
+name: Android APK
+
+# Builds a standalone, sideloadable APK and publishes it to a GitHub Release.
+# The RN Android "release" build type self-signs with the auto-generated debug
+# keystore, so the APK installs on any device (enable "Install unknown apps")
+# without needing a Metro dev server or EAS account. Everything stays local.
+
+on:
+  push:
+    branches:
+      - claude/meme-indexing-mobile-app-3eecka
+  workflow_dispatch:
+
+# Avoid stacking builds on rapid pushes.
+concurrency:
+  group: android-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install dependencies
+        run: npm install --legacy-peer-deps
+
+      - name: Align Expo-managed package versions
+        run: npx expo install --fix
+        continue-on-error: true
+
+      - name: Prebuild Android project
+        run: npx expo prebuild --platform android --no-install
+
+      - name: Give Gradle more heap
+        run: |
+          echo "org.gradle.jvmargs=-Xmx5120m -XX:MaxMetaspaceSize=1024m" >> android/gradle.properties
+          echo "org.gradle.daemon=false" >> android/gradle.properties
+
+      - name: Build release APK
+        working-directory: android
+        run: ./gradlew assembleRelease --no-daemon --stacktrace
+
+      - name: Locate APK
+        id: apk
+        run: |
+          APK=$(find android/app/build/outputs/apk/release -name "*.apk" | head -n 1)
+          echo "Found APK: $APK"
+          echo "path=$APK" >> "$GITHUB_OUTPUT"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: memeget-apk
+          path: ${{ steps.apk.outputs.path }}
+          if-no-files-found: error
+
+      - name: Publish to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: android-latest
+          name: Memeget (latest Android build)
+          body: |
+            Standalone debug-signed APK built from `${{ github.sha }}`.
+            Install: download the `.apk`, then enable "Install unknown apps" for your browser/files app and open it.
+          files: ${{ steps.apk.outputs.path }}
+          make_latest: true
+          prerelease: false

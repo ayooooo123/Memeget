@@ -1,0 +1,29 @@
+{
+  "expo": {
+    "name": "Memeget",
+    "slug": "memeget",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "scheme": "memeget",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "android": {
+      "package": "online.smellslikebacon.memeget",
+      "edgeToEdgeEnabled": true
+    },
+    "plugins": [
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "minSdkVersion": 26,
+            "extraMavenRepos": []
+          }
+        }
+      ]
+    ],
+    "experiments": {
+      "typedRoutes": false
+    }
+  }
+}
