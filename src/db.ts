@@ -1,6 +1,6 @@
 import * as SQLite from 'expo-sqlite';
 
-import type { MemeRecord, SearchHit, Tag, LinkedFolder } from './types';
+import type { MemeRecord, SearchHit, Tag, LinkedFolder, Exemplar } from './types';
 
 let dbPromise: Promise<SQLite.SQLiteDatabase> | null = null;
 
@@ -23,6 +23,7 @@ export async function initDb(): Promise<void> {
       embedding BLOB NOT NULL,
       ocr_text TEXT NOT NULL DEFAULT '',
       tags TEXT NOT NULL DEFAULT '[]',
+      extra_terms TEXT NOT NULL DEFAULT '',
       indexed_at INTEGER NOT NULL
     );
     CREATE TABLE IF NOT EXISTS folders (
@@ -34,7 +35,21 @@ export async function initDb(): Promise<void> {
       label TEXT PRIMARY KEY,
       vector BLOB NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS exemplars (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      label TEXT NOT NULL,
+      category TEXT NOT NULL,
+      vector BLOB NOT NULL,
+      associations TEXT NOT NULL DEFAULT '[]',
+      source_uri TEXT NOT NULL DEFAULT '',
+      created_at INTEGER NOT NULL
+    );
   `);
+  // Migrate v1 databases that predate the extra_terms column.
+  const cols = await db.getAllAsync<{ name: string }>('PRAGMA table_info(memes)');
+  if (!cols.some((c) => c.name === 'extra_terms')) {
+    await db.execAsync(`ALTER TABLE memes ADD COLUMN extra_terms TEXT NOT NULL DEFAULT '';`);
+  }
 }
 
 // ---- float32 <-> blob helpers -------------------------------------------------
@@ -78,17 +93,19 @@ export async function insertMeme(args: {
   embedding: number[]; // already normalized
   ocrText: string;
   tags: Tag[];
+  extraTerms: string;
 }): Promise<void> {
   const db = await getDb();
   await db.runAsync(
-    `INSERT OR REPLACE INTO memes (uri, name, kind, embedding, ocr_text, tags, indexed_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO memes (uri, name, kind, embedding, ocr_text, tags, extra_terms, indexed_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     args.uri,
     args.name,
     args.kind,
     vecToBlob(args.embedding),
     args.ocrText,
     JSON.stringify(args.tags),
+    args.extraTerms,
     Date.now()
   );
 }
@@ -101,6 +118,7 @@ interface MemeRow {
   embedding: Uint8Array;
   ocr_text: string;
   tags: string;
+  extra_terms: string;
   indexed_at: number;
 }
 
@@ -112,9 +130,39 @@ function rowToRecord(row: MemeRow): MemeRecord & { embedding: Float32Array } {
     kind: row.kind as MemeRecord['kind'],
     ocrText: row.ocr_text,
     tags: safeParseTags(row.tags),
+    extraTerms: row.extra_terms ?? '',
     indexedAt: row.indexed_at,
     embedding: blobToVec(row.embedding),
   };
+}
+
+// Re-tagging reuses already-stored embeddings, so applying new knowledge
+// (exemplars, association edits) costs no re-embedding.
+export async function getAllMemeEmbeddings(): Promise<{ id: number; embedding: Float32Array }[]> {
+  const db = await getDb();
+  const rows = await db.getAllAsync<{ id: number; embedding: Uint8Array }>(
+    'SELECT id, embedding FROM memes'
+  );
+  return rows.map((r) => ({ id: r.id, embedding: blobToVec(r.embedding) }));
+}
+
+export async function getMemeEmbedding(id: number): Promise<Float32Array | null> {
+  const db = await getDb();
+  const row = await db.getFirstAsync<{ embedding: Uint8Array }>(
+    'SELECT embedding FROM memes WHERE id = ?',
+    id
+  );
+  return row ? blobToVec(row.embedding) : null;
+}
+
+export async function updateMemeTags(id: number, tags: Tag[], extraTerms: string): Promise<void> {
+  const db = await getDb();
+  await db.runAsync(
+    'UPDATE memes SET tags = ?, extra_terms = ? WHERE id = ?',
+    JSON.stringify(tags),
+    extraTerms,
+    id
+  );
 }
 
 function safeParseTags(s: string): Tag[] {
@@ -158,9 +206,17 @@ export async function searchByVector(
     const rec = rowToRecord(row);
     let score = dot(queryVec, rec.embedding); // cosine (both normalized)
     if (terms.length) {
-      const hay = (rec.ocrText + ' ' + rec.name + ' ' + rec.tags.map((t) => t.label).join(' ')).toLowerCase();
+      const hay = (
+        rec.ocrText +
+        ' ' +
+        rec.name +
+        ' ' +
+        rec.tags.map((t) => t.label).join(' ') +
+        ' ' +
+        rec.extraTerms
+      ).toLowerCase();
       const lexical = terms.reduce((acc, t) => acc + (hay.includes(t) ? 1 : 0), 0) / terms.length;
-      score += 0.15 * lexical; // light lexical boost on top of semantic score
+      score += 0.2 * lexical; // lexical boost (incl. world-knowledge association terms)
     }
     const { embedding, ...record } = rec;
     return { ...record, score } as SearchHit;
@@ -219,4 +275,68 @@ export async function putLabelVector(label: string, vec: number[]): Promise<void
     label,
     vecToBlob(vec)
   );
+}
+
+// ---- exemplars (teach-by-example) --------------------------------------------
+
+export async function addExemplar(args: {
+  label: string;
+  category: string;
+  vector: number[]; // normalized image embedding
+  associations: string[];
+  sourceUri: string;
+}): Promise<void> {
+  const db = await getDb();
+  await db.runAsync(
+    `INSERT INTO exemplars (label, category, vector, associations, source_uri, created_at)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+    args.label,
+    args.category,
+    vecToBlob(args.vector),
+    JSON.stringify(args.associations),
+    args.sourceUri,
+    Date.now()
+  );
+}
+
+export async function getExemplars(): Promise<Exemplar[]> {
+  const db = await getDb();
+  const rows = await db.getAllAsync<{
+    id: number;
+    label: string;
+    category: string;
+    vector: Uint8Array;
+    associations: string;
+    source_uri: string;
+    created_at: number;
+  }>('SELECT * FROM exemplars ORDER BY created_at DESC');
+  return rows.map((r) => ({
+    id: r.id,
+    label: r.label,
+    category: r.category,
+    vector: Array.from(blobToVec(r.vector)),
+    associations: safeParseStrings(r.associations),
+    sourceUri: r.source_uri,
+    createdAt: r.created_at,
+  }));
+}
+
+export async function countExemplars(): Promise<number> {
+  const db = await getDb();
+  const row = await db.getFirstAsync<{ c: number }>('SELECT COUNT(*) as c FROM exemplars');
+  return row?.c ?? 0;
+}
+
+export async function deleteExemplar(id: number): Promise<void> {
+  const db = await getDb();
+  await db.runAsync('DELETE FROM exemplars WHERE id = ?', id);
+}
+
+function safeParseStrings(s: string): string[] {
+  try {
+    const v = JSON.parse(s);
+    return Array.isArray(v) ? v.map(String) : [];
+  } catch {
+    return [];
+  }
 }

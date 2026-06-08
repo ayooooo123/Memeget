@@ -1,8 +1,9 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Alert, Linking, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Alert, Linking, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import { useEmbeddings } from '../embeddings';
-import { clearIndex, countMemes, getFolders, removeFolder } from '../db';
+import { clearIndex, countExemplars, countMemes, getFolders, removeFolder } from '../db';
+import { retagAll } from '../indexer';
 import { MEME_LABELS } from '../memeLabels';
 import { colors } from '../theme';
 import type { LinkedFolder } from '../types';
@@ -11,15 +12,36 @@ export function SettingsScreen() {
   const emb = useEmbeddings();
   const [folders, setFolders] = useState<LinkedFolder[]>([]);
   const [count, setCount] = useState(0);
+  const [taught, setTaught] = useState(0);
+  const [retagging, setRetagging] = useState<{ done: number; total: number } | null>(null);
 
   const refresh = useCallback(async () => {
     setFolders(await getFolders());
     setCount(await countMemes());
+    setTaught(await countExemplars());
   }, []);
 
   useEffect(() => {
     refresh();
   }, [refresh]);
+
+  const onRetag = useCallback(async () => {
+    if (!emb.ready) {
+      Alert.alert('Model still loading', 'Wait for the model to be ready, then re-tag.');
+      return;
+    }
+    setRetagging({ done: 0, total: 0 });
+    try {
+      const res = await retagAll(emb, {
+        onProgress: (done, total) => setRetagging({ done, total }),
+      });
+      Alert.alert('Re-tagged', `Updated ${res.updated} memes with current knowledge.`);
+    } catch (e) {
+      Alert.alert('Re-tag failed', String(e));
+    } finally {
+      setRetagging(null);
+    }
+  }, [emb]);
 
   const onClear = useCallback(() => {
     Alert.alert('Clear index?', 'Removes all processed memes from the local database. Your actual files are untouched.', [
@@ -51,6 +73,27 @@ export function SettingsScreen() {
         <Pressable style={styles.danger} onPress={onClear}>
           <Text style={styles.dangerText}>Clear index</Text>
         </Pressable>
+      </Section>
+
+      <Section title="Culture / knowledge">
+        <Row label="Labels you've taught" value={String(taught)} />
+        <Text style={styles.note}>
+          Tap any meme → “Teach a label” to teach Memeget a new character or format by example
+          (e.g. Milady). Then re-tag to apply it across everything already indexed — no re-scanning,
+          it reuses the embeddings already on device.
+        </Text>
+        {retagging ? (
+          <View style={styles.retagRow}>
+            <ActivityIndicator color={colors.accent} />
+            <Text style={styles.note}>
+              Re-tagging {retagging.done}/{retagging.total || '…'}
+            </Text>
+          </View>
+        ) : (
+          <Pressable style={styles.primary} onPress={onRetag}>
+            <Text style={styles.primaryText}>Re-tag library</Text>
+          </Pressable>
+        )}
       </Section>
 
       <Section title={`Linked folders (${folders.length})`}>
@@ -120,6 +163,9 @@ const styles = StyleSheet.create({
   link: { color: colors.accent, fontSize: 13, fontWeight: '600' },
   danger: { borderWidth: 1, borderColor: colors.danger, borderRadius: 10, paddingVertical: 10, alignItems: 'center' },
   dangerText: { color: colors.danger, fontWeight: '700' },
+  primary: { backgroundColor: colors.accent, borderRadius: 10, paddingVertical: 11, alignItems: 'center' },
+  primaryText: { color: '#0b0d12', fontWeight: '800' },
+  retagRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   folderRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 12 },
   folderName: { color: colors.text, flex: 1, fontSize: 13 },
   unlink: { color: colors.danger, fontSize: 13, fontWeight: '600' },

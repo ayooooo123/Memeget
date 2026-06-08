@@ -56,13 +56,29 @@ export function useEmbeddings(): EmbeddingsApi {
   return ctx;
 }
 
-// Zero-shot classify a normalized image vector against precomputed label
-// vectors. Keeps labels scoring above the strongest negative anchor.
+export interface LabelVec {
+  label: string;
+  category: string;
+  vec: Float32Array;
+}
+
+// Above this image-to-image cosine, a taught exemplar is considered a match.
+// Image/image similarity runs much higher than image/text, so exemplars use
+// their own absolute threshold rather than the text negative-anchor floor.
+const EXEMPLAR_THRESHOLD = 0.62;
+
+// Classify a normalized image vector against two sources:
+//  - text-prompt labels (zero-shot): kept if above the strongest negative
+//    anchor (a per-image dynamic floor).
+//  - taught exemplars (image-to-image): kept if above EXEMPLAR_THRESHOLD.
+// Results are merged and de-duplicated by label, keeping the best score, with
+// exemplar matches preferred (they're the user's ground truth).
 export function classifyImage(
   imageVec: number[],
-  labelVecs: { label: string; category: string; vec: Float32Array }[],
+  labelVecs: LabelVec[],
+  exemplarVecs: LabelVec[],
   negativeVecs: Float32Array[],
-  topK = 4
+  topK = 5
 ): Tag[] {
   const cos = (a: number[], b: Float32Array) => {
     let s = 0;
@@ -72,11 +88,25 @@ export function classifyImage(
 
   const negFloor = negativeVecs.reduce((m, n) => Math.max(m, cos(imageVec, n)), 0);
 
-  const scored = labelVecs
-    .map((l) => ({ label: l.label, category: l.category, score: cos(imageVec, l.vec) }))
-    .filter((l) => l.score > negFloor)
-    .sort((a, b) => b.score - a.score)
-    .slice(0, topK);
+  const fromPrompts: Tag[] = labelVecs
+    .map((l) => ({ label: l.label, category: l.category, score: cos(imageVec, l.vec), source: 'prompt' as const }))
+    .filter((l) => l.score > negFloor);
 
-  return scored;
+  const fromExemplars: Tag[] = exemplarVecs
+    .map((l) => ({ label: l.label, category: l.category, score: cos(imageVec, l.vec), source: 'exemplar' as const }))
+    .filter((l) => l.score > EXEMPLAR_THRESHOLD);
+
+  // De-dupe by label: an exemplar match always wins over a prompt match.
+  const best = new Map<string, Tag>();
+  for (const t of [...fromPrompts, ...fromExemplars]) {
+    const cur = best.get(t.label);
+    if (!cur || t.source === 'exemplar' || t.score > cur.score) best.set(t.label, t);
+  }
+
+  return [...best.values()]
+    .sort((a, b) => {
+      if (a.source !== b.source) return a.source === 'exemplar' ? -1 : 1;
+      return b.score - a.score;
+    })
+    .slice(0, topK);
 }
