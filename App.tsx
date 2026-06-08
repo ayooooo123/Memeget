@@ -2,6 +2,8 @@ import React, { useEffect, useState } from 'react';
 import { StatusBar } from 'expo-status-bar';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { initExecutorch } from 'react-native-executorch';
+import { ExpoResourceFetcher } from 'react-native-executorch-expo-resource-fetcher';
 
 import { EmbeddingsProvider } from './src/embeddings';
 import { initDb } from './src/db';
@@ -9,6 +11,11 @@ import { LibraryScreen } from './src/screens/LibraryScreen';
 import { SearchScreen } from './src/screens/SearchScreen';
 import { SettingsScreen } from './src/screens/SettingsScreen';
 import { colors } from './src/theme';
+
+// Must run once, before any model hook loads a model. Wires ExecuTorch's
+// resource fetcher to Expo's filesystem so model binaries can be downloaded
+// and cached on-device.
+initExecutorch({ resourceFetcher: ExpoResourceFetcher });
 
 type TabKey = 'library' | 'search' | 'settings';
 
