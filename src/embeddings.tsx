@@ -67,34 +67,52 @@ export interface LabelVec {
 // their own absolute threshold rather than the text negative-anchor floor.
 const EXEMPLAR_THRESHOLD = 0.62;
 
+// Zero-shot tuning. We softmax label + negative-anchor similarities together
+// (CLIP-style temperature) and only keep labels that beat every "this is just
+// an ordinary photo" anchor. A plain photo of a person therefore gets few or
+// zero format tags instead of being forced into the top-K wrong ones.
+const LOGIT_SCALE = 50; // softmax sharpness over cosine scores
+const MIN_PROB = 0.05; // floor so near-zero matches are dropped
+
+function cosTo(a: number[], b: Float32Array): number {
+  let s = 0;
+  for (let i = 0; i < b.length; i++) s += a[i] * b[i];
+  return s;
+}
+
 // Classify a normalized image vector against two sources:
-//  - text-prompt labels (zero-shot): kept if above the strongest negative
-//    anchor (a per-image dynamic floor).
+//  - text-prompt labels (zero-shot): softmaxed against the negative anchors;
+//    kept only if their probability exceeds the best anchor and MIN_PROB.
 //  - taught exemplars (image-to-image): kept if above EXEMPLAR_THRESHOLD.
-// Results are merged and de-duplicated by label, keeping the best score, with
-// exemplar matches preferred (they're the user's ground truth).
+// Merged and de-duplicated by label; exemplar matches (the user's ground
+// truth) always win and sort first.
 export function classifyImage(
   imageVec: number[],
   labelVecs: LabelVec[],
   exemplarVecs: LabelVec[],
   negativeVecs: Float32Array[],
-  topK = 5
+  topK = 3
 ): Tag[] {
-  const cos = (a: number[], b: Float32Array) => {
-    let s = 0;
-    for (let i = 0; i < b.length; i++) s += a[i] * b[i];
-    return s;
-  };
+  const labelCos = labelVecs.map((l) => cosTo(imageVec, l.vec));
+  const negCos = negativeVecs.map((n) => cosTo(imageVec, n));
 
-  const negFloor = negativeVecs.reduce((m, n) => Math.max(m, cos(imageVec, n)), 0);
+  // softmax over [labels, negatives] with temperature LOGIT_SCALE
+  const allCos = [...labelCos, ...negCos];
+  const max = allCos.reduce((m, c) => Math.max(m, c), -Infinity);
+  const exps = allCos.map((c) => Math.exp(LOGIT_SCALE * (c - max)));
+  const sum = exps.reduce((a, b) => a + b, 0) || 1;
+  const probs = exps.map((e) => e / sum);
+
+  const n = labelVecs.length;
+  const negMax = probs.slice(n).reduce((m, p) => Math.max(m, p), 0);
 
   const fromPrompts: Tag[] = labelVecs
-    .map((l) => ({ label: l.label, category: l.category, score: cos(imageVec, l.vec), source: 'prompt' as const }))
-    .filter((l) => l.score > negFloor);
+    .map((l, i) => ({ label: l.label, category: l.category, score: probs[i], source: 'prompt' as const }))
+    .filter((t) => t.score > negMax && t.score > MIN_PROB);
 
   const fromExemplars: Tag[] = exemplarVecs
-    .map((l) => ({ label: l.label, category: l.category, score: cos(imageVec, l.vec), source: 'exemplar' as const }))
-    .filter((l) => l.score > EXEMPLAR_THRESHOLD);
+    .map((l) => ({ label: l.label, category: l.category, score: cosTo(imageVec, l.vec), source: 'exemplar' as const }))
+    .filter((t) => t.score > EXEMPLAR_THRESHOLD);
 
   // De-dupe by label: an exemplar match always wins over a prompt match.
   const best = new Map<string, Tag>();
