@@ -3,9 +3,13 @@ import { Image } from 'expo-image';
 import {
   ActivityIndicator,
   Alert,
+  Animated,
   Dimensions,
   FlatList,
+  KeyboardAvoidingView,
   Modal,
+  PanResponder,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -20,11 +24,15 @@ import * as Sharing from 'expo-sharing';
 import { addExemplar, deleteMeme, getLabels, getMemeEmbedding } from '../db';
 import { EXEMPLAR_PROB_THRESHOLD, headProb } from '../embeddings';
 import { buildExemplarHeads, type ExemplarModel } from '../indexer';
+import { success, tap, warn } from '../haptics';
 import { deleteFile, materialize, readImageBase64 } from '../saf';
-import { colors } from '../theme';
+import { colors, radius, space, TABBAR_CLEARANCE } from '../theme';
 import type { MemeRecord, SearchHit } from '../types';
 
-const GAP = 2;
+import { showToast } from './Toast';
+import { Chip, PressableScale } from './ui';
+
+const GAP = 3;
 const COLS = 3;
 
 type Item = MemeRecord | SearchHit;
@@ -41,12 +49,12 @@ const GridCell = React.memo(function GridCell({
   onPress: (it: Item) => void;
 }) {
   return (
-    <Pressable onPress={() => onPress(item)} style={{ width: size, height: size }}>
+    <PressableScale scaleTo={0.94} onPress={() => onPress(item)} style={{ width: size, height: size }}>
       <Image
         source={{ uri: item.uri }}
         style={styles.thumb}
         contentFit="cover"
-        transition={120}
+        transition={150}
         // Reuse the view and release the previous bitmap when a cell is
         // recycled (e.g. when retagAll hands the list a fresh array).
         recyclingKey={String(item.id)}
@@ -58,7 +66,7 @@ const GridCell = React.memo(function GridCell({
           <Text style={styles.playIcon}>▶</Text>
         </View>
       )}
-    </Pressable>
+    </PressableScale>
   );
 });
 
@@ -69,6 +77,8 @@ export function MemeGrid({
   onEndReached,
   loadingMore,
   onDeleted,
+  onSearchLabel,
+  emptyState,
 }: {
   items: Item[];
   header?: React.ReactElement;
@@ -81,6 +91,10 @@ export function MemeGrid({
   loadingMore?: boolean;
   // Called after a meme is deleted so the parent can drop it from its list.
   onDeleted?: (id: number) => void;
+  // Tap a tag in the viewer to jump to a search for it. Optional.
+  onSearchLabel?: (label: string) => void;
+  // Rendered when items is empty (e.g. a "no results" state).
+  emptyState?: React.ReactElement | null;
 }) {
   const [selected, setSelected] = useState<Item | null>(null);
   const [teaching, setTeaching] = useState(false);
@@ -90,13 +104,17 @@ export function MemeGrid({
   const [labels, setLabels] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [notice, setNotice] = useState<string | null>(null);
   const [matchInfo, setMatchInfo] = useState<{ label: string; score: number }[] | null>(null);
   const [matchBusy, setMatchBusy] = useState(false);
   // Cache the trained heads so we don't retrain on every modal open; cleared
   // after teaching so the next open reflects the new example.
   const modelRef = useRef<ExemplarModel | null>(null);
   const size = (Dimensions.get('window').width - GAP * (COLS + 1)) / COLS;
+
+  const openViewer = (it: Item) => {
+    tap();
+    setSelected(it);
+  };
 
   // The taught-label confidence readout is a debug aid that trains a logistic
   // head per label over a 500-vector background — hundreds of ms+ of synchronous
@@ -128,11 +146,6 @@ export function MemeGrid({
     }
   };
 
-  const flash = (msg: string) => {
-    setNotice(msg);
-    setTimeout(() => setNotice(null), 1600);
-  };
-
   // Share the original file to any other app (Discord, Telegram, Photos…) — the
   // fastest way to get a meme onto another platform on mobile.
   const onShare = async () => {
@@ -140,13 +153,13 @@ export function MemeGrid({
     setBusy(true);
     try {
       if (!(await Sharing.isAvailableAsync())) {
-        Alert.alert('Sharing unavailable', 'This device has no share targets.');
+        showToast('This device has no share targets', 'error');
         return;
       }
       const path = await materialize(selected.uri, selected.name);
       await Sharing.shareAsync(path);
     } catch (e) {
-      Alert.alert('Could not share', String(e));
+      showToast(`Could not share: ${String(e)}`, 'error');
     } finally {
       setBusy(false);
     }
@@ -155,16 +168,17 @@ export function MemeGrid({
   const onCopyImage = async () => {
     if (!selected || busy) return;
     if (selected.kind === 'video') {
-      flash('Can’t copy a video as an image — use Share');
+      showToast('Can’t copy a video as an image — use Share', 'info');
       return;
     }
     setBusy(true);
     try {
       const base64 = await readImageBase64(selected.uri, selected.name);
       await Clipboard.setImageAsync(base64);
-      flash('Meme copied — paste it anywhere');
+      success();
+      showToast('Meme copied — paste it anywhere', 'success');
     } catch (e) {
-      Alert.alert('Could not copy image', String(e));
+      showToast(`Could not copy image: ${String(e)}`, 'error');
     } finally {
       setBusy(false);
     }
@@ -173,12 +187,14 @@ export function MemeGrid({
   const onCopyText = async () => {
     if (!selected?.ocrText) return;
     await Clipboard.setStringAsync(selected.ocrText);
-    flash('Text copied');
+    success();
+    showToast('Text copied', 'success');
   };
 
   const onDelete = () => {
     const item = selected;
     if (!item || busy) return;
+    warn();
     Alert.alert(
       'Delete meme?',
       `This removes “${item.name}” from your library and deletes the file from its folder. This can’t be undone.`,
@@ -194,8 +210,9 @@ export function MemeGrid({
               await deleteFile(item.uri).catch(() => {}); // best-effort; DB row is gone regardless
               setSelected(null);
               onDeleted?.(item.id);
+              showToast('Meme deleted', 'info');
             } catch (e) {
-              Alert.alert('Could not delete', String(e));
+              showToast(`Could not delete: ${String(e)}`, 'error');
             } finally {
               setBusy(false);
             }
@@ -206,6 +223,7 @@ export function MemeGrid({
   };
 
   const openTeach = (asPositive: boolean, preset?: string) => {
+    tap();
     setLabelInput(preset ?? '');
     setAssocInput('');
     setPositive(asPositive);
@@ -222,7 +240,7 @@ export function MemeGrid({
     try {
       const emb = await getMemeEmbedding(selected.id);
       if (!emb) {
-        Alert.alert('Could not teach', 'No stored embedding for this item.');
+        showToast('Could not teach: no stored embedding for this item', 'error');
         return;
       }
       // Associations are world-knowledge terms for a positive label; they make
@@ -241,22 +259,23 @@ export function MemeGrid({
       setTeaching(false);
       modelRef.current = null; // new example → retrain heads on next open
       const matched = onTaught ? await onTaught(label) : undefined;
-      const count =
-        typeof matched === 'number'
-          ? ` ${matched} meme${matched === 1 ? '' : 's'} now tagged "${label}".`
-          : ' Run "Re-tag library" in Settings to apply it.';
-      Alert.alert(
-        positive ? 'Taught!' : 'Correction saved',
-        positive
-          ? `Memeget will recognize "${label}" by example.${count}` +
-              (typeof matched === 'number' && matched <= 1
-                ? ' Teach a few more (different poses/backgrounds) to catch the rest.'
-                : '')
-          : `Marked as NOT "${label}". The model learns from the correction —` +
-              ` similar images are less likely to be tagged "${label}".${count}`
-      );
+      success();
+      if (typeof matched === 'number') {
+        showToast(
+          positive
+            ? `Taught “${label}” — ${matched} meme${matched === 1 ? '' : 's'} now tagged` +
+                (matched <= 1 ? '. Teach a few more examples to catch the rest' : '')
+            : `Got it — NOT “${label}”. ${matched} meme${matched === 1 ? '' : 's'} still carry the tag`,
+          'success'
+        );
+      } else {
+        showToast(
+          positive ? `Taught “${label}” — re-tag in Settings to apply it` : `Correction for “${label}” saved`,
+          'success'
+        );
+      }
     } catch (e) {
-      Alert.alert('Could not teach', String(e));
+      showToast(`Could not teach: ${String(e)}`, 'error');
     } finally {
       setSaving(false);
     }
@@ -269,8 +288,11 @@ export function MemeGrid({
         keyExtractor={(it) => String(it.id)}
         numColumns={COLS}
         ListHeaderComponent={header}
+        ListEmptyComponent={emptyState ?? null}
         columnWrapperStyle={{ gap: GAP, paddingHorizontal: GAP }}
-        contentContainerStyle={{ gap: GAP, paddingBottom: 24 }}
+        contentContainerStyle={{ gap: GAP, paddingBottom: TABBAR_CLEARANCE + 24 }}
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="on-drag"
         onEndReached={onEndReached}
         onEndReachedThreshold={0.6}
         // Memory guards: keep only a few screens of image cells mounted so a
@@ -282,156 +304,66 @@ export function MemeGrid({
         windowSize={5}
         updateCellsBatchingPeriod={60}
         ListFooterComponent={
-          loadingMore ? <ActivityIndicator color={colors.accent} style={{ paddingVertical: 16 }} /> : null
+          loadingMore ? <ActivityIndicator color={colors.volt} style={{ paddingVertical: 16 }} /> : null
         }
-        renderItem={({ item }) => <GridCell item={item} size={size} onPress={setSelected} />}
+        renderItem={({ item }) => <GridCell item={item} size={size} onPress={openViewer} />}
+      />
+
+      <ViewerSheet
+        item={selected}
+        busy={busy}
+        matchInfo={matchInfo}
+        matchBusy={matchBusy}
+        onClose={() => setSelected(null)}
+        onShare={onShare}
+        onCopyImage={onCopyImage}
+        onCopyText={onCopyText}
+        onDelete={onDelete}
+        onTeach={openTeach}
+        onShowConfidence={computeMatchInfo}
+        onSearchLabel={
+          onSearchLabel
+            ? (label) => {
+                setSelected(null);
+                onSearchLabel(label);
+              }
+            : undefined
+        }
       />
 
       <Modal
-        visible={!!selected}
+        visible={teaching}
         transparent
-        animationType="fade"
+        animationType="slide"
         statusBarTranslucent
-        onRequestClose={() => setSelected(null)}
+        onRequestClose={() => setTeaching(false)}
       >
-        <View style={styles.modalRoot}>
-          {/* Backdrop sits BEHIND the sheet: only taps that land outside the
-              sheet reach it, so scrolling/teaching/selecting never dismisses. */}
-          <Pressable style={StyleSheet.absoluteFill} onPress={() => setSelected(null)} />
-          {selected && (
-            <View style={styles.sheet}>
-              <View style={styles.sheetHeader}>
-                <Text style={styles.sheetTitle} numberOfLines={1} selectable>
-                  {selected.name}
-                </Text>
-                <Pressable
-                  onPress={() => setSelected(null)}
-                  hitSlop={12}
-                  style={styles.closeBtn}
-                  accessibilityLabel="Close"
-                >
-                  <Text style={styles.closeIcon}>✕</Text>
-                </Pressable>
-              </View>
-              <Image
-                source={{ uri: selected.uri }}
-                style={styles.preview}
-                contentFit="contain"
-                recyclingKey={String(selected.id)}
-                allowDownscaling
-              />
-              <View style={styles.actionBar}>
-                <Pressable style={styles.actionBtn} onPress={onShare} disabled={busy}>
-                  <Text style={styles.actionText}>{busy ? 'Preparing…' : '⤴  Share'}</Text>
-                </Pressable>
-                {selected.kind !== 'video' && (
-                  <Pressable style={styles.actionBtn} onPress={onCopyImage} disabled={busy}>
-                    <Text style={styles.actionText}>⧉  Copy image</Text>
-                  </Pressable>
-                )}
-                {!!selected.ocrText && (
-                  <Pressable style={styles.actionBtn} onPress={onCopyText}>
-                    <Text style={styles.actionText}>🆎  Copy text</Text>
-                  </Pressable>
-                )}
-              </View>
-              {notice && <Text style={styles.notice}>{notice}</Text>}
-              <ScrollView
-                style={styles.meta}
-                contentContainerStyle={{ padding: 14, gap: 10 }}
-                keyboardShouldPersistTaps="handled"
-              >
-                {'score' in selected && (
-                  <Text style={styles.muted}>match {Math.min(100, selected.score * 100).toFixed(0)}%</Text>
-                )}
-                {selected.tags.length > 0 && (
-                  <View>
-                    <Text style={styles.sectionLabel}>Tags · tap one to correct it</Text>
-                    <View style={styles.chipRow}>
-                      {selected.tags.map((t) => (
-                        <Pressable
-                          key={t.label}
-                          onPress={() => openTeach(false, t.label)}
-                          style={[styles.chip, t.source === 'exemplar' && styles.chipTaught]}
-                        >
-                          <Text style={styles.chipText}>
-                            {t.source === 'exemplar' ? '★ ' : ''}
-                            {t.label}
-                          </Text>
-                        </Pressable>
-                      ))}
-                    </View>
-                  </View>
-                )}
-                {!!selected.ocrText && (
-                  <View>
-                    <Text style={styles.sectionLabel}>Text in meme · long-press to copy</Text>
-                    <Text style={styles.ocr} selectable>
-                      {selected.ocrText}
-                    </Text>
-                  </View>
-                )}
-                {matchInfo === null ? (
-                  <Pressable onPress={computeMatchInfo} disabled={matchBusy}>
-                    <Text style={styles.debugLink}>
-                      {matchBusy ? 'Scoring…' : 'Show taught-label confidence (debug)'}
-                    </Text>
-                  </Pressable>
-                ) : matchInfo.length > 0 ? (
-                  <View>
-                    <Text style={styles.sectionLabel}>Taught-label confidence (debug)</Text>
-                    {matchInfo.map((m) => (
-                      <Text key={m.label} style={styles.muted}>
-                        {m.label}: {(m.score * 100).toFixed(0)}%{' '}
-                        {m.score >= EXEMPLAR_PROB_THRESHOLD ? '✓ match' : ''}
-                      </Text>
-                    ))}
-                  </View>
-                ) : (
-                  <Text style={styles.muted}>No taught labels yet.</Text>
-                )}
-                <View style={styles.teachRow}>
-                  <Pressable style={[styles.teachBtn, { flex: 1 }]} onPress={() => openTeach(true)}>
-                    <Text style={styles.teachBtnText}>＋ This IS a…</Text>
-                  </Pressable>
-                  <Pressable
-                    style={[styles.teachBtn, styles.teachBtnNeg, { flex: 1 }]}
-                    onPress={() => openTeach(false)}
-                  >
-                    <Text style={styles.teachBtnNegText}>✗ This is NOT a…</Text>
-                  </Pressable>
-                </View>
-                <Pressable style={styles.deleteBtn} onPress={onDelete} disabled={busy}>
-                  <Text style={styles.deleteText}>🗑  Delete meme</Text>
-                </Pressable>
-              </ScrollView>
-            </View>
-          )}
-        </View>
-      </Modal>
-
-      <Modal visible={teaching} transparent animationType="fade" onRequestClose={() => setTeaching(false)}>
-        <Pressable style={styles.backdrop} onPress={() => setTeaching(false)}>
-          <Pressable style={styles.teachSheet} onPress={() => {}}>
-            <Text style={styles.name}>Label this meme</Text>
+        <KeyboardAvoidingView
+          style={styles.teachRoot}
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        >
+          <Pressable style={StyleSheet.absoluteFill} onPress={() => setTeaching(false)} />
+          <View style={styles.teachSheet}>
+            <View style={styles.grabber} />
+            <Text style={styles.sheetHeading}>Teach Memeget</Text>
             <View style={styles.segRow}>
               <Pressable
                 style={[styles.seg, positive && styles.segActive]}
                 onPress={() => setPositive(true)}
               >
-                <Text style={[styles.segText, positive && styles.segTextActive]}>✓ This IS a…</Text>
+                <Text style={[styles.segText, positive && styles.segTextOn]}>✓ This IS a…</Text>
               </Pressable>
               <Pressable
                 style={[styles.seg, !positive && styles.segActiveNeg]}
                 onPress={() => setPositive(false)}
               >
-                <Text style={[styles.segText, !positive && styles.segTextActive]}>✗ NOT a…</Text>
+                <Text style={[styles.segText, !positive && styles.segTextOnNeg]}>✗ NOT a…</Text>
               </Pressable>
             </View>
-            <Text style={styles.muted}>
+            <Text style={styles.teachHint}>
               {positive
-                ? 'Memeget learns this label by visual example — on-device, no retraining.'
-                : 'Memeget learns this is NOT that label and pulls similar images away from it.'}
+                ? 'Learns this label by visual example — on-device, instantly.'
+                : 'Learns this is NOT that label and pulls similar images away from it.'}
             </Text>
             <TextInput
               style={styles.input}
@@ -442,167 +374,395 @@ export function MemeGrid({
               autoFocus
             />
             {labels.length > 0 && (
-              <View style={styles.suggestRow}>
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                contentContainerStyle={styles.suggestRow}
+                keyboardShouldPersistTaps="handled"
+              >
                 {labels.map((l) => (
-                  <Pressable
-                    key={l}
-                    style={[styles.suggestChip, labelInput.trim() === l && styles.suggestChipActive]}
-                    onPress={() => setLabelInput(l)}
-                  >
-                    <Text style={styles.suggestChipText}>{l}</Text>
-                  </Pressable>
+                  <Chip key={l} label={l} active={labelInput.trim() === l} onPress={() => setLabelInput(l)} />
                 ))}
-              </View>
+              </ScrollView>
             )}
             {positive && (
               <TextInput
                 style={styles.input}
                 value={assocInput}
                 onChangeText={setAssocInput}
-                placeholder="Related terms (optional, comma-separated): remilia, nft, ethereum"
+                placeholder="Related search terms, comma-separated (optional)"
                 placeholderTextColor={colors.muted}
               />
             )}
-            <View style={styles.teachRow}>
-              <Pressable style={[styles.teachAction, styles.teachCancel]} onPress={() => setTeaching(false)}>
+            <View style={styles.teachActions}>
+              <PressableScale style={[styles.teachAction, styles.teachCancel]} onPress={() => setTeaching(false)}>
                 <Text style={styles.teachCancelText}>Cancel</Text>
-              </Pressable>
-              <Pressable
-                style={[
-                  styles.teachAction,
-                  positive ? styles.teachSave : styles.teachSaveNeg,
-                  (!labelInput.trim() || saving) && styles.disabled,
-                ]}
+              </PressableScale>
+              <PressableScale
+                style={[styles.teachAction, positive ? styles.teachSave : styles.teachSaveNeg]}
                 onPress={saveExemplar}
                 disabled={!labelInput.trim() || saving}
               >
                 <Text style={positive ? styles.teachSaveText : styles.teachSaveNegText}>
                   {saving ? 'Saving…' : positive ? 'Teach' : 'Mark as NOT this'}
                 </Text>
-              </Pressable>
+              </PressableScale>
             </View>
-          </Pressable>
-        </Pressable>
+          </View>
+        </KeyboardAvoidingView>
       </Modal>
     </>
   );
 }
 
+// Full-width bottom sheet viewer with a drag-to-dismiss handle.
+function ViewerSheet({
+  item,
+  busy,
+  matchInfo,
+  matchBusy,
+  onClose,
+  onShare,
+  onCopyImage,
+  onCopyText,
+  onDelete,
+  onTeach,
+  onShowConfidence,
+  onSearchLabel,
+}: {
+  item: Item | null;
+  busy: boolean;
+  matchInfo: { label: string; score: number }[] | null;
+  matchBusy: boolean;
+  onClose: () => void;
+  onShare: () => void;
+  onCopyImage: () => void;
+  onCopyText: () => void;
+  onDelete: () => void;
+  onTeach: (positive: boolean, preset?: string) => void;
+  onShowConfidence: () => void;
+  onSearchLabel?: (label: string) => void;
+}) {
+  const drag = useRef(new Animated.Value(0)).current;
+
+  // Drag-to-dismiss on the grab area only, so scrolling the metadata or
+  // pinch-looking at the image never accidentally closes the sheet.
+  const pan = useRef(
+    PanResponder.create({
+      onMoveShouldSetPanResponder: (_e, g) => g.dy > 6 && Math.abs(g.dy) > Math.abs(g.dx),
+      onPanResponderMove: (_e, g) => drag.setValue(Math.max(0, g.dy)),
+      onPanResponderRelease: (_e, g) => {
+        if (g.dy > 110 || g.vy > 1.2) {
+          Animated.timing(drag, { toValue: 600, duration: 160, useNativeDriver: true }).start(() => {
+            drag.setValue(0);
+            onClose();
+          });
+        } else {
+          Animated.spring(drag, { toValue: 0, useNativeDriver: true, speed: 30, bounciness: 4 }).start();
+        }
+      },
+    })
+  ).current;
+
+  useEffect(() => {
+    if (item) drag.setValue(0);
+  }, [item, drag]);
+
+  const imgHeight = Math.round(Dimensions.get('window').height * 0.42);
+
+  return (
+    <Modal
+      visible={!!item}
+      transparent
+      animationType="slide"
+      statusBarTranslucent
+      onRequestClose={onClose}
+    >
+      <View style={styles.viewerRoot}>
+        {/* Backdrop sits BEHIND the sheet: only taps that land outside the
+            sheet reach it, so scrolling/teaching/selecting never dismisses. */}
+        <Pressable style={StyleSheet.absoluteFill} onPress={onClose} />
+        {item && (
+          <Animated.View style={[styles.sheet, { transform: [{ translateY: drag }] }]}>
+            <View {...pan.panHandlers} style={styles.sheetHeader}>
+              <View style={styles.grabber} />
+              <View style={styles.sheetTitleRow}>
+                <Text style={styles.sheetTitle} numberOfLines={1} selectable>
+                  {item.name}
+                </Text>
+                <Pressable onPress={onClose} hitSlop={12} style={styles.closeBtn} accessibilityLabel="Close">
+                  <Text style={styles.closeIcon}>✕</Text>
+                </Pressable>
+              </View>
+            </View>
+
+            <Image
+              source={{ uri: item.uri }}
+              style={[styles.preview, { height: imgHeight }]}
+              contentFit="contain"
+              recyclingKey={String(item.id)}
+              allowDownscaling
+            />
+
+            <View style={styles.actionBar}>
+              <ActionButton glyph="⤴" label={busy ? '…' : 'Share'} onPress={onShare} disabled={busy} />
+              {item.kind !== 'video' && (
+                <ActionButton glyph="⧉" label="Copy" onPress={onCopyImage} disabled={busy} />
+              )}
+              {!!item.ocrText && <ActionButton glyph="🆎" label="Text" onPress={onCopyText} />}
+              <ActionButton glyph="🗑" label="Delete" danger onPress={onDelete} disabled={busy} />
+            </View>
+
+            <ScrollView
+              style={styles.meta}
+              contentContainerStyle={styles.metaContent}
+              keyboardShouldPersistTaps="handled"
+            >
+              {'score' in item && (
+                <Text style={styles.matchScore}>
+                  match {Math.min(100, item.score * 100).toFixed(0)}%
+                </Text>
+              )}
+
+              {item.tags.length > 0 && (
+                <View style={styles.block}>
+                  <Text style={styles.sectionLabel}>
+                    {onSearchLabel ? 'Tags · tap to search · hold to correct' : 'Tags · tap to correct'}
+                  </Text>
+                  <View style={styles.tagWrap}>
+                    {item.tags.map((t) => (
+                      <Chip
+                        key={t.label}
+                        label={t.label}
+                        taught={t.source === 'exemplar'}
+                        onPress={
+                          onSearchLabel ? () => onSearchLabel(t.label) : () => onTeach(false, t.label)
+                        }
+                        onLongPress={() => onTeach(false, t.label)}
+                      />
+                    ))}
+                  </View>
+                </View>
+              )}
+
+              {!!item.ocrText && (
+                <View style={styles.block}>
+                  <Text style={styles.sectionLabel}>Text in meme · long-press to copy</Text>
+                  <Text style={styles.ocr} selectable>
+                    {item.ocrText}
+                  </Text>
+                </View>
+              )}
+
+              <View style={styles.teachRow}>
+                <PressableScale style={styles.teachBtn} onPress={() => onTeach(true)}>
+                  <Text style={styles.teachBtnText}>＋ This IS a…</Text>
+                </PressableScale>
+                <PressableScale style={[styles.teachBtn, styles.teachBtnNeg]} onPress={() => onTeach(false)}>
+                  <Text style={styles.teachBtnNegText}>✗ This is NOT a…</Text>
+                </PressableScale>
+              </View>
+
+              {matchInfo === null ? (
+                <Pressable onPress={onShowConfidence} disabled={matchBusy}>
+                  <Text style={styles.debugLink}>
+                    {matchBusy ? 'Scoring…' : 'Show taught-label confidence (debug)'}
+                  </Text>
+                </Pressable>
+              ) : matchInfo.length > 0 ? (
+                <View style={styles.block}>
+                  <Text style={styles.sectionLabel}>Taught-label confidence (debug)</Text>
+                  {matchInfo.map((m) => (
+                    <Text key={m.label} style={styles.mutedSmall}>
+                      {m.label}: {(m.score * 100).toFixed(0)}%{' '}
+                      {m.score >= EXEMPLAR_PROB_THRESHOLD ? '✓ match' : ''}
+                    </Text>
+                  ))}
+                </View>
+              ) : (
+                <Text style={styles.mutedSmall}>No taught labels yet.</Text>
+              )}
+            </ScrollView>
+          </Animated.View>
+        )}
+      </View>
+    </Modal>
+  );
+}
+
+function ActionButton({
+  glyph,
+  label,
+  onPress,
+  disabled,
+  danger,
+}: {
+  glyph: string;
+  label: string;
+  onPress: () => void;
+  disabled?: boolean;
+  danger?: boolean;
+}) {
+  return (
+    <PressableScale scaleTo={0.9} style={styles.action} onPress={onPress} disabled={disabled}>
+      <View style={[styles.actionCircle, danger && styles.actionCircleDanger]}>
+        <Text style={[styles.actionGlyph, danger && styles.actionGlyphDanger]}>{glyph}</Text>
+      </View>
+      <Text style={[styles.actionLabel, danger && styles.actionLabelDanger]}>{label}</Text>
+    </PressableScale>
+  );
+}
+
 const styles = StyleSheet.create({
-  thumb: { width: '100%', height: '100%', backgroundColor: colors.surface2, borderRadius: 4 },
+  thumb: { width: '100%', height: '100%', backgroundColor: colors.surface2, borderRadius: radius.sm },
   play: {
     position: 'absolute',
-    right: 4,
-    bottom: 4,
-    backgroundColor: 'rgba(0,0,0,0.6)',
-    borderRadius: 10,
-    paddingHorizontal: 5,
-    paddingVertical: 1,
+    right: 6,
+    bottom: 6,
+    backgroundColor: 'rgba(0,0,0,0.65)',
+    borderRadius: radius.pill,
+    paddingHorizontal: 7,
+    paddingVertical: 2,
   },
   playIcon: { color: '#fff', fontSize: 10 },
-  backdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.85)', justifyContent: 'center', padding: 16 },
-  modalRoot: { flex: 1, backgroundColor: 'rgba(0,0,0,0.85)', justifyContent: 'center', padding: 16 },
-  sheet: { backgroundColor: colors.surface, borderRadius: 16, overflow: 'hidden', maxHeight: '90%' },
-  sheetHeader: {
+
+  viewerRoot: { flex: 1, backgroundColor: colors.overlay, justifyContent: 'flex-end' },
+  sheet: {
+    backgroundColor: colors.surface,
+    borderTopLeftRadius: radius.xl,
+    borderTopRightRadius: radius.xl,
+    overflow: 'hidden',
+    maxHeight: '94%',
+    borderWidth: 1,
+    borderBottomWidth: 0,
+    borderColor: colors.borderLight,
+  },
+  sheetHeader: { paddingTop: 8, paddingBottom: 4 },
+  grabber: {
+    alignSelf: 'center',
+    width: 38,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: colors.borderLight,
+    marginBottom: 8,
+  },
+  sheetTitleRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.border,
+    paddingHorizontal: space.lg,
     gap: 10,
   },
-  sheetTitle: { color: colors.text, fontWeight: '700', fontSize: 14, flex: 1 },
+  sheetTitle: { color: colors.textDim, fontWeight: '600', fontSize: 13, flex: 1 },
   closeBtn: {
-    width: 30,
-    height: 30,
-    borderRadius: 15,
-    backgroundColor: colors.surface2,
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: colors.surface3,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  closeIcon: { color: colors.text, fontSize: 14, fontWeight: '800' },
-  preview: { width: '100%', height: 320, backgroundColor: '#000' },
+  closeIcon: { color: colors.text, fontSize: 13, fontWeight: '800' },
+  preview: { width: '100%', backgroundColor: '#000' },
+
   actionBar: {
     flexDirection: 'row',
-    gap: 8,
-    paddingHorizontal: 12,
-    paddingTop: 12,
-    paddingBottom: 4,
+    justifyContent: 'space-evenly',
+    paddingVertical: space.md,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: colors.border,
   },
-  actionBtn: {
-    flex: 1,
+  action: { alignItems: 'center', gap: 5, minWidth: 64 },
+  actionCircle: {
+    width: 46,
+    height: 46,
+    borderRadius: 23,
     backgroundColor: colors.surface2,
-    borderRadius: 10,
-    paddingVertical: 10,
-    alignItems: 'center',
-  },
-  actionText: { color: colors.accent2, fontWeight: '700', fontSize: 13 },
-  notice: { color: colors.accent2, fontSize: 12, textAlign: 'center', paddingTop: 4 },
-  meta: { maxHeight: 260 },
-  name: { color: colors.text, fontWeight: '700', fontSize: 14 },
-  muted: { color: colors.muted, fontSize: 12 },
-  sectionLabel: { color: colors.muted, fontSize: 11, textTransform: 'uppercase', marginBottom: 4 },
-  debugLink: { color: colors.muted, fontSize: 12, textDecorationLine: 'underline' },
-  deleteBtn: {
-    marginTop: 4,
-    paddingVertical: 11,
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: colors.danger,
-    alignItems: 'center',
-  },
-  deleteText: { color: colors.danger, fontWeight: '700', fontSize: 13 },
-  ocr: { color: colors.text, fontSize: 13, lineHeight: 18 },
-  chipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
-  chip: { backgroundColor: colors.chip, borderRadius: 12, paddingHorizontal: 10, paddingVertical: 4 },
-  chipTaught: { backgroundColor: '#1f3a2c', borderWidth: 1, borderColor: colors.accent2 },
-  chipText: { color: colors.accent, fontSize: 12, fontWeight: '600' },
-  teachBtn: {
-    marginTop: 4,
     borderWidth: 1,
     borderColor: colors.border,
-    borderRadius: 10,
-    paddingVertical: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  actionCircleDanger: { backgroundColor: colors.dangerDim, borderColor: colors.danger },
+  actionGlyph: { color: colors.volt, fontSize: 18 },
+  actionGlyphDanger: { color: colors.danger, fontSize: 16 },
+  actionLabel: { color: colors.muted, fontSize: 11, fontWeight: '600' },
+  actionLabelDanger: { color: colors.danger },
+
+  meta: { flexGrow: 0 },
+  metaContent: { padding: space.lg, gap: space.md, paddingBottom: space.xl },
+  matchScore: { color: colors.accent, fontSize: 12, fontWeight: '700' },
+  block: { gap: 8 },
+  sectionLabel: {
+    color: colors.faint,
+    fontSize: 11,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  tagWrap: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  ocr: { color: colors.textDim, fontSize: 13, lineHeight: 19 },
+  mutedSmall: { color: colors.muted, fontSize: 12 },
+  debugLink: { color: colors.faint, fontSize: 12, textDecorationLine: 'underline' },
+
+  teachRow: { flexDirection: 'row', gap: space.sm },
+  teachBtn: {
+    flex: 1,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surface2,
+    borderRadius: radius.md,
+    paddingVertical: 11,
     alignItems: 'center',
   },
-  teachBtnText: { color: colors.accent2, fontWeight: '700', fontSize: 13 },
-  teachBtnNeg: { borderColor: colors.danger },
+  teachBtnText: { color: colors.good, fontWeight: '700', fontSize: 13 },
+  teachBtnNeg: { borderColor: colors.danger, backgroundColor: 'transparent' },
   teachBtnNegText: { color: colors.danger, fontWeight: '700', fontSize: 13 },
-  teachSheet: { backgroundColor: colors.surface, borderRadius: 16, padding: 18, gap: 12 },
-  segRow: { flexDirection: 'row', backgroundColor: colors.surface2, borderRadius: 10, padding: 3, gap: 3 },
-  seg: { flex: 1, paddingVertical: 9, borderRadius: 8, alignItems: 'center' },
-  segActive: { backgroundColor: colors.accent2 },
+
+  teachRoot: { flex: 1, backgroundColor: colors.scrim, justifyContent: 'flex-end' },
+  teachSheet: {
+    backgroundColor: colors.surface,
+    borderTopLeftRadius: radius.xl,
+    borderTopRightRadius: radius.xl,
+    borderWidth: 1,
+    borderBottomWidth: 0,
+    borderColor: colors.borderLight,
+    padding: space.lg,
+    paddingTop: 10,
+    gap: space.md,
+  },
+  sheetHeading: { color: colors.text, fontWeight: '800', fontSize: 17, letterSpacing: -0.3 },
+  segRow: {
+    flexDirection: 'row',
+    backgroundColor: colors.surface2,
+    borderRadius: radius.md,
+    padding: 3,
+    gap: 3,
+  },
+  seg: { flex: 1, paddingVertical: 10, borderRadius: radius.md - 3, alignItems: 'center' },
+  segActive: { backgroundColor: colors.volt },
   segActiveNeg: { backgroundColor: colors.danger },
   segText: { color: colors.muted, fontWeight: '700', fontSize: 13 },
-  segTextActive: { color: '#0b0d12' },
-  suggestRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
-  suggestChip: {
-    backgroundColor: colors.chip,
-    borderRadius: 14,
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderWidth: 1,
-    borderColor: 'transparent',
-  },
-  suggestChipActive: { borderColor: colors.accent },
-  suggestChipText: { color: colors.accent, fontSize: 13, fontWeight: '600' },
+  segTextOn: { color: colors.onVolt },
+  segTextOnNeg: { color: '#fff' },
+  teachHint: { color: colors.muted, fontSize: 12, lineHeight: 17 },
+  suggestRow: { gap: 8, paddingVertical: 2 },
   input: {
     backgroundColor: colors.surface2,
-    borderRadius: 10,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radius.md,
+    paddingHorizontal: 14,
+    paddingVertical: 11,
     color: colors.text,
     fontSize: 14,
   },
-  teachRow: { flexDirection: 'row', gap: 10, marginTop: 4 },
-  teachAction: { flex: 1, paddingVertical: 11, borderRadius: 10, alignItems: 'center' },
+  teachActions: { flexDirection: 'row', gap: space.sm, marginTop: 2, marginBottom: 6 },
+  teachAction: { flex: 1, paddingVertical: 13, borderRadius: radius.md, alignItems: 'center' },
   teachCancel: { borderWidth: 1, borderColor: colors.border },
-  teachCancelText: { color: colors.text, fontWeight: '700' },
-  teachSave: { backgroundColor: colors.accent2 },
-  teachSaveText: { color: '#0b0d12', fontWeight: '800' },
+  teachCancelText: { color: colors.textDim, fontWeight: '700' },
+  teachSave: { backgroundColor: colors.volt },
+  teachSaveText: { color: colors.onVolt, fontWeight: '800' },
   teachSaveNeg: { backgroundColor: colors.danger },
   teachSaveNegText: { color: '#fff', fontWeight: '800' },
-  disabled: { opacity: 0.5 },
 });
