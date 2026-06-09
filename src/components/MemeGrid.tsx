@@ -17,10 +17,10 @@ import {
 import * as Clipboard from 'expo-clipboard';
 import * as Sharing from 'expo-sharing';
 
-import { addExemplar, getLabels, getMemeEmbedding } from '../db';
+import { addExemplar, deleteMeme, getLabels, getMemeEmbedding } from '../db';
 import { EXEMPLAR_PROB_THRESHOLD, headProb } from '../embeddings';
 import { buildExemplarHeads, type ExemplarModel } from '../indexer';
-import { materialize, readImageBase64 } from '../saf';
+import { deleteFile, materialize, readImageBase64 } from '../saf';
 import { colors } from '../theme';
 import type { MemeRecord, SearchHit } from '../types';
 
@@ -68,6 +68,7 @@ export function MemeGrid({
   onTaught,
   onEndReached,
   loadingMore,
+  onDeleted,
 }: {
   items: Item[];
   header?: React.ReactElement;
@@ -78,6 +79,8 @@ export function MemeGrid({
   // the parent can append the next page. Optional (search passes a fixed set).
   onEndReached?: () => void;
   loadingMore?: boolean;
+  // Called after a meme is deleted so the parent can drop it from its list.
+  onDeleted?: (id: number) => void;
 }) {
   const [selected, setSelected] = useState<Item | null>(null);
   const [teaching, setTeaching] = useState(false);
@@ -171,6 +174,35 @@ export function MemeGrid({
     if (!selected?.ocrText) return;
     await Clipboard.setStringAsync(selected.ocrText);
     flash('Text copied');
+  };
+
+  const onDelete = () => {
+    const item = selected;
+    if (!item || busy) return;
+    Alert.alert(
+      'Delete meme?',
+      `This removes “${item.name}” from your library and deletes the file from its folder. This can’t be undone.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            setBusy(true);
+            try {
+              await deleteMeme(item.id);
+              await deleteFile(item.uri).catch(() => {}); // best-effort; DB row is gone regardless
+              setSelected(null);
+              onDeleted?.(item.id);
+            } catch (e) {
+              Alert.alert('Could not delete', String(e));
+            } finally {
+              setBusy(false);
+            }
+          },
+        },
+      ]
+    );
   };
 
   const openTeach = (asPositive: boolean, preset?: string) => {
@@ -369,6 +401,9 @@ export function MemeGrid({
                     <Text style={styles.teachBtnNegText}>✗ This is NOT a…</Text>
                   </Pressable>
                 </View>
+                <Pressable style={styles.deleteBtn} onPress={onDelete} disabled={busy}>
+                  <Text style={styles.deleteText}>🗑  Delete meme</Text>
+                </Pressable>
               </ScrollView>
             </View>
           )}
@@ -510,6 +545,15 @@ const styles = StyleSheet.create({
   muted: { color: colors.muted, fontSize: 12 },
   sectionLabel: { color: colors.muted, fontSize: 11, textTransform: 'uppercase', marginBottom: 4 },
   debugLink: { color: colors.muted, fontSize: 12, textDecorationLine: 'underline' },
+  deleteBtn: {
+    marginTop: 4,
+    paddingVertical: 11,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: colors.danger,
+    alignItems: 'center',
+  },
+  deleteText: { color: colors.danger, fontWeight: '700', fontSize: 13 },
   ocr: { color: colors.text, fontSize: 13, lineHeight: 18 },
   chipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
   chip: { backgroundColor: colors.chip, borderRadius: 12, paddingHorizontal: 10, paddingVertical: 4 },

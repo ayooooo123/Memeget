@@ -132,6 +132,12 @@ export async function saveToFolder(
   }
 }
 
+// Delete a file from its linked folder. The user granted write access when
+// linking the folder, so this removes the original from on-device storage.
+export async function deleteFile(uri: string): Promise<void> {
+  await FileSystem.deleteAsync(uri, { idempotent: true });
+}
+
 export async function deleteCache(uri: string): Promise<void> {
   try {
     await FileSystem.deleteAsync(uri, { idempotent: true });
