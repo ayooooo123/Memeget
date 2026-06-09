@@ -14,9 +14,13 @@ import {
   View,
 } from 'react-native';
 
+import * as Clipboard from 'expo-clipboard';
+import * as Sharing from 'expo-sharing';
+
 import { addExemplar, getMemeEmbedding } from '../db';
 import { EXEMPLAR_PROB_THRESHOLD, headProb } from '../embeddings';
 import { buildExemplarHeads, type ExemplarModel } from '../indexer';
+import { materialize } from '../saf';
 import { colors } from '../theme';
 import type { MemeRecord, SearchHit } from '../types';
 
@@ -48,6 +52,8 @@ export function MemeGrid({
   const [assocInput, setAssocInput] = useState('');
   const [positive, setPositive] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
   const [matchInfo, setMatchInfo] = useState<{ label: string; score: number }[] | null>(null);
   // Cache the trained heads so we don't retrain on every modal open; cleared
   // after teaching so the next open reflects the new example.
@@ -86,6 +92,36 @@ export function MemeGrid({
       cancelled = true;
     };
   }, [selected]);
+
+  const flash = (msg: string) => {
+    setNotice(msg);
+    setTimeout(() => setNotice(null), 1600);
+  };
+
+  // Share the original file to any other app (Discord, Telegram, Photos…) — the
+  // fastest way to get a meme onto another platform on mobile.
+  const onShare = async () => {
+    if (!selected || busy) return;
+    setBusy(true);
+    try {
+      if (!(await Sharing.isAvailableAsync())) {
+        Alert.alert('Sharing unavailable', 'This device has no share targets.');
+        return;
+      }
+      const path = await materialize(selected.uri, selected.name);
+      await Sharing.shareAsync(path);
+    } catch (e) {
+      Alert.alert('Could not share', String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const onCopyText = async () => {
+    if (!selected?.ocrText) return;
+    await Clipboard.setStringAsync(selected.ocrText);
+    flash('Text copied');
+  };
 
   const openTeach = (asPositive: boolean) => {
     setLabelInput('');
@@ -199,6 +235,17 @@ export function MemeGrid({
                 </Pressable>
               </View>
               <Image source={{ uri: selected.uri }} style={styles.preview} contentFit="contain" />
+              <View style={styles.actionBar}>
+                <Pressable style={styles.actionBtn} onPress={onShare} disabled={busy}>
+                  <Text style={styles.actionText}>{busy ? 'Preparing…' : '⤴  Share / Send'}</Text>
+                </Pressable>
+                {!!selected.ocrText && (
+                  <Pressable style={styles.actionBtn} onPress={onCopyText}>
+                    <Text style={styles.actionText}>⧉  Copy text</Text>
+                  </Pressable>
+                )}
+              </View>
+              {notice && <Text style={styles.notice}>{notice}</Text>}
               <ScrollView
                 style={styles.meta}
                 contentContainerStyle={{ padding: 14, gap: 10 }}
@@ -345,6 +392,22 @@ const styles = StyleSheet.create({
   },
   closeIcon: { color: colors.text, fontSize: 14, fontWeight: '800' },
   preview: { width: '100%', height: 320, backgroundColor: '#000' },
+  actionBar: {
+    flexDirection: 'row',
+    gap: 8,
+    paddingHorizontal: 12,
+    paddingTop: 12,
+    paddingBottom: 4,
+  },
+  actionBtn: {
+    flex: 1,
+    backgroundColor: colors.surface2,
+    borderRadius: 10,
+    paddingVertical: 10,
+    alignItems: 'center',
+  },
+  actionText: { color: colors.accent2, fontWeight: '700', fontSize: 13 },
+  notice: { color: colors.accent2, fontSize: 12, textAlign: 'center', paddingTop: 4 },
   meta: { maxHeight: 260 },
   name: { color: colors.text, fontWeight: '700', fontSize: 14 },
   muted: { color: colors.muted, fontSize: 12 },

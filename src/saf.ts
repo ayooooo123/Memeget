@@ -76,6 +76,16 @@ export async function copyToCache(file: SafFile, index: number): Promise<string>
   return dest;
 }
 
+// Copy any SAF/content:// uri into the cache as a stable file:// path so native
+// share sheets (which can't stream a raw content uri) have a real file to send.
+export async function materialize(uri: string, name: string): Promise<string> {
+  const ext = extOf(name) || 'jpg';
+  const safe = (name || `meme.${ext}`).replace(/[^a-zA-Z0-9._-]/g, '_');
+  const dest = `${FileSystem.cacheDirectory}share_${Date.now()}_${safe}`;
+  await FileSystem.copyAsync({ from: uri, to: dest });
+  return dest;
+}
+
 export async function deleteCache(uri: string): Promise<void> {
   try {
     await FileSystem.deleteAsync(uri, { idempotent: true });
