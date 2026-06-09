@@ -122,22 +122,32 @@ export async function buildExemplarHeads(): Promise<ExemplarModel> {
     return out;
   };
 
-  const negatives = sample.map(center);
+  const background = sample.map(center);
 
-  // Group taught examples by label.
-  const byLabel = new Map<string, { category: string; pos: number[][] }>();
+  // Group taught examples by label, split into positive ("is a <label>") and
+  // explicit negative ("is NOT a <label>") sets.
+  const byLabel = new Map<string, { category: string; pos: number[][]; neg: number[][] }>();
   for (const e of exemplars) {
-    const g = byLabel.get(e.label) ?? { category: e.category, pos: [] };
-    g.pos.push(center(e.vector));
+    const g = byLabel.get(e.label) ?? { category: e.category, pos: [], neg: [] };
+    (e.positive ? g.pos : g.neg).push(center(e.vector));
     byLabel.set(e.label, g);
   }
 
+  // A handful of explicit "not this" corrections would be drowned out by ~500
+  // background samples, so replicate each so it carries real weight (~1 copy per
+  // 25 background items) — one correction visibly moves the boundary.
+  const negBoost = Math.max(1, Math.round(background.length / 25));
+
   const heads: LabelHead[] = [];
   for (const [label, g] of byLabel) {
-    // Other labels' positives are also negatives for this one (push them apart).
+    if (g.pos.length === 0) continue; // need at least one positive to train
+    // Negatives = random background + every other label's positives (they're
+    // definitionally not this label) + this label's oversampled corrections.
     const otherPos: number[][] = [];
     for (const [l2, g2] of byLabel) if (l2 !== label) otherPos.push(...g2.pos);
-    heads.push(trainHead(label, g.category, g.pos, [...negatives, ...otherPos]));
+    const corrections: number[][] = [];
+    for (const n of g.neg) for (let k = 0; k < negBoost; k++) corrections.push(n);
+    heads.push(trainHead(label, g.category, g.pos, [...background, ...otherPos, ...corrections]));
   }
   return { heads, mean };
 }

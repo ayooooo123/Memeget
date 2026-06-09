@@ -42,6 +42,7 @@ export async function initDb(): Promise<void> {
       vector BLOB NOT NULL,
       associations TEXT NOT NULL DEFAULT '[]',
       source_uri TEXT NOT NULL DEFAULT '',
+      is_positive INTEGER NOT NULL DEFAULT 1,
       created_at INTEGER NOT NULL
     );
     CREATE TABLE IF NOT EXISTS index_errors (
@@ -57,6 +58,11 @@ export async function initDb(): Promise<void> {
   const cols = await db.getAllAsync<{ name: string }>('PRAGMA table_info(memes)');
   if (!cols.some((c) => c.name === 'extra_terms')) {
     await db.execAsync(`ALTER TABLE memes ADD COLUMN extra_terms TEXT NOT NULL DEFAULT '';`);
+  }
+  // Migrate exemplar tables that predate negative ("not this") teaching.
+  const exCols = await db.getAllAsync<{ name: string }>('PRAGMA table_info(exemplars)');
+  if (!exCols.some((c) => c.name === 'is_positive')) {
+    await db.execAsync(`ALTER TABLE exemplars ADD COLUMN is_positive INTEGER NOT NULL DEFAULT 1;`);
   }
 }
 
@@ -326,16 +332,18 @@ export async function addExemplar(args: {
   vector: number[]; // normalized image embedding
   associations: string[];
   sourceUri: string;
+  positive?: boolean; // false = "this is NOT a <label>" (negative example)
 }): Promise<void> {
   const db = await getDb();
   await db.runAsync(
-    `INSERT INTO exemplars (label, category, vector, associations, source_uri, created_at)
-     VALUES (?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO exemplars (label, category, vector, associations, source_uri, is_positive, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
     args.label,
     args.category,
     vecToBlob(args.vector),
     JSON.stringify(args.associations),
     args.sourceUri,
+    args.positive === false ? 0 : 1,
     Date.now()
   );
 }
@@ -349,6 +357,7 @@ export async function getExemplars(): Promise<Exemplar[]> {
     vector: Uint8Array;
     associations: string;
     source_uri: string;
+    is_positive: number;
     created_at: number;
   }>('SELECT * FROM exemplars ORDER BY created_at DESC');
   return rows.map((r) => ({
@@ -358,6 +367,7 @@ export async function getExemplars(): Promise<Exemplar[]> {
     vector: Array.from(blobToVec(r.vector)),
     associations: safeParseStrings(r.associations),
     sourceUri: r.source_uri,
+    positive: r.is_positive !== 0,
     createdAt: r.created_at,
   }));
 }
