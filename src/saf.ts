@@ -101,6 +101,37 @@ export async function readImageBase64(uri: string, name: string): Promise<string
   }
 }
 
+// Create a new file inside a linked folder (the SAF tree the user granted) and
+// copy `src` — a shared image/video, given as a content:// or file:// uri / path
+// — into it. Returns the new content:// uri + sanitized name so the importer can
+// index it as a normal library item. The user granted read+write when linking
+// the folder, so createFileAsync is permitted.
+export async function saveToFolder(
+  src: string,
+  fileName: string,
+  mimeType: string,
+  folderUri: string
+): Promise<{ uri: string; name: string }> {
+  const safeFull = (fileName || `meme_${Date.now()}.jpg`).replace(/[^a-zA-Z0-9._-]/g, '_');
+  const dot = safeFull.lastIndexOf('.');
+  // createFileAsync derives the extension from the mime type, so pass the base.
+  const base = dot > 0 ? safeFull.slice(0, dot) : safeFull;
+  const norm = src.startsWith('file://') || src.startsWith('content://') ? src : `file://${src}`;
+
+  // Stage to a cache file:// first (content:// can't always be read directly),
+  // then write the bytes into the freshly created SAF document.
+  const tmp = `${FileSystem.cacheDirectory}import_${Date.now()}`;
+  await FileSystem.copyAsync({ from: norm, to: tmp });
+  try {
+    const data = await FileSystem.readAsStringAsync(tmp, { encoding: FileSystem.EncodingType.Base64 });
+    const uri = await SAF.createFileAsync(folderUri, base, mimeType || 'image/jpeg');
+    await FileSystem.writeAsStringAsync(uri, data, { encoding: FileSystem.EncodingType.Base64 });
+    return { uri, name: safeFull };
+  } finally {
+    await FileSystem.deleteAsync(tmp, { idempotent: true });
+  }
+}
+
 export async function deleteCache(uri: string): Promise<void> {
   try {
     await FileSystem.deleteAsync(uri, { idempotent: true });

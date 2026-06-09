@@ -12,6 +12,7 @@ import {
   searchByVector,
 } from '../db';
 import { runIndex, retagAll, type IndexProgress } from '../indexer';
+import { onLibraryChanged } from '../events';
 import { pickFolder } from '../saf';
 import { colors } from '../theme';
 import type { LinkedFolder, MemeRecord, SearchHit } from '../types';
@@ -47,6 +48,8 @@ export function LibraryScreen() {
 
   useEffect(() => {
     refresh();
+    // Refresh when a meme is shared into the app from elsewhere.
+    return onLibraryChanged(refresh);
   }, [refresh]);
 
   const loadMore = useCallback(async () => {
