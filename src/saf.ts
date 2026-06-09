@@ -86,6 +86,21 @@ export async function materialize(uri: string, name: string): Promise<string> {
   return dest;
 }
 
+// Read a SAF/content:// image as a base64 string (no data-URI prefix) so it can
+// be placed on the system clipboard via expo-clipboard's setImageAsync. Copies
+// to a temp file first (content:// can't always be read directly), then cleans
+// up. Returns the base64 payload.
+export async function readImageBase64(uri: string, name: string): Promise<string> {
+  const dest = await materialize(uri, name);
+  try {
+    return await FileSystem.readAsStringAsync(dest, {
+      encoding: FileSystem.EncodingType.Base64,
+    });
+  } finally {
+    await FileSystem.deleteAsync(dest, { idempotent: true });
+  }
+}
+
 export async function deleteCache(uri: string): Promise<void> {
   try {
     await FileSystem.deleteAsync(uri, { idempotent: true });
