@@ -192,6 +192,14 @@ export function MemeGrid({
         contentContainerStyle={{ gap: GAP, paddingBottom: 24 }}
         onEndReached={onEndReached}
         onEndReachedThreshold={0.6}
+        // Memory guards: keep only a few screens of image cells mounted so a
+        // large library can't pin hundreds of decoded bitmaps at once (was
+        // OOM-ing when a teach → retagAll re-render spiked on top of the grid).
+        removeClippedSubviews
+        initialNumToRender={15}
+        maxToRenderPerBatch={9}
+        windowSize={5}
+        updateCellsBatchingPeriod={60}
         ListFooterComponent={
           loadingMore ? <ActivityIndicator color={colors.accent} style={{ paddingVertical: 16 }} /> : null
         }
@@ -202,6 +210,11 @@ export function MemeGrid({
               style={styles.thumb}
               contentFit="cover"
               transition={120}
+              // Reuse the view and release the previous bitmap when a cell is
+              // recycled (e.g. when retagAll hands the list a fresh array).
+              recyclingKey={String(item.id)}
+              cachePolicy="disk"
+              allowDownscaling
             />
             {item.kind === 'video' && (
               <View style={styles.play}>
@@ -238,7 +251,13 @@ export function MemeGrid({
                   <Text style={styles.closeIcon}>✕</Text>
                 </Pressable>
               </View>
-              <Image source={{ uri: selected.uri }} style={styles.preview} contentFit="contain" />
+              <Image
+                source={{ uri: selected.uri }}
+                style={styles.preview}
+                contentFit="contain"
+                recyclingKey={String(selected.id)}
+                allowDownscaling
+              />
               <View style={styles.actionBar}>
                 <Pressable style={styles.actionBtn} onPress={onShare} disabled={busy}>
                   <Text style={styles.actionText}>{busy ? 'Preparing…' : '⤴  Share / Send'}</Text>
