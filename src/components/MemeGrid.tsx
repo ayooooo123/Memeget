@@ -172,13 +172,38 @@ export function MemeGrid({
         )}
       />
 
-      <Modal visible={!!selected} transparent animationType="fade" onRequestClose={() => setSelected(null)}>
-        <Pressable style={styles.backdrop} onPress={() => setSelected(null)}>
+      <Modal
+        visible={!!selected}
+        transparent
+        animationType="fade"
+        statusBarTranslucent
+        onRequestClose={() => setSelected(null)}
+      >
+        <View style={styles.modalRoot}>
+          {/* Backdrop sits BEHIND the sheet: only taps that land outside the
+              sheet reach it, so scrolling/teaching/selecting never dismisses. */}
+          <Pressable style={StyleSheet.absoluteFill} onPress={() => setSelected(null)} />
           {selected && (
             <View style={styles.sheet}>
+              <View style={styles.sheetHeader}>
+                <Text style={styles.sheetTitle} numberOfLines={1} selectable>
+                  {selected.name}
+                </Text>
+                <Pressable
+                  onPress={() => setSelected(null)}
+                  hitSlop={12}
+                  style={styles.closeBtn}
+                  accessibilityLabel="Close"
+                >
+                  <Text style={styles.closeIcon}>✕</Text>
+                </Pressable>
+              </View>
               <Image source={{ uri: selected.uri }} style={styles.preview} contentFit="contain" />
-              <ScrollView style={styles.meta} contentContainerStyle={{ padding: 14, gap: 10 }}>
-                <Text style={styles.name}>{selected.name}</Text>
+              <ScrollView
+                style={styles.meta}
+                contentContainerStyle={{ padding: 14, gap: 10 }}
+                keyboardShouldPersistTaps="handled"
+              >
                 {'score' in selected && (
                   <Text style={styles.muted}>match {Math.min(100, selected.score * 100).toFixed(0)}%</Text>
                 )}
@@ -199,8 +224,10 @@ export function MemeGrid({
                 )}
                 {!!selected.ocrText && (
                   <View>
-                    <Text style={styles.sectionLabel}>Text in meme</Text>
-                    <Text style={styles.ocr}>{selected.ocrText}</Text>
+                    <Text style={styles.sectionLabel}>Text in meme · long-press to copy</Text>
+                    <Text style={styles.ocr} selectable>
+                      {selected.ocrText}
+                    </Text>
                   </View>
                 )}
                 {matchInfo && matchInfo.length > 0 && (
@@ -228,7 +255,7 @@ export function MemeGrid({
               </ScrollView>
             </View>
           )}
-        </Pressable>
+        </View>
       </Modal>
 
       <Modal visible={teaching} transparent animationType="fade" onRequestClose={() => setTeaching(false)}>
@@ -295,9 +322,30 @@ const styles = StyleSheet.create({
   },
   playIcon: { color: '#fff', fontSize: 10 },
   backdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.85)', justifyContent: 'center', padding: 16 },
-  sheet: { backgroundColor: colors.surface, borderRadius: 16, overflow: 'hidden', maxHeight: '88%' },
+  modalRoot: { flex: 1, backgroundColor: 'rgba(0,0,0,0.85)', justifyContent: 'center', padding: 16 },
+  sheet: { backgroundColor: colors.surface, borderRadius: 16, overflow: 'hidden', maxHeight: '90%' },
+  sheetHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
+    gap: 10,
+  },
+  sheetTitle: { color: colors.text, fontWeight: '700', fontSize: 14, flex: 1 },
+  closeBtn: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    backgroundColor: colors.surface2,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  closeIcon: { color: colors.text, fontSize: 14, fontWeight: '800' },
   preview: { width: '100%', height: 320, backgroundColor: '#000' },
-  meta: { maxHeight: 240 },
+  meta: { maxHeight: 260 },
   name: { color: colors.text, fontWeight: '700', fontSize: 14 },
   muted: { color: colors.muted, fontSize: 12 },
   sectionLabel: { color: colors.muted, fontSize: 11, textTransform: 'uppercase', marginBottom: 4 },
