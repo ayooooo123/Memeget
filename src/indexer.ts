@@ -1,11 +1,18 @@
 import * as VideoThumbnails from 'expo-video-thumbnails';
 import { manipulateAsync, SaveFormat } from 'expo-image-manipulator';
 
-import { classifyImage, type EmbeddingsApi, type LabelVec } from './embeddings';
+import {
+  classifyImage,
+  trainHead,
+  type EmbeddingsApi,
+  type LabelHead,
+  type LabelVec,
+} from './embeddings';
 import {
   addIndexError,
   clearIndexErrors,
   getAllMemeEmbeddings,
+  getEmbeddingSample,
   getExemplars,
   getFolders,
   getLabelVectors,
@@ -79,9 +86,60 @@ export interface IndexResult {
 // negative anchors, and the world-knowledge association lookup.
 interface Knowledge {
   labelVecs: LabelVec[];
-  exemplarVecs: LabelVec[];
+  exemplarHeads: LabelHead[];
+  mean: Float32Array | null;
   negativeVecs: Float32Array[];
   assoc: Map<string, string[]>;
+}
+
+export interface ExemplarModel {
+  heads: LabelHead[];
+  mean: Float32Array | null;
+}
+
+// Train a logistic-regression head for every taught label from the exemplars in
+// the DB, using a random sample of the library as the negative background. Pure
+// vector math (no CLIP/api), so it can also be called standalone (e.g. the
+// detail-view debug readout). Returns the per-label heads plus the library mean
+// used to center vectors at inference time.
+export async function buildExemplarHeads(): Promise<ExemplarModel> {
+  const exemplars = await getExemplars();
+  if (exemplars.length === 0) return { heads: [], mean: null };
+
+  const sample = await getEmbeddingSample(500);
+  const dim = exemplars[0].vector.length;
+
+  // Library mean (background proxy) for mean-centering — this is what cancels
+  // CLIP's anisotropic baseline so non-matches can actually reach ~0.
+  const mean = new Float32Array(dim);
+  if (sample.length) {
+    for (const v of sample) for (let i = 0; i < dim; i++) mean[i] += v[i];
+    for (let i = 0; i < dim; i++) mean[i] /= sample.length;
+  }
+  const center = (v: ArrayLike<number>): number[] => {
+    const out = new Array<number>(dim);
+    for (let i = 0; i < dim; i++) out[i] = v[i] - mean[i];
+    return out;
+  };
+
+  const negatives = sample.map(center);
+
+  // Group taught examples by label.
+  const byLabel = new Map<string, { category: string; pos: number[][] }>();
+  for (const e of exemplars) {
+    const g = byLabel.get(e.label) ?? { category: e.category, pos: [] };
+    g.pos.push(center(e.vector));
+    byLabel.set(e.label, g);
+  }
+
+  const heads: LabelHead[] = [];
+  for (const [label, g] of byLabel) {
+    // Other labels' positives are also negatives for this one (push them apart).
+    const otherPos: number[][] = [];
+    for (const [l2, g2] of byLabel) if (l2 !== label) otherPos.push(...g2.pos);
+    heads.push(trainHead(label, g.category, g.pos, [...negatives, ...otherPos]));
+  }
+  return { heads, mean };
 }
 
 // Compute (and cache) CLIP text vectors for every curated label + negative
@@ -113,11 +171,7 @@ export async function buildKnowledge(api: EmbeddingsApi): Promise<Knowledge> {
   const negativeVecs = NEGATIVE_ANCHORS.map((_, i) => cache.get(`${NEG_PREFIX}${i}`)!).filter(Boolean);
 
   const exemplars = await getExemplars();
-  const exemplarVecs: LabelVec[] = exemplars.map((e) => ({
-    label: e.label,
-    category: e.category,
-    vec: Float32Array.from(e.vector),
-  }));
+  const { heads: exemplarHeads, mean } = await buildExemplarHeads();
 
   // Association lookup: curated terms + any added with an exemplar.
   const assoc = new Map<string, string[]>(Object.entries(ASSOCIATIONS));
@@ -127,7 +181,7 @@ export async function buildKnowledge(api: EmbeddingsApi): Promise<Knowledge> {
     }
   }
 
-  return { labelVecs, exemplarVecs, negativeVecs, assoc };
+  return { labelVecs, exemplarHeads, mean, negativeVecs, assoc };
 }
 
 // Build the searchable world-knowledge string for a set of tags: the label
@@ -197,7 +251,7 @@ export async function runIndex(
       const embedding = await api.embedImage(jpeg);
       const ocrText = await ocr(jpeg);
       const tags = mergeTags(
-        classifyImage(embedding, know.labelVecs, know.exemplarVecs, know.negativeVecs),
+        classifyImage(embedding, know.labelVecs, know.exemplarHeads, know.mean, know.negativeVecs),
         ocrTags(ocrText)
       );
 
@@ -243,7 +297,7 @@ export async function retagAll(
   for (let i = 0; i < rows.length; i++) {
     const vec = Array.from(rows[i].embedding);
     const tags = mergeTags(
-      classifyImage(vec, know.labelVecs, know.exemplarVecs, know.negativeVecs),
+      classifyImage(vec, know.labelVecs, know.exemplarHeads, know.mean, know.negativeVecs),
       ocrTags(rows[i].ocrText)
     );
     await updateMemeTags(rows[i].id, tags, extraTermsFor(tags, know.assoc));

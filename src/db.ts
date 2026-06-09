@@ -156,6 +156,17 @@ export async function getAllMemeEmbeddings(): Promise<
   return rows.map((r) => ({ id: r.id, embedding: blobToVec(r.embedding), ocrText: r.ocr_text ?? '' }));
 }
 
+// A random sample of library embeddings, used as the negative/background set
+// when training a taught label's classifier head.
+export async function getEmbeddingSample(limit = 500): Promise<Float32Array[]> {
+  const db = await getDb();
+  const rows = await db.getAllAsync<{ embedding: Uint8Array }>(
+    'SELECT embedding FROM memes ORDER BY RANDOM() LIMIT ?',
+    limit
+  );
+  return rows.map((r) => blobToVec(r.embedding));
+}
+
 export async function getMemeEmbedding(id: number): Promise<Float32Array | null> {
   const db = await getDb();
   const row = await db.getFirstAsync<{ embedding: Uint8Array }>(

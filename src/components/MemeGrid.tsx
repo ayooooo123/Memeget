@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Image } from 'expo-image';
 import {
   ActivityIndicator,
@@ -14,8 +14,9 @@ import {
   View,
 } from 'react-native';
 
-import { addExemplar, getExemplars, getMemeEmbedding } from '../db';
-import { EXEMPLAR_THRESHOLD } from '../embeddings';
+import { addExemplar, getMemeEmbedding } from '../db';
+import { EXEMPLAR_PROB_THRESHOLD, headProb } from '../embeddings';
+import { buildExemplarHeads, type ExemplarModel } from '../indexer';
 import { colors } from '../theme';
 import type { MemeRecord, SearchHit } from '../types';
 
@@ -47,11 +48,14 @@ export function MemeGrid({
   const [assocInput, setAssocInput] = useState('');
   const [saving, setSaving] = useState(false);
   const [matchInfo, setMatchInfo] = useState<{ label: string; score: number }[] | null>(null);
+  // Cache the trained heads so we don't retrain on every modal open; cleared
+  // after teaching so the next open reflects the new example.
+  const modelRef = useRef<ExemplarModel | null>(null);
   const size = (Dimensions.get('window').width - GAP * (COLS + 1)) / COLS;
 
-  // Live diagnostic: when a meme opens, show its cosine similarity to every
-  // taught exemplar — independent of tags/threshold — so we can see whether
-  // exemplars are stored and how close things actually are.
+  // Live diagnostic: when a meme opens, run it through every taught label's
+  // trained head and show the calibrated probability — so a real Milady reads
+  // ~0.95 and an unrelated meme ~0.03, confirming the model actually learned.
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -60,19 +64,19 @@ export function MemeGrid({
         return;
       }
       setMatchInfo(null);
-      const [emb, exemplars] = await Promise.all([getMemeEmbedding(selected.id), getExemplars()]);
+      if (!modelRef.current) modelRef.current = await buildExemplarHeads();
+      const model = modelRef.current;
+      const emb = await getMemeEmbedding(selected.id);
       if (cancelled) return;
-      if (!emb || exemplars.length === 0) {
+      if (!emb || model.heads.length === 0) {
         setMatchInfo([]);
         return;
       }
-      const dot = (b: number[]) => {
-        let s = 0;
-        for (let i = 0; i < b.length; i++) s += emb[i] * b[i];
-        return s;
-      };
-      const scored = exemplars
-        .map((e) => ({ label: e.label, score: dot(e.vector) }))
+      const centered = model.mean
+        ? Array.from(emb, (v, i) => v - model.mean![i])
+        : Array.from(emb);
+      const scored = model.heads
+        .map((h) => ({ label: h.label, score: headProb(h, centered) }))
         .sort((a, b) => b.score - a.score)
         .slice(0, 6);
       setMatchInfo(scored);
@@ -110,6 +114,7 @@ export function MemeGrid({
         sourceUri: selected.uri,
       });
       setTeaching(false);
+      modelRef.current = null; // new example → retrain heads on next open
       const matched = onTaught ? await onTaught(label) : undefined;
       Alert.alert(
         'Taught!',
@@ -191,10 +196,11 @@ export function MemeGrid({
                 )}
                 {matchInfo && matchInfo.length > 0 && (
                   <View>
-                    <Text style={styles.sectionLabel}>Taught-label similarity (debug)</Text>
+                    <Text style={styles.sectionLabel}>Taught-label confidence (debug)</Text>
                     {matchInfo.map((m) => (
                       <Text key={m.label} style={styles.muted}>
-                        {m.label}: {m.score.toFixed(2)} {m.score >= EXEMPLAR_THRESHOLD ? '✓ match' : ''}
+                        {m.label}: {(m.score * 100).toFixed(0)}%{' '}
+                        {m.score >= EXEMPLAR_PROB_THRESHOLD ? '✓ match' : ''}
                       </Text>
                     ))}
                   </View>

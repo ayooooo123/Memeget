@@ -62,12 +62,83 @@ export interface LabelVec {
   vec: Float32Array;
 }
 
-// Above this image-to-image cosine, a taught exemplar is considered a match.
-// CLIP image embeddings of memes share a HIGH baseline (~0.6+) because memes
-// look alike (text on white, cartoonish), so unrelated memes still score
-// ~0.63-0.66 against an exemplar. Real instances of the same character sit at
-// ~0.9-1.0. The cutoff therefore has to live well above the noise floor.
-export const EXEMPLAR_THRESHOLD = 0.8;
+// A taught label is no longer a raw cosine-to-exemplar match. Raw CLIP image
+// cosine has a high baseline (unrelated memes score ~0.6+ against any exemplar)
+// because the embeddings are anisotropic and memes look alike — so no cosine
+// threshold ever cleanly separates "is a Milady" from "isn't".
+//
+// Instead each taught label gets its own small logistic-regression head trained
+// on top of the frozen CLIP features: the user's examples as positives, a random
+// sample of the library as negatives. The head learns the *discriminative*
+// direction (what makes a Milady different from everything else) and outputs a
+// calibrated probability — a real Milady ~0.95, an unrelated meme ~0.03.
+export const EXEMPLAR_PROB_THRESHOLD = 0.6; // sigmoid prob above which we tag
+
+export interface LabelHead {
+  label: string;
+  category: string;
+  w: Float32Array; // weights; operate on the mean-centered image vector
+  b: number; // bias
+}
+
+// Probability that a (mean-centered) vector belongs to this head's label.
+export function headProb(head: LabelHead, x: number[]): number {
+  let z = head.b;
+  const w = head.w;
+  for (let i = 0; i < w.length; i++) z += w[i] * x[i];
+  if (z < -30) return 0;
+  if (z > 30) return 1;
+  return 1 / (1 + Math.exp(-z));
+}
+
+// Train a binary logistic-regression head separating `positives` (the taught
+// examples) from `negatives` (a background sample of the library). Classes are
+// re-weighted because positives are few and negatives many; L2 keeps the few-
+// shot boundary from overfitting. Pure vector math — no CLIP/api call, runs in
+// tens of milliseconds on-device.
+export function trainHead(
+  label: string,
+  category: string,
+  positives: number[][],
+  negatives: number[][],
+  opts: { iters?: number; lr?: number; l2?: number } = {}
+): LabelHead {
+  const dim = positives[0]?.length ?? negatives[0]?.length ?? 512;
+  const iters = opts.iters ?? 250;
+  const lr = opts.lr ?? 0.5;
+  const l2 = opts.l2 ?? 5e-3;
+  const w = new Float32Array(dim);
+  let b = 0;
+
+  const nPos = positives.length;
+  const nNeg = negatives.length;
+  const total = nPos + nNeg || 1;
+  // Balanced class weights so a handful of positives aren't drowned out.
+  const wPos = nPos ? total / (2 * nPos) : 0;
+  const wNeg = nNeg ? total / (2 * nNeg) : 0;
+
+  const gw = new Float32Array(dim);
+  for (let it = 0; it < iters; it++) {
+    gw.fill(0);
+    let gb = 0;
+    const accum = (x: number[], y: number, cw: number) => {
+      let z = b;
+      for (let i = 0; i < dim; i++) z += w[i] * x[i];
+      const p = z < -30 ? 0 : z > 30 ? 1 : 1 / (1 + Math.exp(-z));
+      const g = cw * (p - y);
+      for (let i = 0; i < dim; i++) gw[i] += g * x[i];
+      gb += g;
+    };
+    for (const x of positives) accum(x, 1, wPos);
+    for (const x of negatives) accum(x, 0, wNeg);
+    for (let i = 0; i < dim; i++) {
+      gw[i] = gw[i] / total + l2 * w[i];
+      w[i] -= lr * gw[i];
+    }
+    b -= lr * (gb / total);
+  }
+  return { label, category, w, b };
+}
 
 // Zero-shot tuning. We softmax label + negative-anchor similarities together
 // (CLIP-style temperature) and only keep labels that beat every "this is just
@@ -85,13 +156,15 @@ function cosTo(a: number[], b: Float32Array): number {
 // Classify a normalized image vector against two sources:
 //  - text-prompt labels (zero-shot): softmaxed against the negative anchors;
 //    kept only if their probability exceeds the best anchor and MIN_PROB.
-//  - taught exemplars (image-to-image): kept if above EXEMPLAR_THRESHOLD.
-// Merged and de-duplicated by label; exemplar matches (the user's ground
-// truth) always win and sort first.
+//  - taught labels (few-shot): each label's logistic-regression head scores the
+//    mean-centered vector; kept if its probability beats EXEMPLAR_PROB_THRESHOLD.
+// Merged and de-duplicated by label; taught matches (the user's ground truth)
+// always win and sort first.
 export function classifyImage(
   imageVec: number[],
   labelVecs: LabelVec[],
-  exemplarVecs: LabelVec[],
+  exemplarHeads: LabelHead[],
+  mean: Float32Array | null,
   negativeVecs: Float32Array[],
   topK = 3
 ): Tag[] {
@@ -112,9 +185,10 @@ export function classifyImage(
     .map((l, i) => ({ label: l.label, category: l.category, score: probs[i], source: 'prompt' as const }))
     .filter((t) => t.score > negMax && t.score > MIN_PROB);
 
-  const fromExemplars: Tag[] = exemplarVecs
-    .map((l) => ({ label: l.label, category: l.category, score: cosTo(imageVec, l.vec), source: 'exemplar' as const }))
-    .filter((t) => t.score > EXEMPLAR_THRESHOLD);
+  const centered = mean ? imageVec.map((v, i) => v - mean[i]) : imageVec;
+  const fromExemplars: Tag[] = exemplarHeads
+    .map((h) => ({ label: h.label, category: h.category, score: headProb(h, centered), source: 'exemplar' as const }))
+    .filter((t) => t.score > EXEMPLAR_PROB_THRESHOLD);
 
   // De-dupe by label: an exemplar match always wins over a prompt match.
   const best = new Map<string, Tag>();
