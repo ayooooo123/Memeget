@@ -22,7 +22,7 @@ import {
   updateMemeTags,
 } from './db';
 import { ASSOCIATIONS, MEME_LABELS, NEGATIVE_ANCHORS, ocrTags } from './memeLabels';
-import { copyToCache, deleteCache, listMedia } from './saf';
+import { copyToCache, deleteCache, listMedia, saveToFolder, type SafFile } from './saf';
 import type { Tag } from './types';
 
 // Merge visual (prompt/exemplar) tags with OCR-derived tags, de-duped by label.
@@ -233,60 +233,91 @@ export async function runIndex(
     if (opts.shouldCancel?.()) break;
     const file = allFiles[i];
     opts.onProgress?.({ processed: i, total, added, current: file.name });
-
-    let stage = 'copy';
-    const temp: string[] = [];
-    try {
-      if (await memeExists(file.uri)) {
-        skipped++;
-        continue;
-      }
-
-      const work = await copyToCache(file, i);
-      temp.push(work);
-      let frame = work;
-
-      if (file.kind === 'video') {
-        stage = 'thumbnail';
-        const { uri } = await VideoThumbnails.getThumbnailAsync(work, { time: 1000 });
-        frame = uri;
-        temp.push(uri);
-      }
-
-      stage = 'transcode';
-      const jpeg = await toJpeg(frame);
-      temp.push(jpeg);
-
-      stage = 'embed';
-      const embedding = await api.embedImage(jpeg);
-      const ocrText = await ocr(jpeg);
-      const tags = mergeTags(
-        classifyImage(embedding, know.labelVecs, know.exemplarHeads, know.mean, know.negativeVecs),
-        ocrTags(ocrText)
-      );
-
-      stage = 'store';
-      await insertMeme({
-        uri: file.uri,
-        name: file.name,
-        kind: file.kind,
-        embedding,
-        ocrText,
-        tags,
-        extraTerms: extraTermsFor(tags, know.assoc),
-      });
-      added++;
-    } catch (e) {
-      errors++;
-      const reason = String((e as Error)?.message ?? e).slice(0, 300);
-      await addIndexError({ name: file.name, kind: file.kind, stage, reason }).catch(() => {});
-    } finally {
-      for (const t of temp) await deleteCache(t);
-    }
+    const r = await processFile(api, file, know, i);
+    if (r === 'added') added++;
+    else if (r === 'skipped') skipped++;
+    else errors++;
   }
 
   opts.onProgress?.({ processed: total, total, added, current: '' });
   return { added, skipped, errors };
+}
+
+// Full per-file pipeline: copy → (thumbnail) → transcode → embed → OCR →
+// classify → store. Logs failures to the index-error table and cleans up temp
+// files. Shared by the folder scan (runIndex) and the share-target importer.
+async function processFile(
+  api: EmbeddingsApi,
+  file: SafFile,
+  know: Knowledge,
+  idx: number
+): Promise<'added' | 'skipped' | 'error'> {
+  let stage = 'copy';
+  const temp: string[] = [];
+  try {
+    if (await memeExists(file.uri)) return 'skipped';
+
+    const work = await copyToCache(file, idx);
+    temp.push(work);
+    let frame = work;
+
+    if (file.kind === 'video') {
+      stage = 'thumbnail';
+      const { uri } = await VideoThumbnails.getThumbnailAsync(work, { time: 1000 });
+      frame = uri;
+      temp.push(uri);
+    }
+
+    stage = 'transcode';
+    const jpeg = await toJpeg(frame);
+    temp.push(jpeg);
+
+    stage = 'embed';
+    const embedding = await api.embedImage(jpeg);
+    const ocrText = await ocr(jpeg);
+    const tags = mergeTags(
+      classifyImage(embedding, know.labelVecs, know.exemplarHeads, know.mean, know.negativeVecs),
+      ocrTags(ocrText)
+    );
+
+    stage = 'store';
+    await insertMeme({
+      uri: file.uri,
+      name: file.name,
+      kind: file.kind,
+      embedding,
+      ocrText,
+      tags,
+      extraTerms: extraTermsFor(tags, know.assoc),
+    });
+    return 'added';
+  } catch (e) {
+    const reason = String((e as Error)?.message ?? e).slice(0, 300);
+    await addIndexError({ name: file.name, kind: file.kind, stage, reason }).catch(() => {});
+    return 'error';
+  } finally {
+    for (const t of temp) await deleteCache(t);
+  }
+}
+
+// Accept a meme shared into the app from another app: copy it into the first
+// linked folder (so it lives alongside the rest of the library) and index it.
+export async function importSharedFile(
+  api: EmbeddingsApi,
+  src: { path: string; fileName: string; mimeType: string }
+): Promise<{ folderName: string }> {
+  const folders = await getFolders();
+  if (folders.length === 0) {
+    throw new Error('Link a folder first (Library tab) so shared memes have a place to live.');
+  }
+  const folder = folders[0];
+  const kind: 'image' | 'video' = src.mimeType.startsWith('video') ? 'video' : 'image';
+  const { uri, name } = await saveToFolder(src.path, src.fileName, src.mimeType, folder.uri);
+
+  const know = await buildKnowledge(api);
+  const result = await processFile(api, { uri, name, kind }, know, 0);
+  if (result === 'error') throw new Error('Saved the file, but indexing it failed. See Settings → diagnostics.');
+  return { folderName: folder.name };
 }
 
 export interface RetagResult {

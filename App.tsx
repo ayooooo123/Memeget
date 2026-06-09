@@ -9,6 +9,7 @@ import { EmbeddingsProvider } from './src/embeddings';
 import { initDb } from './src/db';
 import { LibraryScreen } from './src/screens/LibraryScreen';
 import { SettingsScreen } from './src/screens/SettingsScreen';
+import { ShareReceiver } from './src/components/ShareReceiver';
 import { colors } from './src/theme';
 
 // Must run once, before any model hook loads a model. Wires ExecuTorch's
@@ -66,6 +67,8 @@ export default function App() {
               );
             })}
           </View>
+
+          <ShareReceiver />
         </SafeAreaView>
       </EmbeddingsProvider>
     </SafeAreaProvider>

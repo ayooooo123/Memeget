@@ -20,6 +20,14 @@
             "extraMavenRepos": []
           }
         }
+      ],
+      [
+        "expo-share-intent",
+        {
+          "androidIntentFilters": ["image/*", "video/*"],
+          "androidMultiIntentFilters": ["image/*", "video/*"],
+          "disableIOS": true
+        }
       ]
     ],
     "experiments": {
