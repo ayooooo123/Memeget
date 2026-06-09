@@ -166,7 +166,7 @@ export function MemeGrid({
               <ScrollView style={styles.meta} contentContainerStyle={{ padding: 14, gap: 10 }}>
                 <Text style={styles.name}>{selected.name}</Text>
                 {'score' in selected && (
-                  <Text style={styles.muted}>match {(selected.score * 100).toFixed(0)}%</Text>
+                  <Text style={styles.muted}>match {Math.min(100, selected.score * 100).toFixed(0)}%</Text>
                 )}
                 {selected.tags.length > 0 && (
                   <View style={styles.chipRow}>

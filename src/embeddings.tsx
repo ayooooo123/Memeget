@@ -63,9 +63,11 @@ export interface LabelVec {
 }
 
 // Above this image-to-image cosine, a taught exemplar is considered a match.
-// Image/image similarity runs much higher than image/text, so exemplars use
-// their own absolute threshold rather than the text negative-anchor floor.
-export const EXEMPLAR_THRESHOLD = 0.55;
+// CLIP image embeddings of memes share a HIGH baseline (~0.6+) because memes
+// look alike (text on white, cartoonish), so unrelated memes still score
+// ~0.63-0.66 against an exemplar. Real instances of the same character sit at
+// ~0.9-1.0. The cutoff therefore has to live well above the noise floor.
+export const EXEMPLAR_THRESHOLD = 0.8;
 
 // Zero-shot tuning. We softmax label + negative-anchor similarities together
 // (CLIP-style temperature) and only keep labels that beat every "this is just
