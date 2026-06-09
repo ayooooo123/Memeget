@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Image } from 'expo-image';
 import {
   Alert,
@@ -13,7 +13,8 @@ import {
   View,
 } from 'react-native';
 
-import { addExemplar, getMemeEmbedding } from '../db';
+import { addExemplar, getExemplars, getMemeEmbedding } from '../db';
+import { EXEMPLAR_THRESHOLD } from '../embeddings';
 import { colors } from '../theme';
 import type { MemeRecord, SearchHit } from '../types';
 
@@ -38,7 +39,41 @@ export function MemeGrid({
   const [labelInput, setLabelInput] = useState('');
   const [assocInput, setAssocInput] = useState('');
   const [saving, setSaving] = useState(false);
+  const [matchInfo, setMatchInfo] = useState<{ label: string; score: number }[] | null>(null);
   const size = (Dimensions.get('window').width - GAP * (COLS + 1)) / COLS;
+
+  // Live diagnostic: when a meme opens, show its cosine similarity to every
+  // taught exemplar — independent of tags/threshold — so we can see whether
+  // exemplars are stored and how close things actually are.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (!selected) {
+        setMatchInfo(null);
+        return;
+      }
+      setMatchInfo(null);
+      const [emb, exemplars] = await Promise.all([getMemeEmbedding(selected.id), getExemplars()]);
+      if (cancelled) return;
+      if (!emb || exemplars.length === 0) {
+        setMatchInfo([]);
+        return;
+      }
+      const dot = (b: number[]) => {
+        let s = 0;
+        for (let i = 0; i < b.length; i++) s += emb[i] * b[i];
+        return s;
+      };
+      const scored = exemplars
+        .map((e) => ({ label: e.label, score: dot(e.vector) }))
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 6);
+      setMatchInfo(scored);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [selected]);
 
   const openTeach = () => {
     setLabelInput('');
@@ -140,6 +175,16 @@ export function MemeGrid({
                   <View>
                     <Text style={styles.sectionLabel}>Text in meme</Text>
                     <Text style={styles.ocr}>{selected.ocrText}</Text>
+                  </View>
+                )}
+                {matchInfo && matchInfo.length > 0 && (
+                  <View>
+                    <Text style={styles.sectionLabel}>Taught-label similarity (debug)</Text>
+                    {matchInfo.map((m) => (
+                      <Text key={m.label} style={styles.muted}>
+                        {m.label}: {m.score.toFixed(2)} {m.score >= EXEMPLAR_THRESHOLD ? '✓ match' : ''}
+                      </Text>
+                    ))}
                   </View>
                 )}
                 <Pressable style={styles.teachBtn} onPress={openTeach}>
