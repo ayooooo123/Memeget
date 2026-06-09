@@ -8,7 +8,6 @@ import { ExpoResourceFetcher } from 'react-native-executorch-expo-resource-fetch
 import { EmbeddingsProvider } from './src/embeddings';
 import { initDb } from './src/db';
 import { LibraryScreen } from './src/screens/LibraryScreen';
-import { SearchScreen } from './src/screens/SearchScreen';
 import { SettingsScreen } from './src/screens/SettingsScreen';
 import { colors } from './src/theme';
 
@@ -17,11 +16,10 @@ import { colors } from './src/theme';
 // and cached on-device.
 initExecutorch({ resourceFetcher: ExpoResourceFetcher });
 
-type TabKey = 'library' | 'search' | 'settings';
+type TabKey = 'library' | 'settings';
 
 const TABS: { key: TabKey; label: string; icon: string }[] = [
   { key: 'library', label: 'Library', icon: '🗂️' },
-  { key: 'search', label: 'Search', icon: '🔍' },
   { key: 'settings', label: 'Settings', icon: '⚙️' },
 ];
 
@@ -52,8 +50,6 @@ export default function App() {
               </View>
             ) : tab === 'library' ? (
               <LibraryScreen />
-            ) : tab === 'search' ? (
-              <SearchScreen />
             ) : (
               <SettingsScreen />
             )}

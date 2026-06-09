@@ -378,6 +378,16 @@ export async function countExemplars(): Promise<number> {
   return row?.c ?? 0;
 }
 
+// Distinct labels the user has taught — used to suggest/reuse labels when
+// teaching so they aren't retyped (and fragmented by typos).
+export async function getLabels(): Promise<string[]> {
+  const db = await getDb();
+  const rows = await db.getAllAsync<{ label: string }>(
+    'SELECT DISTINCT label FROM exemplars ORDER BY label COLLATE NOCASE'
+  );
+  return rows.map((r) => r.label);
+}
+
 export async function deleteExemplar(id: number): Promise<void> {
   const db = await getDb();
   await db.runAsync('DELETE FROM exemplars WHERE id = ?', id);
