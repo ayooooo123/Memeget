@@ -3,8 +3,8 @@ import { ActivityIndicator, Alert, Pressable, StyleSheet, Text, View } from 'rea
 
 import { MemeGrid } from '../components/MemeGrid';
 import { useEmbeddings } from '../embeddings';
-import { addFolder, countMemes, getFolders, getRecentMemes } from '../db';
-import { runIndex, type IndexProgress } from '../indexer';
+import { addFolder, countMemes, countMemesWithLabel, getFolders, getRecentMemes } from '../db';
+import { runIndex, retagAll, type IndexProgress } from '../indexer';
 import { pickFolder } from '../saf';
 import { colors } from '../theme';
 import type { LinkedFolder, MemeRecord } from '../types';
@@ -109,7 +109,16 @@ export function LibraryScreen() {
     </View>
   );
 
-  return <MemeGrid items={recent} header={header} />;
+  const onTaught = useCallback(
+    async (label: string) => {
+      if (emb.ready) await retagAll(emb);
+      await refresh();
+      return countMemesWithLabel(label);
+    },
+    [emb, refresh]
+  );
+
+  return <MemeGrid items={recent} header={header} onTaught={onTaught} />;
 }
 
 function ModelStatus({ ready, progress, error }: { ready: boolean; progress: number; error: string | null }) {

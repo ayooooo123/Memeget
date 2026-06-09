@@ -189,6 +189,16 @@ export async function countMemes(): Promise<number> {
   return row?.c ?? 0;
 }
 
+// How many memes currently carry a given tag label (used for teach feedback).
+export async function countMemesWithLabel(label: string): Promise<number> {
+  const db = await getDb();
+  const row = await db.getFirstAsync<{ c: number }>(
+    'SELECT COUNT(*) as c FROM memes WHERE tags LIKE ?',
+    `%"label":"${label}"%`
+  );
+  return row?.c ?? 0;
+}
+
 export async function getRecentMemes(limit = 60): Promise<MemeRecord[]> {
   const db = await getDb();
   const rows = await db.getAllAsync<MemeRow>(

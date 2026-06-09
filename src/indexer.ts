@@ -1,4 +1,5 @@
 import * as VideoThumbnails from 'expo-video-thumbnails';
+import { manipulateAsync, SaveFormat } from 'expo-image-manipulator';
 
 import { classifyImage, type EmbeddingsApi, type LabelVec } from './embeddings';
 import {
@@ -36,6 +37,18 @@ const NEG_PREFIX = 'neg::';
 
 // On-device OCR (Google ML Kit on Android). Imported lazily/defensively so a
 // missing module never breaks the whole index run.
+// ExecuTorch's native image decoder rejects WebP/HEIC/animated formats
+// ("Read image error: invalid argument"). Transcode every frame to a plain
+// JPEG (downscaled — CLIP only needs 224px) so embed + OCR always get a format
+// they can read. Also sidesteps out-of-memory on very large images.
+async function toJpeg(uri: string): Promise<string> {
+  const r = await manipulateAsync(uri, [{ resize: { width: 768 } }], {
+    compress: 0.9,
+    format: SaveFormat.JPEG,
+  });
+  return r.uri;
+}
+
 async function ocr(uri: string): Promise<string> {
   try {
     const mod = require('expo-text-extractor');
@@ -158,6 +171,7 @@ export async function runIndex(
     opts.onProgress?.({ processed: i, total, added, current: file.name });
 
     let stage = 'copy';
+    const temp: string[] = [];
     try {
       if (await memeExists(file.uri)) {
         skipped++;
@@ -165,19 +179,23 @@ export async function runIndex(
       }
 
       const work = await copyToCache(file, i);
+      temp.push(work);
       let frame = work;
-      let thumbForCleanup: string | null = null;
 
       if (file.kind === 'video') {
         stage = 'thumbnail';
         const { uri } = await VideoThumbnails.getThumbnailAsync(work, { time: 1000 });
         frame = uri;
-        thumbForCleanup = uri;
+        temp.push(uri);
       }
 
+      stage = 'transcode';
+      const jpeg = await toJpeg(frame);
+      temp.push(jpeg);
+
       stage = 'embed';
-      const embedding = await api.embedImage(frame);
-      const ocrText = await ocr(frame);
+      const embedding = await api.embedImage(jpeg);
+      const ocrText = await ocr(jpeg);
       const tags = mergeTags(
         classifyImage(embedding, know.labelVecs, know.exemplarVecs, know.negativeVecs),
         ocrTags(ocrText)
@@ -194,13 +212,12 @@ export async function runIndex(
         extraTerms: extraTermsFor(tags, know.assoc),
       });
       added++;
-
-      await deleteCache(work);
-      if (thumbForCleanup) await deleteCache(thumbForCleanup);
     } catch (e) {
       errors++;
       const reason = String((e as Error)?.message ?? e).slice(0, 300);
       await addIndexError({ name: file.name, kind: file.kind, stage, reason }).catch(() => {});
+    } finally {
+      for (const t of temp) await deleteCache(t);
     }
   }
 
