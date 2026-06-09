@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Image } from 'expo-image';
 import {
+  ActivityIndicator,
   Alert,
   Dimensions,
   FlatList,
@@ -27,12 +28,18 @@ export function MemeGrid({
   items,
   header,
   onTaught,
+  onEndReached,
+  loadingMore,
 }: {
   items: Item[];
   header?: React.ReactElement;
   // Called after a new exemplar is saved; should re-tag and return how many
   // memes now carry the label (for feedback). Optional.
   onTaught?: (label: string) => Promise<number | void>;
+  // Infinite-scroll hook: called when the user nears the end of the list so
+  // the parent can append the next page. Optional (search passes a fixed set).
+  onEndReached?: () => void;
+  loadingMore?: boolean;
 }) {
   const [selected, setSelected] = useState<Item | null>(null);
   const [teaching, setTeaching] = useState(false);
@@ -129,6 +136,11 @@ export function MemeGrid({
         ListHeaderComponent={header}
         columnWrapperStyle={{ gap: GAP, paddingHorizontal: GAP }}
         contentContainerStyle={{ gap: GAP, paddingBottom: 24 }}
+        onEndReached={onEndReached}
+        onEndReachedThreshold={0.6}
+        ListFooterComponent={
+          loadingMore ? <ActivityIndicator color={colors.accent} style={{ paddingVertical: 16 }} /> : null
+        }
         renderItem={({ item }) => (
           <Pressable onPress={() => setSelected(item)} style={{ width: size, height: size }}>
             <Image

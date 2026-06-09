@@ -10,19 +10,39 @@ import { colors } from '../theme';
 import type { LinkedFolder, MemeRecord } from '../types';
 
 export function LibraryScreen() {
+  const PAGE = 90;
   const emb = useEmbeddings();
   const [folders, setFolders] = useState<LinkedFolder[]>([]);
   const [recent, setRecent] = useState<MemeRecord[]>([]);
   const [count, setCount] = useState(0);
   const [indexing, setIndexing] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [progress, setProgress] = useState<IndexProgress | null>(null);
   const cancelRef = useRef(false);
+  const hasMoreRef = useRef(true);
+  const loadingMoreRef = useRef(false);
 
   const refresh = useCallback(async () => {
     setFolders(await getFolders());
-    setRecent(await getRecentMemes());
+    const first = await getRecentMemes(PAGE, 0);
+    setRecent(first);
+    hasMoreRef.current = first.length === PAGE;
     setCount(await countMemes());
   }, []);
+
+  const loadMore = useCallback(async () => {
+    if (loadingMoreRef.current || !hasMoreRef.current) return;
+    loadingMoreRef.current = true;
+    setLoadingMore(true);
+    try {
+      const next = await getRecentMemes(PAGE, recent.length);
+      hasMoreRef.current = next.length === PAGE;
+      setRecent((cur) => [...cur, ...next]);
+    } finally {
+      loadingMoreRef.current = false;
+      setLoadingMore(false);
+    }
+  }, [recent.length]);
 
   useEffect(() => {
     refresh();
@@ -118,7 +138,15 @@ export function LibraryScreen() {
     [emb, refresh]
   );
 
-  return <MemeGrid items={recent} header={header} onTaught={onTaught} />;
+  return (
+    <MemeGrid
+      items={recent}
+      header={header}
+      onTaught={onTaught}
+      onEndReached={loadMore}
+      loadingMore={loadingMore}
+    />
+  );
 }
 
 function ModelStatus({ ready, progress, error }: { ready: boolean; progress: number; error: string | null }) {

@@ -199,11 +199,12 @@ export async function countMemesWithLabel(label: string): Promise<number> {
   return row?.c ?? 0;
 }
 
-export async function getRecentMemes(limit = 60): Promise<MemeRecord[]> {
+export async function getRecentMemes(limit = 90, offset = 0): Promise<MemeRecord[]> {
   const db = await getDb();
   const rows = await db.getAllAsync<MemeRow>(
-    'SELECT * FROM memes ORDER BY indexed_at DESC LIMIT ?',
-    limit
+    'SELECT * FROM memes ORDER BY indexed_at DESC LIMIT ? OFFSET ?',
+    limit,
+    offset
   );
   return rows.map(rowToRecord);
 }
@@ -235,8 +236,14 @@ export async function searchByVector(
         ' ' +
         rec.extraTerms
       ).toLowerCase();
-      const lexical = terms.reduce((acc, t) => acc + (hay.includes(t) ? 1 : 0), 0) / terms.length;
-      score += 0.2 * lexical; // lexical boost (incl. world-knowledge association terms)
+      const matched = terms.reduce((acc, t) => acc + (hay.includes(t) ? 1 : 0), 0);
+      const lexical = matched / terms.length;
+      score += 0.35 * lexical; // lexical boost (incl. world-knowledge association terms)
+      // A literal keyword hit (the word actually appears in the meme's text,
+      // name, or tags) should outrank pure-semantic near-misses — text/image
+      // cosines top out around ~0.35, so this guarantees keyword results
+      // surface to the top instead of being buried past the result cap.
+      if (matched === terms.length) score += 0.6;
     }
     const { embedding, ...record } = rec;
     return { ...record, score } as SearchHit;
