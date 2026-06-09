@@ -222,6 +222,12 @@ export function LibraryScreen() {
     [emb, refresh, query, runSearch]
   );
 
+  const onDeleted = useCallback((id: number) => {
+    setRecent((cur) => cur.filter((m) => m.id !== id));
+    setResults((cur) => (cur ? cur.filter((m) => m.id !== id) : cur));
+    setCount((c) => Math.max(0, c - 1));
+  }, []);
+
   return (
     <MemeGrid
       items={results ?? recent}
@@ -229,6 +235,7 @@ export function LibraryScreen() {
       onTaught={onTaught}
       onEndReached={loadMore}
       loadingMore={loadingMore}
+      onDeleted={onDeleted}
     />
   );
 }

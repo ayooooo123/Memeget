@@ -100,6 +100,11 @@ export async function memeExists(uri: string): Promise<boolean> {
   return !!row;
 }
 
+export async function deleteMeme(id: number): Promise<void> {
+  const db = await getDb();
+  await db.runAsync('DELETE FROM memes WHERE id = ?', id);
+}
+
 export async function insertMeme(args: {
   uri: string;
   name: string;

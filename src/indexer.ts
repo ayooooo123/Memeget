@@ -300,24 +300,39 @@ async function processFile(
   }
 }
 
-// Accept a meme shared into the app from another app: copy it into the first
-// linked folder (so it lives alongside the rest of the library) and index it.
-export async function importSharedFile(
+// Accept memes shared into the app from other apps: copy each into the first
+// linked folder (so they live alongside the rest of the library) and index
+// them. Knowledge (label vectors + trained exemplar heads) is built ONCE for the
+// whole batch — rebuilding it per file is what made importing slow.
+export async function importSharedFiles(
   api: EmbeddingsApi,
-  src: { path: string; fileName: string; mimeType: string }
-): Promise<{ folderName: string }> {
+  files: { path: string; fileName: string; mimeType: string }[],
+  opts: { onProgress?: (done: number, total: number) => void } = {}
+): Promise<{ added: number; errors: number; folderName: string }> {
   const folders = await getFolders();
   if (folders.length === 0) {
     throw new Error('Link a folder first (Library tab) so shared memes have a place to live.');
   }
   const folder = folders[0];
-  const kind: 'image' | 'video' = src.mimeType.startsWith('video') ? 'video' : 'image';
-  const { uri, name } = await saveToFolder(src.path, src.fileName, src.mimeType, folder.uri);
-
   const know = await buildKnowledge(api);
-  const result = await processFile(api, { uri, name, kind }, know, 0);
-  if (result === 'error') throw new Error('Saved the file, but indexing it failed. See Settings → diagnostics.');
-  return { folderName: folder.name };
+
+  let added = 0;
+  let errors = 0;
+  for (let i = 0; i < files.length; i++) {
+    opts.onProgress?.(i, files.length);
+    const src = files[i];
+    const kind: 'image' | 'video' = src.mimeType.startsWith('video') ? 'video' : 'image';
+    try {
+      const { uri, name } = await saveToFolder(src.path, src.fileName, src.mimeType, folder.uri);
+      const result = await processFile(api, { uri, name, kind }, know, i);
+      if (result === 'error') errors++;
+      else added++;
+    } catch {
+      errors++;
+    }
+  }
+  opts.onProgress?.(files.length, files.length);
+  return { added, errors, folderName: folder.name };
 }
 
 export interface RetagResult {

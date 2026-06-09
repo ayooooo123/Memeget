@@ -3,7 +3,7 @@ import { ActivityIndicator, StyleSheet, Text, View } from 'react-native';
 import { useShareIntent, type ShareIntentFile } from 'expo-share-intent';
 
 import { useEmbeddings } from '../embeddings';
-import { importSharedFile } from '../indexer';
+import { importSharedFiles } from '../indexer';
 import { emitLibraryChanged } from '../events';
 import { colors } from '../theme';
 
@@ -36,22 +36,26 @@ export function ShareReceiver() {
     }
 
     busyRef.current = true;
-    setStatus({ kind: 'importing', msg: `Adding ${files.length} meme${files.length > 1 ? 's' : ''}…` });
+    const total = files.length;
+    setStatus({ kind: 'importing', msg: total > 1 ? `Adding 0/${total} memes…` : 'Adding meme…' });
     (async () => {
-      let added = 0;
-      let folderName = '';
       try {
-        for (const f of files) {
-          const res = await importSharedFile(emb, {
+        const res = await importSharedFiles(
+          emb,
+          files.map((f: ShareIntentFile) => ({
             path: f.path,
             fileName: f.fileName,
             mimeType: f.mimeType,
-          });
-          folderName = res.folderName;
-          added++;
-        }
+          })),
+          {
+            onProgress: (done, t) => {
+              if (t > 1 && done < t) setStatus({ kind: 'importing', msg: `Adding ${done}/${t} memes…` });
+            },
+          }
+        );
         emitLibraryChanged();
-        setStatus({ kind: 'done', msg: `Added ${added} to “${folderName}”` });
+        const errNote = res.errors > 0 ? ` (${res.errors} failed)` : '';
+        setStatus({ kind: 'done', msg: `Added ${res.added} to “${res.folderName}”${errNote}` });
       } catch (e) {
         setStatus({ kind: 'error', msg: String((e as Error)?.message ?? e) });
       } finally {
