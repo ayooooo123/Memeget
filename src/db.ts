@@ -201,8 +201,11 @@ export async function countMemesWithLabel(label: string): Promise<number> {
 
 export async function getRecentMemes(limit = 90, offset = 0): Promise<MemeRecord[]> {
   const db = await getDb();
+  // Tiebreak on id: bulk indexing stamps many rows with the same indexed_at
+  // (same millisecond), and without a stable secondary sort LIMIT/OFFSET paging
+  // repeats and skips rows — which is what broke infinite scroll.
   const rows = await db.getAllAsync<MemeRow>(
-    'SELECT * FROM memes ORDER BY indexed_at DESC LIMIT ? OFFSET ?',
+    'SELECT * FROM memes ORDER BY indexed_at DESC, id DESC LIMIT ? OFFSET ?',
     limit,
     offset
   );
