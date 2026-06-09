@@ -5,7 +5,8 @@
     "version": "0.1.0",
     "orientation": "portrait",
     "scheme": "memeget",
-    "userInterfaceStyle": "automatic",
+    "userInterfaceStyle": "dark",
+    "backgroundColor": "#0a0b0e",
     "newArchEnabled": true,
     "android": {
       "package": "com.memeget.app",

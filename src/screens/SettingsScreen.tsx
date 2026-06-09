@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { ActivityIndicator, Alert, Linking, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Alert, Linking, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
+import { showToast } from '../components/Toast';
+import { Button, ProgressBar, StatusDot } from '../components/ui';
 import { useEmbeddings } from '../embeddings';
 import {
   clearIndex,
@@ -11,17 +13,20 @@ import {
   removeFolder,
   type IndexError,
 } from '../db';
+import { emitLibraryChanged } from '../events';
+import { success, warn } from '../haptics';
 import { retagAll } from '../indexer';
 import { MEME_LABELS } from '../memeLabels';
-import { colors } from '../theme';
+import { colors, radius, space, TABBAR_CLEARANCE } from '../theme';
 import type { LinkedFolder } from '../types';
 
-export function SettingsScreen() {
+export function SettingsScreen({ active = true }: { active?: boolean }) {
   const emb = useEmbeddings();
   const [folders, setFolders] = useState<LinkedFolder[]>([]);
   const [count, setCount] = useState(0);
   const [taught, setTaught] = useState(0);
   const [errors, setErrors] = useState<IndexError[]>([]);
+  const [showErrors, setShowErrors] = useState(false);
   const [retagging, setRetagging] = useState<{ done: number; total: number } | null>(null);
 
   const refresh = useCallback(async () => {
@@ -31,13 +36,15 @@ export function SettingsScreen() {
     setErrors(await getIndexErrors());
   }, []);
 
+  // Both tabs stay mounted (so the Library keeps its state), which means this
+  // screen must refetch its stats whenever it becomes the visible tab.
   useEffect(() => {
-    refresh();
-  }, [refresh]);
+    if (active) refresh();
+  }, [active, refresh]);
 
   const onRetag = useCallback(async () => {
     if (!emb.ready) {
-      Alert.alert('Model still loading', 'Wait for the model to be ready, then re-tag.');
+      showToast('Model still loading — try again shortly', 'info');
       return;
     }
     setRetagging({ done: 0, total: 0 });
@@ -45,93 +52,115 @@ export function SettingsScreen() {
       const res = await retagAll(emb, {
         onProgress: (done, total) => setRetagging({ done, total }),
       });
-      Alert.alert('Re-tagged', `Updated ${res.updated} memes with current knowledge.`);
+      success();
+      emitLibraryChanged(); // tags changed under the Library's feet
+      showToast(`Re-tagged ${res.updated} memes with current knowledge`, 'success');
     } catch (e) {
-      Alert.alert('Re-tag failed', String(e));
+      showToast(`Re-tag failed: ${String(e)}`, 'error');
     } finally {
       setRetagging(null);
+      refresh();
     }
-  }, [emb]);
+  }, [emb, refresh]);
 
   const onClear = useCallback(() => {
-    Alert.alert('Clear index?', 'Removes all processed memes from the local database. Your actual files are untouched.', [
-      { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'Clear',
-        style: 'destructive',
-        onPress: async () => {
-          await clearIndex();
-          await refresh();
+    warn();
+    Alert.alert(
+      'Clear index?',
+      'Removes all processed memes from the local database. Your actual files are untouched.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Clear',
+          style: 'destructive',
+          onPress: async () => {
+            await clearIndex();
+            await refresh();
+            emitLibraryChanged(); // the Library grid must drop its rows too
+            showToast('Index cleared', 'info');
+          },
         },
-      },
-    ]);
+      ]
+    );
   }, [refresh]);
+
+  const modelTone = emb.error ? 'bad' : emb.ready ? 'good' : 'busy';
+  const modelLabel = emb.error
+    ? 'Error'
+    : emb.ready
+      ? 'Ready'
+      : `Loading ${Math.round((emb.progress || 0) * 100)}%`;
 
   return (
     <ScrollView contentContainerStyle={styles.container}>
-      <Section title="On-device model">
-        <Row label="CLIP (image + text)" value={emb.ready ? 'Ready' : emb.error ? 'Error' : 'Loading'} />
+      <Text style={styles.title}>Settings</Text>
+
+      <Section glyph="✦" title="On-device model" tint={colors.volt}>
+        <Row label="CLIP (image + text)">
+          <StatusDot tone={modelTone} label={modelLabel} />
+        </Row>
+        {!emb.ready && !emb.error && <ProgressBar value={emb.progress || 0} />}
+        {!!emb.error && <Text style={styles.errText}>{emb.error}</Text>}
         <Text style={styles.note}>
           Runs fully on your device via ExecuTorch. The model binary downloads once on first launch,
           then everything — indexing and search — happens offline with no network calls.
         </Text>
       </Section>
 
-      <Section title="Index">
+      <Section glyph="▦" title="Index" tint={colors.accent}>
         <Row label="Indexed memes" value={String(count)} />
         <Row label="Known meme formats" value={String(MEME_LABELS.length)} />
-        <Pressable style={styles.danger} onPress={onClear}>
-          <Text style={styles.dangerText}>Clear index</Text>
-        </Pressable>
+        {errors.length > 0 && (
+          <Pressable onPress={() => setShowErrors((s) => !s)}>
+            <Row label="Indexing errors" value={`${errors.length} ${showErrors ? '▴' : '▾'}`} valueTint={colors.danger} />
+          </Pressable>
+        )}
+        {showErrors && errors.length > 0 && (
+          <View style={styles.errBox}>
+            {Object.entries(
+              errors.reduce<Record<string, number>>((acc, e) => {
+                const key = `${e.stage} · ${e.kind}`;
+                acc[key] = (acc[key] ?? 0) + 1;
+                return acc;
+              }, {})
+            ).map(([k, n]) => (
+              <Row key={k} label={k} value={String(n)} />
+            ))}
+            {errors.slice(0, 8).map((e, i) => (
+              <View key={i} style={styles.errRow}>
+                <Text style={styles.errName} numberOfLines={1}>
+                  {e.name}
+                </Text>
+                <Text style={styles.errReason} numberOfLines={2}>
+                  [{e.stage}] {e.reason}
+                </Text>
+              </View>
+            ))}
+          </View>
+        )}
+        <Button variant="dangerGhost" small label="Clear index" onPress={onClear} />
       </Section>
 
-      <Section title="Culture / knowledge">
-        <Row label="Labels you've taught" value={String(taught)} />
+      <Section glyph="★" title="Taught knowledge" tint={colors.good}>
+        <Row label="Examples you've taught" value={String(taught)} />
         <Text style={styles.note}>
-          Tap any meme → “Teach a label” to teach Memeget a new character or format by example
-          (e.g. Milady). Then re-tag to apply it across everything already indexed — no re-scanning,
-          it reuses the embeddings already on device.
+          Open any meme and use “This IS a…” to teach a new character or format by example (e.g.
+          Milady). Re-tagging applies it across everything already indexed — no re-scanning, it
+          reuses the embeddings on device.
         </Text>
         {retagging ? (
-          <View style={styles.retagRow}>
-            <ActivityIndicator color={colors.accent} />
+          <View style={{ gap: 8 }}>
             <Text style={styles.note}>
               Re-tagging {retagging.done}/{retagging.total || '…'}
             </Text>
+            <ProgressBar value={retagging.total ? retagging.done / retagging.total : 0} tint={colors.good} />
           </View>
         ) : (
-          <Pressable style={styles.primary} onPress={onRetag}>
-            <Text style={styles.primaryText}>Re-tag library</Text>
-          </Pressable>
+          <Button small label="Re-tag library" onPress={onRetag} />
         )}
       </Section>
 
-      {errors.length > 0 && (
-        <Section title={`Indexing errors (${errors.length})`}>
-          {Object.entries(
-            errors.reduce<Record<string, number>>((acc, e) => {
-              const key = `${e.stage} · ${e.kind}`;
-              acc[key] = (acc[key] ?? 0) + 1;
-              return acc;
-            }, {})
-          ).map(([k, n]) => (
-            <Row key={k} label={k} value={String(n)} />
-          ))}
-          <Text style={styles.sectionLabel}>Examples</Text>
-          {errors.slice(0, 12).map((e, i) => (
-            <View key={i} style={styles.errRow}>
-              <Text style={styles.errName} numberOfLines={1}>
-                {e.name}
-              </Text>
-              <Text style={styles.errReason} numberOfLines={2}>
-                [{e.stage}] {e.reason}
-              </Text>
-            </View>
-          ))}
-        </Section>
-      )}
-
-      <Section title={`Linked folders (${folders.length})`}>
+      <Section glyph="🗂" title={`Linked folders (${folders.length})`} tint={colors.accent}>
         {folders.length === 0 ? (
           <Text style={styles.note}>None yet. Link folders from the Library tab.</Text>
         ) : (
@@ -141,9 +170,12 @@ export function SettingsScreen() {
                 {f.name}
               </Text>
               <Pressable
+                hitSlop={8}
                 onPress={async () => {
                   await removeFolder(f.uri);
                   refresh();
+                  emitLibraryChanged();
+                  showToast(`Unlinked “${f.name}” — already-indexed memes stay searchable`, 'info');
                 }}
               >
                 <Text style={styles.unlink}>Unlink</Text>
@@ -153,60 +185,110 @@ export function SettingsScreen() {
         )}
       </Section>
 
-      <Section title="Privacy">
+      <Section glyph="🔒" title="Privacy" tint={colors.good}>
         <Text style={styles.note}>
           Memeget never uploads your memes. Folder access is granted per-folder through Android’s
           Storage Access Framework, and the search index lives only in this app’s local database.
         </Text>
         <Pressable onPress={() => Linking.openSettings()}>
-          <Text style={styles.link}>Open app settings</Text>
+          <Text style={styles.link}>Open app settings →</Text>
         </Pressable>
       </Section>
 
-      <Text style={styles.version}>Memeget 0.1 · on-device meme indexing</Text>
+      <Text style={styles.version}>
+        Memeget<Text style={{ color: colors.volt }}>.</Text> 0.1 · private, on-device meme search
+      </Text>
     </ScrollView>
   );
 }
 
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
+function Section({
+  glyph,
+  title,
+  tint,
+  children,
+}: {
+  glyph: string;
+  title: string;
+  tint: string;
+  children: React.ReactNode;
+}) {
   return (
     <View style={styles.section}>
-      <Text style={styles.sectionTitle}>{title}</Text>
+      <View style={styles.sectionHead}>
+        <View style={[styles.glyphBox, { borderColor: tint }]}>
+          <Text style={[styles.glyph, { color: tint }]}>{glyph}</Text>
+        </View>
+        <Text style={styles.sectionTitle}>{title}</Text>
+      </View>
       <View style={styles.card}>{children}</View>
     </View>
   );
 }
 
-function Row({ label, value }: { label: string; value: string }) {
+function Row({
+  label,
+  value,
+  valueTint,
+  children,
+}: {
+  label: string;
+  value?: string;
+  valueTint?: string;
+  children?: React.ReactNode;
+}) {
   return (
     <View style={styles.row}>
       <Text style={styles.rowLabel}>{label}</Text>
-      <Text style={styles.rowValue}>{value}</Text>
+      {children ?? <Text style={[styles.rowValue, valueTint ? { color: valueTint } : null]}>{value}</Text>}
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { padding: 12, gap: 18, paddingBottom: 40 },
-  section: { gap: 8 },
-  sectionTitle: { color: colors.muted, fontSize: 12, textTransform: 'uppercase', fontWeight: '700', marginLeft: 4 },
-  card: { backgroundColor: colors.surface, borderRadius: 14, padding: 14, gap: 10 },
-  row: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  rowLabel: { color: colors.text, fontSize: 14 },
+  container: {
+    padding: space.lg,
+    gap: space.xl,
+    paddingBottom: TABBAR_CLEARANCE + 32,
+  },
+  title: { color: colors.text, fontSize: 28, fontWeight: '800', letterSpacing: -0.5 },
+  section: { gap: space.sm },
+  sectionHead: { flexDirection: 'row', alignItems: 'center', gap: 8, marginLeft: 2 },
+  glyphBox: {
+    width: 22,
+    height: 22,
+    borderRadius: 7,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  glyph: { fontSize: 11 },
+  sectionTitle: { color: colors.textDim, fontSize: 13, fontWeight: '700' },
+  card: {
+    backgroundColor: colors.surface,
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: space.lg,
+    gap: space.md,
+  },
+  row: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 12 },
+  rowLabel: { color: colors.text, fontSize: 14, flexShrink: 1 },
   rowValue: { color: colors.accent, fontSize: 14, fontWeight: '700' },
-  note: { color: colors.muted, fontSize: 12, lineHeight: 17 },
+  note: { color: colors.muted, fontSize: 12, lineHeight: 18 },
   link: { color: colors.accent, fontSize: 13, fontWeight: '600' },
-  danger: { borderWidth: 1, borderColor: colors.danger, borderRadius: 10, paddingVertical: 10, alignItems: 'center' },
-  dangerText: { color: colors.danger, fontWeight: '700' },
-  primary: { backgroundColor: colors.accent, borderRadius: 10, paddingVertical: 11, alignItems: 'center' },
-  primaryText: { color: '#0b0d12', fontWeight: '800' },
-  retagRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  sectionLabel: { color: colors.muted, fontSize: 11, textTransform: 'uppercase', marginTop: 4 },
+  errText: { color: colors.danger, fontSize: 12 },
+  errBox: {
+    backgroundColor: colors.surface2,
+    borderRadius: radius.md,
+    padding: space.md,
+    gap: 8,
+  },
   errRow: { gap: 1 },
-  errName: { color: colors.text, fontSize: 12, fontWeight: '600' },
+  errName: { color: colors.textDim, fontSize: 12, fontWeight: '600' },
   errReason: { color: colors.muted, fontSize: 11, lineHeight: 15 },
   folderRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 12 },
   folderName: { color: colors.text, flex: 1, fontSize: 13 },
   unlink: { color: colors.danger, fontSize: 13, fontWeight: '600' },
-  version: { color: colors.muted, fontSize: 11, textAlign: 'center', marginTop: 8 },
+  version: { color: colors.faint, fontSize: 11, textAlign: 'center', marginTop: 4 },
 });

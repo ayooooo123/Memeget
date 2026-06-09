@@ -5,7 +5,7 @@ import { useShareIntent, type ShareIntentFile } from 'expo-share-intent';
 import { useEmbeddings } from '../embeddings';
 import { importSharedFiles } from '../indexer';
 import { emitLibraryChanged } from '../events';
-import { colors } from '../theme';
+import { colors, radius, shadow, TABBAR_CLEARANCE } from '../theme';
 
 type Status =
   | { kind: 'importing'; msg: string }
@@ -68,11 +68,12 @@ export function ShareReceiver() {
 
   if (!status) return null;
   const tone =
-    status.kind === 'error' ? colors.danger : status.kind === 'done' ? colors.accent2 : colors.accent;
+    status.kind === 'error' ? colors.danger : status.kind === 'done' ? colors.good : colors.volt;
   return (
-    <View style={[styles.banner, { borderColor: tone }]} pointerEvents="none">
-      {status.kind === 'importing' && <ActivityIndicator color={tone} />}
-      <Text style={[styles.text, { color: tone }]} numberOfLines={2}>
+    <View style={styles.banner} pointerEvents="none">
+      <View style={[styles.bar, { backgroundColor: tone }]} />
+      {status.kind === 'importing' && <ActivityIndicator color={tone} size="small" />}
+      <Text style={[styles.text, { color: status.kind === 'error' ? colors.danger : colors.text }]} numberOfLines={2}>
         {status.kind === 'done' ? '✓ ' : status.kind === 'error' ? '⚠ ' : ''}
         {status.msg}
       </Text>
@@ -83,17 +84,20 @@ export function ShareReceiver() {
 const styles = StyleSheet.create({
   banner: {
     position: 'absolute',
-    left: 12,
-    right: 12,
-    bottom: 76,
+    left: 16,
+    right: 16,
+    bottom: TABBAR_CLEARANCE + 16,
     flexDirection: 'row',
     alignItems: 'center',
     gap: 10,
-    backgroundColor: colors.surface,
+    backgroundColor: colors.surface2,
     borderWidth: 1,
-    borderRadius: 12,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
+    borderColor: colors.borderLight,
+    borderRadius: radius.md,
+    paddingRight: 14,
+    overflow: 'hidden',
+    ...shadow.float,
   },
-  text: { flex: 1, fontSize: 13, fontWeight: '700' },
+  bar: { width: 3, alignSelf: 'stretch' },
+  text: { flex: 1, fontSize: 13, fontWeight: '600', paddingVertical: 12, paddingLeft: 11 },
 });
