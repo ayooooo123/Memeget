@@ -65,7 +65,7 @@ export interface LabelVec {
 // Above this image-to-image cosine, a taught exemplar is considered a match.
 // Image/image similarity runs much higher than image/text, so exemplars use
 // their own absolute threshold rather than the text negative-anchor floor.
-const EXEMPLAR_THRESHOLD = 0.62;
+export const EXEMPLAR_THRESHOLD = 0.55;
 
 // Zero-shot tuning. We softmax label + negative-anchor similarities together
 // (CLIP-style temperature) and only keep labels that beat every "this is just
