@@ -85,15 +85,22 @@ export function LibraryScreen() {
     [emb]
   );
 
+  // Keep the latest runSearch in a ref so the debounce effect below depends
+  // ONLY on the query text. If it depended on runSearch (a new function each
+  // render), every search would re-render → re-arm the timer → search again,
+  // flickering "Searching…" ↔ "N results" forever.
+  const runSearchRef = useRef(runSearch);
+  runSearchRef.current = runSearch;
+
   // Debounce so the grid narrows as you type without a search per keystroke.
   useEffect(() => {
     if (!query.trim()) {
       setResults(null);
       return;
     }
-    const id = setTimeout(() => runSearch(query), 350);
+    const id = setTimeout(() => runSearchRef.current(query), 350);
     return () => clearTimeout(id);
-  }, [query, runSearch]);
+  }, [query]);
 
   const onLink = useCallback(async () => {
     try {
