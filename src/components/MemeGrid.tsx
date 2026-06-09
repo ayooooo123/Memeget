@@ -29,6 +29,39 @@ const COLS = 3;
 
 type Item = MemeRecord | SearchHit;
 
+// Memoized so modal/teach-sheet state changes in MemeGrid don't re-render every
+// visible thumbnail (which kept the tag-edit tap feeling sluggish on big grids).
+const GridCell = React.memo(function GridCell({
+  item,
+  size,
+  onPress,
+}: {
+  item: Item;
+  size: number;
+  onPress: (it: Item) => void;
+}) {
+  return (
+    <Pressable onPress={() => onPress(item)} style={{ width: size, height: size }}>
+      <Image
+        source={{ uri: item.uri }}
+        style={styles.thumb}
+        contentFit="cover"
+        transition={120}
+        // Reuse the view and release the previous bitmap when a cell is
+        // recycled (e.g. when retagAll hands the list a fresh array).
+        recyclingKey={String(item.id)}
+        cachePolicy="disk"
+        allowDownscaling
+      />
+      {item.kind === 'video' && (
+        <View style={styles.play}>
+          <Text style={styles.playIcon}>▶</Text>
+        </View>
+      )}
+    </Pressable>
+  );
+});
+
 export function MemeGrid({
   items,
   header,
@@ -56,43 +89,41 @@ export function MemeGrid({
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [matchInfo, setMatchInfo] = useState<{ label: string; score: number }[] | null>(null);
+  const [matchBusy, setMatchBusy] = useState(false);
   // Cache the trained heads so we don't retrain on every modal open; cleared
   // after teaching so the next open reflects the new example.
   const modelRef = useRef<ExemplarModel | null>(null);
   const size = (Dimensions.get('window').width - GAP * (COLS + 1)) / COLS;
 
-  // Live diagnostic: when a meme opens, run it through every taught label's
-  // trained head and show the calibrated probability — so a real Milady reads
-  // ~0.95 and an unrelated meme ~0.03, confirming the model actually learned.
+  // The taught-label confidence readout is a debug aid that trains a logistic
+  // head per label over a 500-vector background — hundreds of ms+ of synchronous
+  // JS. Running it on every meme open froze the UI (and any tag tap queued
+  // behind it), so it's now opt-in: reset on open, compute only when tapped.
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      if (!selected) {
-        setMatchInfo(null);
-        return;
-      }
-      setMatchInfo(null);
+    setMatchInfo(null);
+  }, [selected]);
+
+  const computeMatchInfo = async () => {
+    if (!selected || matchBusy) return;
+    setMatchBusy(true);
+    try {
       if (!modelRef.current) modelRef.current = await buildExemplarHeads();
       const model = modelRef.current;
       const emb = await getMemeEmbedding(selected.id);
-      if (cancelled) return;
       if (!emb || model.heads.length === 0) {
         setMatchInfo([]);
         return;
       }
-      const centered = model.mean
-        ? Array.from(emb, (v, i) => v - model.mean![i])
-        : Array.from(emb);
+      const centered = model.mean ? Array.from(emb, (v, i) => v - model.mean![i]) : Array.from(emb);
       const scored = model.heads
         .map((h) => ({ label: h.label, score: headProb(h, centered) }))
         .sort((a, b) => b.score - a.score)
         .slice(0, 6);
       setMatchInfo(scored);
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [selected]);
+    } finally {
+      setMatchBusy(false);
+    }
+  };
 
   const flash = (msg: string) => {
     setNotice(msg);
@@ -221,26 +252,7 @@ export function MemeGrid({
         ListFooterComponent={
           loadingMore ? <ActivityIndicator color={colors.accent} style={{ paddingVertical: 16 }} /> : null
         }
-        renderItem={({ item }) => (
-          <Pressable onPress={() => setSelected(item)} style={{ width: size, height: size }}>
-            <Image
-              source={{ uri: item.uri }}
-              style={styles.thumb}
-              contentFit="cover"
-              transition={120}
-              // Reuse the view and release the previous bitmap when a cell is
-              // recycled (e.g. when retagAll hands the list a fresh array).
-              recyclingKey={String(item.id)}
-              cachePolicy="disk"
-              allowDownscaling
-            />
-            {item.kind === 'video' && (
-              <View style={styles.play}>
-                <Text style={styles.playIcon}>▶</Text>
-              </View>
-            )}
-          </Pressable>
-        )}
+        renderItem={({ item }) => <GridCell item={item} size={size} onPress={setSelected} />}
       />
 
       <Modal
@@ -327,7 +339,13 @@ export function MemeGrid({
                     </Text>
                   </View>
                 )}
-                {matchInfo && matchInfo.length > 0 && (
+                {matchInfo === null ? (
+                  <Pressable onPress={computeMatchInfo} disabled={matchBusy}>
+                    <Text style={styles.debugLink}>
+                      {matchBusy ? 'Scoring…' : 'Show taught-label confidence (debug)'}
+                    </Text>
+                  </Pressable>
+                ) : matchInfo.length > 0 ? (
                   <View>
                     <Text style={styles.sectionLabel}>Taught-label confidence (debug)</Text>
                     {matchInfo.map((m) => (
@@ -337,6 +355,8 @@ export function MemeGrid({
                       </Text>
                     ))}
                   </View>
+                ) : (
+                  <Text style={styles.muted}>No taught labels yet.</Text>
                 )}
                 <View style={styles.teachRow}>
                   <Pressable style={[styles.teachBtn, { flex: 1 }]} onPress={() => openTeach(true)}>
@@ -489,6 +509,7 @@ const styles = StyleSheet.create({
   name: { color: colors.text, fontWeight: '700', fontSize: 14 },
   muted: { color: colors.muted, fontSize: 12 },
   sectionLabel: { color: colors.muted, fontSize: 11, textTransform: 'uppercase', marginBottom: 4 },
+  debugLink: { color: colors.muted, fontSize: 12, textDecorationLine: 'underline' },
   ocr: { color: colors.text, fontSize: 13, lineHeight: 18 },
   chipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
   chip: { backgroundColor: colors.chip, borderRadius: 12, paddingHorizontal: 10, paddingVertical: 4 },
