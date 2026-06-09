@@ -20,7 +20,7 @@ import * as Sharing from 'expo-sharing';
 import { addExemplar, getLabels, getMemeEmbedding } from '../db';
 import { EXEMPLAR_PROB_THRESHOLD, headProb } from '../embeddings';
 import { buildExemplarHeads, type ExemplarModel } from '../indexer';
-import { materialize } from '../saf';
+import { materialize, readImageBase64 } from '../saf';
 import { colors } from '../theme';
 import type { MemeRecord, SearchHit } from '../types';
 
@@ -113,6 +113,24 @@ export function MemeGrid({
       await Sharing.shareAsync(path);
     } catch (e) {
       Alert.alert('Could not share', String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const onCopyImage = async () => {
+    if (!selected || busy) return;
+    if (selected.kind === 'video') {
+      flash('Can’t copy a video as an image — use Share');
+      return;
+    }
+    setBusy(true);
+    try {
+      const base64 = await readImageBase64(selected.uri, selected.name);
+      await Clipboard.setImageAsync(base64);
+      flash('Meme copied — paste it anywhere');
+    } catch (e) {
+      Alert.alert('Could not copy image', String(e));
     } finally {
       setBusy(false);
     }
@@ -260,11 +278,16 @@ export function MemeGrid({
               />
               <View style={styles.actionBar}>
                 <Pressable style={styles.actionBtn} onPress={onShare} disabled={busy}>
-                  <Text style={styles.actionText}>{busy ? 'Preparing…' : '⤴  Share / Send'}</Text>
+                  <Text style={styles.actionText}>{busy ? 'Preparing…' : '⤴  Share'}</Text>
                 </Pressable>
+                {selected.kind !== 'video' && (
+                  <Pressable style={styles.actionBtn} onPress={onCopyImage} disabled={busy}>
+                    <Text style={styles.actionText}>⧉  Copy image</Text>
+                  </Pressable>
+                )}
                 {!!selected.ocrText && (
                   <Pressable style={styles.actionBtn} onPress={onCopyText}>
-                    <Text style={styles.actionText}>⧉  Copy text</Text>
+                    <Text style={styles.actionText}>🆎  Copy text</Text>
                   </Pressable>
                 )}
               </View>
