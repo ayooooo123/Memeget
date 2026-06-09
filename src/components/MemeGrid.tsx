@@ -22,7 +22,17 @@ const COLS = 3;
 
 type Item = MemeRecord | SearchHit;
 
-export function MemeGrid({ items, header }: { items: Item[]; header?: React.ReactElement }) {
+export function MemeGrid({
+  items,
+  header,
+  onTaught,
+}: {
+  items: Item[];
+  header?: React.ReactElement;
+  // Called after a new exemplar is saved; should re-tag and return how many
+  // memes now carry the label (for feedback). Optional.
+  onTaught?: (label: string) => Promise<number | void>;
+}) {
   const [selected, setSelected] = useState<Item | null>(null);
   const [teaching, setTeaching] = useState(false);
   const [labelInput, setLabelInput] = useState('');
@@ -58,9 +68,15 @@ export function MemeGrid({ items, header }: { items: Item[]; header?: React.Reac
         sourceUri: selected.uri,
       });
       setTeaching(false);
+      const matched = onTaught ? await onTaught(label) : undefined;
       Alert.alert(
         'Taught!',
-        `Memeget will now recognize "${label}" by example. Run "Re-tag library" in Settings to apply it to everything you've already indexed.`
+        typeof matched === 'number'
+          ? `Applied across your library: ${matched} meme${matched === 1 ? '' : 's'} now tagged "${label}".` +
+              (matched <= 1
+                ? ' Teach a few more examples (different poses/backgrounds) to catch the rest.'
+                : '')
+          : `Memeget will now recognize "${label}" by example. Run "Re-tag library" in Settings to apply it.`
       );
     } catch (e) {
       Alert.alert('Could not teach', String(e));

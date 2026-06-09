@@ -3,7 +3,8 @@ import { ActivityIndicator, Pressable, StyleSheet, Text, TextInput, View } from 
 
 import { MemeGrid } from '../components/MemeGrid';
 import { useEmbeddings } from '../embeddings';
-import { searchByVector } from '../db';
+import { countMemesWithLabel, searchByVector } from '../db';
+import { retagAll } from '../indexer';
 import { colors } from '../theme';
 import type { SearchHit } from '../types';
 
@@ -89,7 +90,16 @@ export function SearchScreen() {
     </View>
   );
 
-  return <MemeGrid items={hits} header={header} />;
+  const onTaught = useCallback(
+    async (label: string) => {
+      if (emb.ready) await retagAll(emb);
+      if (query.trim()) await run(query);
+      return countMemesWithLabel(label);
+    },
+    [emb, query, run]
+  );
+
+  return <MemeGrid items={hits} header={header} onTaught={onTaught} />;
 }
 
 const styles = StyleSheet.create({
