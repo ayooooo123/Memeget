@@ -1,20 +1,32 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import {
+  ActivityIndicator,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+} from 'react-native';
 
 import { MemeGrid } from '../components/MemeGrid';
+import { showToast } from '../components/Toast';
+import { Button, Chip, ProgressBar, StatusDot } from '../components/ui';
 import { useEmbeddings } from '../embeddings';
 import {
   addFolder,
   countMemes,
   countMemesWithLabel,
   getFolders,
+  getLabels,
   getRecentMemes,
   searchByVector,
 } from '../db';
 import { runIndex, retagAll, type IndexProgress } from '../indexer';
 import { onLibraryChanged } from '../events';
+import { success, tap, thud } from '../haptics';
 import { pickFolder } from '../saf';
-import { colors } from '../theme';
+import { colors, radius, space, type } from '../theme';
 import type { LinkedFolder, MemeRecord, SearchHit } from '../types';
 
 const PAGE = 90;
@@ -24,6 +36,7 @@ export function LibraryScreen() {
   const [folders, setFolders] = useState<LinkedFolder[]>([]);
   const [recent, setRecent] = useState<MemeRecord[]>([]);
   const [count, setCount] = useState(0);
+  const [taughtLabels, setTaughtLabels] = useState<string[]>([]);
   const [indexing, setIndexing] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [progress, setProgress] = useState<IndexProgress | null>(null);
@@ -44,6 +57,7 @@ export function LibraryScreen() {
     setRecent(first);
     hasMoreRef.current = first.length === PAGE;
     setCount(await countMemes());
+    setTaughtLabels(await getLabels().catch(() => []));
   }, []);
 
   useEffect(() => {
@@ -105,27 +119,36 @@ export function LibraryScreen() {
     return () => clearTimeout(id);
   }, [query]);
 
+  const searchLabel = useCallback((label: string) => {
+    tap();
+    // Toggle: tapping the active chip clears the filter.
+    setQuery((cur) => (cur.trim() === label ? '' : label));
+  }, []);
+
   const onLink = useCallback(async () => {
     try {
       const picked = await pickFolder();
       if (!picked) return;
       await addFolder(picked.uri, picked.name);
       await refresh();
-      Alert.alert('Folder linked', `"${picked.name}" added. Tap Index to process it.`);
+      success();
+      showToast(`Linked “${picked.name}” — tap Index to scan it`, 'success');
     } catch (e) {
-      Alert.alert('Could not link folder', String(e));
+      showToast(`Could not link folder: ${String(e)}`, 'error');
     }
   }, [refresh]);
 
   const onIndex = useCallback(async () => {
+    if (indexing) return;
     if (!emb.ready) {
-      Alert.alert('Model still loading', 'The on-device CLIP model is still preparing. Try again shortly.');
+      showToast('The on-device model is still preparing — try again shortly', 'info');
       return;
     }
     if (folders.length === 0) {
-      Alert.alert('No folders', 'Link a folder first.');
+      showToast('Link a folder first', 'info');
       return;
     }
+    thud();
     cancelRef.current = false;
     setIndexing(true);
     try {
@@ -134,78 +157,77 @@ export function LibraryScreen() {
         shouldCancel: () => cancelRef.current,
       });
       await refresh();
-      Alert.alert('Indexing complete', `Added ${res.added}, skipped ${res.skipped}, errors ${res.errors}.`);
+      success();
+      const errNote = res.errors > 0 ? ` · ${res.errors} failed` : '';
+      showToast(`Indexed ${res.added} new · ${res.skipped} already known${errNote}`, 'success');
     } catch (e) {
-      Alert.alert('Indexing failed', String(e));
+      showToast(`Indexing failed: ${String(e)}`, 'error');
     } finally {
       setIndexing(false);
       setProgress(null);
     }
-  }, [emb, folders.length, refresh]);
+  }, [emb, folders.length, indexing, refresh]);
 
+  const isSearch = results !== null;
+  const hasLibrary = count > 0 || recent.length > 0;
+
+  // Scrolling part of the page (lives inside the grid as its header).
   const header = (
-    <View style={styles.header}>
-      <View style={styles.searchRow}>
-        <TextInput
-          style={styles.search}
-          value={query}
-          onChangeText={setQuery}
-          placeholder="Search your memes…"
-          placeholderTextColor={colors.muted}
-          returnKeyType="search"
-          autoCapitalize="none"
-          onSubmitEditing={() => runSearch(query)}
-        />
-        {query.length > 0 && (
-          <Pressable style={styles.clearBtn} onPress={() => setQuery('')} hitSlop={8}>
-            <Text style={styles.clearIcon}>✕</Text>
-          </Pressable>
-        )}
-      </View>
-
-      {results !== null ? (
-        <Text style={styles.muted}>
-          {searching ? 'Searching on-device…' : `${results.length} result${results.length === 1 ? '' : 's'} for “${query.trim()}”`}
-          {!emb.ready && ' · model still loading'}
-        </Text>
-      ) : (
-        <>
-          <ModelStatus ready={emb.ready} progress={emb.progress} error={emb.error} />
-          <View style={styles.row}>
-            <Pressable style={[styles.btn, styles.btnGhost]} onPress={onLink}>
-              <Text style={styles.btnGhostText}>+ Link folder</Text>
-            </Pressable>
-            <Pressable
-              style={[styles.btn, styles.btnPrimary, indexing && styles.btnDisabled]}
-              onPress={indexing ? () => (cancelRef.current = true) : onIndex}
-            >
-              <Text style={styles.btnPrimaryText}>{indexing ? 'Stop' : 'Index now'}</Text>
-            </Pressable>
-          </View>
-
-          {folders.length > 0 && (
-            <Text style={styles.muted}>
-              {folders.length} folder{folders.length > 1 ? 's' : ''} linked · {count} indexed
+    <View style={styles.listHeader}>
+      {isSearch ? (
+        <View style={styles.resultRow}>
+          {searching ? (
+            <>
+              <ActivityIndicator size="small" color={colors.volt} />
+              <Text style={styles.resultText}>Searching on-device…</Text>
+            </>
+          ) : (
+            <Text style={styles.resultText}>
+              <Text style={styles.resultCount}>{results.length}</Text>
+              {` result${results.length === 1 ? '' : 's'} for “${query.trim()}”`}
             </Text>
           )}
-
-          {indexing && progress && (
-            <View style={styles.progress}>
-              <ActivityIndicator color={colors.accent} />
-              <Text style={styles.muted} numberOfLines={1}>
-                {progress.processed}/{progress.total} · +{progress.added} · {progress.current}
-              </Text>
+        </View>
+      ) : (
+        <>
+          {indexing ? (
+            <View style={styles.progressCard}>
+              <View style={styles.progressTopRow}>
+                <Text style={styles.progressTitle}>
+                  {progress
+                    ? `Indexing ${progress.processed}/${progress.total || '…'}` +
+                      (progress.added > 0 ? `  ·  ${progress.added} new` : '')
+                    : 'Preparing to index…'}
+                </Text>
+                <Pressable onPress={() => (cancelRef.current = true)} hitSlop={10}>
+                  <Text style={styles.stopText}>Stop</Text>
+                </Pressable>
+              </View>
+              <ProgressBar value={progress?.total ? progress.processed / progress.total : 0} />
+              {!!progress?.current && (
+                <Text style={styles.progressFile} numberOfLines={1}>
+                  {progress.current}
+                </Text>
+              )}
             </View>
-          )}
-
-          {recent.length === 0 && !indexing && (
-            <View style={styles.empty}>
-              <Text style={styles.emptyTitle}>No memes indexed yet</Text>
-              <Text style={styles.muted}>
-                Link a folder of memes, then tap “Index now”. Everything is processed on your phone — no
-                network, no uploads.
+          ) : hasLibrary ? (
+            <View style={styles.toolbar}>
+              <Text style={styles.toolbarInfo}>
+                {count} meme{count === 1 ? '' : 's'}
+                {folders.length > 0 ? ` · ${folders.length} folder${folders.length > 1 ? 's' : ''}` : ''}
               </Text>
+              <View style={styles.toolbarBtns}>
+                <Button small variant="secondary" label="Link" icon="＋" onPress={onLink} />
+                <Button small variant="primary" label="Index" icon="⟳" onPress={onIndex} />
+              </View>
             </View>
+          ) : (
+            <Onboarding
+              hasFolder={folders.length > 0}
+              modelReady={emb.ready}
+              onLink={onLink}
+              onIndex={onIndex}
+            />
           )}
         </>
       )}
@@ -229,57 +251,208 @@ export function LibraryScreen() {
   }, []);
 
   return (
-    <MemeGrid
-      items={results ?? recent}
-      header={header}
-      onTaught={onTaught}
-      onEndReached={loadMore}
-      loadingMore={loadingMore}
-      onDeleted={onDeleted}
-    />
+    <View style={styles.root}>
+      {/* Fixed chrome: brand, search, quick filters. */}
+      <View style={styles.topArea}>
+        <View style={styles.brandRow}>
+          <Text style={styles.brand}>
+            Memeget<Text style={styles.brandDot}>.</Text>
+          </Text>
+          <ModelBadge ready={emb.ready} progress={emb.progress} error={emb.error} />
+        </View>
+
+        <View style={styles.searchRow}>
+          <Text style={styles.searchGlyph}>⌕</Text>
+          <TextInput
+            style={styles.search}
+            value={query}
+            onChangeText={setQuery}
+            placeholder={hasLibrary ? `Search ${count} memes…` : 'Search your memes…'}
+            placeholderTextColor={colors.muted}
+            returnKeyType="search"
+            autoCapitalize="none"
+            autoCorrect={false}
+            onSubmitEditing={() => runSearch(query)}
+          />
+          {query.length > 0 && (
+            <Pressable style={styles.clearBtn} onPress={() => setQuery('')} hitSlop={8}>
+              <Text style={styles.clearIcon}>✕</Text>
+            </Pressable>
+          )}
+        </View>
+
+        {taughtLabels.length > 0 && (
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.chipRow}
+            keyboardShouldPersistTaps="handled"
+          >
+            {taughtLabels.map((l) => (
+              <Chip key={l} label={l} taught active={query.trim() === l} onPress={() => searchLabel(l)} />
+            ))}
+          </ScrollView>
+        )}
+      </View>
+
+      <MemeGrid
+        items={results ?? recent}
+        header={header}
+        onTaught={onTaught}
+        onEndReached={loadMore}
+        loadingMore={loadingMore}
+        onDeleted={onDeleted}
+        onSearchLabel={searchLabel}
+        emptyState={
+          isSearch && !searching && results.length === 0 ? (
+            <View style={styles.noResults}>
+              <Text style={styles.noResultsGlyph}>¯\_(ツ)_/¯</Text>
+              <Text style={styles.noResultsTitle}>Nothing matched</Text>
+              <Text style={styles.noResultsHint}>
+                Try fewer words, a vibe (“sad frog”), or text you remember from the meme.
+              </Text>
+            </View>
+          ) : null
+        }
+      />
+    </View>
   );
 }
 
-function ModelStatus({ ready, progress, error }: { ready: boolean; progress: number; error: string | null }) {
-  if (error) return <Text style={[styles.status, { color: colors.danger }]}>Model error: {error}</Text>;
-  if (ready) return <Text style={[styles.status, { color: colors.accent2 }]}>● CLIP model ready (on-device)</Text>;
+// Compact model state pill in the brand row; details live in Settings.
+function ModelBadge({ ready, progress, error }: { ready: boolean; progress: number; error: string | null }) {
+  if (error) return <StatusDot tone="bad" label="model error" />;
+  if (ready) return <StatusDot tone="good" label="on-device" />;
   const pct = Math.round((progress || 0) * 100);
-  return <Text style={styles.status}>Preparing on-device model… {pct > 0 ? `${pct}%` : ''}</Text>;
+  return <StatusDot tone="busy" label={pct > 0 ? `model ${pct}%` : 'model loading'} />;
+}
+
+// First-run guidance: a 1-2-3 card that walks straight into the two actions.
+function Onboarding({
+  hasFolder,
+  modelReady,
+  onLink,
+  onIndex,
+}: {
+  hasFolder: boolean;
+  modelReady: boolean;
+  onLink: () => void;
+  onIndex: () => void;
+}) {
+  return (
+    <View style={styles.onboard}>
+      <Text style={styles.onboardEmoji}>🐸</Text>
+      <Text style={styles.onboardTitle}>Your stash, searchable</Text>
+      <Text style={styles.onboardBody}>
+        Memeget indexes a folder of memes entirely on your phone — no uploads, no account — then finds
+        any of them by vibe, character, or the text inside.
+      </Text>
+      <View style={styles.steps}>
+        <Step n="1" done={hasFolder} text="Link the folder where your memes live" />
+        <Step n="2" done={false} text="Index it (one-time scan, all on-device)" />
+        <Step n="3" done={false} text="Search “sad frog”, “galaxy brain”, anything" />
+      </View>
+      {hasFolder ? (
+        <Button label={modelReady ? 'Index my memes' : 'Index (model still loading…)'} onPress={onIndex} />
+      ) : (
+        <Button label="Link a folder" icon="＋" onPress={onLink} />
+      )}
+      {hasFolder && <Button variant="ghost" small label="＋ Link another folder" onPress={onLink} />}
+    </View>
+  );
+}
+
+function Step({ n, done, text }: { n: string; done: boolean; text: string }) {
+  return (
+    <View style={styles.step}>
+      <View style={[styles.stepBadge, done && styles.stepBadgeDone]}>
+        <Text style={[styles.stepN, done && styles.stepNDone]}>{done ? '✓' : n}</Text>
+      </View>
+      <Text style={styles.stepText}>{text}</Text>
+    </View>
+  );
 }
 
 const styles = StyleSheet.create({
-  header: { padding: 12, gap: 10 },
-  searchRow: { flexDirection: 'row', alignItems: 'center' },
-  search: {
-    flex: 1,
+  root: { flex: 1 },
+  topArea: { paddingHorizontal: space.lg, paddingTop: space.sm, gap: space.md, paddingBottom: space.sm },
+  brandRow: { flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between' },
+  brand: { color: colors.text, ...type.display },
+  brandDot: { color: colors.volt },
+
+  searchRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
     backgroundColor: colors.surface2,
-    borderRadius: 12,
+    borderRadius: radius.pill,
+    borderWidth: 1,
+    borderColor: colors.border,
     paddingHorizontal: 14,
-    paddingVertical: 11,
-    color: colors.text,
-    fontSize: 15,
   },
+  searchGlyph: { color: colors.muted, fontSize: 18, marginRight: 6, fontWeight: '700' },
+  search: { flex: 1, paddingVertical: 12, color: colors.text, fontSize: 15 },
   clearBtn: {
-    position: 'absolute',
-    right: 8,
-    width: 28,
-    height: 28,
-    borderRadius: 14,
-    backgroundColor: colors.surface,
+    width: 26,
+    height: 26,
+    borderRadius: 13,
+    backgroundColor: colors.surface3,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  clearIcon: { color: colors.muted, fontSize: 13, fontWeight: '700' },
-  status: { color: colors.muted, fontSize: 12, fontWeight: '600' },
-  row: { flexDirection: 'row', gap: 10 },
-  btn: { flex: 1, paddingVertical: 12, borderRadius: 12, alignItems: 'center' },
-  btnPrimary: { backgroundColor: colors.accent },
-  btnPrimaryText: { color: '#0b0d12', fontWeight: '800' },
-  btnGhost: { borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface },
-  btnGhostText: { color: colors.text, fontWeight: '700' },
-  btnDisabled: { opacity: 0.6 },
-  muted: { color: colors.muted, fontSize: 12 },
-  progress: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  empty: { paddingVertical: 32, gap: 6 },
-  emptyTitle: { color: colors.text, fontWeight: '700', fontSize: 15 },
+  clearIcon: { color: colors.textDim, fontSize: 12, fontWeight: '700' },
+  chipRow: { gap: space.sm, paddingRight: space.lg },
+
+  listHeader: { paddingHorizontal: space.md, paddingBottom: space.sm, gap: space.md },
+  resultRow: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 2 },
+  resultText: { color: colors.muted, fontSize: 13, fontWeight: '600' },
+  resultCount: { color: colors.volt, fontWeight: '800' },
+
+  toolbar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  toolbarInfo: { color: colors.muted, fontSize: 13, fontWeight: '600', flexShrink: 1 },
+  toolbarBtns: { flexDirection: 'row', gap: space.sm },
+
+  progressCard: {
+    backgroundColor: colors.surface,
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: space.lg,
+    gap: 10,
+  },
+  progressTopRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  progressTitle: { color: colors.text, fontSize: 13, fontWeight: '700' },
+  stopText: { color: colors.danger, fontSize: 13, fontWeight: '700' },
+  progressFile: { color: colors.faint, fontSize: 11 },
+
+  onboard: {
+    backgroundColor: colors.surface,
+    borderRadius: radius.xl,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: space.xl,
+    gap: space.md,
+    marginTop: space.sm,
+  },
+  onboardEmoji: { fontSize: 40 },
+  onboardTitle: { color: colors.text, fontSize: 20, fontWeight: '800', letterSpacing: -0.3 },
+  onboardBody: { color: colors.muted, fontSize: 13, lineHeight: 19 },
+  steps: { gap: 10, marginVertical: 4 },
+  step: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  stepBadge: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: colors.surface3,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  stepBadgeDone: { backgroundColor: colors.goodDim },
+  stepN: { color: colors.textDim, fontSize: 11, fontWeight: '800' },
+  stepNDone: { color: colors.good },
+  stepText: { color: colors.textDim, fontSize: 13, flex: 1 },
+
+  noResults: { alignItems: 'center', paddingVertical: 48, paddingHorizontal: 32, gap: 8 },
+  noResultsGlyph: { color: colors.faint, fontSize: 22, marginBottom: 6 },
+  noResultsTitle: { color: colors.text, fontSize: 16, fontWeight: '700' },
+  noResultsHint: { color: colors.muted, fontSize: 13, textAlign: 'center', lineHeight: 19 },
 });
