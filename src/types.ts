@@ -28,6 +28,7 @@ export interface Exemplar {
   vector: number[]; // normalized image embedding
   associations: string[];
   sourceUri: string;
+  positive: boolean; // false = a "this is NOT a <label>" negative example
   createdAt: number;
 }
 

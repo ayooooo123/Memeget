@@ -46,6 +46,7 @@ export function MemeGrid({
   const [teaching, setTeaching] = useState(false);
   const [labelInput, setLabelInput] = useState('');
   const [assocInput, setAssocInput] = useState('');
+  const [positive, setPositive] = useState(true);
   const [saving, setSaving] = useState(false);
   const [matchInfo, setMatchInfo] = useState<{ label: string; score: number }[] | null>(null);
   // Cache the trained heads so we don't retrain on every modal open; cleared
@@ -86,9 +87,10 @@ export function MemeGrid({
     };
   }, [selected]);
 
-  const openTeach = () => {
+  const openTeach = (asPositive: boolean) => {
     setLabelInput('');
     setAssocInput('');
+    setPositive(asPositive);
     setTeaching(true);
   };
 
@@ -102,28 +104,35 @@ export function MemeGrid({
         Alert.alert('Could not teach', 'No stored embedding for this item.');
         return;
       }
-      const associations = assocInput
-        .split(',')
-        .map((s) => s.trim())
-        .filter(Boolean);
+      // Associations are world-knowledge terms for a positive label; they make
+      // no sense for a "this is NOT a <label>" correction.
+      const associations = positive
+        ? assocInput.split(',').map((s) => s.trim()).filter(Boolean)
+        : [];
       await addExemplar({
         label,
         category: 'character',
         vector: Array.from(emb),
         associations,
         sourceUri: selected.uri,
+        positive,
       });
       setTeaching(false);
       modelRef.current = null; // new example → retrain heads on next open
       const matched = onTaught ? await onTaught(label) : undefined;
-      Alert.alert(
-        'Taught!',
+      const count =
         typeof matched === 'number'
-          ? `Applied across your library: ${matched} meme${matched === 1 ? '' : 's'} now tagged "${label}".` +
-              (matched <= 1
-                ? ' Teach a few more examples (different poses/backgrounds) to catch the rest.'
+          ? ` ${matched} meme${matched === 1 ? '' : 's'} now tagged "${label}".`
+          : ' Run "Re-tag library" in Settings to apply it.';
+      Alert.alert(
+        positive ? 'Taught!' : 'Correction saved',
+        positive
+          ? `Memeget will recognize "${label}" by example.${count}` +
+              (typeof matched === 'number' && matched <= 1
+                ? ' Teach a few more (different poses/backgrounds) to catch the rest.'
                 : '')
-          : `Memeget will now recognize "${label}" by example. Run "Re-tag library" in Settings to apply it.`
+          : `Marked as NOT "${label}". The model learns from the correction —` +
+              ` similar images are less likely to be tagged "${label}".${count}`
       );
     } catch (e) {
       Alert.alert('Could not teach', String(e));
@@ -205,9 +214,17 @@ export function MemeGrid({
                     ))}
                   </View>
                 )}
-                <Pressable style={styles.teachBtn} onPress={openTeach}>
-                  <Text style={styles.teachBtnText}>＋ Teach a label from this image</Text>
-                </Pressable>
+                <View style={styles.teachRow}>
+                  <Pressable style={[styles.teachBtn, { flex: 1 }]} onPress={() => openTeach(true)}>
+                    <Text style={styles.teachBtnText}>＋ This IS a…</Text>
+                  </Pressable>
+                  <Pressable
+                    style={[styles.teachBtn, styles.teachBtnNeg, { flex: 1 }]}
+                    onPress={() => openTeach(false)}
+                  >
+                    <Text style={styles.teachBtnNegText}>✗ This is NOT a…</Text>
+                  </Pressable>
+                </View>
               </ScrollView>
             </View>
           )}
@@ -217,36 +234,45 @@ export function MemeGrid({
       <Modal visible={teaching} transparent animationType="fade" onRequestClose={() => setTeaching(false)}>
         <Pressable style={styles.backdrop} onPress={() => setTeaching(false)}>
           <Pressable style={styles.teachSheet} onPress={() => {}}>
-            <Text style={styles.name}>Teach a label</Text>
+            <Text style={styles.name}>{positive ? 'Teach a label' : 'Correct a label'}</Text>
             <Text style={styles.muted}>
-              Name what this is (e.g. “Milady”). Memeget learns it by visual example — no model
-              retraining, fully on-device.
+              {positive
+                ? 'Name what this is (e.g. “Milady”). Memeget learns it by visual example — no model retraining, fully on-device.'
+                : 'Name the label this image is wrongly matching (e.g. “Milady”). The model learns this is NOT one and pulls similar images away from that label.'}
             </Text>
             <TextInput
               style={styles.input}
               value={labelInput}
               onChangeText={setLabelInput}
-              placeholder="Label, e.g. Milady"
+              placeholder={positive ? 'Label, e.g. Milady' : 'Not this label, e.g. Milady'}
               placeholderTextColor={colors.muted}
               autoFocus
             />
-            <TextInput
-              style={styles.input}
-              value={assocInput}
-              onChangeText={setAssocInput}
-              placeholder="Related terms (optional, comma-separated): remilia, nft, ethereum"
-              placeholderTextColor={colors.muted}
-            />
+            {positive && (
+              <TextInput
+                style={styles.input}
+                value={assocInput}
+                onChangeText={setAssocInput}
+                placeholder="Related terms (optional, comma-separated): remilia, nft, ethereum"
+                placeholderTextColor={colors.muted}
+              />
+            )}
             <View style={styles.teachRow}>
               <Pressable style={[styles.teachAction, styles.teachCancel]} onPress={() => setTeaching(false)}>
                 <Text style={styles.teachCancelText}>Cancel</Text>
               </Pressable>
               <Pressable
-                style={[styles.teachAction, styles.teachSave, (!labelInput.trim() || saving) && styles.disabled]}
+                style={[
+                  styles.teachAction,
+                  positive ? styles.teachSave : styles.teachSaveNeg,
+                  (!labelInput.trim() || saving) && styles.disabled,
+                ]}
                 onPress={saveExemplar}
                 disabled={!labelInput.trim() || saving}
               >
-                <Text style={styles.teachSaveText}>{saving ? 'Saving…' : 'Teach'}</Text>
+                <Text style={positive ? styles.teachSaveText : styles.teachSaveNegText}>
+                  {saving ? 'Saving…' : positive ? 'Teach' : 'Mark as NOT this'}
+                </Text>
               </Pressable>
             </View>
           </Pressable>
@@ -289,6 +315,8 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   teachBtnText: { color: colors.accent2, fontWeight: '700', fontSize: 13 },
+  teachBtnNeg: { borderColor: colors.danger },
+  teachBtnNegText: { color: colors.danger, fontWeight: '700', fontSize: 13 },
   teachSheet: { backgroundColor: colors.surface, borderRadius: 16, padding: 18, gap: 12 },
   input: {
     backgroundColor: colors.surface2,
@@ -304,5 +332,7 @@ const styles = StyleSheet.create({
   teachCancelText: { color: colors.text, fontWeight: '700' },
   teachSave: { backgroundColor: colors.accent2 },
   teachSaveText: { color: '#0b0d12', fontWeight: '800' },
+  teachSaveNeg: { backgroundColor: colors.danger },
+  teachSaveNegText: { color: '#fff', fontWeight: '800' },
   disabled: { opacity: 0.5 },
 });
