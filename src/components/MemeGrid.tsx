@@ -17,7 +17,7 @@ import {
 import * as Clipboard from 'expo-clipboard';
 import * as Sharing from 'expo-sharing';
 
-import { addExemplar, getMemeEmbedding } from '../db';
+import { addExemplar, getLabels, getMemeEmbedding } from '../db';
 import { EXEMPLAR_PROB_THRESHOLD, headProb } from '../embeddings';
 import { buildExemplarHeads, type ExemplarModel } from '../indexer';
 import { materialize } from '../saf';
@@ -51,6 +51,7 @@ export function MemeGrid({
   const [labelInput, setLabelInput] = useState('');
   const [assocInput, setAssocInput] = useState('');
   const [positive, setPositive] = useState(true);
+  const [labels, setLabels] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
@@ -123,11 +124,14 @@ export function MemeGrid({
     flash('Text copied');
   };
 
-  const openTeach = (asPositive: boolean) => {
-    setLabelInput('');
+  const openTeach = (asPositive: boolean, preset?: string) => {
+    setLabelInput(preset ?? '');
     setAssocInput('');
     setPositive(asPositive);
     setTeaching(true);
+    getLabels()
+      .then(setLabels)
+      .catch(() => setLabels([]));
   };
 
   const saveExemplar = async () => {
@@ -255,18 +259,22 @@ export function MemeGrid({
                   <Text style={styles.muted}>match {Math.min(100, selected.score * 100).toFixed(0)}%</Text>
                 )}
                 {selected.tags.length > 0 && (
-                  <View style={styles.chipRow}>
-                    {selected.tags.map((t) => (
-                      <View
-                        key={t.label}
-                        style={[styles.chip, t.source === 'exemplar' && styles.chipTaught]}
-                      >
-                        <Text style={styles.chipText}>
-                          {t.source === 'exemplar' ? '★ ' : ''}
-                          {t.label}
-                        </Text>
-                      </View>
-                    ))}
+                  <View>
+                    <Text style={styles.sectionLabel}>Tags · tap one to correct it</Text>
+                    <View style={styles.chipRow}>
+                      {selected.tags.map((t) => (
+                        <Pressable
+                          key={t.label}
+                          onPress={() => openTeach(false, t.label)}
+                          style={[styles.chip, t.source === 'exemplar' && styles.chipTaught]}
+                        >
+                          <Text style={styles.chipText}>
+                            {t.source === 'exemplar' ? '★ ' : ''}
+                            {t.label}
+                          </Text>
+                        </Pressable>
+                      ))}
+                    </View>
                   </View>
                 )}
                 {!!selected.ocrText && (
@@ -308,11 +316,25 @@ export function MemeGrid({
       <Modal visible={teaching} transparent animationType="fade" onRequestClose={() => setTeaching(false)}>
         <Pressable style={styles.backdrop} onPress={() => setTeaching(false)}>
           <Pressable style={styles.teachSheet} onPress={() => {}}>
-            <Text style={styles.name}>{positive ? 'Teach a label' : 'Correct a label'}</Text>
+            <Text style={styles.name}>Label this meme</Text>
+            <View style={styles.segRow}>
+              <Pressable
+                style={[styles.seg, positive && styles.segActive]}
+                onPress={() => setPositive(true)}
+              >
+                <Text style={[styles.segText, positive && styles.segTextActive]}>✓ This IS a…</Text>
+              </Pressable>
+              <Pressable
+                style={[styles.seg, !positive && styles.segActiveNeg]}
+                onPress={() => setPositive(false)}
+              >
+                <Text style={[styles.segText, !positive && styles.segTextActive]}>✗ NOT a…</Text>
+              </Pressable>
+            </View>
             <Text style={styles.muted}>
               {positive
-                ? 'Name what this is (e.g. “Milady”). Memeget learns it by visual example — no model retraining, fully on-device.'
-                : 'Name the label this image is wrongly matching (e.g. “Milady”). The model learns this is NOT one and pulls similar images away from that label.'}
+                ? 'Memeget learns this label by visual example — on-device, no retraining.'
+                : 'Memeget learns this is NOT that label and pulls similar images away from it.'}
             </Text>
             <TextInput
               style={styles.input}
@@ -322,6 +344,19 @@ export function MemeGrid({
               placeholderTextColor={colors.muted}
               autoFocus
             />
+            {labels.length > 0 && (
+              <View style={styles.suggestRow}>
+                {labels.map((l) => (
+                  <Pressable
+                    key={l}
+                    style={[styles.suggestChip, labelInput.trim() === l && styles.suggestChipActive]}
+                    onPress={() => setLabelInput(l)}
+                  >
+                    <Text style={styles.suggestChipText}>{l}</Text>
+                  </Pressable>
+                ))}
+              </View>
+            )}
             {positive && (
               <TextInput
                 style={styles.input}
@@ -429,6 +464,23 @@ const styles = StyleSheet.create({
   teachBtnNeg: { borderColor: colors.danger },
   teachBtnNegText: { color: colors.danger, fontWeight: '700', fontSize: 13 },
   teachSheet: { backgroundColor: colors.surface, borderRadius: 16, padding: 18, gap: 12 },
+  segRow: { flexDirection: 'row', backgroundColor: colors.surface2, borderRadius: 10, padding: 3, gap: 3 },
+  seg: { flex: 1, paddingVertical: 9, borderRadius: 8, alignItems: 'center' },
+  segActive: { backgroundColor: colors.accent2 },
+  segActiveNeg: { backgroundColor: colors.danger },
+  segText: { color: colors.muted, fontWeight: '700', fontSize: 13 },
+  segTextActive: { color: '#0b0d12' },
+  suggestRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
+  suggestChip: {
+    backgroundColor: colors.chip,
+    borderRadius: 14,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderWidth: 1,
+    borderColor: 'transparent',
+  },
+  suggestChipActive: { borderColor: colors.accent },
+  suggestChipText: { color: colors.accent, fontSize: 13, fontWeight: '600' },
   input: {
     backgroundColor: colors.surface2,
     borderRadius: 10,
