@@ -20,6 +20,7 @@ import {
 
 import * as Clipboard from 'expo-clipboard';
 import * as Sharing from 'expo-sharing';
+import { useVideoPlayer, VideoView } from 'expo-video';
 
 import { addExemplar, deleteMeme, getLabels, getMemeEmbedding } from '../db';
 import { EXEMPLAR_PROB_THRESHOLD, headProb } from '../embeddings';
@@ -496,13 +497,17 @@ function ViewerSheet({
               </View>
             </View>
 
-            <Image
-              source={{ uri: item.uri }}
-              style={[styles.preview, { height: imgHeight }]}
-              contentFit="contain"
-              recyclingKey={String(item.id)}
-              allowDownscaling
-            />
+            {item.kind === 'video' ? (
+              <VideoPreview key={item.id} uri={item.uri} height={imgHeight} />
+            ) : (
+              <Image
+                source={{ uri: item.uri }}
+                style={[styles.preview, { height: imgHeight }]}
+                contentFit="contain"
+                recyclingKey={String(item.id)}
+                allowDownscaling
+              />
+            )}
 
             <View style={styles.actionBar}>
               <ActionButton glyph="⤴" label={busy ? '…' : 'Share'} onPress={onShare} disabled={busy} />
@@ -587,6 +592,29 @@ function ViewerSheet({
         )}
       </View>
     </Modal>
+  );
+}
+
+// In-viewer player for video memes. expo-video drives Android's ExoPlayer,
+// which streams the SAF content:// uri directly (same uri we store + display),
+// so there's no need to materialize a temp file just to watch it. The player is
+// created per-uri and released automatically when the sheet unmounts; keying the
+// element by item.id guarantees a fresh player when you swipe to another video.
+function VideoPreview({ uri, height }: { uri: string; height: number }) {
+  const player = useVideoPlayer(uri, (p) => {
+    p.loop = true;
+    p.play();
+  });
+
+  return (
+    <VideoView
+      style={[styles.preview, { height }]}
+      player={player}
+      contentFit="contain"
+      nativeControls
+      fullscreenOptions={{ enable: true }}
+      allowsPictureInPicture={false}
+    />
   );
 }
 
