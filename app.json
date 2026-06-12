@@ -29,7 +29,8 @@
           "androidMultiIntentFilters": ["image/*", "video/*"],
           "disableIOS": true
         }
-      ]
+      ],
+      "expo-video"
     ],
     "experiments": {
       "typedRoutes": false
