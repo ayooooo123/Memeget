@@ -262,7 +262,87 @@ the same constant swap + a larger download.
 
 ---
 
-## 6. Roadmap (ROI order)
+## 6. Runtime, acceleration & sparse experts
+
+Device hardware is the real ceiling. This section is about putting each piece of
+work on the *right* silicon, and about the architecture that lets a phone behave
+like a much bigger multi-domain model without holding one in memory.
+
+### 6.1 Put each job on the right silicon
+
+The mistake is to reach for "custom kernels" for everything. The encoder is
+heavy matmuls that ExecuTorch's delegates **already** run on accelerated
+hardware; the gaps are elsewhere.
+
+| Work | Runtime | Why |
+|---|---|---|
+| Encode image/face → vector | ExecuTorch delegate — **NPU** (Core ML/ANE on iOS, QNN on Snapdragon) or Vulkan GPU | heavy, already tuned by the backend authors; a transformer encoder is NPU-bound, and the NPU is the *best* silicon for it |
+| Search the library (cosine over all embeddings) | **custom WebGPU compute** | embarrassingly parallel, scales with library size, and **not** covered by ExecuTorch — this is our code (`searchByVector`, `db.ts`) |
+| Retrain many heads + re-tag everything | **WebGPU** batched matmul `[N×d]·[d×L]` | the inner loop the autonomous flow hammers after each update |
+| Train one head on a correction | plain JS | a 512-d dot product is microseconds; GPU is pointless for one |
+
+**Do not hand-write encoder kernels.** A WGSL matmul loses to ExecuTorch's
+Vulkan/QNN/Core ML backends, and worse — WebGPU can't reach the **NPU**, which is
+the right accelerator for the encoder on modern phones. Custom kernels move you
+off the best silicon onto the second-best.
+
+**WebGPU on native RN is real and in-ecosystem.** Software Mansion (authors of
+`react-native-executorch`, which we already depend on) also ship
+`react-native-wgpu` — native WebGPU/Dawn bindings, not a browser shim. So a
+WebGPU compute path for search + batched re-tag is concrete for this stack, and
+it targets exactly the gaps ExecuTorch leaves.
+
+### 6.2 Make models small the right way (bigger lever than kernels)
+
+For "fits on device," quantization and distillation beat any kernel:
+
+- **Quantize (int8 / int4):** 4–8× smaller encoder, faster, and the NPU delegates
+  *prefer* quantized graphs. This does more for on-device viability than any
+  hand-written op.
+- **Distill / specialize:** a tiny encoder distilled on *meme-domain* images can
+  match a big general CLIP **on memes specifically** — smaller, faster, and more
+  discriminative, which directly raises the heads toward "near-perfect."
+  Specialized embeddings beat general embeddings + clever kernels.
+
+### 6.3 Phone-native "mixture of experts"
+
+The appealing MoE intuition — *route sparsely to small specialists, only pay for
+what fires* — ports to a phone **only if the experts are tiny and resident
+budget is bounded.** The literal big-MoE dream does not, for one reason:
+
+> **MoE saves FLOPs, not memory.** Every expert must be resident (or paged),
+> because routing is per-input and you can't predict which expert is next. A
+> 500B model at int4 is ~250 GB just to *store* — it optimizes the axis phones
+> aren't bottlenecked on (compute) and ignores the one they are (memory + load).
+> A small dense model of equal *active* params is a strictly better phone fit.
+
+But the *pattern* is already how Memeget is built — it just was never named:
+
+| MoE concept | Datacenter | Memeget on-device |
+|---|---|---|
+| Shared trunk | huge shared layers | one frozen encoder (on the NPU) |
+| Router / gate | learned per-token | coarse zero-shot classifier picks the domain |
+| Experts | billions of params each | per-label heads (~2 KB) + small specialist encoders (face/anime/NSFW nets, MB) |
+| Sparsity win | skip most FLOPs | fire 1–5 heads; don't load cold specialists |
+
+The one big-MoE trick that *does* port: **expert paging.** Keep resident only the
+trunk, the router, and the "hot" experts the user actually hits; `mmap` the cold
+specialist encoders from storage and fault them in when the router calls them
+(à la `llama.cpp` mmap weights). Because the experts are small, load latency is
+tolerable, and you get the *feel* of a giant multi-domain model while holding
+only a few hundred MB in RAM.
+
+**The thesis, assembled:** a quantized, domain-distilled trunk encoder on the
+NPU produces specialized embeddings; a coarse router fans out sparsely to tiny
+per-label heads (resident) and small specialist encoders (paged on demand); a
+WebGPU compute layer makes search and the retrain/re-tag loop instant at any
+library size; and the autonomous head loop (§4) keeps every expert improving on
+device. Each piece sits on the silicon it belongs on, and the expert count can
+grow without growing resident memory.
+
+---
+
+## 7. Roadmap (ROI order)
 
 1. **Close the autonomous head loop** on the CLIP heads we already have:
    feedback + pseudo-labeling → debounced retrain → hold-out gate → versioned
@@ -276,7 +356,7 @@ the same constant swap + a larger download.
 
 ---
 
-## 7. Open questions
+## 8. Open questions
 
 - Where to run background retrains in RN (idle callback vs a background task vs
   on next app foreground) without jank.
@@ -285,3 +365,9 @@ the same constant swap + a larger download.
 - Hold-out size for labels with very few explicit examples (cold start): below
   ~5 positives, skip pseudo-labeling entirely and stay explicit-only until there
   is enough ground truth to hold out.
+- WebGPU search threshold: at what library size does the WGSL cosine kernel beat
+  the JS loop (`searchByVector`) net of buffer-upload overhead? Below it, stay on
+  CPU / move to `sqlite-vec`.
+- Expert-paging policy: which specialist encoders stay resident vs `mmap`'d, and
+  how to hide first-use fault latency (warm the likely expert from the router's
+  top-2?).
