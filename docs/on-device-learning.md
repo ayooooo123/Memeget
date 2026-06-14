@@ -304,41 +304,106 @@ For "fits on device," quantization and distillation beat any kernel:
   discriminative, which directly raises the heads toward "near-perfect."
   Specialized embeddings beat general embeddings + clever kernels.
 
-### 6.3 Phone-native "mixture of experts"
+### 6.3 "Mixture of experts" on a phone: what fits
 
-The appealing MoE intuition — *route sparsely to small specialists, only pay for
-what fires* — ports to a phone **only if the experts are tiny and resident
-budget is bounded.** The literal big-MoE dream does not, for one reason:
+The appealing MoE intuition — *route to small specialists, only pay for what
+fires* — can port to a phone, but the scale decides everything, and there are
+**two different things both called "MoE"** that behave very differently.
 
-> **MoE saves FLOPs, not memory.** Every expert must be resident (or paged),
-> because routing is per-input and you can't predict which expert is next. A
-> 500B model at int4 is ~250 GB just to *store* — it optimizes the axis phones
-> aren't bottlenecked on (compute) and ignores the one they are (memory + load).
-> A small dense model of equal *active* params is a strictly better phone fit.
+**Scale first.** MoE saves *compute* (FLOPs per input), not *memory* — every
+expert in a token-routed MoE must be resident, because routing is per-token and
+you can't predict the next expert. So the question is just "does the whole thing
+fit in RAM?":
 
-But the *pattern* is already how Memeget is built — it just was never named:
+| Model size | int4 resident | int8 resident | Phone verdict |
+|---|---|---|---|
+| 500B (e.g. frontier MoE) | ~250 GB | ~500 GB | impossible — storage alone rules it out |
+| **1B total (e.g. 5×~200M experts)** | **~0.5 GB** | ~1 GB | **feasible** on an 8 GB+ phone (people run 1–3B LLMs on-device) |
+| one 300M expert | ~150 MB | ~300 MB | trivial |
+| one 100M expert | ~50 MB | ~100 MB | trivial |
 
-| MoE concept | Datacenter | Memeget on-device |
-|---|---|---|
-| Shared trunk | huge shared layers | one frozen encoder (on the NPU) |
-| Router / gate | learned per-token | coarse zero-shot classifier picks the domain |
-| Experts | billions of params each | per-label heads (~2 KB) + small specialist encoders (face/anime/NSFW nets, MB) |
-| Sparsity win | skip most FLOPs | fire 1–5 heads; don't load cold specialists |
+A vision encoder is *easier* than an on-device LLM because it fires during
+indexing/search, not always-on. So **a ~1B model is a viable target**; 500B is
+not.
 
-The one big-MoE trick that *does* port: **expert paging.** Keep resident only the
-trunk, the router, and the "hot" experts the user actually hits; `mmap` the cold
-specialist encoders from storage and fault them in when the router calls them
-(à la `llama.cpp` mmap weights). Because the experts are small, load latency is
-tolerable, and you get the *feel* of a giant multi-domain model while holding
-only a few hundred MB in RAM.
+**Two flavours of MoE, and they page differently:**
 
-**The thesis, assembled:** a quantized, domain-distilled trunk encoder on the
-NPU produces specialized embeddings; a coarse router fans out sparsely to tiny
-per-label heads (resident) and small specialist encoders (paged on demand); a
-WebGPU compute layer makes search and the retrain/re-tag loop instant at any
-library size; and the autonomous head loop (§4) keeps every expert improving on
-device. Each piece sits on the silicon it belongs on, and the expert count can
-grow without growing resident memory.
+1. **Token-routed MoE** (what "1B MoE" technically means — sparse FFN experts
+   inside the transformer). The router picks experts *per token*. A ViT has ~256
+   patch tokens per image, so a single forward pass fans out across **all/most
+   experts anyway** → you **cannot page within one inference; all experts stay
+   resident** (~0.5 GB at 1B/int4). What you save is **compute** (each token only
+   runs trunk + top-k experts): lower latency, less battery and thermal
+   throttling on a big index run. A real phone win — just not a memory win. The
+   risk: ExecuTorch's static-graph NPU delegates may not handle dynamic
+   per-token gather/scatter dispatch cleanly — **prototype this before
+   committing**, or routing falls back to CPU/Vulkan and the latency win
+   evaporates.
+
+2. **Image-level expert routing** (coarse: one look at the *whole image* picks a
+   specialist). *This* pages — only the chosen specialist is resident; cold ones
+   sit on disk. It is **not** a 1B MoE transformer; it's "swappable specialist
+   encoders," and it's the recommended shape for Memeget — see §6.4.
+
+**Do you even need MoE?** For a vision encoder, a dense ~300–400M model distilled
+on meme+face data may match a 1B sparse one *on your domains* with far less
+complexity. MoE earns its keep only if you want one model spanning many domains
+(memes + faces + art + text-heavy + NSFW) and sparsity to keep per-image cost
+down. If the domain is mostly "memes," dense-and-specialized likely wins on
+simplicity.
+
+### 6.4 Image router + cascaded specialist passes (recommended)
+
+The phone-friendly realization of the MoE intuition. Think **receptionist +
+specialists**: one cheap look routes each image to only the specialists it needs.
+
+```
+image ─► shared encoder (you already run this) ─► embedding
+                                                   │
+                                                   ▼
+                                          tiny router (classifier on the embedding)
+                                          "face? · anime? · text-heavy? · crypto? · generic?"
+                                                   │  (per-image, coarse)
+                 ┌─────────────────┬───────────────┼────────────────┐
+                 ▼                 ▼               ▼                 ▼
+          face specialist    anime/art spec.   text/layout spec.   (none → stop)
+          (detector+embed)   (small encoder)   (OCR — already)      generic tags only
+                 └─────────────────┴───────────────┴──► merge tags (mergeTags)
+```
+
+Why it fits a phone better than token-MoE:
+
+- **Tiny memory.** Load only the specialist the router asked for; `mmap`/page the
+  rest; cold specialists cost nothing.
+- **Pay only for what's relevant.** Most memes trip 1–2 specialists, so the
+  average image is *cheaper* than running one big model on everything.
+- **It's a cascade.** Cheap pass first, escalate only when warranted — the
+  biggest battery/thermal saver for bulk indexing.
+- **It's the shape the code already has.** `processFile` is already a multi-stage
+  pipeline (copy → thumbnail → embed → OCR → classify); router → specialists is
+  just more stages.
+- **Grows cleanly.** New domain = add a specialist + register it with the router.
+  No retraining one giant model; each specialist self-improves via §4
+  independently.
+
+**The one gotcha — router blind spots.** If the router misses "this has a face,"
+the face specialist never runs and the tag is silently lost (cascades inherit the
+router's errors). Mitigations:
+
+1. **Gate on cheap reliable detectors where they exist.** Fire the face
+   specialist off ML Kit face *detection* (cheap, accurate), not the learned
+   router's guess. Reserve the learned router for fuzzy domains (vibe, art-style).
+2. **Periodic full sweeps.** While idle + charging, re-run *all* specialists on a
+   sample regardless of routing — catches router misses **and** generates
+   training data that improves the router, feeding back into the §4 loop.
+
+**The thesis, assembled:** a quantized, domain-distilled trunk encoder on the NPU
+produces specialized embeddings; a tiny per-image router fans out to paged
+specialist encoders (only what's needed) and resident per-label heads (~2 KB
+each); a WebGPU compute layer makes search and the retrain/re-tag loop instant at
+any library size; and the autonomous loop (§4) keeps router and every specialist
+improving on device. Each piece sits on the silicon it belongs on, and the
+specialist count grows without growing resident memory.
 
 ---
 
@@ -352,7 +417,12 @@ grow without growing resident memory.
    The one place a dedicated model clearly beats CLIP.
 3. **Stronger frozen backbone** (SigLIP/ViT-L) — biggest generic lift, constant
    swap + re-index.
-4. **Off-device LoRA** on the meme/face encoder — only after 1–3 plateau.
+4. **Image router + specialist passes** (§6.4) — once there are ≥2 specialists
+   (e.g. the face pipeline + an art/anime one), add the per-image router so each
+   meme only runs the specialists it needs. Detector-gated where possible.
+5. **Off-device LoRA / distillation** on the meme/face encoder — only after the
+   above plateau. (Token-routed 1B MoE only if a prototype proves ExecuTorch can
+   dispatch it on the NPU — see §6.3.)
 
 ---
 
@@ -371,3 +441,8 @@ grow without growing resident memory.
 - Expert-paging policy: which specialist encoders stay resident vs `mmap`'d, and
   how to hide first-use fault latency (warm the likely expert from the router's
   top-2?).
+- Router threshold tuning: how aggressively to fire specialists (recall vs cost),
+  and which domains are detector-gated vs learned-router-gated (§6.4).
+- Whether a token-routed 1B MoE is dispatchable on ExecuTorch's NPU delegates at
+  all, or whether image-level routing (§6.4) is the only viable sparse path on
+  device.
