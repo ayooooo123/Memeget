@@ -407,26 +407,121 @@ specialist count grows without growing resident memory.
 
 ---
 
-## 7. Roadmap (ROI order)
+## 7. Cold start: bundled reference corpus + kNN tag-transfer
 
-1. **Close the autonomous head loop** on the CLIP heads we already have:
+The hardest product problem isn't the self-improving loop — it's that a
+loop-based design is **bad by default and only good after the user labors**. That
+is unacceptable: teaching must be optional delight, never the path to basic
+usefulness. The app has to be good *out of the box, on niche memes, with zero
+user work.*
+
+### 7.1 Three layers of "good by default" (teaching is the last, optional one)
+
+Separate **"improves passively with use"** (fine) from **"user must do homework"**
+(not fine). Quality comes from three layers; the user only ever touches the
+third, and only if they want to:
+
+| Layer | What it does | User labor |
+|---|---|---|
+| **1 — Open-world perception** | caption (small VLM) + OCR + open-vocab embedding. A meme in no label set is still *describable* and *readable* → findable. Handles the infinite "a meme is an idea" tail. | **none** |
+| **2 — Bundled world knowledge** | a precomputed reference corpus + kNN tag-transfer (this section). Names known/niche memes instantly. Grows for everyone via pack updates, not individual effort. | **none** |
+| **3 — Personal self-improvement** | the autonomous loop (§4), learning passively from normal usage. Explicit teach-by-example stays for power users. | **optional** |
+
+Layers 1–2 carry the experience. Layer 3 is gravy. This section is **Layer 2**.
+
+### 7.2 The mechanism: kNN tag-transfer (label propagation)
+
+Given a labeled reference corpus, default tagging needs **no training and no user
+input**:
+
+1. **Build time (offline / CI):** embed every reference image with the *app's*
+   CLIP → bundle `{ embedding, tags }`.
+2. **Runtime (on-device, no network):** embed the user's meme → find its nearest
+   neighbours in the bundled set → **transfer their tags** by a
+   similarity-weighted, frequency-aware vote, thresholded.
+
+A user's pepe-brainlet meme retrieves other pepe-brainlet memes and inherits
+`pepe, brainlet, wojak` instantly. This is "reverse image search" with the
+database shipped *inside the app* — open-world recall, zero runtime calls, zero
+labor.
+
+### 7.3 First pack: the basedmemes corpus
+
+The scraped `basedmemes_dataset.json` is a ready-made Layer-2 pack:
+
+- **5,183 memes**, avg **4.2 tags** each (min 1, max 10), none untagged.
+- **3,552 unique tags**, but a heavy long tail: **1,824 singletons**; only **276
+  tags have ≥10 support**, **121 have ≥20**, **54 have ≥50**. The reliable core is
+  the ≥10-support band.
+- **Skew:** pepe (2,526) / wojak (1,762) / brainlet / bobo / boomer / doomer /
+  apu / npc / soy… It is a *based/4chan* corpus — a fantastic pack for **exactly
+  the niche generic CLIP is worst at**, weak on mainstream formats / faces / pop
+  culture (those want a complementary broader pack later).
+
+### 7.4 Ship embeddings, not images (privacy + legal win)
+
+Bundle the **vectors + tags only**, never the scraped images:
+
+- 5,183 × 512 × float32 ≈ **~10 MB**; int8 ≈ **~2.5 MB**. Trivially bundleable
+  (or a one-time download like the CLIP model already is).
+- No redistribution of copyrighted meme images — only embeddings. Fits the
+  no-network, no-liability ethos exactly.
+
+### 7.5 Free byproducts
+
+- **A real vocabulary.** After cleaning (drop stopwords `in/on/with/by/at`, drop
+  or downweight singletons and fragment tags like `face/head/big/red`, normalize)
+  the ≥10-support core is a community label set far richer than the 97 hand-written
+  `MEME_LABELS`.
+- **Associations for free.** Tag **co-occurrence** *is* the knowledge graph —
+  compute it from statistics instead of hand-writing `associations` in
+  `memeLabels.ts` (e.g. tags that co-occur with `pepe`).
+- **Bootstraps Layer 3.** kNN-transferred tags are free pseudo-labels, so the §4
+  autonomous loop starts from a strong prior instead of cold.
+
+### 7.6 Caveats
+
+- **Tag noise** — needs the cleaning pass above before the vocabulary is usable as
+  labels (kNN transfer tolerates more noise than head-training does).
+- **Skew** — based-meme heavy; plan a second, broader pack for formats/faces/pop
+  culture. Packs compose: kNN over the union.
+- **Encoder lock** — embeddings must come from the app's CLIP; swapping the
+  encoder (e.g. → SigLIP) means rebuilding every pack in CI.
+
+### 7.7 Build pipeline (CI)
+
+Mirror the existing APK workflow: a job that reads the dataset JSON, downloads
+each image, transcodes (the `toJpeg` step already handles WebP/HEIC), embeds with
+the same CLIP the app loads, and emits `pack.bin` (`{embedding,tags}`, int8) +
+`vocab.json` (cleaned labels) + `associations.json` (co-occurrence graph). Ship as
+a bundled asset or a versioned download.
+
+---
+
+## 8. Roadmap (ROI order)
+
+1. **Bundled corpus + kNN tag-transfer** (§7) — fixes "average by default" with
+   zero user labor, using the basedmemes pack we already have. Ship embeddings,
+   not images. Highest priority: it makes the app good *before* any teaching.
+2. **Caption pass** (small VLM at index time) — Layer-1 open-world recall for the
+   niche/long tail. Probably the biggest recall lever after the pack.
+3. **Close the autonomous head loop** on the CLIP heads we already have:
    feedback + pseudo-labeling → debounced retrain → hold-out gate → versioned
-   commit → `retagAll`. Zero new models; ~90% of "self-improving"; reuses
-   `trainHead`/`buildExemplarHeads`/`retagAll`.
-2. **Face pipeline**: detection + a face-embedding `.pte` + `buildFaceHeads()`.
+   commit → `retagAll`. Now *gravy on top of* a good default, not the engine.
+4. **Face pipeline**: detection + a face-embedding `.pte` + `buildFaceHeads()`.
    The one place a dedicated model clearly beats CLIP.
-3. **Stronger frozen backbone** (SigLIP/ViT-L) — biggest generic lift, constant
-   swap + re-index.
-4. **Image router + specialist passes** (§6.4) — once there are ≥2 specialists
+5. **Stronger frozen backbone** (SigLIP/ViT-L) — biggest generic lift, constant
+   swap + re-index (and rebuild the pack — encoder lock, §7.6).
+6. **Image router + specialist passes** (§6.4) — once there are ≥2 specialists
    (e.g. the face pipeline + an art/anime one), add the per-image router so each
    meme only runs the specialists it needs. Detector-gated where possible.
-5. **Off-device LoRA / distillation** on the meme/face encoder — only after the
+7. **Off-device LoRA / distillation** on the meme/face encoder — only after the
    above plateau. (Token-routed 1B MoE only if a prototype proves ExecuTorch can
    dispatch it on the NPU — see §6.3.)
 
 ---
 
-## 8. Open questions
+## 9. Open questions
 
 - Where to run background retrains in RN (idle callback vs a background task vs
   on next app foreground) without jank.
@@ -446,3 +541,12 @@ specialist count grows without growing resident memory.
 - Whether a token-routed 1B MoE is dispatchable on ExecuTorch's NPU delegates at
   all, or whether image-level routing (§6.4) is the only viable sparse path on
   device.
+- kNN tag-transfer tuning (§7): k, the similarity floor, and how to weight a
+  neighbour's tag (by cosine × tag-frequency? cap common tags like `pepe` so they
+  don't drown specifics?). Needs the recall@k eval to tune against.
+- Pack search cost: kNN over ~5k (and growing) bundled vectors per indexed meme —
+  brute force in JS, the WebGPU search kernel (§6.1), or `sqlite-vec`? Shares the
+  same engine as library search.
+- Cleaning thresholds (§7.5): minimum tag support to keep as a label, and the
+  stopword/fragment blocklist — tune so the vocabulary stays useful without
+  dropping real niche entities.
