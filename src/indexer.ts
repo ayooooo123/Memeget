@@ -300,23 +300,24 @@ async function processFile(
   }
 }
 
-// Accept memes shared into the app from other apps: copy each into the first
-// linked folder (so they live alongside the rest of the library) and index
-// them. Knowledge (label vectors + trained exemplar heads) is built ONCE for the
-// whole batch — rebuilding it per file is what made importing slow.
-export async function importSharedFiles(
-  api: EmbeddingsApi,
+// Phase 1 of accepting a shared meme: copy each file into the first linked
+// folder so it lives alongside the rest of the library. This is deliberately
+// the *only* step that has to finish before the user can leave the app — it
+// needs no CLIP model and is just a file copy, so it returns almost instantly.
+// The slow embed/OCR/tag work is deferred to indexSavedFiles. Crucially, a file
+// saved here but not yet indexed is NOT lost: it's a normal file in the linked
+// folder, so the next runIndex (or a later call to indexSavedFiles) picks it up.
+export async function saveSharedFiles(
   files: { path: string; fileName: string; mimeType: string }[],
   opts: { onProgress?: (done: number, total: number) => void } = {}
-): Promise<{ added: number; errors: number; folderName: string }> {
+): Promise<{ saved: SafFile[]; errors: number; folderName: string }> {
   const folders = await getFolders();
   if (folders.length === 0) {
     throw new Error('Link a folder first (Library tab) so shared memes have a place to live.');
   }
   const folder = folders[0];
-  const know = await buildKnowledge(api);
 
-  let added = 0;
+  const saved: SafFile[] = [];
   let errors = 0;
   for (let i = 0; i < files.length; i++) {
     opts.onProgress?.(i, files.length);
@@ -324,15 +325,39 @@ export async function importSharedFiles(
     const kind: 'image' | 'video' = src.mimeType.startsWith('video') ? 'video' : 'image';
     try {
       const { uri, name } = await saveToFolder(src.path, src.fileName, src.mimeType, folder.uri);
-      const result = await processFile(api, { uri, name, kind }, know, i);
-      if (result === 'error') errors++;
-      else added++;
+      saved.push({ uri, name, kind });
     } catch {
       errors++;
     }
   }
   opts.onProgress?.(files.length, files.length);
-  return { added, errors, folderName: folder.name };
+  return { saved, errors, folderName: folder.name };
+}
+
+// Phase 2: embed/OCR/tag files already saved into the library and store them.
+// Knowledge (label vectors + trained exemplar heads) is built ONCE for the whole
+// batch — rebuilding it per file is what made importing slow. Runs in the
+// background after saveSharedFiles, so the user is long gone by the time it
+// finishes. Skipping it (app killed, model not ready) loses nothing: the saved
+// files are still in the folder for the next runIndex to catch.
+export async function indexSavedFiles(
+  api: EmbeddingsApi,
+  saved: SafFile[],
+  opts: { onProgress?: (done: number, total: number) => void } = {}
+): Promise<{ added: number; errors: number }> {
+  if (saved.length === 0) return { added: 0, errors: 0 };
+  const know = await buildKnowledge(api);
+
+  let added = 0;
+  let errors = 0;
+  for (let i = 0; i < saved.length; i++) {
+    opts.onProgress?.(i, saved.length);
+    const r = await processFile(api, saved[i], know, i);
+    if (r === 'error') errors++;
+    else added++;
+  }
+  opts.onProgress?.(saved.length, saved.length);
+  return { added, errors };
 }
 
 export interface RetagResult {
