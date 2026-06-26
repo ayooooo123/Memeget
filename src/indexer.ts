@@ -147,7 +147,9 @@ export async function buildExemplarHeads(): Promise<ExemplarModel> {
     for (const [l2, g2] of byLabel) if (l2 !== label) otherPos.push(...g2.pos);
     const corrections: number[][] = [];
     for (const n of g.neg) for (let k = 0; k < negBoost; k++) corrections.push(n);
-    heads.push(trainHead(label, g.category, g.pos, [...background, ...otherPos, ...corrections]));
+    // trainHead yields internally, so awaiting it keeps the UI alive even when
+    // many labels have been taught (one full train each, back to back).
+    heads.push(await trainHead(label, g.category, g.pos, [...background, ...otherPos, ...corrections]));
   }
   return { heads, mean };
 }
