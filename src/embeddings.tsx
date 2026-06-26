@@ -94,15 +94,20 @@ export function headProb(head: LabelHead, x: number[]): number {
 // Train a binary logistic-regression head separating `positives` (the taught
 // examples) from `negatives` (a background sample of the library). Classes are
 // re-weighted because positives are few and negatives many; L2 keeps the few-
-// shot boundary from overfitting. Pure vector math — no CLIP/api call, runs in
-// tens of milliseconds on-device.
-export function trainHead(
+// shot boundary from overfitting. Pure vector math — no CLIP/api call.
+//
+// On a big library this is ~250 iters × hundreds of 512-dim negatives = tens of
+// millions of multiply-adds per head, all on the single JS thread. Run straight
+// through it blocks React from rendering/handling touch and the app freezes
+// while teaching — so we hand the event loop a macrotask every few iterations
+// (same trick retagAll uses for its classify pass). It's async for that reason.
+export async function trainHead(
   label: string,
   category: string,
   positives: number[][],
   negatives: number[][],
   opts: { iters?: number; lr?: number; l2?: number } = {}
-): LabelHead {
+): Promise<LabelHead> {
   const dim = positives[0]?.length ?? negatives[0]?.length ?? 512;
   const iters = opts.iters ?? 250;
   const lr = opts.lr ?? 0.5;
@@ -136,6 +141,9 @@ export function trainHead(
       w[i] -= lr * gw[i];
     }
     b -= lr * (gb / total);
+    // Yield to React roughly every 16 iters (~15 breaths over a full train) so
+    // the UI stays responsive instead of locking up for the whole pass.
+    if ((it & 15) === 15) await new Promise<void>((resolve) => setTimeout(resolve, 0));
   }
   return { label, category, w, b };
 }
