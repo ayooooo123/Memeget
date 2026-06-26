@@ -6,7 +6,7 @@ import {
   Animated,
   Dimensions,
   FlatList,
-  KeyboardAvoidingView,
+  Keyboard,
   Modal,
   PanResponder,
   Platform,
@@ -26,7 +26,7 @@ import { addExemplar, deleteMeme, getLabels, getMemeEmbedding } from '../db';
 import { EXEMPLAR_PROB_THRESHOLD, headProb } from '../embeddings';
 import { buildExemplarHeads, type ExemplarModel } from '../indexer';
 import { success, tap, warn } from '../haptics';
-import { deleteFile, materialize, readImageBase64 } from '../saf';
+import { deleteFile, materialize, readImageBase64, readVideoFrameBase64 } from '../saf';
 import { colors, radius, space, TABBAR_CLEARANCE } from '../theme';
 import type { MemeRecord, SearchHit } from '../types';
 
@@ -37,6 +37,27 @@ const GAP = 3;
 const COLS = 3;
 
 type Item = MemeRecord | SearchHit;
+
+// Track the on-screen keyboard height so the teach sheet (a bottom-anchored
+// Modal) can lift itself clear of the keyboard. KeyboardAvoidingView is
+// unreliable inside an Android Modal — it shares no window with the soft input —
+// so we pad the sheet container by the measured height instead. iOS fires the
+// `Will` events (smoother, in sync with the slide animation); Android only the
+// `Did` events.
+function useKeyboardHeight(): number {
+  const [height, setHeight] = useState(0);
+  useEffect(() => {
+    const showEvt = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
+    const hideEvt = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
+    const show = Keyboard.addListener(showEvt, (e) => setHeight(e.endCoordinates.height));
+    const hide = Keyboard.addListener(hideEvt, () => setHeight(0));
+    return () => {
+      show.remove();
+      hide.remove();
+    };
+  }, []);
+  return height;
+}
 
 // Memoized so modal/teach-sheet state changes in MemeGrid don't re-render every
 // visible thumbnail (which kept the tag-edit tap feeling sluggish on big grids).
@@ -111,6 +132,7 @@ export function MemeGrid({
   // after teaching so the next open reflects the new example.
   const modelRef = useRef<ExemplarModel | null>(null);
   const size = (Dimensions.get('window').width - GAP * (COLS + 1)) / COLS;
+  const kbHeight = useKeyboardHeight();
 
   const openViewer = (it: Item) => {
     tap();
@@ -166,20 +188,21 @@ export function MemeGrid({
     }
   };
 
-  const onCopyImage = async () => {
+  const onCopy = async () => {
     if (!selected || busy) return;
-    if (selected.kind === 'video') {
-      showToast('Can’t copy a video as an image — use Share', 'info');
-      return;
-    }
+    const isVideo = selected.kind === 'video';
     setBusy(true);
     try {
-      const base64 = await readImageBase64(selected.uri, selected.name);
+      // Images copy as-is; videos copy a representative still frame, since the
+      // system clipboard can't hold a video file.
+      const base64 = isVideo
+        ? await readVideoFrameBase64(selected.uri, selected.name)
+        : await readImageBase64(selected.uri, selected.name);
       await Clipboard.setImageAsync(base64);
       success();
-      showToast('Meme copied — paste it anywhere', 'success');
+      showToast(isVideo ? 'Frame copied — paste it anywhere' : 'Meme copied — paste it anywhere', 'success');
     } catch (e) {
-      showToast(`Could not copy image: ${String(e)}`, 'error');
+      showToast(`Could not copy: ${String(e)}`, 'error');
     } finally {
       setBusy(false);
     }
@@ -317,7 +340,7 @@ export function MemeGrid({
         matchBusy={matchBusy}
         onClose={() => setSelected(null)}
         onShare={onShare}
-        onCopyImage={onCopyImage}
+        onCopy={onCopy}
         onCopyText={onCopyText}
         onDelete={onDelete}
         onTeach={openTeach}
@@ -339,10 +362,7 @@ export function MemeGrid({
         statusBarTranslucent
         onRequestClose={() => setTeaching(false)}
       >
-        <KeyboardAvoidingView
-          style={styles.teachRoot}
-          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-        >
+        <View style={[styles.teachRoot, { paddingBottom: kbHeight }]}>
           <Pressable style={StyleSheet.absoluteFill} onPress={() => setTeaching(false)} />
           <View style={styles.teachSheet}>
             <View style={styles.grabber} />
@@ -410,7 +430,7 @@ export function MemeGrid({
               </PressableScale>
             </View>
           </View>
-        </KeyboardAvoidingView>
+        </View>
       </Modal>
     </>
   );
@@ -424,7 +444,7 @@ function ViewerSheet({
   matchBusy,
   onClose,
   onShare,
-  onCopyImage,
+  onCopy,
   onCopyText,
   onDelete,
   onTeach,
@@ -437,7 +457,7 @@ function ViewerSheet({
   matchBusy: boolean;
   onClose: () => void;
   onShare: () => void;
-  onCopyImage: () => void;
+  onCopy: () => void;
   onCopyText: () => void;
   onDelete: () => void;
   onTeach: (positive: boolean, preset?: string) => void;
@@ -511,9 +531,7 @@ function ViewerSheet({
 
             <View style={styles.actionBar}>
               <ActionButton glyph="⤴" label={busy ? '…' : 'Share'} onPress={onShare} disabled={busy} />
-              {item.kind !== 'video' && (
-                <ActionButton glyph="⧉" label="Copy" onPress={onCopyImage} disabled={busy} />
-              )}
+              <ActionButton glyph="⧉" label="Copy" onPress={onCopy} disabled={busy} />
               {!!item.ocrText && <ActionButton glyph="🆎" label="Text" onPress={onCopyText} />}
               <ActionButton glyph="🗑" label="Delete" danger onPress={onDelete} disabled={busy} />
             </View>

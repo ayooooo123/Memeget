@@ -10,6 +10,7 @@ import {
 } from './embeddings';
 import {
   addIndexError,
+  bulkUpdateMemeTags,
   clearIndexErrors,
   getAllMemeEmbeddings,
   getEmbeddingSample,
@@ -19,7 +20,6 @@ import {
   insertMeme,
   memeExists,
   putLabelVector,
-  updateMemeTags,
 } from './db';
 import { ASSOCIATIONS, MEME_LABELS, NEGATIVE_ANCHORS, ocrTags } from './memeLabels';
 import { copyToCache, deleteCache, listMedia, saveToFolder, type SafFile } from './saf';
@@ -374,16 +374,23 @@ export async function retagAll(
   const know = await buildKnowledge(api);
   const rows = await getAllMemeEmbeddings();
 
-  let updated = 0;
+  // Classify every meme up front. This is pure JS vector math over the whole
+  // library, so we hand the event loop a macrotask every so often — otherwise
+  // the awaited DB writes only flush microtasks and React never gets to render,
+  // which froze the app while teaching.
+  const updates: { id: number; tags: Tag[]; extraTerms: string }[] = [];
   for (let i = 0; i < rows.length; i++) {
     const vec = Array.from(rows[i].embedding);
     const tags = mergeTags(
       classifyImage(vec, know.labelVecs, know.exemplarHeads, know.mean, know.negativeVecs),
       ocrTags(rows[i].ocrText)
     );
-    await updateMemeTags(rows[i].id, tags, extraTermsFor(tags, know.assoc));
-    updated++;
+    updates.push({ id: rows[i].id, tags, extraTerms: extraTermsFor(tags, know.assoc) });
     opts.onProgress?.(i + 1, rows.length);
+    if ((i & 63) === 63) await new Promise<void>((resolve) => setTimeout(resolve, 0));
   }
-  return { updated };
+
+  // Single transaction for all the writes — fast even on a big library.
+  await bulkUpdateMemeTags(updates);
+  return { updated: updates.length };
 }

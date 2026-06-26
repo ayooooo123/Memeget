@@ -197,6 +197,27 @@ export async function updateMemeTags(id: number, tags: Tag[], extraTerms: string
   );
 }
 
+// Write tags for many memes in one transaction with a single prepared statement.
+// Re-tagging the whole library (retagAll) used to fire one auto-committed UPDATE
+// per meme — a separate disk fsync each — which made teaching crawl on large
+// libraries. Batching into one commit turns hundreds of fsyncs into one.
+export async function bulkUpdateMemeTags(
+  updates: { id: number; tags: Tag[]; extraTerms: string }[]
+): Promise<void> {
+  if (updates.length === 0) return;
+  const db = await getDb();
+  const stmt = await db.prepareAsync('UPDATE memes SET tags = ?, extra_terms = ? WHERE id = ?');
+  try {
+    await db.withTransactionAsync(async () => {
+      for (const u of updates) {
+        await stmt.executeAsync(JSON.stringify(u.tags), u.extraTerms, u.id);
+      }
+    });
+  } finally {
+    await stmt.finalizeAsync();
+  }
+}
+
 function safeParseTags(s: string): Tag[] {
   try {
     return JSON.parse(s) as Tag[];
