@@ -3,6 +3,7 @@
 // native modules (CLIP, OCR, thumbnailer) get a stable file:// path to work
 // with. Uses the stable legacy FileSystem API for SAF + copy operations.
 import * as FileSystem from 'expo-file-system/legacy';
+import * as VideoThumbnails from 'expo-video-thumbnails';
 
 const IMAGE_EXTS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'heic', 'heif'];
 const VIDEO_EXTS = ['mp4', 'mov', 'mkv', 'webm', 'avi', 'm4v', '3gp'];
@@ -98,6 +99,26 @@ export async function readImageBase64(uri: string, name: string): Promise<string
     });
   } finally {
     await FileSystem.deleteAsync(dest, { idempotent: true });
+  }
+}
+
+// Grab a representative frame from a video and return it as base64 (no data-URI
+// prefix). The system clipboard can't hold a video file, so copying a video
+// really means copying a still frame you can paste anywhere — same path the
+// indexer uses to thumbnail videos. Materializes the content:// uri to a temp
+// file first (the thumbnailer needs a real file path), then cleans both up.
+export async function readVideoFrameBase64(uri: string, name: string): Promise<string> {
+  const file = await materialize(uri, name);
+  let thumb: string | null = null;
+  try {
+    const { uri: t } = await VideoThumbnails.getThumbnailAsync(file, { time: 1000 });
+    thumb = t;
+    return await FileSystem.readAsStringAsync(t, {
+      encoding: FileSystem.EncodingType.Base64,
+    });
+  } finally {
+    await FileSystem.deleteAsync(file, { idempotent: true }).catch(() => {});
+    if (thumb) await FileSystem.deleteAsync(thumb, { idempotent: true }).catch(() => {});
   }
 }
 
