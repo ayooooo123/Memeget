@@ -1,11 +1,12 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, StyleSheet, Text, View } from 'react-native';
 import { useShareIntent, type ShareIntentFile } from 'expo-share-intent';
 
 import { useEmbeddings } from '../embeddings';
-import { importSharedFiles } from '../indexer';
+import { indexSavedFiles, saveSharedFiles } from '../indexer';
 import { emitLibraryChanged } from '../events';
 import { colors, radius, shadow, TABBAR_CLEARANCE } from '../theme';
+import type { SafFile } from '../saf';
 
 type Status =
   | { kind: 'importing'; msg: string }
@@ -13,35 +14,44 @@ type Status =
   | { kind: 'error'; msg: string };
 
 // Listens for images/videos shared into the app from other apps (Android
-// ACTION_SEND). On receipt it copies each into the linked folder and indexes
-// it, showing a small status banner. Lives inside EmbeddingsProvider so the
-// import can reuse the loaded CLIP model.
+// ACTION_SEND) and adds them to the library in two phases so the user can
+// leave the app the instant they share:
+//
+//   1. Save — copy the file into the linked folder. Fast (a file copy, no
+//      model), runs immediately even while the CLIP model is still loading, and
+//      makes the file permanent. Once this shows "Saved", the user is free to go.
+//   2. Index — embed/OCR/tag in the background. Decoupled from the share event,
+//      so backgrounding the app (which resets the share intent) never blocks it.
+//      If it never gets to run, the saved file is still in the folder and the
+//      next folder scan indexes it — nothing is lost.
+//
+// Lives inside EmbeddingsProvider so the index phase can reuse the loaded model.
 export function ShareReceiver() {
   const emb = useEmbeddings();
   const { hasShareIntent, shareIntent, resetShareIntent } = useShareIntent({ resetOnBackground: true });
   const [status, setStatus] = useState<Status | null>(null);
-  const busyRef = useRef(false);
+  const savingRef = useRef(false);
 
+  // Files saved to the folder but not yet indexed. A ref (the queue) plus a tick
+  // (to wake the drain effect) so a new share while indexing just appends.
+  const queueRef = useRef<SafFile[]>([]);
+  const indexingRef = useRef(false);
+  const [tick, setTick] = useState(0);
+
+  // Phase 1: save the shared files the moment they arrive. No model wait.
   useEffect(() => {
     const files = (shareIntent?.files ?? []).filter((f: ShareIntentFile) =>
       /^(image|video)\//.test(f.mimeType)
     );
     if (!hasShareIntent || files.length === 0) return;
-    if (busyRef.current) return;
+    if (savingRef.current) return;
 
-    // Wait for the on-device model before indexing; this re-runs once it's ready.
-    if (!emb.ready) {
-      setStatus({ kind: 'importing', msg: 'Preparing the on-device model…' });
-      return;
-    }
-
-    busyRef.current = true;
+    savingRef.current = true;
     const total = files.length;
-    setStatus({ kind: 'importing', msg: total > 1 ? `Adding 0/${total} memes…` : 'Adding meme…' });
+    setStatus({ kind: 'importing', msg: total > 1 ? `Saving 0/${total} memes…` : 'Saving meme…' });
     (async () => {
       try {
-        const res = await importSharedFiles(
-          emb,
+        const res = await saveSharedFiles(
           files.map((f: ShareIntentFile) => ({
             path: f.path,
             fileName: f.fileName,
@@ -49,22 +59,55 @@ export function ShareReceiver() {
           })),
           {
             onProgress: (done, t) => {
-              if (t > 1 && done < t) setStatus({ kind: 'importing', msg: `Adding ${done}/${t} memes…` });
+              if (t > 1 && done < t) setStatus({ kind: 'importing', msg: `Saving ${done}/${t} memes…` });
             },
           }
         );
+        // Hand the saved files to the background indexer and refresh the library.
+        if (res.saved.length > 0) {
+          queueRef.current.push(...res.saved);
+          setTick((t) => t + 1);
+        }
         emitLibraryChanged();
         const errNote = res.errors > 0 ? ` (${res.errors} failed)` : '';
-        setStatus({ kind: 'done', msg: `Added ${res.added} to “${res.folderName}”${errNote}` });
+        const n = res.saved.length;
+        setStatus({
+          kind: 'done',
+          msg: `✓ Saved ${n} to “${res.folderName}” — indexing in background${errNote}`,
+        });
       } catch (e) {
         setStatus({ kind: 'error', msg: String((e as Error)?.message ?? e) });
       } finally {
+        // Reset right away so the share intent clears and the user can move on.
         resetShareIntent();
-        busyRef.current = false;
+        savingRef.current = false;
         setTimeout(() => setStatus(null), 3200);
       }
     })();
-  }, [hasShareIntent, shareIntent, emb.ready, emb, resetShareIntent]);
+  }, [hasShareIntent, shareIntent, resetShareIntent]);
+
+  // Phase 2: drain the queue once the model is ready. Serialized via indexingRef
+  // so overlapping shares don't build knowledge twice; a share that lands mid-run
+  // just appends and gets picked up by the same loop.
+  const drain = useCallback(async () => {
+    if (indexingRef.current || !emb.ready || queueRef.current.length === 0) return;
+    indexingRef.current = true;
+    try {
+      while (queueRef.current.length > 0) {
+        const batch = queueRef.current.splice(0, queueRef.current.length);
+        await indexSavedFiles(emb, batch);
+        emitLibraryChanged();
+      }
+    } catch {
+      // Best-effort: anything missed stays in the folder for the next scan.
+    } finally {
+      indexingRef.current = false;
+    }
+  }, [emb]);
+
+  useEffect(() => {
+    drain();
+  }, [tick, emb.ready, drain]);
 
   if (!status) return null;
   const tone =
