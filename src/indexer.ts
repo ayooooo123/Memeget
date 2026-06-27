@@ -3,6 +3,7 @@ import { manipulateAsync, SaveFormat } from 'expo-image-manipulator';
 
 import {
   classifyImage,
+  createYielder,
   trainHead,
   type EmbeddingsApi,
   type LabelHead,
@@ -106,7 +107,10 @@ export async function buildExemplarHeads(): Promise<ExemplarModel> {
   const exemplars = await getExemplars();
   if (exemplars.length === 0) return { heads: [], mean: null };
 
-  const sample = await getEmbeddingSample(500);
+  // 250 random library vectors is plenty to estimate the mean and act as the
+  // negative background for a logistic head — and roughly halves the per-pass
+  // training cost vs. 500, which is what the user feels as teach latency.
+  const sample = await getEmbeddingSample(250);
   const dim = exemplars[0].vector.length;
 
   // Library mean (background proxy) for mean-centering — this is what cancels
@@ -377,10 +381,12 @@ export async function retagAll(
   const rows = await getAllMemeEmbeddings();
 
   // Classify every meme up front. This is pure JS vector math over the whole
-  // library, so we hand the event loop a macrotask every so often — otherwise
-  // the awaited DB writes only flush microtasks and React never gets to render,
-  // which froze the app while teaching.
+  // library, so we time-slice (createYielder) — otherwise the awaited DB writes
+  // only flush microtasks and React never gets to render, which froze the app
+  // while teaching. Yielding on elapsed time (not a row count) keeps it
+  // responsive whether the library is 100 memes or 100,000.
   const updates: { id: number; tags: Tag[]; extraTerms: string }[] = [];
+  const tick = createYielder();
   for (let i = 0; i < rows.length; i++) {
     const vec = Array.from(rows[i].embedding);
     const tags = mergeTags(
@@ -389,7 +395,7 @@ export async function retagAll(
     );
     updates.push({ id: rows[i].id, tags, extraTerms: extraTermsFor(tags, know.assoc) });
     opts.onProgress?.(i + 1, rows.length);
-    if ((i & 63) === 63) await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    await tick();
   }
 
   // Single transaction for all the writes — fast even on a big library.

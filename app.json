@@ -10,6 +10,7 @@
     "newArchEnabled": true,
     "android": {
       "package": "online.smellslikebacon.memeget",
+      "versionCode": 1,
       "edgeToEdgeEnabled": true
     },
     "plugins": [

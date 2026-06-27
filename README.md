@@ -29,16 +29,35 @@ from install, the model can be bundled into the APK assets — see "Next steps".
 
 ## Getting the APK
 
-A GitHub Actions workflow (`.github/workflows/android-apk.yml`) builds a
-standalone, sideloadable APK on every push to the dev branch and attaches it to
-the **`android-latest`** GitHub Release.
+Every release is a standalone, sideloadable APK built by GitHub Actions
+(`.github/workflows/android-apk.yml`). Two channels:
 
-1. Open the repo's **Releases** → **Memeget (latest Android build)**.
+- **Versioned releases** — tagged `vX.Y.Z` (e.g. `v0.2.0`), permanent, with a
+  `memeget-vX.Y.Z.apk` you can always come back to. This is the real history.
+- **`latest`** — a single rolling pre-release that tracks the newest build on
+  `main`. Grab `memeget-latest.apk` when you just want the current bits.
+
+1. Open the repo's **Releases** and pick a version (or **latest**).
 2. Download the `.apk` on your Android phone.
 3. Enable "Install unknown apps" for your browser/Files app, then open it.
 
 The APK is signed with the auto-generated debug key (fine for personal
 testing), so it installs without Metro or an EAS account.
+
+### Cutting a release
+
+Releases are driven entirely by git tags — no manual upload:
+
+```bash
+# bump the version in app.json / package.json first, then:
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+The workflow stamps that version into the build (`versionName`/`versionCode`),
+builds the APK, and publishes the `v0.2.0` GitHub Release. Pushing to `main`
+(or running the workflow manually) refreshes the rolling `latest` pre-release
+instead. Keep `version` in `app.json` and `package.json` in sync with the tag.
 
 ## Local development
 
@@ -85,3 +104,8 @@ weights — editable and on-device:
 - Audio/music recognition (needs an on-device fingerprint DB — deferred).
 - `sqlite-vec` for very large collections.
 - Incremental/background re-indexing when folders change.
+
+## License
+
+[MIT](LICENSE) — do whatever you want, no warranty. The bundled model weights
+and any third-party assets are under their own respective licenses.
