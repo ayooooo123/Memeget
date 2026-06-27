@@ -65,13 +65,9 @@ jobs:
           echo "Found APK: $APK"
           echo "path=$APK" >> "$GITHUB_OUTPUT"
 
-      - name: Upload APK artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: memeget-apk
-          path: ${{ steps.apk.outputs.path }}
-          if-no-files-found: error
-
+      # Publish first: a GitHub Release stores the APK separately from Actions
+      # artifact storage, so it does not consume (or get blocked by) the
+      # artifact storage quota. This is the durable download source.
       - name: Publish to Release
         uses: softprops/action-gh-release@v2
         with:
@@ -83,3 +79,14 @@ jobs:
           files: ${{ steps.apk.outputs.path }}
           make_latest: true
           prerelease: false
+
+      # Artifact upload is a convenience copy. Keep it short-lived and never let
+      # a hit artifact-storage quota fail the build (the Release already has it).
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: memeget-apk
+          path: ${{ steps.apk.outputs.path }}
+          if-no-files-found: error
+          retention-days: 1
