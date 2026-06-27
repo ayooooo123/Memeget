@@ -18,6 +18,7 @@ import {
   getFolders,
   getLabelVectors,
   insertMeme,
+  insertPendingMeme,
   memeExists,
   putLabelVector,
 } from './db';
@@ -327,6 +328,10 @@ export async function saveSharedFiles(
     const kind: 'image' | 'video' = src.mimeType.startsWith('video') ? 'video' : 'image';
     try {
       const { uri, name } = await saveToFolder(src.path, src.fileName, src.mimeType, folder.uri);
+      // Record a pending placeholder right away so the meme appears in the
+      // library list the instant it's saved — before the (model-dependent,
+      // possibly much later) embed/OCR/tag pass replaces it with the real row.
+      await insertPendingMeme({ uri, name, kind }).catch(() => {});
       saved.push({ uri, name, kind });
     } catch {
       errors++;
