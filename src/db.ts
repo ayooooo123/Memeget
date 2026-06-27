@@ -282,15 +282,32 @@ export async function countMemesWithLabel(label: string): Promise<number> {
 
 export async function getRecentMemes(limit = 90, offset = 0): Promise<MemeRecord[]> {
   const db = await getDb();
+  // Deliberately does NOT select the embedding blob: the grid only renders
+  // thumbnails + metadata, so pulling a 512-float vector per row into JS just to
+  // scroll past it wasted megabytes of RAM on a big library — which stuttered
+  // the list and competed with the CLIP model loading on first launch. Search
+  // and teaching read embeddings on demand (searchByVector / getMemeEmbedding).
+  //
   // Tiebreak on id: bulk indexing stamps many rows with the same indexed_at
   // (same millisecond), and without a stable secondary sort LIMIT/OFFSET paging
   // repeats and skips rows — which is what broke infinite scroll.
-  const rows = await db.getAllAsync<MemeRow>(
-    'SELECT * FROM memes ORDER BY indexed_at DESC, id DESC LIMIT ? OFFSET ?',
+  const rows = await db.getAllAsync<Omit<MemeRow, 'embedding'>>(
+    `SELECT id, uri, name, kind, ocr_text, tags, extra_terms, indexed_at, pending
+     FROM memes ORDER BY indexed_at DESC, id DESC LIMIT ? OFFSET ?`,
     limit,
     offset
   );
-  return rows.map(rowToRecord);
+  return rows.map((r) => ({
+    id: r.id,
+    uri: r.uri,
+    name: r.name,
+    kind: r.kind as MemeRecord['kind'],
+    ocrText: r.ocr_text,
+    tags: safeParseTags(r.tags),
+    extraTerms: r.extra_terms ?? '',
+    indexedAt: r.indexed_at,
+    pending: r.pending === 1,
+  }));
 }
 
 // Brute-force vector search. Fine for thousands of items; swap for sqlite-vec
