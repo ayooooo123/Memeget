@@ -81,6 +81,24 @@ export interface LabelHead {
   b: number; // bias
 }
 
+// Cooperative time-slicer. Heavy on-device loops (head training, full-library
+// re-tagging) run on the single JS thread, so without breaks they block React
+// from rendering and handling touches — the app "freezes" while teaching.
+// Yielding on a fixed iteration count is fragile: the work per iteration scales
+// with the library/sample size, so the same `i & 63` that's fine on a small
+// library still locks up a big one. Instead we yield on a *time* budget: call
+// `await tick()` every iteration and it only actually hands a macrotask back to
+// React once the current synchronous run has used up ~one frame (8 ms). That
+// caps blocking at a frame regardless of how much data there is.
+export function createYielder(budgetMs = 8): () => Promise<void> {
+  let start = Date.now();
+  return async function tick(): Promise<void> {
+    if (Date.now() - start < budgetMs) return;
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    start = Date.now();
+  };
+}
+
 // Probability that a (mean-centered) vector belongs to this head's label.
 export function headProb(head: LabelHead, x: number[]): number {
   let z = head.b;
@@ -99,8 +117,8 @@ export function headProb(head: LabelHead, x: number[]): number {
 // On a big library this is ~250 iters × hundreds of 512-dim negatives = tens of
 // millions of multiply-adds per head, all on the single JS thread. Run straight
 // through it blocks React from rendering/handling touch and the app freezes
-// while teaching — so we hand the event loop a macrotask every few iterations
-// (same trick retagAll uses for its classify pass). It's async for that reason.
+// while teaching — so it's async and time-slices via createYielder(), handing a
+// macrotask back to React whenever a pass has held the thread for ~a frame.
 export async function trainHead(
   label: string,
   category: string,
@@ -123,6 +141,7 @@ export async function trainHead(
   const wNeg = nNeg ? total / (2 * nNeg) : 0;
 
   const gw = new Float32Array(dim);
+  const tick = createYielder();
   for (let it = 0; it < iters; it++) {
     gw.fill(0);
     let gb = 0;
@@ -141,9 +160,10 @@ export async function trainHead(
       w[i] -= lr * gw[i];
     }
     b -= lr * (gb / total);
-    // Yield to React roughly every 16 iters (~15 breaths over a full train) so
-    // the UI stays responsive instead of locking up for the whole pass.
-    if ((it & 15) === 15) await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    // Hand control back to React whenever this pass has held the JS thread for a
+    // frame — so teaching stays responsive whether the negative set is 50 or
+    // 5,000 vectors. (Fixed-interval yielding couldn't make that guarantee.)
+    await tick();
   }
   return { label, category, w, b };
 }
