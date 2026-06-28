@@ -45,7 +45,7 @@ class MemegetBgModule : Module() {
     }
 
     Function("startForeground") { title: String, text: String ->
-      val ctx = appContext.reactContext ?: return@Function
+      val ctx = appContext.reactContext ?: return@Function null
       val intent = Intent(ctx, KeepAliveService::class.java).apply {
         putExtra(KeepAliveService.EXTRA_TITLE, title)
         putExtra(KeepAliveService.EXTRA_TEXT, text)
@@ -58,7 +58,7 @@ class MemegetBgModule : Module() {
     }
 
     Function("stopForeground") {
-      val ctx = appContext.reactContext ?: return@Function
+      val ctx = appContext.reactContext ?: return@Function null
       ctx.stopService(Intent(ctx, KeepAliveService::class.java))
     }
   }
