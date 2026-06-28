@@ -136,6 +136,11 @@ export function MemeGrid({
   // Cache the trained heads so we don't retrain on every modal open; cleared
   // after teaching so the next open reflects the new example.
   const modelRef = useRef<ExemplarModel | null>(null);
+  // Applying a taught example across the whole library (retrain heads + re-tag
+  // everything) is heavy and runs detached from the teach button. Serialize the
+  // applies through one promise chain so a quick second teach can't kick off a
+  // second retag while the first is still inside its DB transaction.
+  const applyChainRef = useRef<Promise<void>>(Promise.resolve());
   const size = (Dimensions.get('window').width - GAP * (COLS + 1)) / COLS;
   const kbHeight = useKeyboardHeight();
 
@@ -265,6 +270,10 @@ export function MemeGrid({
   const saveExemplar = async () => {
     const label = labelInput.trim();
     if (!selected || !label) return;
+    // The teach itself is just persisting the exemplar — fast. We gate the
+    // button on that alone, not on the heavy library-wide re-tag that follows,
+    // so the button never sits frozen on "Saving…" (and a second teach isn't
+    // blocked) while the whole library is being reclassified.
     setSaving(true);
     try {
       const emb = await getMemeEmbedding(selected.id);
@@ -285,29 +294,46 @@ export function MemeGrid({
         sourceUri: selected.uri,
         positive,
       });
-      setTeaching(false);
-      modelRef.current = null; // new example → retrain heads on next open
-      const matched = onTaught ? await onTaught(label) : undefined;
-      success();
-      if (typeof matched === 'number') {
-        showToast(
-          positive
-            ? `Taught “${label}” — ${matched} meme${matched === 1 ? '' : 's'} now tagged` +
-                (matched <= 1 ? '. Teach a few more examples to catch the rest' : '')
-            : `Got it — NOT “${label}”. ${matched} meme${matched === 1 ? '' : 's'} still carry the tag`,
-          'success'
-        );
-      } else {
-        showToast(
-          positive ? `Taught “${label}” — re-tag in Settings to apply it` : `Correction for “${label}” saved`,
-          'success'
-        );
-      }
     } catch (e) {
       showToast(`Could not teach: ${String(e)}`, 'error');
+      return;
     } finally {
       setSaving(false);
     }
+
+    // Exemplar saved — close the sheet and give immediate feedback. `positive`
+    // is captured now because the sheet (and its state) may be reused before the
+    // detached apply below runs.
+    const taughtPositive = positive;
+    setTeaching(false);
+    modelRef.current = null; // new example → retrain heads on next open
+    success();
+
+    // Apply the new example across the library off the button: retrain heads and
+    // re-tag everything. Chained so concurrent teaches run one retag at a time.
+    applyChainRef.current = applyChainRef.current
+      .catch(() => {})
+      .then(async () => {
+        try {
+          const matched = onTaught ? await onTaught(label) : undefined;
+          if (typeof matched === 'number') {
+            showToast(
+              taughtPositive
+                ? `Taught “${label}” — ${matched} meme${matched === 1 ? '' : 's'} now tagged` +
+                    (matched <= 1 ? '. Teach a few more examples to catch the rest' : '')
+                : `Got it — NOT “${label}”. ${matched} meme${matched === 1 ? '' : 's'} still carry the tag`,
+              'success'
+            );
+          } else {
+            showToast(
+              taughtPositive ? `Taught “${label}” — re-tag in Settings to apply it` : `Correction for “${label}” saved`,
+              'success'
+            );
+          }
+        } catch (e) {
+          showToast(`Saved “${label}”, but applying it failed: ${String(e)}`, 'error');
+        }
+      });
   };
 
   return (
