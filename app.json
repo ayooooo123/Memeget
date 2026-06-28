@@ -25,7 +25,7 @@
       [
         "expo-share-intent",
         {
-          "androidIntentFilters": ["image/*", "video/*"],
+          "androidIntentFilters": ["image/*", "video/*", "text/*"],
           "androidMultiIntentFilters": ["image/*", "video/*"],
           "disableIOS": true
         }
