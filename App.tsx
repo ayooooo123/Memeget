@@ -6,6 +6,7 @@ import { initExecutorch } from 'react-native-executorch';
 import { ExpoResourceFetcher } from 'react-native-executorch-expo-resource-fetcher';
 
 import { EmbeddingsProvider } from './src/embeddings';
+import { VisionProvider } from './src/vision';
 import { initDb } from './src/db';
 import { LibraryScreen } from './src/screens/LibraryScreen';
 import { SettingsScreen } from './src/screens/SettingsScreen';
@@ -30,8 +31,10 @@ export default function App() {
   return (
     <SafeAreaProvider>
       <EmbeddingsProvider>
-        <StatusBar style="light" />
-        <Shell />
+        <VisionProvider>
+          <StatusBar style="light" />
+          <Shell />
+        </VisionProvider>
       </EmbeddingsProvider>
     </SafeAreaProvider>
   );

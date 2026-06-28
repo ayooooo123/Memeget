@@ -4,8 +4,13 @@ export interface Tag {
   label: string;
   category: string;
   score: number;
-  source?: 'prompt' | 'exemplar' | 'ocr'; // how the label was matched
+  source?: 'prompt' | 'exemplar' | 'ocr' | 'vision'; // how the label was matched
 }
+
+// Lifecycle of the optional LFM2-VL enrichment pass for a meme.
+//  pending -> not yet described · done -> described · failed -> describe errored
+//  (won't auto-retry; a manual "Describe library" re-run can reset failures).
+export type VisionState = 'pending' | 'done' | 'failed';
 
 export interface MemeRecord {
   id: number;
@@ -13,8 +18,10 @@ export interface MemeRecord {
   name: string;
   kind: MediaKind;
   ocrText: string;
+  caption: string; // one-line scene/joke description from LFM2-VL ('' until enriched)
   tags: Tag[];
   extraTerms: string; // association/world-knowledge terms, for search
+  visionState: VisionState;
   indexedAt: number;
   pending?: boolean; // saved & visible, but not yet embedded/OCR'd/tagged
 }

@@ -17,28 +17,50 @@ import {
   getExemplars,
   getFolders,
   getLabelVectors,
+  getMemesNeedingVision,
   insertMeme,
   insertPendingMeme,
+  markVisionFailed,
   memeExists,
   putLabelVector,
+  setMemeVision,
+  updateMemeTags,
 } from './db';
 import { ASSOCIATIONS, MEME_LABELS, NEGATIVE_ANCHORS, ocrTags } from './memeLabels';
 import { copyToCache, deleteCache, listMedia, saveToFolder, type SafFile } from './saf';
+import type { VisionResult } from './vision';
 import type { Tag } from './types';
 
-// Merge visual (prompt/exemplar) tags with OCR-derived tags, de-duped by label.
-// Priority: ocr > exemplar > prompt (watermarks and the user's ground truth
-// beat shaky zero-shot guesses).
-function mergeTags(visual: Tag[], fromOcr: Tag[]): Tag[] {
-  const rank = (t: Tag) => (t.source === 'ocr' ? 3 : t.source === 'exemplar' ? 2 : 1);
+// Confidence in how a label was matched, highest first:
+//   ocr      — text literally in the image (watermark/caption)
+//   exemplar — the user's own ground truth, taught by example
+//   vision   — LFM2-VL's open-vocabulary read of the image
+//   prompt   — CLIP zero-shot guess against the fixed label vocabulary
+const TAG_RANK: Record<NonNullable<Tag['source']>, number> = {
+  ocr: 4,
+  exemplar: 3,
+  vision: 2,
+  prompt: 1,
+};
+const tagRank = (t: Tag): number => TAG_RANK[t.source ?? 'prompt'] ?? 1;
+
+// De-dupe a pile of tags by label, keeping the highest-confidence source (and
+// highest score within a source), best first, capped.
+function dedupeRankTags(tags: Tag[], cap = 6): Tag[] {
   const best = new Map<string, Tag>();
-  for (const t of [...visual, ...fromOcr]) {
+  for (const t of tags) {
     const cur = best.get(t.label);
-    if (!cur || rank(t) > rank(cur) || (rank(t) === rank(cur) && t.score > cur.score)) {
+    if (!cur || tagRank(t) > tagRank(cur) || (tagRank(t) === tagRank(cur) && t.score > cur.score)) {
       best.set(t.label, t);
     }
   }
-  return [...best.values()].sort((a, b) => rank(b) - rank(a) || b.score - a.score).slice(0, 4);
+  return [...best.values()].sort((a, b) => tagRank(b) - tagRank(a) || b.score - a.score).slice(0, cap);
+}
+
+// Fast-pass merge: CLIP/exemplar visual tags + OCR-derived tags. Kept tight (4)
+// because the slower LFM2-VL pass adds richer tags later.
+function mergeTags(visual: Tag[], fromOcr: Tag[]): Tag[] {
+  return dedupeRankTags([...visual, ...fromOcr], 4);
 }
 
 const NEG_PREFIX = 'neg::';
@@ -68,6 +90,40 @@ async function ocr(uri: string): Promise<string> {
   } catch {
     return '';
   }
+}
+
+// Turn a library item (image or video) into a local JPEG path the models can
+// read, plus the temp files to clean up afterward. The VLM needs an actual
+// on-disk path (its `mediaPath`), and SAF content:// URIs aren't usable
+// directly — so we re-derive the frame the same way the index pass does.
+async function materializeFrame(
+  file: SafFile,
+  idx: number
+): Promise<{ jpeg: string; temp: string[] }> {
+  const temp: string[] = [];
+  const work = await copyToCache(file, idx);
+  temp.push(work);
+  let frame = work;
+  if (file.kind === 'video') {
+    const { uri } = await VideoThumbnails.getThumbnailAsync(work, { time: 1000 });
+    frame = uri;
+    temp.push(uri);
+  }
+  const jpeg = await toJpeg(frame);
+  temp.push(jpeg);
+  return { jpeg, temp };
+}
+
+// Curated associations + any added when teaching an exemplar. Shared by the
+// classification pass and the VLM enrichment pass.
+async function buildAssociations(): Promise<Map<string, string[]>> {
+  const assoc = new Map<string, string[]>(Object.entries(ASSOCIATIONS));
+  for (const e of await getExemplars()) {
+    if (e.associations.length) {
+      assoc.set(e.label, [...(assoc.get(e.label) ?? []), ...e.associations]);
+    }
+  }
+  return assoc;
 }
 
 export interface IndexProgress {
@@ -400,4 +456,90 @@ export async function retagAll(
   // Single transaction for all the writes — fast even on a big library.
   await bulkUpdateMemeTags(updates);
   return { updated: updates.length };
+}
+
+// ---- LFM2-VL enrichment pass -------------------------------------------------
+
+export interface EnrichProgress {
+  done: number;
+  total: number;
+  current: string;
+}
+
+export interface EnrichResult {
+  described: number;
+  failed: number;
+}
+
+// Minimal surface of the vision API the enricher needs — keeps indexer.ts free
+// of any React/provider coupling.
+export interface VisionEnricher {
+  ready: boolean;
+  describe: (jpegPath: string) => Promise<VisionResult | null>;
+}
+
+// Walk every meme still awaiting a description and run LFM2-VL over it: caption,
+// literal text, and open-vocabulary tags get merged into the record and folded
+// into the search index. Runs AFTER the fast CLIP pass so the library is
+// browsable immediately; this just makes it smarter in the background.
+//
+// Strictly sequential: the on-device LLM does one generation at a time, and
+// re-deriving each frame keeps memory flat across a whole library.
+export async function enrichLibrary(
+  vision: VisionEnricher,
+  opts: { onProgress?: (p: EnrichProgress) => void; shouldCancel?: () => boolean } = {}
+): Promise<EnrichResult> {
+  if (!vision.ready) throw new Error('Vision model is still loading — try again shortly.');
+
+  const assoc = await buildAssociations();
+  const queue = await getMemesNeedingVision();
+  const total = queue.length;
+
+  let described = 0;
+  let failed = 0;
+  for (let i = 0; i < queue.length; i++) {
+    if (opts.shouldCancel?.()) break;
+    const m = queue[i];
+    opts.onProgress?.({ done: i, total, current: m.name });
+
+    const temp: string[] = [];
+    try {
+      const frame = await materializeFrame({ uri: m.uri, name: m.name, kind: m.kind }, i);
+      temp.push(...frame.temp);
+
+      const res = await vision.describe(frame.jpeg);
+      if (!res) {
+        // Model went unready mid-run; leave as pending to retry next time.
+        break;
+      }
+
+      // LFM's open-vocabulary tags join the existing CLIP/OCR/exemplar tags,
+      // ranked between them (above CLIP guesses, below the user's truth).
+      const visionTags: Tag[] = res.tags.map((label) => ({
+        label,
+        category: 'topic',
+        score: 0.9,
+        source: 'vision' as const,
+      }));
+      const merged = dedupeRankTags([...m.tags, ...visionTags], 6);
+
+      // Everything the model surfaced becomes searchable: the literal text, the
+      // named subjects, and the keywords — on top of the usual association terms.
+      const visionExtra = [res.text, res.subjects.join(' '), res.tags.join(' ')]
+        .join(' ')
+        .toLowerCase();
+      const extraTerms = `${extraTermsFor(merged, assoc)} ${visionExtra}`.replace(/\s+/g, ' ').trim();
+
+      await setMemeVision(m.id, { caption: res.caption, tags: merged, extraTerms });
+      described++;
+    } catch {
+      await markVisionFailed(m.id).catch(() => {});
+      failed++;
+    } finally {
+      for (const t of temp) await deleteCache(t);
+    }
+  }
+
+  opts.onProgress?.({ done: total, total, current: '' });
+  return { described, failed };
 }
