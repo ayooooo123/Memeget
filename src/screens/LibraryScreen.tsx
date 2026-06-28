@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Pressable,
@@ -19,6 +19,7 @@ import {
   countMemesWithLabel,
   getFolders,
   getLabels,
+  getLibraryTagLabels,
   getRecentMemes,
   searchByVector,
 } from '../db';
@@ -27,7 +28,7 @@ import { onLibraryChanged } from '../events';
 import { success, tap, thud } from '../haptics';
 import { pickFolder } from '../saf';
 import { colors, radius, space, type } from '../theme';
-import type { LinkedFolder, MemeRecord, SearchHit } from '../types';
+import type { LinkedFolder, MediaKind, MemeRecord, SearchHit } from '../types';
 
 const PAGE = 90;
 
@@ -37,6 +38,7 @@ export function LibraryScreen() {
   const [recent, setRecent] = useState<MemeRecord[]>([]);
   const [count, setCount] = useState(0);
   const [taughtLabels, setTaughtLabels] = useState<string[]>([]);
+  const [libraryTags, setLibraryTags] = useState<string[]>([]);
   const [indexing, setIndexing] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [progress, setProgress] = useState<IndexProgress | null>(null);
@@ -46,6 +48,14 @@ export function LibraryScreen() {
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<SearchHit[] | null>(null);
   const [searching, setSearching] = useState(false);
+
+  // Media-type narrowing applied to both browse and search. 'all' = no filter.
+  const [kind, setKind] = useState<MediaKind | 'all'>('all');
+  // Mirrored into a ref so refresh()/loadMore()/runSearch() (kept stable) read
+  // the current filter without being re-created on every kind change.
+  const kindRef = useRef<MediaKind | 'all'>('all');
+  kindRef.current = kind;
+  const kindArg = () => (kindRef.current === 'all' ? undefined : kindRef.current);
 
   const cancelRef = useRef(false);
   const hasMoreRef = useRef(true);
@@ -58,14 +68,16 @@ export function LibraryScreen() {
 
   const refresh = useCallback(async () => {
     setFolders(await getFolders());
+    const k = kindRef.current === 'all' ? undefined : kindRef.current;
     const span = Math.max(PAGE, loadedCountRef.current);
-    const rows = await getRecentMemes(span, 0);
+    const rows = await getRecentMemes(span, 0, k);
     setRecent(rows);
     loadedCountRef.current = rows.length;
     // Only assume there's more to page in when we filled a clean page boundary.
     hasMoreRef.current = rows.length === span && rows.length % PAGE === 0;
     setCount(await countMemes());
     setTaughtLabels(await getLabels().catch(() => []));
+    setLibraryTags(await getLibraryTagLabels().catch(() => []));
   }, []);
 
   useEffect(() => {
@@ -80,7 +92,7 @@ export function LibraryScreen() {
     loadingMoreRef.current = true;
     setLoadingMore(true);
     try {
-      const next = await getRecentMemes(PAGE, recent.length);
+      const next = await getRecentMemes(PAGE, recent.length, kindArg());
       hasMoreRef.current = next.length === PAGE;
       setRecent((cur) => {
         const merged = [...cur, ...next];
@@ -106,7 +118,7 @@ export function LibraryScreen() {
       setSearching(true);
       try {
         const vec = await emb.embedText(q);
-        setResults(await searchByVector(vec, q, 80));
+        setResults(await searchByVector(vec, q, 80, kindArg()));
       } finally {
         setSearching(false);
       }
@@ -136,6 +148,29 @@ export function LibraryScreen() {
     // Toggle: tapping the active chip clears the filter.
     setQuery((cur) => (cur.trim() === label ? '' : label));
   }, []);
+
+  // Tapping a media chip toggles that filter (tap again to clear back to 'all').
+  const toggleKind = useCallback((k: MediaKind) => {
+    tap();
+    setKind((cur) => (cur === k ? 'all' : k));
+  }, []);
+
+  // When the media filter changes, re-fetch the browse page and re-run any
+  // active search through the new filter. Skips the initial mount (the refresh
+  // effect above already loads the unfiltered library once).
+  const queryRef = useRef(query);
+  queryRef.current = query;
+  const didMountKind = useRef(false);
+  useEffect(() => {
+    if (!didMountKind.current) {
+      didMountKind.current = true;
+      return;
+    }
+    loadedCountRef.current = PAGE; // drop back to a single page for the new filter
+    refresh();
+    const q = queryRef.current.trim();
+    if (q) runSearchRef.current(q);
+  }, [kind, refresh]);
 
   const onLink = useCallback(async () => {
     try {
@@ -182,6 +217,17 @@ export function LibraryScreen() {
 
   const isSearch = results !== null;
   const hasLibrary = count > 0 || recent.length > 0;
+
+  // Quick-filter chips: the labels the user has taught (starred) first, then the
+  // known meme tags the indexer actually applied across the library — so people
+  // can narrow to a recognized format/character by tapping instead of typing.
+  const tagChips = useMemo(() => {
+    const taught = new Set(taughtLabels);
+    return [
+      ...taughtLabels.map((label) => ({ label, taught: true })),
+      ...libraryTags.filter((l) => !taught.has(l)).map((label) => ({ label, taught: false })),
+    ];
+  }, [taughtLabels, libraryTags]);
 
   // Scrolling part of the page (lives inside the grid as its header).
   const header = (
@@ -297,15 +343,24 @@ export function LibraryScreen() {
           )}
         </View>
 
-        {taughtLabels.length > 0 && (
+        {hasLibrary && (
           <ScrollView
             horizontal
             showsHorizontalScrollIndicator={false}
             contentContainerStyle={styles.chipRow}
             keyboardShouldPersistTaps="handled"
           >
-            {taughtLabels.map((l) => (
-              <Chip key={l} label={l} taught active={query.trim() === l} onPress={() => searchLabel(l)} />
+            <Chip label="▦ Images" active={kind === 'image'} onPress={() => toggleKind('image')} />
+            <Chip label="▶ Videos" active={kind === 'video'} onPress={() => toggleKind('video')} />
+            {tagChips.length > 0 && <View style={styles.chipDivider} />}
+            {tagChips.map((c) => (
+              <Chip
+                key={c.label}
+                label={c.label}
+                taught={c.taught}
+                active={query.trim() === c.label}
+                onPress={() => searchLabel(c.label)}
+              />
             ))}
           </ScrollView>
         )}
@@ -326,6 +381,16 @@ export function LibraryScreen() {
               <Text style={styles.noResultsTitle}>Nothing matched</Text>
               <Text style={styles.noResultsHint}>
                 Try fewer words, a vibe (“sad frog”), or text you remember from the meme.
+              </Text>
+            </View>
+          ) : !isSearch && hasLibrary && recent.length === 0 && kind !== 'all' ? (
+            <View style={styles.noResults}>
+              <Text style={styles.noResultsGlyph}>{kind === 'video' ? '▶' : '▦'}</Text>
+              <Text style={styles.noResultsTitle}>
+                No {kind === 'video' ? 'videos' : 'images'} here
+              </Text>
+              <Text style={styles.noResultsHint}>
+                Tap “{kind === 'video' ? '▶ Videos' : '▦ Images'}” again to show everything.
               </Text>
             </View>
           ) : null
@@ -416,7 +481,8 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   clearIcon: { color: colors.textDim, fontSize: 12, fontWeight: '700' },
-  chipRow: { gap: space.sm, paddingRight: space.lg },
+  chipRow: { gap: space.sm, paddingRight: space.lg, alignItems: 'center' },
+  chipDivider: { width: 1, alignSelf: 'stretch', marginVertical: 5, backgroundColor: colors.border },
 
   listHeader: { paddingHorizontal: space.md, paddingBottom: space.sm, gap: space.md },
   resultRow: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 2 },
