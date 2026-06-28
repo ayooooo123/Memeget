@@ -19,15 +19,43 @@ No accounts. No servers. No uploads.
 | Video | A keyframe is extracted (`expo-video-thumbnails`) and indexed like an image. |
 | Index storage | `expo-sqlite`; embeddings stored as float32 blobs, brute-force cosine search. |
 | Folder access | Android **Storage Access Framework** — per-folder permission, no broad media access. |
+| Save from a link | Share an **X/Twitter**, **Tenor**, or any social-post URL into Memeget and it resolves the underlying media (tweet-syndication for X, Open Graph `og:video`/`og:image` for everything else), downloads it into your linked folder, and indexes it like a normal share — no manual download + re-import. |
+
+## Saving from a shared link
+
+Besides sharing image/video *files*, you can share a **link** to a post and let
+Memeget fetch the meme for you:
+
+- In X, Tenor, your browser, Reddit, etc., tap **Share → Memeget** (or copy the
+  link and share it). The URL doesn't have to be bare — "caption text https://…"
+  works; the first URL is used.
+- Memeget figures out the actual media: for `x.com`/`twitter.com` it reads X's
+  public tweet-syndication endpoint (no login) and picks the highest-quality
+  video variant, or the full-res photo; for Tenor and anything else it scrapes
+  the page's Open Graph / Twitter-card tags (`og:video`, then `og:image`). A URL
+  that already points straight at a `.mp4`/`.gif`/`.jpg`… is downloaded directly.
+- It then drops the file into your first linked folder and hands it to the same
+  background indexer as any other share — so it picks up CLIP/OCR/VLM tags
+  automatically and shows up in search.
+
+This is best-effort: a private/age-gated post, or a site that hides its media
+behind JavaScript, may not resolve — you'll get a short "no media found" notice
+and nothing is saved.
 
 ## Privacy / network honesty
 
-The app makes **no network calls at runtime** — indexing and search are fully
-offline. The **one** exception is a *one-time* download of the CLIP model from
-Hugging Face on first launch (ExecuTorch fetches it, then caches it locally at
-`{documentDirectory}/react-native-executorch/`). After that, you can stay
-airplane-mode forever. To make it *truly* zero-network from install, the model
-can be bundled into the APK assets — see "Next steps".
+Indexing and search are fully **offline** — no network, no accounts, no uploads.
+There are exactly two times the app reaches out, both download-only:
+
+1. A *one-time* download of the CLIP model from Hugging Face on first launch
+   (ExecuTorch fetches it, then caches it locally at
+   `{documentDirectory}/react-native-executorch/`). After that, you can stay
+   airplane-mode forever. To make it *truly* zero-network from install, the model
+   can be bundled into the APK assets — see "Next steps".
+2. **Only when you share a link** (see above), Memeget contacts that link's host
+   (plus X's public syndication endpoint for tweets) to download the media you
+   asked for. No URL is fetched unless you explicitly share one, and nothing
+   about you or your library is sent — it's a plain download.
 
 **Online only once — across updates too.** The cached model and the SQLite index
 both live in the app's internal storage, which Android keeps across an app update
@@ -69,6 +97,7 @@ src/embeddings.tsx      # CLIP image+text hooks + zero-shot classifier
 src/indexer.ts          # SAF -> copy -> (thumbnail) -> embed -> OCR -> tag -> store
 src/db.ts               # SQLite schema, vector storage, cosine search
 src/saf.ts              # Storage Access Framework folder linking
+src/linkResolver.ts     # shared X/Tenor/social links -> resolve + download media
 src/memeLabels.ts       # curated meme-format/character/emotion prompts
 src/screens/            # Library (index), Search, Settings
 ```
