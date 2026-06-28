@@ -40,20 +40,30 @@ export interface VisionResult {
 }
 
 export const SYSTEM_PROMPT =
-  'You are a meme cataloging engine. You look at a single image and output ONLY ' +
-  'a compact JSON object describing it for search. No prose, no markdown, no code fences.';
+  'You are a meme cataloging engine. You look at a single image and describe it for ' +
+  'search using four labeled lines. Output ONLY those lines — no prose, no JSON, no ' +
+  'markdown, no code fences.';
 
-// Terse on purpose: decode is per-token, so a tight schema + short caption keeps
-// each call fast. (react-native-executorch has no hard max-token knob, so brevity
-// is enforced via the prompt.)
+// A flat "LABEL: value" format instead of JSON. A 450M/1.6B model frequently
+// botches nested JSON (unbalanced braces/brackets, bad quote-escaping), and any
+// truncation there loses the whole object. Line-delimited output has no nesting
+// to corrupt and degrades gracefully: a reply cut off early still yields every
+// line that finished. One filled-in example anchors the format and stops the
+// model echoing the field hints back verbatim. (react-native-executorch has no
+// hard max-token knob, so brevity is enforced via the prompt.)
 export const USER_PROMPT =
-  'Describe this meme so it can be found later by search. Respond with ONLY this JSON ' +
-  'object and nothing else, no prose:\n' +
-  '{"caption": "<=14 words: what is happening and why it is funny>", ' +
-  '"subjects": ["<main people, characters, or objects>"], ' +
-  '"text": "<text visible in the image, verbatim; empty string if none>", ' +
-  '"tags": ["<4-8 lowercase keywords: meme format/template name if known, topic, emotion, named characters>"]}\n' +
-  'If it is not a meme, still describe the image the same way. Be concise.';
+  'Describe this meme so it can be found later by search. Reply with EXACTLY these ' +
+  'four lines, each starting with the label in caps, and nothing else:\n' +
+  'CAPTION: one sentence, <=14 words, what is happening and why it is funny\n' +
+  'TEXT: text visible in the image, verbatim; leave blank if none\n' +
+  'SUBJECTS: comma-separated main people, characters, or objects\n' +
+  'TAGS: 4-8 comma-separated lowercase keywords (meme format/template name if known, topic, emotion, named characters)\n' +
+  '\nExample of the exact format:\n' +
+  'CAPTION: a distracted man looks back at another woman while his girlfriend glares\n' +
+  'TEXT: me, new framework, the project i should be working on\n' +
+  'SUBJECTS: man, girlfriend, other woman\n' +
+  'TAGS: distracted boyfriend, temptation, priorities, relatable, stock photo\n' +
+  '\nNow describe the image. If it is not a meme, still describe it the same way. Be concise.';
 
 // Cap the injected OCR so it can't bloat the prompt (prefill cost) — a hint.
 export const OCR_HINT_MAX = 280;
@@ -65,18 +75,84 @@ export function userTurn(ocrHint?: string): string {
   if (!hint) return USER_PROMPT;
   return (
     USER_PROMPT +
-    `\nText already extracted from this image by OCR — use it verbatim for the "text" field and ` +
+    `\nText already extracted from this image by OCR — use it verbatim for the TEXT line and ` +
     `as a hint for the caption: "${hint.slice(0, OCR_HINT_MAX)}"`
   );
 }
 
-// A value the model left as an unfilled schema placeholder, e.g.
-// "<main people, characters, or objects>" or "<=14 words: ...>". The small model
-// sometimes echoes the prompt's `<...>` slots verbatim instead of filling them;
-// such values are noise and must never reach the UI.
-function isPlaceholder(s: string): boolean {
-  return /^<.*>$/.test(s.trim());
+// Fragments of the prompt's own field descriptions. The small model occasionally
+// echoes a hint instead of filling it in; a value containing one of these is
+// noise and must never reach the UI.
+const HINT_FRAGMENTS = [
+  'what is happening and why it is funny',
+  'text visible in the image',
+  'leave blank if none',
+  'main people, characters, or objects',
+  'comma-separated',
+  'lowercase keywords',
+];
+
+// True for an unfilled hint: a bracketed "<...>" placeholder (JSON-drift relic)
+// or text that quotes one of the prompt's field descriptions.
+function isJunk(s: string): boolean {
+  const t = s.trim();
+  if (!t) return true;
+  if (/^<.*>$/.test(t)) return true;
+  const lower = t.toLowerCase();
+  return HINT_FRAGMENTS.some((f) => lower.includes(f));
 }
+
+// Back-compat alias used by the JSON fallback below.
+const isPlaceholder = isJunk;
+
+// Trim a single value and shed any quotes/brackets/markdown the model wrapped it
+// in out of habit. Returns '' for an unfilled hint so it's dropped downstream.
+function cleanValue(s: string): string {
+  const v = s.replace(/^[\s"'`*[\]]+|[\s"'`*[\]]+$/g, '').trim();
+  return isJunk(v) ? '' : v;
+}
+
+// Split a comma/semicolon-separated value into clean items. The whole string is
+// checked for an echoed hint first, since a hint like "main people, characters,
+// or objects" would otherwise survive being split on its own commas.
+function splitList(s: string): string[] {
+  if (isJunk(s.trim())) return [];
+  return s
+    .split(/[,;\n]+/)
+    .map(cleanValue)
+    .filter(Boolean)
+    .slice(0, 16);
+}
+
+const FIELD_LINE = /^\s*(caption|subjects|text|tags)\s*[:\-]\s*(.*)$/i;
+
+// Primary parse: the flat "LABEL: value" format the prompt requests. A line that
+// starts with a known label opens that field; any following unlabeled lines are
+// appended to it (so a wrapped caption survives). Returns null if no labeled line
+// is present, signalling the JSON/bare-text fallback.
+function parseLabeledLines(reply: string): Record<string, string> | null {
+  const out: Record<string, string> = {};
+  let current: string | null = null;
+  let found = false;
+  for (const line of reply.split(/\r?\n/)) {
+    if (/^\s*```/.test(line)) continue; // ignore markdown code-fence lines
+    const m = FIELD_LINE.exec(line);
+    if (m) {
+      found = true;
+      current = m[1].toLowerCase();
+      out[current] = out[current] ? `${out[current]} ${m[2].trim()}` : m[2].trim();
+    } else if (current && line.trim()) {
+      out[current] = `${out[current]} ${line.trim()}`.trim();
+    }
+  }
+  return found ? out : null;
+}
+
+// ---- JSON fallback (defensive) ----------------------------------------------
+// The contract is the flat format above, but a small model can drift back to
+// JSON. These recover fields from JSON that may be wrapped in prose, truncated
+// before its closing brace, or full of unfilled hints — without ever letting raw
+// JSON structure leak into the caption.
 
 function asStringArray(v: unknown): string[] {
   if (!Array.isArray(v)) return [];
@@ -86,9 +162,6 @@ function asStringArray(v: unknown): string[] {
     .slice(0, 16);
 }
 
-// Pull a single "key": "value" string out of raw model text, tolerating escaped
-// quotes and JSON that's truncated before its closing brace. Returns null for a
-// missing field or an unfilled placeholder.
 function extractStringField(raw: string, key: string): string | null {
   const m = new RegExp(`"${key}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"`).exec(raw);
   if (!m) return null;
@@ -100,8 +173,6 @@ function extractStringField(raw: string, key: string): string | null {
   }
 }
 
-// Pull a "key": [ ... ] array out of raw model text. The trailing `]` is optional
-// so a reply truncated mid-array still yields whatever items completed.
 function extractArrayField(raw: string, key: string): string[] {
   const m = new RegExp(`"${key}"\\s*:\\s*\\[([^\\]]*)`).exec(raw);
   if (!m) return [];
@@ -118,9 +189,6 @@ function extractArrayField(raw: string, key: string): string[] {
     .slice(0, 16);
 }
 
-// Last-resort cleanup: strip JSON scaffolding (keys, braces, quotes) and any
-// `<...>` placeholders so a broken reply degrades to readable text instead of a
-// raw object dump in the caption.
 function stripJsonArtifacts(raw: string): string {
   return raw
     .replace(/<[^>]*>/g, ' ')
@@ -131,13 +199,7 @@ function stripJsonArtifacts(raw: string): string {
     .trim();
 }
 
-// Pull a JSON object out of the model's reply and coerce it into a VisionResult.
-// Defensive: the on-device model occasionally wraps JSON in prose, truncates it
-// before the closing brace, echoes the schema placeholders, or emits a bare
-// description. We recover usable fields field-by-field and, crucially, never let
-// raw JSON structure leak into the caption shown to the user.
-export function parseVision(raw: string): VisionResult {
-  const reply = (raw ?? '').trim();
+function parseJsonReply(reply: string): VisionResult {
   const start = reply.indexOf('{');
   const end = reply.lastIndexOf('}');
   let obj: Record<string, unknown> = {};
@@ -168,11 +230,29 @@ export function parseVision(raw: string): VisionResult {
   }
 
   const text = fromObj('text') ?? extractStringField(reply, 'text') ?? '';
-
   const subjects = obj.subjects !== undefined ? asStringArray(obj.subjects) : extractArrayField(reply, 'subjects');
   const tags = obj.tags !== undefined ? asStringArray(obj.tags) : extractArrayField(reply, 'tags');
 
   return { caption, subjects, text, tags };
+}
+
+// Coerce the model's reply into a VisionResult. The expected shape is the flat
+// "LABEL: value" format; we fall back to recovering fields from JSON (or a bare
+// description) so an off-format reply still produces a usable, clean caption.
+export function parseVision(raw: string): VisionResult {
+  const reply = (raw ?? '').trim();
+
+  const lines = parseLabeledLines(reply);
+  if (lines) {
+    return {
+      caption: cleanValue(lines.caption ?? ''),
+      subjects: splitList(lines.subjects ?? ''),
+      text: cleanValue(lines.text ?? ''),
+      tags: splitList(lines.tags ?? ''),
+    };
+  }
+
+  return parseJsonReply(reply);
 }
 
 // ---- background pacing -------------------------------------------------------
