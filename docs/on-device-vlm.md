@@ -10,7 +10,8 @@ vocabulary can't produce. Nothing leaves the device.
 ## Architecture
 
 ```
-visionCore.ts      React-free core: model constants, prompt, JSON parse,
+visionCore.ts      React-free core: model constants, prompt, reply parse
+                   (flat "LABEL: value" format + JSON/bare fallback),
                    throttle logic, rate mapping, setting keys.
         │
         ├── vision.tsx ............ FOREGROUND path: useLLM hook + in-app paced
