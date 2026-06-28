@@ -30,6 +30,8 @@ export interface Exemplar {
   associations: string[];
   sourceUri: string;
   positive: boolean; // false = a "this is NOT a <label>" negative example
+  origin: 'self' | 'pack'; // taught here, or imported from a teaching pack
+  pack: string; // source pack name when origin === 'pack', else ''
   createdAt: number;
 }
 

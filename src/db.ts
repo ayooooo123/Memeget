@@ -44,6 +44,8 @@ export async function initDb(): Promise<void> {
       associations TEXT NOT NULL DEFAULT '[]',
       source_uri TEXT NOT NULL DEFAULT '',
       is_positive INTEGER NOT NULL DEFAULT 1,
+      origin TEXT NOT NULL DEFAULT 'self',
+      pack TEXT NOT NULL DEFAULT '',
       created_at INTEGER NOT NULL
     );
     CREATE TABLE IF NOT EXISTS index_errors (
@@ -69,6 +71,16 @@ export async function initDb(): Promise<void> {
   const exCols = await db.getAllAsync<{ name: string }>('PRAGMA table_info(exemplars)');
   if (!exCols.some((c) => c.name === 'is_positive')) {
     await db.execAsync(`ALTER TABLE exemplars ADD COLUMN is_positive INTEGER NOT NULL DEFAULT 1;`);
+  }
+  // Migrate exemplar tables that predate provenance tracking. `origin` is 'self'
+  // (you taught it) or 'pack' (imported); `pack` names the source pack so a whole
+  // import can be listed and removed as a unit. Existing rows are your own work,
+  // so they default to 'self'.
+  if (!exCols.some((c) => c.name === 'origin')) {
+    await db.execAsync(`ALTER TABLE exemplars ADD COLUMN origin TEXT NOT NULL DEFAULT 'self';`);
+  }
+  if (!exCols.some((c) => c.name === 'pack')) {
+    await db.execAsync(`ALTER TABLE exemplars ADD COLUMN pack TEXT NOT NULL DEFAULT '';`);
   }
 }
 
@@ -455,9 +467,10 @@ export async function addExemplar(args: {
   positive?: boolean; // false = "this is NOT a <label>" (negative example)
 }): Promise<void> {
   const db = await getDb();
+  // Examples created here are the user's own teaching — origin 'self', no pack.
   await db.runAsync(
-    `INSERT INTO exemplars (label, category, vector, associations, source_uri, is_positive, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO exemplars (label, category, vector, associations, source_uri, is_positive, origin, pack, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, 'self', '', ?)`,
     args.label,
     args.category,
     vecToBlob(args.vector),
@@ -478,6 +491,8 @@ export async function getExemplars(): Promise<Exemplar[]> {
     associations: string;
     source_uri: string;
     is_positive: number;
+    origin: string;
+    pack: string;
     created_at: number;
   }>('SELECT * FROM exemplars ORDER BY created_at DESC');
   return rows.map((r) => ({
@@ -488,6 +503,8 @@ export async function getExemplars(): Promise<Exemplar[]> {
     associations: safeParseStrings(r.associations),
     sourceUri: r.source_uri,
     positive: r.is_positive !== 0,
+    origin: r.origin === 'pack' ? 'pack' : 'self',
+    pack: r.pack ?? '',
     createdAt: r.created_at,
   }));
 }
@@ -532,13 +549,20 @@ export interface TaughtLabelStat {
   positives: number;
   negatives: number;
   tagged: number; // memes in the library currently tagged with this label
+  fromSelf: boolean; // at least one example you taught yourself
+  fromPack: boolean; // at least one example came from an imported pack
+  packs: string[]; // distinct source-pack names contributing to this label
 }
 
 export async function getTaughtLabelStats(): Promise<TaughtLabelStat[]> {
   const db = await getDb();
-  const exRows = await db.getAllAsync<{ label: string; category: string; is_positive: number }>(
-    'SELECT label, category, is_positive FROM exemplars'
-  );
+  const exRows = await db.getAllAsync<{
+    label: string;
+    category: string;
+    is_positive: number;
+    origin: string;
+    pack: string;
+  }>('SELECT label, category, is_positive, origin, pack FROM exemplars');
   const tagRows = await db.getAllAsync<{ tags: string }>(
     "SELECT tags FROM memes WHERE pending = 0 AND tags != '[]'"
   );
@@ -551,24 +575,80 @@ export async function getTaughtLabelStats(): Promise<TaughtLabelStat[]> {
     for (const label of seen) taggedCounts.set(label, (taggedCounts.get(label) ?? 0) + 1);
   }
 
-  const byLabel = new Map<string, TaughtLabelStat>();
+  const byLabel = new Map<string, TaughtLabelStat & { packSet: Set<string> }>();
   for (const r of exRows) {
     const stat =
       byLabel.get(r.label) ??
-      { label: r.label, category: r.category, positives: 0, negatives: 0, tagged: taggedCounts.get(r.label) ?? 0 };
+      {
+        label: r.label,
+        category: r.category,
+        positives: 0,
+        negatives: 0,
+        tagged: taggedCounts.get(r.label) ?? 0,
+        fromSelf: false,
+        fromPack: false,
+        packs: [],
+        packSet: new Set<string>(),
+      };
     if (r.is_positive !== 0) stat.positives += 1;
     else stat.negatives += 1;
+    if (r.origin === 'pack') {
+      stat.fromPack = true;
+      if (r.pack) stat.packSet.add(r.pack);
+    } else {
+      stat.fromSelf = true;
+    }
     byLabel.set(r.label, stat);
   }
 
-  return [...byLabel.values()].sort(
-    (a, b) => b.tagged - a.tagged || a.label.localeCompare(b.label)
-  );
+  return [...byLabel.values()]
+    .map(({ packSet, ...s }) => ({ ...s, packs: [...packSet].sort() }))
+    .sort((a, b) => b.tagged - a.tagged || a.label.localeCompare(b.label));
 }
 
-// Bulk-insert exemplars from an imported teaching pack. Skips ones that already
-// exist verbatim (same label, polarity, and vector) so re-importing a pack — or
-// importing one that overlaps your own teaching — doesn't pile up duplicates.
+// One row per imported pack: which packs are installed and how much each adds.
+// Powers the pack-management list (and per-pack removal).
+export interface ImportedPack {
+  pack: string;
+  labels: number; // distinct labels the pack contributes
+  examples: number; // total exemplars from the pack
+}
+
+export async function getImportedPacks(): Promise<ImportedPack[]> {
+  const db = await getDb();
+  const rows = await db.getAllAsync<{ pack: string; label: string }>(
+    "SELECT pack, label FROM exemplars WHERE origin = 'pack'"
+  );
+  const byPack = new Map<string, { labels: Set<string>; examples: number }>();
+  for (const r of rows) {
+    const name = r.pack || 'Imported pack';
+    const g = byPack.get(name) ?? { labels: new Set<string>(), examples: 0 };
+    g.labels.add(r.label);
+    g.examples += 1;
+    byPack.set(name, g);
+  }
+  return [...byPack.entries()]
+    .map(([pack, g]) => ({ pack, labels: g.labels.size, examples: g.examples }))
+    .sort((a, b) => a.pack.localeCompare(b.pack));
+}
+
+// Remove every example imported from a given pack (your own teaching is left
+// untouched). Returns how many exemplars were dropped.
+export async function deleteExemplarsByPack(pack: string): Promise<number> {
+  const db = await getDb();
+  const res = await db.runAsync(
+    "DELETE FROM exemplars WHERE origin = 'pack' AND pack = ?",
+    pack
+  );
+  return res.changes ?? 0;
+}
+
+// Bulk-insert exemplars from an imported teaching pack, tagging each with its
+// source `pack` name and origin 'pack'. Two modes:
+//  - 'merge'   (default): keep what you have, add the pack's examples, and skip
+//    any that already exist verbatim so re-importing never piles up duplicates.
+//  - 'replace': wipe ALL existing exemplars first (yours included) so the
+//    library holds exactly this pack — for starting clean from a curated set.
 export async function importExemplars(
   list: {
     label: string;
@@ -576,24 +656,33 @@ export async function importExemplars(
     vector: number[];
     associations: string[];
     positive: boolean;
-  }[]
-): Promise<{ added: number; skipped: number }> {
+  }[],
+  opts: { pack: string; mode?: 'merge' | 'replace' } = { pack: '' }
+): Promise<{ added: number; skipped: number; removed: number }> {
   const db = await getDb();
-  const existing = await getExemplars();
+  const mode = opts.mode ?? 'merge';
   const sig = (label: string, positive: boolean, vec: number[]) =>
     // First few components rounded are a cheap, collision-safe fingerprint for
-    // a 512-dim normalized vector — exact equality across devices is unreliable.
-    `${label} ${positive ? 1 : 0} ${vec.slice(0, 8).map((v) => v.toFixed(5)).join(',')}`;
+    // a 512-dim normalized vector; exact equality across devices is unreliable.
+    `${label} ${positive ? 1 : 0} ${vec.slice(0, 8).map((v) => v.toFixed(5)).join(',')}`;
+
+  // On replace we drop everything below, so there's nothing to dedupe against.
+  const existing = mode === 'replace' ? [] : await getExemplars();
   const seen = new Set(existing.map((e) => sig(e.label, e.positive, e.vector)));
 
   let added = 0;
   let skipped = 0;
+  let removed = 0;
   const stmt = await db.prepareAsync(
-    `INSERT INTO exemplars (label, category, vector, associations, source_uri, is_positive, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO exemplars (label, category, vector, associations, source_uri, is_positive, origin, pack, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, 'pack', ?, ?)`
   );
   try {
     await db.withTransactionAsync(async () => {
+      if (mode === 'replace') {
+        const res = await db.runAsync('DELETE FROM exemplars');
+        removed = res.changes ?? 0;
+      }
       for (const e of list) {
         const s = sig(e.label, e.positive, e.vector);
         if (seen.has(s)) {
@@ -608,6 +697,7 @@ export async function importExemplars(
           JSON.stringify(e.associations),
           '', // imported examples have no local source image
           e.positive ? 1 : 0,
+          opts.pack || 'Imported pack',
           Date.now()
         );
         added += 1;
@@ -616,7 +706,7 @@ export async function importExemplars(
   } finally {
     await stmt.finalizeAsync();
   }
-  return { added, skipped };
+  return { added, skipped, removed };
 }
 
 // ---- indexing errors (diagnostics) ------------------------------------------
