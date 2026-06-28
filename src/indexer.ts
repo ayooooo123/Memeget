@@ -71,8 +71,8 @@ const NEG_PREFIX = 'neg::';
 // ("Read image error: invalid argument"). Transcode every frame to a plain
 // JPEG (downscaled — CLIP only needs 224px) so embed + OCR always get a format
 // they can read. Also sidesteps out-of-memory on very large images.
-async function toJpeg(uri: string): Promise<string> {
-  const r = await manipulateAsync(uri, [{ resize: { width: 768 } }], {
+async function toJpeg(uri: string, width = 768): Promise<string> {
+  const r = await manipulateAsync(uri, [{ resize: { width } }], {
     compress: 0.9,
     format: SaveFormat.JPEG,
   });
@@ -92,6 +92,12 @@ async function ocr(uri: string): Promise<string> {
   }
 }
 
+// Width fed to the VLM. LFM2-VL processes up to 512px natively and tiles
+// anything larger — every extra tile is more vision tokens and a proportionally
+// longer prefill, the dominant cost of a caption. Capping at 512 keeps most
+// memes to a single tile (the ML Kit OCR hint covers any small text we'd lose).
+const VLM_FRAME_WIDTH = 512;
+
 // Turn a library item (image or video) into a local JPEG path the models can
 // read, plus the temp files to clean up afterward. The VLM needs an actual
 // on-disk path (its `mediaPath`), and SAF content:// URIs aren't usable
@@ -109,7 +115,7 @@ async function materializeFrame(
     frame = uri;
     temp.push(uri);
   }
-  const jpeg = await toJpeg(frame);
+  const jpeg = await toJpeg(frame, VLM_FRAME_WIDTH);
   temp.push(jpeg);
   return { jpeg, temp };
 }
@@ -472,19 +478,71 @@ export interface EnrichResult {
 }
 
 // Minimal surface of the vision API the enricher needs — keeps indexer.ts free
-// of any React/provider coupling.
+// of any React/provider coupling. `ocrHint` is the text ML Kit already pulled
+// from the image, passed so the model uses it verbatim instead of (poorly)
+// re-reading small text — which lets us downscale the frame aggressively.
 export interface VisionEnricher {
   ready: boolean;
-  describe: (jpegPath: string) => Promise<VisionResult | null>;
+  describe: (jpegPath: string, ocrHint?: string) => Promise<VisionResult | null>;
 }
 
-// Walk every meme still awaiting a description and run LFM2-VL over it: caption,
-// literal text, and open-vocabulary tags get merged into the record and folded
-// into the search index. Runs AFTER the fast CLIP pass so the library is
-// browsable immediately; this just makes it smarter in the background.
-//
-// Strictly sequential: the on-device LLM does one generation at a time, and
-// re-deriving each frame keeps memory flat across a whole library.
+type MemeNeedingVision = {
+  id: number;
+  uri: string;
+  name: string;
+  kind: 'image' | 'video';
+  tags: Tag[];
+  ocrText: string;
+};
+
+// Describe one meme and write the result back. Returns 'unready' (caller should
+// stop — model not loaded), 'done', or 'failed' (marked so it won't auto-retry).
+// Re-derives the frame each time so memory stays flat across a whole library.
+async function describeAndSave(
+  vision: VisionEnricher,
+  m: MemeNeedingVision,
+  assoc: Map<string, string[]>,
+  idx: number
+): Promise<'done' | 'failed' | 'unready'> {
+  const temp: string[] = [];
+  try {
+    const frame = await materializeFrame({ uri: m.uri, name: m.name, kind: m.kind }, idx);
+    temp.push(...frame.temp);
+
+    const res = await vision.describe(frame.jpeg, m.ocrText);
+    if (!res) return 'unready'; // model went unready; leave as pending to retry
+
+    // LFM's open-vocabulary tags join the existing CLIP/OCR/exemplar tags,
+    // ranked between them (above CLIP guesses, below the user's truth).
+    const visionTags: Tag[] = res.tags.map((label) => ({
+      label,
+      category: 'topic',
+      score: 0.9,
+      source: 'vision' as const,
+    }));
+    const merged = dedupeRankTags([...m.tags, ...visionTags], 6);
+
+    // Everything the model surfaced becomes searchable: the literal text, the
+    // named subjects, and the keywords — on top of the usual association terms.
+    const visionExtra = [res.text, res.subjects.join(' '), res.tags.join(' ')]
+      .join(' ')
+      .toLowerCase();
+    const extraTerms = `${extraTermsFor(merged, assoc)} ${visionExtra}`.replace(/\s+/g, ' ').trim();
+
+    await setMemeVision(m.id, { caption: res.caption, tags: merged, extraTerms });
+    return 'done';
+  } catch {
+    await markVisionFailed(m.id).catch(() => {});
+    return 'failed';
+  } finally {
+    for (const t of temp) await deleteCache(t);
+  }
+}
+
+// Walk every meme still awaiting a description and run LFM2-VL over it. This is
+// the "burst" path (the Settings "Describe N now" button). Runs AFTER the fast
+// CLIP pass so the library is browsable immediately; this just makes it smarter.
+// Strictly sequential — the on-device LLM does one generation at a time.
 export async function enrichLibrary(
   vision: VisionEnricher,
   opts: { onProgress?: (p: EnrichProgress) => void; shouldCancel?: () => boolean } = {}
@@ -501,45 +559,25 @@ export async function enrichLibrary(
     if (opts.shouldCancel?.()) break;
     const m = queue[i];
     opts.onProgress?.({ done: i, total, current: m.name });
-
-    const temp: string[] = [];
-    try {
-      const frame = await materializeFrame({ uri: m.uri, name: m.name, kind: m.kind }, i);
-      temp.push(...frame.temp);
-
-      const res = await vision.describe(frame.jpeg);
-      if (!res) {
-        // Model went unready mid-run; leave as pending to retry next time.
-        break;
-      }
-
-      // LFM's open-vocabulary tags join the existing CLIP/OCR/exemplar tags,
-      // ranked between them (above CLIP guesses, below the user's truth).
-      const visionTags: Tag[] = res.tags.map((label) => ({
-        label,
-        category: 'topic',
-        score: 0.9,
-        source: 'vision' as const,
-      }));
-      const merged = dedupeRankTags([...m.tags, ...visionTags], 6);
-
-      // Everything the model surfaced becomes searchable: the literal text, the
-      // named subjects, and the keywords — on top of the usual association terms.
-      const visionExtra = [res.text, res.subjects.join(' '), res.tags.join(' ')]
-        .join(' ')
-        .toLowerCase();
-      const extraTerms = `${extraTermsFor(merged, assoc)} ${visionExtra}`.replace(/\s+/g, ' ').trim();
-
-      await setMemeVision(m.id, { caption: res.caption, tags: merged, extraTerms });
-      described++;
-    } catch {
-      await markVisionFailed(m.id).catch(() => {});
-      failed++;
-    } finally {
-      for (const t of temp) await deleteCache(t);
-    }
+    const r = await describeAndSave(vision, m, assoc, i);
+    if (r === 'unready') break;
+    if (r === 'done') described++;
+    else failed++;
   }
 
   opts.onProgress?.({ done: total, total, current: '' });
   return { described, failed };
+}
+
+// Describe exactly ONE pending meme — the unit of work for the paced background
+// service. Returns 'empty' when nothing is left to do (caller can back off).
+export async function enrichNextMeme(
+  vision: VisionEnricher
+): Promise<'done' | 'failed' | 'empty'> {
+  if (!vision.ready) return 'empty';
+  const queue = await getMemesNeedingVision(1);
+  if (queue.length === 0) return 'empty';
+  const assoc = await buildAssociations();
+  const r = await describeAndSave(vision, queue[0], assoc, 0);
+  return r === 'unready' ? 'empty' : r;
 }

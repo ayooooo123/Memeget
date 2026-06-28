@@ -1,13 +1,13 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Alert, Linking, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Alert, Linking, Pressable, ScrollView, StyleSheet, Switch, Text, View } from 'react-native';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
 
 import { showToast } from '../components/Toast';
-import { Button, Chip, ProgressBar, StatusDot } from '../components/ui';
+import { Button, Chip, ProgressBar, Slider, StatusDot } from '../components/ui';
 import { useEmbeddings } from '../embeddings';
-import { useVision } from '../vision';
+import { useVision, intensityLabel, memesPerHour } from '../vision';
 import {
   clearIndex,
   countMemes,
@@ -29,7 +29,7 @@ import {
 } from '../db';
 import { emitLibraryChanged } from '../events';
 import { success, warn } from '../haptics';
-import { enrichLibrary, retagAll } from '../indexer';
+import { retagAll } from '../indexer';
 import { MEME_LABELS } from '../memeLabels';
 import { buildPack, parsePack, serializePack } from '../teachingPack';
 import { colors, radius, space, TABBAR_CLEARANCE } from '../theme';
@@ -264,10 +264,16 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
     enrichCancel.current = false;
     setEnriching({ done: 0, total: 0 });
     try {
-      const res = await enrichLibrary(vision, {
+      // Routed through the provider's mutex so it can never collide with the
+      // background trickle (one accelerator, one generation at a time).
+      const res = await vision.runEnrichment({
         onProgress: (p) => setEnriching({ done: p.done, total: p.total }),
         shouldCancel: () => enrichCancel.current,
       });
+      if (res === 'busy') {
+        showToast('Already describing in the background — try again in a moment', 'info');
+        return;
+      }
       success();
       emitLibraryChanged(); // captions/tags changed under the Library's feet
       const failNote = res.failed > 0 ? ` · ${res.failed} failed` : '';
@@ -415,6 +421,47 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
               <Text style={styles.note}>
                 {described > 0 ? 'Every meme has been described ✓' : 'Index some memes first, then describe them.'}
               </Text>
+            )}
+
+            <View style={styles.bgDivider} />
+
+            <View style={styles.bgHeadRow}>
+              <Text style={styles.rowLabel}>Background processing</Text>
+              <Switch
+                value={vision.backgroundEnabled}
+                onValueChange={vision.setBackgroundEnabled}
+                trackColor={{ true: colors.volt, false: colors.surface3 }}
+                thumbColor="#fff"
+              />
+            </View>
+            <Text style={styles.note}>
+              Quietly trickles through your library while Memeget is open — no need to sit on the
+              Describe button. Drag toward Extreme to go faster (and warmer); Conservative sips. Runs
+              only while the app is open for now.
+            </Text>
+
+            {vision.backgroundEnabled && (
+              <>
+                <View style={styles.enrichTopRow}>
+                  <Text style={styles.rowLabel}>{intensityLabel(vision.backgroundIntensity)}</Text>
+                  <Text style={styles.rowValue}>
+                    {memesPerHour(vision.backgroundIntensity) === Infinity
+                      ? 'max speed'
+                      : `~${memesPerHour(vision.backgroundIntensity)} / hr`}
+                  </Text>
+                </View>
+                <Slider
+                  value={vision.backgroundIntensity}
+                  onChange={vision.setBackgroundIntensity}
+                />
+                <View style={styles.scaleRow}>
+                  <Text style={styles.faintSmall}>Conservative</Text>
+                  <Text style={styles.faintSmall}>Extreme</Text>
+                </View>
+                {vision.running && !enriching && (
+                  <Text style={styles.note}>Working in the background… {described} described so far.</Text>
+                )}
+              </>
             )}
           </>
         )}
@@ -677,6 +724,10 @@ const styles = StyleSheet.create({
   qualityRow: { flexDirection: 'row', gap: 8 },
   enrichTopRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   stopText: { color: colors.danger, fontSize: 13, fontWeight: '700' },
+  bgDivider: { height: 1, backgroundColor: colors.border, marginVertical: 4 },
+  bgHeadRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  scaleRow: { flexDirection: 'row', justifyContent: 'space-between' },
+  faintSmall: { color: colors.faint, fontSize: 11, fontWeight: '600' },
   link: { color: colors.accent, fontSize: 13, fontWeight: '600' },
   errText: { color: colors.danger, fontSize: 12 },
   errBox: {
