@@ -578,6 +578,15 @@ function ViewerSheet({
                 </Text>
               )}
 
+              {!!item.caption && (
+                <View style={styles.block}>
+                  <Text style={styles.sectionLabel}>What this is · on-device AI</Text>
+                  <Text style={styles.caption} selectable>
+                    {item.caption}
+                  </Text>
+                </View>
+              )}
+
               {item.tags.length > 0 && (
                 <View style={styles.block}>
                   <Text style={styles.sectionLabel}>
@@ -703,7 +712,11 @@ const styles = StyleSheet.create({
   },
   playIcon: { color: '#fff', fontSize: 10 },
   pending: {
-    ...StyleSheet.absoluteFillObject,
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: 'rgba(0,0,0,0.35)',
@@ -786,6 +799,7 @@ const styles = StyleSheet.create({
   },
   tagWrap: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   ocr: { color: colors.textDim, fontSize: 13, lineHeight: 19 },
+  caption: { color: colors.text, fontSize: 14, lineHeight: 20, fontWeight: '500' },
   mutedSmall: { color: colors.muted, fontSize: 12 },
   debugLink: { color: colors.faint, fontSize: 12, textDecorationLine: 'underline' },
 

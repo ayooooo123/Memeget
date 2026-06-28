@@ -3,6 +3,7 @@
 import React, { useRef } from 'react';
 import {
   Animated,
+  PanResponder,
   Pressable,
   StyleSheet,
   Text,
@@ -146,6 +147,55 @@ export function ProgressBar({ value, tint = colors.volt }: { value: number; tint
   );
 }
 
+// Self-contained horizontal slider (0..1) — PanResponder + percentage layout,
+// so we don't pull in a native slider dependency / rebuild. Tap or drag anywhere
+// on the track. Width is read via onLayout into a ref so the gesture math is
+// always against the current track size.
+export function Slider({
+  value,
+  onChange,
+  tint = colors.volt,
+}: {
+  value: number;
+  onChange: (v: number) => void;
+  tint?: string;
+}) {
+  const widthRef = useRef(0);
+  const onChangeRef = useRef(onChange);
+  onChangeRef.current = onChange;
+
+  const setFromX = (x: number) => {
+    const w = widthRef.current;
+    if (!w) return;
+    onChangeRef.current(Math.max(0, Math.min(1, x / w)));
+  };
+
+  const pan = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: () => true,
+      onPanResponderGrant: (e) => setFromX(e.nativeEvent.locationX),
+      onPanResponderMove: (e) => setFromX(e.nativeEvent.locationX),
+    })
+  ).current;
+
+  const pct = `${Math.max(0, Math.min(1, value)) * 100}%` as `${number}%`;
+  return (
+    <View
+      style={styles.sliderHit}
+      onLayout={(e) => {
+        widthRef.current = e.nativeEvent.layout.width;
+      }}
+      {...pan.panHandlers}
+    >
+      <View style={styles.sliderTrack}>
+        <View style={[styles.sliderFill, { width: pct, backgroundColor: tint }]} />
+      </View>
+      <View style={[styles.sliderThumb, { left: pct, borderColor: tint }]} />
+    </View>
+  );
+}
+
 // Small status dot + label, e.g. model readiness.
 export function StatusDot({ tone, label }: { tone: 'good' | 'busy' | 'bad'; label: string }) {
   const c = tone === 'good' ? colors.good : tone === 'bad' ? colors.danger : colors.accent;
@@ -196,6 +246,23 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
   },
   fill: { height: '100%', borderRadius: 2 },
+  sliderHit: { height: 28, justifyContent: 'center' },
+  sliderTrack: {
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: colors.surface3,
+    overflow: 'hidden',
+  },
+  sliderFill: { height: '100%', borderRadius: 3 },
+  sliderThumb: {
+    position: 'absolute',
+    width: 18,
+    height: 18,
+    marginLeft: -9,
+    borderRadius: 9,
+    backgroundColor: colors.text,
+    borderWidth: 2,
+  },
   statusRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   dot: { width: 7, height: 7, borderRadius: 4 },
   statusText: { color: colors.muted, fontSize: 12, fontWeight: '600' },

@@ -12,33 +12,60 @@ import {
   addIndexError,
   bulkUpdateMemeTags,
   clearIndexErrors,
+  countMemesDescribed,
+  dot,
   getAllMemeEmbeddings,
+  getDescribedVisionRecords,
   getEmbeddingSample,
   getExemplars,
   getFolders,
   getLabelVectors,
+  getMemesNeedingVision,
   insertMeme,
   insertPendingMeme,
+  markVisionFailed,
   memeExists,
   putLabelVector,
+  setMemeVision,
+  updateMemeTags,
+  type DescribedVisionRow,
+  type MemeNeedingVisionRow,
 } from './db';
 import { ASSOCIATIONS, MEME_LABELS, NEGATIVE_ANCHORS, ocrTags } from './memeLabels';
 import { copyToCache, deleteCache, listMedia, saveToFolder, type SafFile } from './saf';
+import type { VisionResult } from './visionCore';
 import type { Tag } from './types';
 
-// Merge visual (prompt/exemplar) tags with OCR-derived tags, de-duped by label.
-// Priority: ocr > exemplar > prompt (watermarks and the user's ground truth
-// beat shaky zero-shot guesses).
-function mergeTags(visual: Tag[], fromOcr: Tag[]): Tag[] {
-  const rank = (t: Tag) => (t.source === 'ocr' ? 3 : t.source === 'exemplar' ? 2 : 1);
+// Confidence in how a label was matched, highest first:
+//   ocr      — text literally in the image (watermark/caption)
+//   exemplar — the user's own ground truth, taught by example
+//   vision   — LFM2-VL's open-vocabulary read of the image
+//   prompt   — CLIP zero-shot guess against the fixed label vocabulary
+const TAG_RANK: Record<NonNullable<Tag['source']>, number> = {
+  ocr: 4,
+  exemplar: 3,
+  vision: 2,
+  prompt: 1,
+};
+const tagRank = (t: Tag): number => TAG_RANK[t.source ?? 'prompt'] ?? 1;
+
+// De-dupe a pile of tags by label, keeping the highest-confidence source (and
+// highest score within a source), best first, capped.
+function dedupeRankTags(tags: Tag[], cap = 6): Tag[] {
   const best = new Map<string, Tag>();
-  for (const t of [...visual, ...fromOcr]) {
+  for (const t of tags) {
     const cur = best.get(t.label);
-    if (!cur || rank(t) > rank(cur) || (rank(t) === rank(cur) && t.score > cur.score)) {
+    if (!cur || tagRank(t) > tagRank(cur) || (tagRank(t) === tagRank(cur) && t.score > cur.score)) {
       best.set(t.label, t);
     }
   }
-  return [...best.values()].sort((a, b) => rank(b) - rank(a) || b.score - a.score).slice(0, 4);
+  return [...best.values()].sort((a, b) => tagRank(b) - tagRank(a) || b.score - a.score).slice(0, cap);
+}
+
+// Fast-pass merge: CLIP/exemplar visual tags + OCR-derived tags. Kept tight (4)
+// because the slower LFM2-VL pass adds richer tags later.
+function mergeTags(visual: Tag[], fromOcr: Tag[]): Tag[] {
+  return dedupeRankTags([...visual, ...fromOcr], 4);
 }
 
 const NEG_PREFIX = 'neg::';
@@ -49,8 +76,8 @@ const NEG_PREFIX = 'neg::';
 // ("Read image error: invalid argument"). Transcode every frame to a plain
 // JPEG (downscaled — CLIP only needs 224px) so embed + OCR always get a format
 // they can read. Also sidesteps out-of-memory on very large images.
-async function toJpeg(uri: string): Promise<string> {
-  const r = await manipulateAsync(uri, [{ resize: { width: 768 } }], {
+async function toJpeg(uri: string, width = 768): Promise<string> {
+  const r = await manipulateAsync(uri, [{ resize: { width } }], {
     compress: 0.9,
     format: SaveFormat.JPEG,
   });
@@ -68,6 +95,46 @@ async function ocr(uri: string): Promise<string> {
   } catch {
     return '';
   }
+}
+
+// Width fed to the VLM. LFM2-VL processes up to 512px natively and tiles
+// anything larger — every extra tile is more vision tokens and a proportionally
+// longer prefill, the dominant cost of a caption. Capping at 512 keeps most
+// memes to a single tile (the ML Kit OCR hint covers any small text we'd lose).
+const VLM_FRAME_WIDTH = 512;
+
+// Turn a library item (image or video) into a local JPEG path the models can
+// read, plus the temp files to clean up afterward. The VLM needs an actual
+// on-disk path (its `mediaPath`), and SAF content:// URIs aren't usable
+// directly — so we re-derive the frame the same way the index pass does.
+async function materializeFrame(
+  file: SafFile,
+  idx: number
+): Promise<{ jpeg: string; temp: string[] }> {
+  const temp: string[] = [];
+  const work = await copyToCache(file, idx);
+  temp.push(work);
+  let frame = work;
+  if (file.kind === 'video') {
+    const { uri } = await VideoThumbnails.getThumbnailAsync(work, { time: 1000 });
+    frame = uri;
+    temp.push(uri);
+  }
+  const jpeg = await toJpeg(frame, VLM_FRAME_WIDTH);
+  temp.push(jpeg);
+  return { jpeg, temp };
+}
+
+// Curated associations + any added when teaching an exemplar. Shared by the
+// classification pass and the VLM enrichment pass.
+async function buildAssociations(): Promise<Map<string, string[]>> {
+  const assoc = new Map<string, string[]>(Object.entries(ASSOCIATIONS));
+  for (const e of await getExemplars()) {
+    if (e.associations.length) {
+      assoc.set(e.label, [...(assoc.get(e.label) ?? []), ...e.associations]);
+    }
+  }
+  return assoc;
 }
 
 export interface IndexProgress {
@@ -387,12 +454,20 @@ export async function retagAll(
   // which froze the app while teaching.
   const updates: { id: number; tags: Tag[]; extraTerms: string }[] = [];
   for (let i = 0; i < rows.length; i++) {
-    const vec = Array.from(rows[i].embedding);
-    const tags = mergeTags(
+    const row = rows[i];
+    const vec = Array.from(row.embedding);
+    const base = mergeTags(
       classifyImage(vec, know.labelVecs, know.exemplarHeads, know.mean, know.negativeVecs),
-      ocrTags(rows[i].ocrText)
+      ocrTags(row.ocrText)
     );
-    updates.push({ id: rows[i].id, tags, extraTerms: extraTermsFor(tags, know.assoc) });
+    // Preserve any LFM2-VL tags already on the meme — re-tagging applies new
+    // taught knowledge, it shouldn't erase the vision pass's work.
+    const visionTags = row.tags.filter((t) => t.source === 'vision');
+    const merged = dedupeRankTags([...base, ...visionTags], 6);
+    // Likewise keep the vision search terms (subjects/text/caption keywords)
+    // that already live in extra_terms — union them with the fresh assoc terms.
+    const extraTerms = unionTerms(extraTermsFor(merged, know.assoc), row.extraTerms);
+    updates.push({ id: row.id, tags: merged, extraTerms });
     opts.onProgress?.(i + 1, rows.length);
     if ((i & 63) === 63) await new Promise<void>((resolve) => setTimeout(resolve, 0));
   }
@@ -400,4 +475,271 @@ export async function retagAll(
   // Single transaction for all the writes — fast even on a big library.
   await bulkUpdateMemeTags(updates);
   return { updated: updates.length };
+}
+
+// Merge two whitespace-separated term strings into a de-duplicated bag.
+function unionTerms(a: string, b: string): string {
+  const set = new Set<string>();
+  for (const w of `${a} ${b}`.split(/\s+/)) {
+    const t = w.trim();
+    if (t) set.add(t);
+  }
+  return [...set].join(' ');
+}
+
+// ---- LFM2-VL enrichment pass -------------------------------------------------
+
+export interface EnrichProgress {
+  done: number;
+  total: number;
+  current: string;
+}
+
+export interface EnrichResult {
+  described: number; // ran the model
+  deduped: number; // skipped — copied an identical meme's result
+  failed: number;
+}
+
+// Minimal surface of the vision API the enricher needs — keeps indexer.ts free
+// of any React/provider coupling. `ocrHint` is the text ML Kit already pulled
+// from the image, passed so the model uses it verbatim instead of (poorly)
+// re-reading small text — which lets us downscale the frame aggressively.
+export interface VisionEnricher {
+  ready: boolean;
+  describe: (jpegPath: string, ocrHint?: string) => Promise<VisionResult | null>;
+}
+
+interface VisionPayload {
+  caption: string;
+  tags: Tag[];
+  extraTerms: string;
+}
+
+// ---- duplicate-skip twin index ----------------------------------------------
+// The cheapest description is the one we never run. Two memes are treated as
+// "the same" when their CLIP vectors are nearly identical AND their OCR text
+// matches. The OCR check is what makes this SAFE for memes: the same template
+// with different top-text has a high visual cosine but different text, so it is
+// NOT merged — its caption genuinely differs.
+const DUP_COSINE = 0.99;
+const normText = (s: string) => s.toLowerCase().replace(/\s+/g, ' ').trim();
+
+type TwinRec = DescribedVisionRow;
+let twinCache: { count: number; recs: TwinRec[] } | null = null;
+
+// Cache keyed by the described-meme count, which self-heals on delete/clear
+// (count drops → reload). Mutations only happen under the provider's mutex, so
+// there's no concurrent access to worry about.
+async function getTwinIndex(): Promise<TwinRec[]> {
+  const count = await countMemesDescribed();
+  if (!twinCache || twinCache.count !== count) {
+    twinCache = { count, recs: await getDescribedVisionRecords() };
+  }
+  return twinCache.recs;
+}
+function pushTwin(rec: TwinRec) {
+  if (twinCache) {
+    twinCache.recs.push(rec);
+    twinCache.count += 1; // the matching setMemeVision bumped the DB count too
+  }
+}
+export function invalidateTwinIndex() {
+  twinCache = null;
+}
+
+function findTwin(m: MemeNeedingVisionRow, twins: TwinRec[]): TwinRec | null {
+  const text = normText(m.ocrText);
+  let best: TwinRec | null = null;
+  let bestCos = DUP_COSINE;
+  for (const t of twins) {
+    if (normText(t.ocrText) !== text) continue;
+    const c = dot(m.embedding, t.embedding); // both normalized → cosine
+    if (c >= bestCos) {
+      bestCos = c;
+      best = t;
+    }
+  }
+  return best;
+}
+
+// ---- telemetry (per-stage timing, for tuning) -------------------------------
+const telem = { described: 0, deduped: 0, failed: 0, durations: [] as number[] };
+function recordDuration(ms: number) {
+  telem.durations.push(ms);
+  if (telem.durations.length > 30) telem.durations.shift();
+}
+
+export interface VisionTelemetry {
+  described: number;
+  deduped: number;
+  failed: number;
+  avgMs: number; // mean model time over the last ~30 described memes
+}
+export function getVisionTelemetry(): VisionTelemetry {
+  const d = telem.durations;
+  const avgMs = d.length ? d.reduce((a, b) => a + b, 0) / d.length : 0;
+  return { described: telem.described, deduped: telem.deduped, failed: telem.failed, avgMs };
+}
+
+// Build searchable terms from merged tags + the model's free text.
+function visionExtraTerms(merged: Tag[], assoc: Map<string, string[]>, res: VisionResult): string {
+  const extra = [res.text, res.subjects.join(' '), res.tags.join(' ')].join(' ').toLowerCase();
+  return `${extraTermsFor(merged, assoc)} ${extra}`.replace(/\s+/g, ' ').trim();
+}
+
+// Run the model on one meme and persist. Returns the saved payload (to seed the
+// twin index) or a terminal status. Re-derives the frame each time so memory
+// stays flat across a whole library; times the call for telemetry.
+async function describeAndSave(
+  vision: VisionEnricher,
+  m: MemeNeedingVisionRow,
+  assoc: Map<string, string[]>,
+  idx: number
+): Promise<{ status: 'done'; payload: VisionPayload } | { status: 'failed' | 'unready' }> {
+  const temp: string[] = [];
+  const started = Date.now();
+  try {
+    const frame = await materializeFrame({ uri: m.uri, name: m.name, kind: m.kind }, idx);
+    temp.push(...frame.temp);
+
+    const res = await vision.describe(frame.jpeg, m.ocrText);
+    if (!res) return { status: 'unready' }; // model went unready; leave pending
+
+    // LFM's open-vocabulary tags join the existing CLIP/OCR/exemplar tags,
+    // ranked between them (above CLIP guesses, below the user's truth).
+    const visionTags: Tag[] = res.tags.map((label) => ({
+      label,
+      category: 'topic',
+      score: 0.9,
+      source: 'vision' as const,
+    }));
+    const merged = dedupeRankTags([...m.tags, ...visionTags], 6);
+    const extraTerms = visionExtraTerms(merged, assoc, res);
+
+    await setMemeVision(m.id, { caption: res.caption, tags: merged, extraTerms });
+    recordDuration(Date.now() - started);
+    return { status: 'done', payload: { caption: res.caption, tags: merged, extraTerms } };
+  } catch {
+    await markVisionFailed(m.id).catch(() => {});
+    return { status: 'failed' };
+  } finally {
+    for (const t of temp) await deleteCache(t);
+  }
+}
+
+// Process one pending meme: skip-as-duplicate when a twin exists, else describe.
+// Keeps the running telemetry counters and the twin index up to date.
+async function enrichOne(
+  vision: VisionEnricher,
+  m: MemeNeedingVisionRow,
+  assoc: Map<string, string[]>,
+  twins: TwinRec[]
+): Promise<'done' | 'deduped' | 'failed' | 'unready'> {
+  const twin = findTwin(m, twins);
+  if (twin) {
+    // Copy the twin's caption; re-rank tags so this meme keeps its own
+    // CLIP/OCR/exemplar tags alongside the twin's vision tags.
+    const visionTags = twin.tags.filter((t) => t.source === 'vision');
+    const merged = dedupeRankTags([...m.tags, ...visionTags], 6);
+    const extraTerms = `${extraTermsFor(merged, assoc)} ${twin.extraTerms}`.replace(/\s+/g, ' ').trim();
+    await setMemeVision(m.id, { caption: twin.caption, tags: merged, extraTerms });
+    pushTwin({ embedding: m.embedding, ocrText: m.ocrText, caption: twin.caption, tags: merged, extraTerms });
+    telem.deduped += 1;
+    return 'deduped';
+  }
+
+  const r = await describeAndSave(vision, m, assoc, 0);
+  if (r.status === 'done') {
+    telem.described += 1;
+    pushTwin({
+      embedding: m.embedding,
+      ocrText: m.ocrText,
+      caption: r.payload.caption,
+      tags: r.payload.tags,
+      extraTerms: r.payload.extraTerms,
+    });
+    return 'done';
+  }
+  if (r.status === 'failed') {
+    telem.failed += 1;
+    return 'failed';
+  }
+  return 'unready';
+}
+
+// Walk every meme still awaiting a description. This is the "burst" path (the
+// Settings "Describe N now" button). Runs AFTER the fast CLIP pass so the
+// library is browsable immediately; this just makes it smarter. Strictly
+// sequential — the on-device LLM does one generation at a time.
+export async function enrichLibrary(
+  vision: VisionEnricher,
+  opts: { onProgress?: (p: EnrichProgress) => void; shouldCancel?: () => boolean } = {}
+): Promise<EnrichResult> {
+  if (!vision.ready) throw new Error('Vision model is still loading — try again shortly.');
+
+  const assoc = await buildAssociations();
+  const twins = await getTwinIndex();
+  const queue = await getMemesNeedingVision();
+  const total = queue.length;
+
+  let described = 0;
+  let deduped = 0;
+  let failed = 0;
+  for (let i = 0; i < queue.length; i++) {
+    if (opts.shouldCancel?.()) break;
+    opts.onProgress?.({ done: i, total, current: queue[i].name });
+    const r = await enrichOne(vision, queue[i], assoc, twins);
+    if (r === 'unready') break;
+    if (r === 'done') described++;
+    else if (r === 'deduped') deduped++;
+    else failed++;
+  }
+
+  opts.onProgress?.({ done: total, total, current: '' });
+  return { described, deduped, failed };
+}
+
+// Process exactly ONE pending meme — the unit of work for the paced background
+// loop. Returns 'empty' when nothing is left to do (caller can back off).
+export async function enrichNextMeme(
+  vision: VisionEnricher
+): Promise<'done' | 'deduped' | 'failed' | 'empty'> {
+  if (!vision.ready) return 'empty';
+  const queue = await getMemesNeedingVision(1);
+  if (queue.length === 0) return 'empty';
+  const assoc = await buildAssociations();
+  const twins = await getTwinIndex();
+  const r = await enrichOne(vision, queue[0], assoc, twins);
+  return r === 'unready' ? 'empty' : r;
+}
+
+// Bounded session for an OS-scheduled background run: describe up to `maxItems`
+// pending memes, stopping early if `shouldStop` flips (time budget expiring,
+// device went hot/unplugged). Unlike the burst path it re-queries one meme at a
+// time so a long session always sees freshly-indexed work and can bail cleanly.
+export async function runBackgroundSession(
+  vision: VisionEnricher,
+  opts: { maxItems?: number; shouldStop?: () => boolean } = {}
+): Promise<EnrichResult> {
+  const result: EnrichResult = { described: 0, deduped: 0, failed: 0 };
+  if (!vision.ready) return result;
+
+  const assoc = await buildAssociations();
+  const twins = await getTwinIndex();
+  const max = opts.maxItems ?? Infinity;
+
+  let n = 0;
+  while (n < max) {
+    if (opts.shouldStop?.()) break;
+    const queue = await getMemesNeedingVision(1);
+    if (queue.length === 0) break;
+    const r = await enrichOne(vision, queue[0], assoc, twins);
+    if (r === 'unready') break;
+    if (r === 'done') result.described++;
+    else if (r === 'deduped') result.deduped++;
+    else result.failed++;
+    n++;
+  }
+  return result;
 }

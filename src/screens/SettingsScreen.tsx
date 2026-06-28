@@ -1,15 +1,18 @@
-import React, { useCallback, useEffect, useState } from 'react';
-import { Alert, Linking, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { Alert, Linking, Pressable, ScrollView, StyleSheet, Switch, Text, View } from 'react-native';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
 
 import { showToast } from '../components/Toast';
-import { Button, ProgressBar, StatusDot } from '../components/ui';
+import { Button, Chip, ProgressBar, Slider, StatusDot } from '../components/ui';
 import { useEmbeddings } from '../embeddings';
+import { useVision, intensityLabel, memesPerHour } from '../vision';
 import {
   clearIndex,
   countMemes,
+  countMemesDescribed,
+  countMemesNeedingVision,
   deleteExemplarsByLabel,
   deleteExemplarsByPack,
   getExemplars,
@@ -19,13 +22,14 @@ import {
   getTaughtLabelStats,
   importExemplars,
   removeFolder,
+  resetVisionState,
   type ImportedPack,
   type IndexError,
   type TaughtLabelStat,
 } from '../db';
 import { emitLibraryChanged } from '../events';
 import { success, warn } from '../haptics';
-import { retagAll } from '../indexer';
+import { getVisionTelemetry, retagAll, type VisionTelemetry } from '../indexer';
 import { MEME_LABELS } from '../memeLabels';
 import { buildPack, parsePack, serializePack } from '../teachingPack';
 import { colors, radius, space, TABBAR_CLEARANCE } from '../theme';
@@ -33,6 +37,7 @@ import type { LinkedFolder } from '../types';
 
 export function SettingsScreen({ active = true }: { active?: boolean }) {
   const emb = useEmbeddings();
+  const vision = useVision();
   const [folders, setFolders] = useState<LinkedFolder[]>([]);
   const [count, setCount] = useState(0);
   const [taughtStats, setTaughtStats] = useState<TaughtLabelStat[]>([]);
@@ -41,6 +46,11 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
   const [showErrors, setShowErrors] = useState(false);
   const [retagging, setRetagging] = useState<{ done: number; total: number } | null>(null);
   const [transferBusy, setTransferBusy] = useState(false);
+  const [described, setDescribed] = useState(0);
+  const [pending, setPending] = useState(0);
+  const [enriching, setEnriching] = useState<{ done: number; total: number } | null>(null);
+  const [tele, setTele] = useState<VisionTelemetry>({ described: 0, deduped: 0, failed: 0, avgMs: 0 });
+  const enrichCancel = useRef(false);
 
   const refresh = useCallback(async () => {
     setFolders(await getFolders());
@@ -48,6 +58,9 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
     setTaughtStats(await getTaughtLabelStats().catch(() => []));
     setImportedPacks(await getImportedPacks().catch(() => []));
     setErrors(await getIndexErrors());
+    setDescribed(await countMemesDescribed());
+    setPending(await countMemesNeedingVision());
+    setTele(getVisionTelemetry());
   }, []);
 
   // Both tabs stay mounted (so the Library keeps its state), which means this
@@ -245,6 +258,56 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
     [refresh]
   );
 
+  const onRunEnrich = useCallback(async () => {
+    if (!vision.ready) {
+      showToast('Vision model still loading — try again shortly', 'info');
+      return;
+    }
+    enrichCancel.current = false;
+    setEnriching({ done: 0, total: 0 });
+    try {
+      // Routed through the provider's mutex so it can never collide with the
+      // background trickle (one accelerator, one generation at a time).
+      const res = await vision.runEnrichment({
+        onProgress: (p) => setEnriching({ done: p.done, total: p.total }),
+        shouldCancel: () => enrichCancel.current,
+      });
+      if (res === 'busy') {
+        showToast('Already describing in the background — try again in a moment', 'info');
+        return;
+      }
+      success();
+      emitLibraryChanged(); // captions/tags changed under the Library's feet
+      const dupNote = res.deduped > 0 ? ` · ${res.deduped} dup${res.deduped === 1 ? '' : 's'} skipped` : '';
+      const failNote = res.failed > 0 ? ` · ${res.failed} failed` : '';
+      showToast(
+        `Described ${res.described} meme${res.described === 1 ? '' : 's'}${dupNote}${failNote}`,
+        'success'
+      );
+    } catch (e) {
+      showToast(`Describe failed: ${String(e)}`, 'error');
+    } finally {
+      setEnriching(null);
+      refresh();
+    }
+  }, [vision, refresh]);
+
+  const onSwitchQuality = useCallback(
+    (q: 'fast' | 'max') => {
+      if (q === vision.quality) return;
+      vision.setQuality(q);
+      // Re-queue everything so the sharper/faster model re-describes it.
+      resetVisionState()
+        .then(refresh)
+        .catch(() => {});
+      showToast(
+        `Switched to ${q === 'max' ? 'Max · 1.6B' : 'Fast · 450M'} — re-run Describe to apply`,
+        'info'
+      );
+    },
+    [vision, refresh]
+  );
+
   const onClear = useCallback(() => {
     warn();
     Alert.alert(
@@ -273,6 +336,16 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
       ? 'Ready'
       : `Loading ${Math.round((emb.progress || 0) * 100)}%`;
 
+  const visionTone = vision.error ? 'bad' : vision.ready ? 'good' : 'busy';
+  const visionLabel = vision.error
+    ? 'Error'
+    : !vision.enabled
+      ? 'Off'
+      : vision.ready
+        ? 'Ready'
+        : `Loading ${Math.round((vision.progress || 0) * 100)}%`;
+  const describedTotal = described + pending;
+
   return (
     <ScrollView contentContainerStyle={styles.container}>
       <Text style={styles.title}>Settings</Text>
@@ -287,6 +360,150 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
           Runs fully on your device via ExecuTorch. The model binary downloads once on first launch,
           then everything — indexing and search — happens offline with no network calls.
         </Text>
+      </Section>
+
+      <Section glyph="👁" title="AI descriptions" tint={colors.volt}>
+        <Row label="LFM2-VL (vision-language)">
+          <StatusDot tone={visionTone} label={visionLabel} />
+        </Row>
+        {vision.enabled && !vision.ready && !vision.error && (
+          <ProgressBar value={vision.progress || 0} />
+        )}
+        {!!vision.error && <Text style={styles.errText}>{vision.error}</Text>}
+        <Text style={styles.note}>
+          Reads each meme on-device and writes a one-line caption, the text inside, and rich
+          open-vocabulary tags — so you can search by what’s actually happening, not just keywords.
+          Runs through the same ExecuTorch engine as CLIP; nothing ever leaves your phone.
+        </Text>
+
+        <Button
+          small
+          variant={vision.enabled ? 'dangerGhost' : 'primary'}
+          label={vision.enabled ? 'Turn off AI descriptions' : 'Enable AI descriptions'}
+          onPress={() => {
+            const turningOn = !vision.enabled;
+            vision.setEnabled(turningOn);
+            if (turningOn) showToast('Downloading the vision model — first time only', 'info');
+          }}
+        />
+
+        {vision.enabled && (
+          <>
+            <Text style={[styles.note, { marginTop: 2 }]}>Model size</Text>
+            <View style={styles.qualityRow}>
+              <Chip
+                label="Fast · 450M"
+                active={vision.quality === 'fast'}
+                onPress={() => onSwitchQuality('fast')}
+              />
+              <Chip
+                label="Max · 1.6B"
+                active={vision.quality === 'max'}
+                onPress={() => onSwitchQuality('max')}
+              />
+            </View>
+
+            <Row label="Described" value={`${described} / ${describedTotal}`} />
+            {tele.avgMs > 0 && (
+              <Text style={styles.faintSmall}>
+                ≈ {(tele.avgMs / 1000).toFixed(1)}s per meme on this device
+                {tele.deduped > 0 ? ` · ${tele.deduped} skipped as duplicates` : ''}
+              </Text>
+            )}
+            {enriching ? (
+              <View style={{ gap: 8 }}>
+                <View style={styles.enrichTopRow}>
+                  <Text style={styles.note}>
+                    Describing {enriching.done}/{enriching.total || '…'}
+                  </Text>
+                  <Pressable onPress={() => (enrichCancel.current = true)} hitSlop={10}>
+                    <Text style={styles.stopText}>Stop</Text>
+                  </Pressable>
+                </View>
+                <ProgressBar value={enriching.total ? enriching.done / enriching.total : 0} />
+              </View>
+            ) : pending > 0 ? (
+              <Button
+                small
+                label={`Describe ${pending} meme${pending === 1 ? '' : 's'}`}
+                onPress={onRunEnrich}
+                disabled={!vision.ready}
+              />
+            ) : (
+              <Text style={styles.note}>
+                {described > 0 ? 'Every meme has been described ✓' : 'Index some memes first, then describe them.'}
+              </Text>
+            )}
+
+            <View style={styles.bgDivider} />
+
+            <View style={styles.bgHeadRow}>
+              <Text style={styles.rowLabel}>Background processing</Text>
+              <Switch
+                value={vision.backgroundEnabled}
+                onValueChange={vision.setBackgroundEnabled}
+                trackColor={{ true: colors.volt, false: colors.surface3 }}
+                thumbColor="#fff"
+              />
+            </View>
+            <Text style={styles.note}>
+              Quietly trickles through your library — no need to sit on the Describe button. Drag
+              toward Extreme to go faster (and warmer); Conservative sips. Runs while the app is open,
+              and (with a native build) on a schedule when it’s closed.
+            </Text>
+
+            {vision.backgroundEnabled && (
+              <>
+                <View style={styles.enrichTopRow}>
+                  <Text style={styles.rowLabel}>{intensityLabel(vision.backgroundIntensity)}</Text>
+                  <Text style={styles.rowValue}>
+                    {memesPerHour(vision.backgroundIntensity) === Infinity
+                      ? 'max speed'
+                      : `~${memesPerHour(vision.backgroundIntensity)} / hr`}
+                  </Text>
+                </View>
+                <Slider
+                  value={vision.backgroundIntensity}
+                  onChange={vision.setBackgroundIntensity}
+                />
+                <View style={styles.scaleRow}>
+                  <Text style={styles.faintSmall}>Conservative</Text>
+                  <Text style={styles.faintSmall}>Extreme</Text>
+                </View>
+                {vision.pausedReason && (
+                  <Text style={styles.faintSmall}>Paused — {vision.pausedReason}</Text>
+                )}
+                {vision.running && !enriching && !vision.pausedReason && (
+                  <Text style={styles.faintSmall}>Working in the background… {described} described so far.</Text>
+                )}
+
+                <View style={styles.bgDivider} />
+                <ThrottleRow
+                  label="Only while charging"
+                  value={vision.throttles.onlyWhileCharging}
+                  onChange={(v) => vision.setThrottle('onlyWhileCharging', v)}
+                />
+                <ThrottleRow
+                  label="Pause when device is warm"
+                  value={vision.throttles.pauseWhenHot}
+                  onChange={(v) => vision.setThrottle('pauseWhenHot', v)}
+                />
+                <ThrottleRow
+                  label="Pause on low battery"
+                  value={vision.throttles.pauseOnLowBattery}
+                  onChange={(v) => vision.setThrottle('pauseOnLowBattery', v)}
+                />
+                {!vision.nativeBackgroundAvailable && (
+                  <Text style={styles.note}>
+                    Charging/thermal awareness and true keep-running-in-background need a native
+                    build (expo prebuild). Until then this runs only while the app is open and the
+                    throttles above have no signal to act on.
+                  </Text>
+                )}
+              </>
+            )}
+          </>
+        )}
       </Section>
 
       <Section glyph="▦" title="Index" tint={colors.accent}>
@@ -493,6 +710,28 @@ function Section({
   );
 }
 
+function ThrottleRow({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: boolean;
+  onChange: (v: boolean) => void;
+}) {
+  return (
+    <View style={styles.bgHeadRow}>
+      <Text style={styles.rowLabel}>{label}</Text>
+      <Switch
+        value={value}
+        onValueChange={onChange}
+        trackColor={{ true: colors.volt, false: colors.surface3 }}
+        thumbColor="#fff"
+      />
+    </View>
+  );
+}
+
 function Row({
   label,
   value,
@@ -543,6 +782,13 @@ const styles = StyleSheet.create({
   rowLabel: { color: colors.text, fontSize: 14, flexShrink: 1 },
   rowValue: { color: colors.accent, fontSize: 14, fontWeight: '700' },
   note: { color: colors.muted, fontSize: 12, lineHeight: 18 },
+  qualityRow: { flexDirection: 'row', gap: 8 },
+  enrichTopRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  stopText: { color: colors.danger, fontSize: 13, fontWeight: '700' },
+  bgDivider: { height: 1, backgroundColor: colors.border, marginVertical: 4 },
+  bgHeadRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  scaleRow: { flexDirection: 'row', justifyContent: 'space-between' },
+  faintSmall: { color: colors.faint, fontSize: 11, fontWeight: '600' },
   link: { color: colors.accent, fontSize: 13, fontWeight: '600' },
   errText: { color: colors.danger, fontSize: 12 },
   errBox: {
