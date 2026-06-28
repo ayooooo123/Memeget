@@ -1,22 +1,30 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Alert, Linking, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import * as DocumentPicker from 'expo-document-picker';
+import * as FileSystem from 'expo-file-system/legacy';
+import * as Sharing from 'expo-sharing';
 
 import { showToast } from '../components/Toast';
 import { Button, ProgressBar, StatusDot } from '../components/ui';
 import { useEmbeddings } from '../embeddings';
 import {
   clearIndex,
-  countExemplars,
   countMemes,
+  deleteExemplarsByLabel,
+  getExemplars,
   getFolders,
   getIndexErrors,
+  getTaughtLabelStats,
+  importExemplars,
   removeFolder,
   type IndexError,
+  type TaughtLabelStat,
 } from '../db';
 import { emitLibraryChanged } from '../events';
 import { success, warn } from '../haptics';
 import { retagAll } from '../indexer';
 import { MEME_LABELS } from '../memeLabels';
+import { buildPack, parsePack, serializePack } from '../teachingPack';
 import { colors, radius, space, TABBAR_CLEARANCE } from '../theme';
 import type { LinkedFolder } from '../types';
 
@@ -24,15 +32,16 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
   const emb = useEmbeddings();
   const [folders, setFolders] = useState<LinkedFolder[]>([]);
   const [count, setCount] = useState(0);
-  const [taught, setTaught] = useState(0);
+  const [taughtStats, setTaughtStats] = useState<TaughtLabelStat[]>([]);
   const [errors, setErrors] = useState<IndexError[]>([]);
   const [showErrors, setShowErrors] = useState(false);
   const [retagging, setRetagging] = useState<{ done: number; total: number } | null>(null);
+  const [transferBusy, setTransferBusy] = useState(false);
 
   const refresh = useCallback(async () => {
     setFolders(await getFolders());
     setCount(await countMemes());
-    setTaught(await countExemplars());
+    setTaughtStats(await getTaughtLabelStats().catch(() => []));
     setErrors(await getIndexErrors());
   }, []);
 
@@ -62,6 +71,98 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
       refresh();
     }
   }, [emb, refresh]);
+
+  // Write every taught example to a JSON pack and hand it to the share sheet so
+  // an archiver can send their meme knowledge to anyone.
+  const onExport = useCallback(async () => {
+    if (transferBusy) return;
+    setTransferBusy(true);
+    try {
+      const exemplars = await getExemplars();
+      if (exemplars.length === 0) {
+        showToast('Nothing to export yet — teach a tag first', 'info');
+        return;
+      }
+      const pack = buildPack(exemplars, Date.now());
+      const path = `${FileSystem.cacheDirectory}memeget-teachings-${Date.now()}.json`;
+      await FileSystem.writeAsStringAsync(path, serializePack(pack));
+      if (await Sharing.isAvailableAsync()) {
+        await Sharing.shareAsync(path, {
+          mimeType: 'application/json',
+          dialogTitle: 'Share teaching pack',
+          UTI: 'public.json',
+        });
+      } else {
+        showToast(`Saved pack to ${path}`, 'info');
+      }
+      success();
+    } catch (e) {
+      showToast(`Export failed: ${String(e)}`, 'error');
+    } finally {
+      setTransferBusy(false);
+    }
+  }, [transferBusy]);
+
+  // Pick a pack file, fold its examples into the local DB, then offer to re-tag
+  // so the imported knowledge takes effect across the library.
+  const onImport = useCallback(async () => {
+    if (transferBusy) return;
+    setTransferBusy(true);
+    try {
+      const res = await DocumentPicker.getDocumentAsync({
+        type: ['application/json', 'text/plain', '*/*'],
+        copyToCacheDirectory: true,
+      });
+      if (res.canceled) return;
+      const asset = res.assets[0];
+      if (!asset) return;
+      const text = await FileSystem.readAsStringAsync(asset.uri);
+      const pack = parsePack(text); // throws a readable message on bad input
+      const { added, skipped } = await importExemplars(pack.exemplars);
+      await refresh();
+      success();
+      const summary =
+        added > 0
+          ? `Imported ${added} example${added === 1 ? '' : 's'}` +
+            (skipped ? ` (${skipped} already had)` : '')
+          : 'Pack already fully imported — nothing new';
+      if (added > 0 && emb.ready) {
+        Alert.alert('Teaching imported', `${summary}. Re-tag your library now to apply it?`, [
+          { text: 'Later', style: 'cancel', onPress: () => showToast(summary, 'success') },
+          { text: 'Re-tag now', onPress: onRetag },
+        ]);
+      } else {
+        showToast(summary, added > 0 ? 'success' : 'info');
+      }
+    } catch (e) {
+      showToast(`Import failed: ${String(e)}`, 'error');
+    } finally {
+      setTransferBusy(false);
+    }
+  }, [transferBusy, refresh, emb.ready, onRetag]);
+
+  const onForget = useCallback(
+    (label: string) => {
+      warn();
+      Alert.alert(
+        `Forget “${label}”?`,
+        'Removes the examples you taught for this tag. Memes already tagged keep the label until the next re-tag.',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Forget',
+            style: 'destructive',
+            onPress: async () => {
+              await deleteExemplarsByLabel(label);
+              await refresh();
+              showToast(`Forgot “${label}” — re-tag to drop it from memes`, 'info');
+            },
+          },
+        ]
+      );
+    },
+    [refresh]
+  );
 
   const onClear = useCallback(() => {
     warn();
@@ -142,12 +243,39 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
       </Section>
 
       <Section glyph="★" title="Taught knowledge" tint={colors.good}>
-        <Row label="Examples you've taught" value={String(taught)} />
-        <Text style={styles.note}>
-          Open any meme and use “This IS a…” to teach a new character or format by example (e.g.
-          Milady). Re-tagging applies it across everything already indexed — no re-scanning, it
-          reuses the embeddings on device.
-        </Text>
+        <Row
+          label="Tags you've taught"
+          value={String(taughtStats.length)}
+          valueTint={colors.good}
+        />
+        {taughtStats.length === 0 ? (
+          <Text style={styles.note}>
+            Open any meme and use “This IS a…” to teach a new character or format by example (e.g.
+            Milady). Re-tagging applies it across everything already indexed — no re-scanning, it
+            reuses the embeddings on device.
+          </Text>
+        ) : (
+          <View style={styles.taughtList}>
+            {taughtStats.map((t) => (
+              <View key={t.label} style={styles.taughtRow}>
+                <View style={styles.taughtMain}>
+                  <Text style={styles.taughtLabel} numberOfLines={1}>
+                    {t.label}
+                  </Text>
+                  <Text style={styles.taughtMeta}>
+                    {t.tagged} meme{t.tagged === 1 ? '' : 's'} tagged · {t.positives} example
+                    {t.positives === 1 ? '' : 's'}
+                    {t.negatives > 0 ? ` · ${t.negatives} correction${t.negatives === 1 ? '' : 's'}` : ''}
+                  </Text>
+                </View>
+                <Pressable hitSlop={8} onPress={() => onForget(t.label)}>
+                  <Text style={styles.taughtForget}>✕</Text>
+                </Pressable>
+              </View>
+            ))}
+          </View>
+        )}
+
         {retagging ? (
           <View style={{ gap: 8 }}>
             <Text style={styles.note}>
@@ -158,6 +286,32 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
         ) : (
           <Button small label="Re-tag library" onPress={onRetag} />
         )}
+
+        <View style={styles.divider} />
+        <Text style={styles.note}>
+          Share your taught tags as a pack, or import someone else’s to inherit their meme knowledge
+          instantly — the examples merge into yours, then re-tag to apply them.
+        </Text>
+        <View style={styles.transferRow}>
+          <Button
+            small
+            variant="secondary"
+            icon="⇪"
+            label="Export"
+            onPress={onExport}
+            disabled={transferBusy}
+            style={styles.transferBtn}
+          />
+          <Button
+            small
+            variant="secondary"
+            icon="⇩"
+            label="Import"
+            onPress={onImport}
+            disabled={transferBusy}
+            style={styles.transferBtn}
+          />
+        </View>
       </Section>
 
       <Section glyph="🗂" title={`Linked folders (${folders.length})`} tint={colors.accent}>
@@ -290,5 +444,26 @@ const styles = StyleSheet.create({
   folderRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 12 },
   folderName: { color: colors.text, flex: 1, fontSize: 13 },
   unlink: { color: colors.danger, fontSize: 13, fontWeight: '600' },
+  taughtList: {
+    backgroundColor: colors.surface2,
+    borderRadius: radius.md,
+    paddingHorizontal: space.md,
+    paddingVertical: 4,
+  },
+  taughtRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    paddingVertical: 9,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: colors.border,
+  },
+  taughtMain: { flex: 1, gap: 2 },
+  taughtLabel: { color: colors.text, fontSize: 14, fontWeight: '700' },
+  taughtMeta: { color: colors.muted, fontSize: 11 },
+  taughtForget: { color: colors.faint, fontSize: 16, fontWeight: '700', paddingHorizontal: 4 },
+  divider: { height: StyleSheet.hairlineWidth, backgroundColor: colors.border, marginVertical: 2 },
+  transferRow: { flexDirection: 'row', gap: space.sm },
+  transferBtn: { flex: 1 },
   version: { color: colors.faint, fontSize: 11, textAlign: 'center', marginTop: 4 },
 });

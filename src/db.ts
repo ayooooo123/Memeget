@@ -513,6 +513,112 @@ export async function deleteExemplar(id: number): Promise<void> {
   await db.runAsync('DELETE FROM exemplars WHERE id = ?', id);
 }
 
+// Drop every example for a label — i.e. forget a taught tag entirely. The tags
+// already written onto memes stay until the next re-tag, when the label simply
+// stops matching (no head to train) and falls off.
+export async function deleteExemplarsByLabel(label: string): Promise<number> {
+  const db = await getDb();
+  const res = await db.runAsync('DELETE FROM exemplars WHERE label = ?', label);
+  return res.changes ?? 0;
+}
+
+// Per-label rollup for the "Taught knowledge" list: how many positive/negative
+// examples back each label, and how many memes currently carry it as a tag. One
+// pass over exemplars + one pass over meme tags, so it's cheap even with a big
+// library.
+export interface TaughtLabelStat {
+  label: string;
+  category: string;
+  positives: number;
+  negatives: number;
+  tagged: number; // memes in the library currently tagged with this label
+}
+
+export async function getTaughtLabelStats(): Promise<TaughtLabelStat[]> {
+  const db = await getDb();
+  const exRows = await db.getAllAsync<{ label: string; category: string; is_positive: number }>(
+    'SELECT label, category, is_positive FROM exemplars'
+  );
+  const tagRows = await db.getAllAsync<{ tags: string }>(
+    "SELECT tags FROM memes WHERE pending = 0 AND tags != '[]'"
+  );
+
+  const taggedCounts = new Map<string, number>();
+  for (const r of tagRows) {
+    // A meme can only carry a label once, so count distinct labels per row.
+    const seen = new Set<string>();
+    for (const t of safeParseTags(r.tags)) seen.add(t.label);
+    for (const label of seen) taggedCounts.set(label, (taggedCounts.get(label) ?? 0) + 1);
+  }
+
+  const byLabel = new Map<string, TaughtLabelStat>();
+  for (const r of exRows) {
+    const stat =
+      byLabel.get(r.label) ??
+      { label: r.label, category: r.category, positives: 0, negatives: 0, tagged: taggedCounts.get(r.label) ?? 0 };
+    if (r.is_positive !== 0) stat.positives += 1;
+    else stat.negatives += 1;
+    byLabel.set(r.label, stat);
+  }
+
+  return [...byLabel.values()].sort(
+    (a, b) => b.tagged - a.tagged || a.label.localeCompare(b.label)
+  );
+}
+
+// Bulk-insert exemplars from an imported teaching pack. Skips ones that already
+// exist verbatim (same label, polarity, and vector) so re-importing a pack — or
+// importing one that overlaps your own teaching — doesn't pile up duplicates.
+export async function importExemplars(
+  list: {
+    label: string;
+    category: string;
+    vector: number[];
+    associations: string[];
+    positive: boolean;
+  }[]
+): Promise<{ added: number; skipped: number }> {
+  const db = await getDb();
+  const existing = await getExemplars();
+  const sig = (label: string, positive: boolean, vec: number[]) =>
+    // First few components rounded are a cheap, collision-safe fingerprint for
+    // a 512-dim normalized vector — exact equality across devices is unreliable.
+    `${label} ${positive ? 1 : 0} ${vec.slice(0, 8).map((v) => v.toFixed(5)).join(',')}`;
+  const seen = new Set(existing.map((e) => sig(e.label, e.positive, e.vector)));
+
+  let added = 0;
+  let skipped = 0;
+  const stmt = await db.prepareAsync(
+    `INSERT INTO exemplars (label, category, vector, associations, source_uri, is_positive, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`
+  );
+  try {
+    await db.withTransactionAsync(async () => {
+      for (const e of list) {
+        const s = sig(e.label, e.positive, e.vector);
+        if (seen.has(s)) {
+          skipped += 1;
+          continue;
+        }
+        seen.add(s);
+        await stmt.executeAsync(
+          e.label,
+          e.category,
+          vecToBlob(e.vector),
+          JSON.stringify(e.associations),
+          '', // imported examples have no local source image
+          e.positive ? 1 : 0,
+          Date.now()
+        );
+        added += 1;
+      }
+    });
+  } finally {
+    await stmt.finalizeAsync();
+  }
+  return { added, skipped };
+}
+
 // ---- indexing errors (diagnostics) ------------------------------------------
 
 export interface IndexError {
