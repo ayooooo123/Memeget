@@ -5,8 +5,9 @@ import { useShareIntent, type ShareIntentFile } from 'expo-share-intent';
 import { useEmbeddings } from '../embeddings';
 import { indexSavedFiles, saveSharedFiles } from '../indexer';
 import { emitLibraryChanged } from '../events';
+import { extractUrl, resolveSharedLink } from '../linkResolver';
 import { colors, radius, shadow, TABBAR_CLEARANCE } from '../theme';
-import type { SafFile } from '../saf';
+import { deleteCache, type SafFile } from '../saf';
 
 type Status =
   | { kind: 'importing'; msg: string }
@@ -38,50 +39,86 @@ export function ShareReceiver() {
   const indexingRef = useRef(false);
   const [tick, setTick] = useState(0);
 
-  // Phase 1: save the shared files the moment they arrive. No model wait.
+  // Phase 1: accept the share the moment it arrives. No model wait. Two kinds
+  // of share land here:
+  //   • image/video files       → copied straight into the linked folder.
+  //   • a link (X / Tenor / any  → resolved to its underlying media, downloaded,
+  //     social post URL)           then saved the same way. The download is the
+  //     ONE time the app touches the network, and only because you handed it a
+  //     URL — nothing is uploaded.
   useEffect(() => {
     const files = (shareIntent?.files ?? []).filter((f: ShareIntentFile) =>
       /^(image|video)\//.test(f.mimeType)
     );
-    if (!hasShareIntent || files.length === 0) return;
+    // Only treat the share as a link if no media file came with it.
+    const sharedUrl = files.length === 0 ? extractUrl(shareIntent?.webUrl, shareIntent?.text) : null;
+    if (!hasShareIntent || (files.length === 0 && !sharedUrl)) return;
     if (savingRef.current) return;
 
     savingRef.current = true;
-    const total = files.length;
-    setStatus({ kind: 'importing', msg: total > 1 ? `Saving 0/${total} memes…` : 'Saving meme…' });
+
+    // Hand freshly saved files to the background indexer, refresh the library,
+    // and report the outcome. Shared by the file and link paths.
+    const acceptSaved = (res: { saved: SafFile[]; errors: number; folderName: string }) => {
+      if (res.saved.length > 0) {
+        queueRef.current.push(...res.saved);
+        setTick((t) => t + 1);
+      }
+      emitLibraryChanged();
+      const errNote = res.errors > 0 ? ` (${res.errors} failed)` : '';
+      setStatus({
+        kind: 'done',
+        msg: `✓ Saved ${res.saved.length} to “${res.folderName}” — indexing in background${errNote}`,
+      });
+    };
+
     (async () => {
       try {
-        const res = await saveSharedFiles(
-          files.map((f: ShareIntentFile) => ({
-            path: f.path,
-            fileName: f.fileName,
-            mimeType: f.mimeType,
-          })),
-          {
-            onProgress: (done, t) => {
-              if (t > 1 && done < t) setStatus({ kind: 'importing', msg: `Saving ${done}/${t} memes…` });
-            },
+        if (sharedUrl) {
+          // Link path: fetch the page/endpoint → download the media → save it.
+          setStatus({ kind: 'importing', msg: 'Reading link…' });
+          const media = await resolveSharedLink(sharedUrl, {
+            onProgress: (p) =>
+              setStatus({
+                kind: 'importing',
+                msg: p.stage === 'downloading' ? 'Downloading meme…' : 'Reading link…',
+              }),
+          });
+          try {
+            const res = await saveSharedFiles([
+              { path: media.path, fileName: media.fileName, mimeType: media.mimeType },
+            ]);
+            acceptSaved(res);
+          } finally {
+            // The download was a throwaway cache copy; saveSharedFiles already
+            // wrote a permanent copy into the linked folder.
+            await deleteCache(media.path);
           }
-        );
-        // Hand the saved files to the background indexer and refresh the library.
-        if (res.saved.length > 0) {
-          queueRef.current.push(...res.saved);
-          setTick((t) => t + 1);
+        } else {
+          // File path: copy each shared image/video into the linked folder.
+          const total = files.length;
+          setStatus({ kind: 'importing', msg: total > 1 ? `Saving 0/${total} memes…` : 'Saving meme…' });
+          const res = await saveSharedFiles(
+            files.map((f: ShareIntentFile) => ({
+              path: f.path,
+              fileName: f.fileName,
+              mimeType: f.mimeType,
+            })),
+            {
+              onProgress: (done, t) => {
+                if (t > 1 && done < t) setStatus({ kind: 'importing', msg: `Saving ${done}/${t} memes…` });
+              },
+            }
+          );
+          acceptSaved(res);
         }
-        emitLibraryChanged();
-        const errNote = res.errors > 0 ? ` (${res.errors} failed)` : '';
-        const n = res.saved.length;
-        setStatus({
-          kind: 'done',
-          msg: `✓ Saved ${n} to “${res.folderName}” — indexing in background${errNote}`,
-        });
       } catch (e) {
         setStatus({ kind: 'error', msg: String((e as Error)?.message ?? e) });
       } finally {
         // Reset right away so the share intent clears and the user can move on.
         resetShareIntent();
         savingRef.current = false;
-        setTimeout(() => setStatus(null), 3200);
+        setTimeout(() => setStatus(null), 3600);
       }
     })();
   }, [hasShareIntent, shareIntent, resetShareIntent]);
