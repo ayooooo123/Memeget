@@ -30,7 +30,8 @@
           "disableIOS": true
         }
       ],
-      "expo-video"
+      "expo-video",
+      "./plugins/withFixedDebugKeystore"
     ],
     "experiments": {
       "typedRoutes": false

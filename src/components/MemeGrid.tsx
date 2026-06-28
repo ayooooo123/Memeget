@@ -88,6 +88,11 @@ const GridCell = React.memo(function GridCell({
           <Text style={styles.playIcon}>▶</Text>
         </View>
       )}
+      {'pending' in item && item.pending && (
+        <View style={styles.pending}>
+          <ActivityIndicator color="#fff" size="small" />
+        </View>
+      )}
     </PressableScale>
   );
 });
@@ -671,6 +676,13 @@ const styles = StyleSheet.create({
     paddingVertical: 2,
   },
   playIcon: { color: '#fff', fontSize: 10 },
+  pending: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(0,0,0,0.35)',
+    borderRadius: radius.sm,
+  },
 
   viewerRoot: { flex: 1, backgroundColor: colors.overlay, justifyContent: 'flex-end' },
   sheet: {
