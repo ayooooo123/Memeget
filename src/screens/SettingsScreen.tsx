@@ -11,12 +11,15 @@ import {
   clearIndex,
   countMemes,
   deleteExemplarsByLabel,
+  deleteExemplarsByPack,
   getExemplars,
   getFolders,
+  getImportedPacks,
   getIndexErrors,
   getTaughtLabelStats,
   importExemplars,
   removeFolder,
+  type ImportedPack,
   type IndexError,
   type TaughtLabelStat,
 } from '../db';
@@ -33,6 +36,7 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
   const [folders, setFolders] = useState<LinkedFolder[]>([]);
   const [count, setCount] = useState(0);
   const [taughtStats, setTaughtStats] = useState<TaughtLabelStat[]>([]);
+  const [importedPacks, setImportedPacks] = useState<ImportedPack[]>([]);
   const [errors, setErrors] = useState<IndexError[]>([]);
   const [showErrors, setShowErrors] = useState(false);
   const [retagging, setRetagging] = useState<{ done: number; total: number } | null>(null);
@@ -42,6 +46,7 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
     setFolders(await getFolders());
     setCount(await countMemes());
     setTaughtStats(await getTaughtLabelStats().catch(() => []));
+    setImportedPacks(await getImportedPacks().catch(() => []));
     setErrors(await getIndexErrors());
   }, []);
 
@@ -83,8 +88,12 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
         showToast('Nothing to export yet — teach a tag first', 'info');
         return;
       }
-      const pack = buildPack(exemplars, Date.now());
-      const path = `${FileSystem.cacheDirectory}memeget-teachings-${Date.now()}.json`;
+      const stamp = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+      const labelCount = new Set(exemplars.map((e) => e.label)).size;
+      const pack = buildPack(exemplars, Date.now(), {
+        name: `Teaching pack · ${labelCount} tag${labelCount === 1 ? '' : 's'} · ${stamp}`,
+      });
+      const path = `${FileSystem.cacheDirectory}memeget-teachings-${stamp}.json`;
       await FileSystem.writeAsStringAsync(path, serializePack(pack));
       if (await Sharing.isAvailableAsync()) {
         await Sharing.shareAsync(path, {
@@ -103,8 +112,48 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
     }
   }, [transferBusy]);
 
-  // Pick a pack file, fold its examples into the local DB, then offer to re-tag
-  // so the imported knowledge takes effect across the library.
+  // Run an import in the chosen mode, then offer to re-tag so it takes effect.
+  // Called from the mode Alert below, after the picker's busy lock has already
+  // been released — so it manages its own busy state and error reporting.
+  const runImport = useCallback(
+    async (
+      exemplars: Parameters<typeof importExemplars>[0],
+      packName: string,
+      mode: 'merge' | 'replace'
+    ) => {
+      setTransferBusy(true);
+      try {
+        const { added, skipped, removed } = await importExemplars(exemplars, {
+          pack: packName,
+          mode,
+        });
+        await refresh();
+        success();
+        const replacedNote = mode === 'replace' && removed > 0 ? `Replaced ${removed} · ` : '';
+        const summary =
+          added > 0
+            ? `${replacedNote}Imported ${added} example${added === 1 ? '' : 's'}` +
+              (skipped ? ` (${skipped} already had)` : '')
+            : 'Pack already fully imported — nothing new';
+        if (added > 0 && emb.ready) {
+          Alert.alert('Teaching imported', `${summary}. Re-tag your library now to apply it?`, [
+            { text: 'Later', style: 'cancel', onPress: () => showToast(summary, 'success') },
+            { text: 'Re-tag now', onPress: onRetag },
+          ]);
+        } else {
+          showToast(summary, added > 0 ? 'success' : 'info');
+        }
+      } catch (e) {
+        showToast(`Import failed: ${String(e)}`, 'error');
+      } finally {
+        setTransferBusy(false);
+      }
+    },
+    [refresh, emb.ready, onRetag]
+  );
+
+  // Pick a pack file, then ask whether to merge it into your tags or replace
+  // everything with it. The actual insert + re-tag happens in runImport.
   const onImport = useCallback(async () => {
     if (transferBusy) return;
     setTransferBusy(true);
@@ -118,28 +167,60 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
       if (!asset) return;
       const text = await FileSystem.readAsStringAsync(asset.uri);
       const pack = parsePack(text); // throws a readable message on bad input
-      const { added, skipped } = await importExemplars(pack.exemplars);
-      await refresh();
-      success();
-      const summary =
-        added > 0
-          ? `Imported ${added} example${added === 1 ? '' : 's'}` +
-            (skipped ? ` (${skipped} already had)` : '')
-          : 'Pack already fully imported — nothing new';
-      if (added > 0 && emb.ready) {
-        Alert.alert('Teaching imported', `${summary}. Re-tag your library now to apply it?`, [
-          { text: 'Later', style: 'cancel', onPress: () => showToast(summary, 'success') },
-          { text: 'Re-tag now', onPress: onRetag },
-        ]);
-      } else {
-        showToast(summary, added > 0 ? 'success' : 'info');
-      }
+      // Prefer the pack's own name; fall back to the picked file's name.
+      const packName =
+        pack.name ||
+        (asset.name || 'Imported pack')
+          .replace(/\.json$/i, '')
+          .replace(/[_-]+/g, ' ')
+          .trim()
+          .slice(0, 60) ||
+        'Imported pack';
+
+      // The picker dialog has dismissed by now; the busy lock is released in the
+      // finally below, so each Alert branch kicks off its own busy import.
+      Alert.alert(
+        packName,
+        `${pack.count} example${pack.count === 1 ? '' : 's'} ready. Merge into your taught tags, or replace everything with this pack?`,
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Replace all',
+            style: 'destructive',
+            onPress: () => runImport(pack.exemplars, packName, 'replace'),
+          },
+          { text: 'Merge', onPress: () => runImport(pack.exemplars, packName, 'merge') },
+        ]
+      );
     } catch (e) {
       showToast(`Import failed: ${String(e)}`, 'error');
     } finally {
       setTransferBusy(false);
     }
-  }, [transferBusy, refresh, emb.ready, onRetag]);
+  }, [transferBusy, runImport]);
+
+  const onRemovePack = useCallback(
+    (pack: ImportedPack) => {
+      warn();
+      Alert.alert(
+        `Remove “${pack.pack}”?`,
+        `Deletes the ${pack.examples} imported example${pack.examples === 1 ? '' : 's'} from this pack. Your own teaching is untouched; re-tag afterward to drop its labels from memes.`,
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Remove',
+            style: 'destructive',
+            onPress: async () => {
+              await deleteExemplarsByPack(pack.pack);
+              await refresh();
+              showToast(`Removed “${pack.pack}” — re-tag to apply`, 'info');
+            },
+          },
+        ]
+      );
+    },
+    [refresh]
+  );
 
   const onForget = useCallback(
     (label: string) => {
@@ -259,13 +340,21 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
             {taughtStats.map((t) => (
               <View key={t.label} style={styles.taughtRow}>
                 <View style={styles.taughtMain}>
-                  <Text style={styles.taughtLabel} numberOfLines={1}>
-                    {t.label}
-                  </Text>
+                  <View style={styles.taughtTitleRow}>
+                    <Text style={styles.taughtLabel} numberOfLines={1}>
+                      {t.label}
+                    </Text>
+                    <View style={[styles.srcChip, t.fromPack ? styles.srcPack : styles.srcSelf]}>
+                      <Text style={[styles.srcChipText, { color: t.fromPack ? colors.accent : colors.muted }]}>
+                        {t.fromSelf && t.fromPack ? 'you + pack' : t.fromPack ? 'pack' : 'you'}
+                      </Text>
+                    </View>
+                  </View>
                   <Text style={styles.taughtMeta}>
                     {t.tagged} meme{t.tagged === 1 ? '' : 's'} tagged · {t.positives} example
                     {t.positives === 1 ? '' : 's'}
                     {t.negatives > 0 ? ` · ${t.negatives} correction${t.negatives === 1 ? '' : 's'}` : ''}
+                    {t.fromPack && t.packs.length > 0 ? ` · from ${t.packs.join(', ')}` : ''}
                   </Text>
                 </View>
                 <Pressable hitSlop={8} onPress={() => onForget(t.label)}>
@@ -289,8 +378,9 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
 
         <View style={styles.divider} />
         <Text style={styles.note}>
-          Share your taught tags as a pack, or import someone else’s to inherit their meme knowledge
-          instantly — the examples merge into yours, then re-tag to apply them.
+          Share your taught tags as a pack, or import someone else’s to inherit their meme knowledge.
+          On import you choose to <Text style={styles.noteStrong}>merge</Text> it into your tags or{' '}
+          <Text style={styles.noteStrong}>replace</Text> everything with it — then re-tag to apply.
         </Text>
         <View style={styles.transferRow}>
           <Button
@@ -312,6 +402,29 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
             style={styles.transferBtn}
           />
         </View>
+
+        {importedPacks.length > 0 && (
+          <>
+            <View style={styles.divider} />
+            <Text style={styles.note}>Imported packs</Text>
+            {importedPacks.map((p) => (
+              <View key={p.pack} style={styles.packRow}>
+                <View style={styles.taughtMain}>
+                  <Text style={styles.taughtLabel} numberOfLines={1}>
+                    {p.pack}
+                  </Text>
+                  <Text style={styles.taughtMeta}>
+                    {p.labels} tag{p.labels === 1 ? '' : 's'} · {p.examples} example
+                    {p.examples === 1 ? '' : 's'}
+                  </Text>
+                </View>
+                <Pressable hitSlop={8} onPress={() => onRemovePack(p)}>
+                  <Text style={styles.taughtForget}>✕</Text>
+                </Pressable>
+              </View>
+            ))}
+          </>
+        )}
       </Section>
 
       <Section glyph="🗂" title={`Linked folders (${folders.length})`} tint={colors.accent}>
@@ -459,10 +572,27 @@ const styles = StyleSheet.create({
     borderBottomColor: colors.border,
   },
   taughtMain: { flex: 1, gap: 2 },
-  taughtLabel: { color: colors.text, fontSize: 14, fontWeight: '700' },
+  taughtTitleRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  taughtLabel: { color: colors.text, fontSize: 14, fontWeight: '700', flexShrink: 1 },
   taughtMeta: { color: colors.muted, fontSize: 11 },
   taughtForget: { color: colors.faint, fontSize: 16, fontWeight: '700', paddingHorizontal: 4 },
+  srcChip: {
+    paddingHorizontal: 7,
+    paddingVertical: 1,
+    borderRadius: radius.sm,
+    borderWidth: 1,
+  },
+  srcSelf: { borderColor: colors.border, backgroundColor: 'transparent' },
+  srcPack: { borderColor: colors.accent, backgroundColor: colors.surface },
+  srcChipText: { fontSize: 9, fontWeight: '800', letterSpacing: 0.3, textTransform: 'uppercase' },
+  packRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    paddingVertical: 7,
+  },
   divider: { height: StyleSheet.hairlineWidth, backgroundColor: colors.border, marginVertical: 2 },
+  noteStrong: { color: colors.text, fontWeight: '700' },
   transferRow: { flexDirection: 'row', gap: space.sm },
   transferBtn: { flex: 1 },
   version: { color: colors.faint, fontSize: 11, textAlign: 'center', marginTop: 4 },

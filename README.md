@@ -88,12 +88,18 @@ weights — editable and on-device:
   seconds.
 - **Taught-knowledge list** (Settings → *Taught knowledge*) — every tag you've
   taught, with how many examples back it and how many memes currently carry it.
-  Tap ✕ to forget a tag.
+  Each tag shows a **you / pack / you + pack** chip so you can tell your own
+  teaching from imported knowledge at a glance. Tap ✕ to forget a tag.
 - **Teaching packs** (Settings → *Export / Import*) — share your taught tags as a
   small JSON pack so other collectors inherit your meme knowledge instantly.
-  Importing merges the examples into your own (duplicates are skipped); re-tag to
-  apply them. Packs carry the CLIP model + dimension stamp and are rejected on
-  import if they don't match, so vectors are always comparable.
+  On import you choose **Merge** (add to your tags, skipping duplicates) or
+  **Replace all** (wipe everything and start from the pack); then re-tag to apply.
+  Packs carry the CLIP model + dimension stamp and are rejected on import if they
+  don't match, so vectors are always comparable. Device-local source paths are
+  stripped from exports.
+- **Pack management** (Settings → *Imported packs*) — imported packs are listed
+  with their tag/example counts and provenance, and each can be removed as a unit
+  (✕) without touching your own teaching.
 - **Re-tag library** (Settings) — re-applies all current knowledge to everything
   already indexed, reusing stored embeddings (no re-scanning/re-embedding).
 
