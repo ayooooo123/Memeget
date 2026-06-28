@@ -3,6 +3,13 @@ apply plugin: 'expo-module-gradle-plugin'
 group = 'expo.modules.memegetbg'
 version = '0.1.0'
 
+expoModule {
+  // This native module is bundled directly into the app. Publishing it as a
+  // standalone Maven artifact is unnecessary, and Expo SDK 56/Gradle 9 fails
+  // during release builds if publication metadata/components are absent.
+  canBePublished false
+}
+
 // The expo-module-gradle-plugin wires up the Android library config
 // (compile/min/target SDK from the host app), Kotlin, and the expo-modules-core
 // dependency. We only need to declare our namespace and any extra deps.
