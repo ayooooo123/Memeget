@@ -295,10 +295,19 @@ export async function bulkUpdateMemeTags(
 // the fields the enricher needs to re-materialize the image and write back.
 export async function getMemesNeedingVision(
   limit = 10000
-): Promise<{ id: number; uri: string; name: string; kind: 'image' | 'video'; tags: Tag[] }[]> {
+): Promise<
+  { id: number; uri: string; name: string; kind: 'image' | 'video'; tags: Tag[]; ocrText: string }[]
+> {
   const db = await getDb();
-  const rows = await db.getAllAsync<{ id: number; uri: string; name: string; kind: string; tags: string }>(
-    "SELECT id, uri, name, kind, tags FROM memes WHERE vision_state = 'pending' ORDER BY indexed_at DESC, id DESC LIMIT ?",
+  const rows = await db.getAllAsync<{
+    id: number;
+    uri: string;
+    name: string;
+    kind: string;
+    tags: string;
+    ocr_text: string;
+  }>(
+    "SELECT id, uri, name, kind, tags, ocr_text FROM memes WHERE vision_state = 'pending' ORDER BY indexed_at DESC, id DESC LIMIT ?",
     limit
   );
   return rows.map((r) => ({
@@ -307,6 +316,7 @@ export async function getMemesNeedingVision(
     name: r.name,
     kind: r.kind as 'image' | 'video',
     tags: safeParseTags(r.tags),
+    ocrText: r.ocr_text ?? '',
   }));
 }
 
