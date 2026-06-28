@@ -31,7 +31,8 @@
         }
       ],
       "expo-video",
-      "./plugins/withFixedDebugKeystore"
+      "./plugins/withFixedDebugKeystore",
+      "./plugins/withArm64Only"
     ],
     "experiments": {
       "typedRoutes": false
