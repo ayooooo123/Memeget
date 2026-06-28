@@ -33,7 +33,7 @@ import {
 } from './db';
 import { ASSOCIATIONS, MEME_LABELS, NEGATIVE_ANCHORS, ocrTags } from './memeLabels';
 import { copyToCache, deleteCache, listMedia, saveToFolder, type SafFile } from './saf';
-import type { VisionResult } from './vision';
+import type { VisionResult } from './visionCore';
 import type { Tag } from './types';
 
 // Confidence in how a label was matched, highest first:
@@ -712,4 +712,34 @@ export async function enrichNextMeme(
   const twins = await getTwinIndex();
   const r = await enrichOne(vision, queue[0], assoc, twins);
   return r === 'unready' ? 'empty' : r;
+}
+
+// Bounded session for an OS-scheduled background run: describe up to `maxItems`
+// pending memes, stopping early if `shouldStop` flips (time budget expiring,
+// device went hot/unplugged). Unlike the burst path it re-queries one meme at a
+// time so a long session always sees freshly-indexed work and can bail cleanly.
+export async function runBackgroundSession(
+  vision: VisionEnricher,
+  opts: { maxItems?: number; shouldStop?: () => boolean } = {}
+): Promise<EnrichResult> {
+  const result: EnrichResult = { described: 0, deduped: 0, failed: 0 };
+  if (!vision.ready) return result;
+
+  const assoc = await buildAssociations();
+  const twins = await getTwinIndex();
+  const max = opts.maxItems ?? Infinity;
+
+  let n = 0;
+  while (n < max) {
+    if (opts.shouldStop?.()) break;
+    const queue = await getMemesNeedingVision(1);
+    if (queue.length === 0) break;
+    const r = await enrichOne(vision, queue[0], assoc, twins);
+    if (r === 'unready') break;
+    if (r === 'done') result.described++;
+    else if (r === 'deduped') result.deduped++;
+    else result.failed++;
+    n++;
+  }
+  return result;
 }

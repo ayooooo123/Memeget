@@ -447,9 +447,9 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
               />
             </View>
             <Text style={styles.note}>
-              Quietly trickles through your library while Memeget is open — no need to sit on the
-              Describe button. Drag toward Extreme to go faster (and warmer); Conservative sips. Runs
-              only while the app is open for now.
+              Quietly trickles through your library — no need to sit on the Describe button. Drag
+              toward Extreme to go faster (and warmer); Conservative sips. Runs while the app is open,
+              and (with a native build) on a schedule when it’s closed.
             </Text>
 
             {vision.backgroundEnabled && (

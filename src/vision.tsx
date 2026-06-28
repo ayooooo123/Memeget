@@ -1,9 +1,5 @@
 import React, { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react';
-import {
-  useLLM,
-  LFM2_5_VL_450M_QUANTIZED,
-  LFM2_5_VL_1_6B_QUANTIZED,
-} from 'react-native-executorch';
+import { useLLM } from 'react-native-executorch';
 
 import { getSetting, setSetting } from './db';
 import {
@@ -20,92 +16,40 @@ import {
   stopKeepAlive,
   type NativePower,
 } from '../modules/memeget-bg';
+import {
+  bgIntervalMs,
+  parseVision,
+  powerBlockReason,
+  userTurn,
+  BG_ENABLED_KEY,
+  BG_INTENSITY_KEY,
+  BG_ONLY_CHARGING_KEY,
+  BG_PAUSE_HOT_KEY,
+  BG_PAUSE_LOW_KEY,
+  ENABLED_KEY,
+  MODEL,
+  POWER_CACHE_MS,
+  QUALITY_KEY,
+  SYSTEM_PROMPT,
+  type BgThrottles,
+  type VisionQuality,
+  type VisionResult,
+} from './visionCore';
+import { registerBackgroundDescribe, unregisterBackgroundDescribe } from './backgroundTask';
 
-// LFM2.5-VL, on-device, via ExecuTorch's XNNPACK backend — the SAME runtime
-// that already runs CLIP, so there's no second engine to ship. We use the
-// vision-language model purely as an *enrichment* pass: CLIP stays the fast
-// embedding/similarity + teach-by-example backbone; LFM reads each meme and
-// writes back a human caption, the literal text, and open-vocabulary tags that
-// CLIP's fixed 97-label vocabulary can never produce.
+// Re-export the pure helpers/types screens import from this module.
+export { memesPerHour, intensityLabel } from './visionCore';
+export type { VisionQuality, VisionResult, BgThrottles } from './visionCore';
+
+// LFM2.5-VL, on-device, via ExecuTorch — the SAME runtime that already runs
+// CLIP, so there's no second engine to ship. Used purely as an *enrichment*
+// pass: CLIP stays the fast embedding/similarity + teach-by-example backbone;
+// LFM reads each meme and writes back a human caption, the literal text, and
+// open-vocabulary tags CLIP's fixed 97-label vocabulary can never produce.
 //
-// Two sizes, user-selectable:
-//   fast → 450M (smaller download, snappier per-image)
-//   max  → 1.6B (sharper captions / OCR, heavier)
-export type VisionQuality = 'fast' | 'max';
-
-const QUALITY_KEY = 'vision.quality';
-const ENABLED_KEY = 'vision.enabled';
-const BG_ENABLED_KEY = 'vision.bg.enabled';
-const BG_INTENSITY_KEY = 'vision.bg.intensity';
-const BG_ONLY_CHARGING_KEY = 'vision.bg.onlyCharging';
-const BG_PAUSE_HOT_KEY = 'vision.bg.pauseHot';
-const BG_PAUSE_LOW_KEY = 'vision.bg.pauseLowBattery';
-
-const MODEL = {
-  fast: LFM2_5_VL_450M_QUANTIZED,
-  max: LFM2_5_VL_1_6B_QUANTIZED,
-} as const;
-
-// Never hammer the accelerator faster than this between background items, even
-// at "Extreme" — leaves the UI thread and the GPU/CPU some breathing room (a
-// single caption usually takes longer than this anyway).
-const MIN_BG_INTERVAL_MS = 1200;
-
-// Map the intensity slider (0..1) to a target throughput in memes/hour.
-// Bottom of the range trickles (~6/hr); the very top means "as fast as the
-// model allows" (Infinity → just the floor interval between items).
-export function memesPerHour(intensity: number): number {
-  const v = Math.max(0, Math.min(1, intensity));
-  if (v >= 0.97) return Infinity;
-  const minRate = 6;
-  const maxRate = 600;
-  return Math.round(minRate * Math.pow(maxRate / minRate, v));
-}
-
-// Human label for the current intensity band.
-export function intensityLabel(intensity: number): string {
-  const v = Math.max(0, Math.min(1, intensity));
-  if (v < 0.3) return 'Conservative';
-  if (v < 0.6) return 'Balanced';
-  if (v < 0.97) return 'Aggressive';
-  return 'Extreme';
-}
-
-// Delay between background items for a given intensity.
-function bgIntervalMs(intensity: number): number {
-  const rate = memesPerHour(intensity);
-  if (rate === Infinity) return MIN_BG_INTERVAL_MS;
-  return Math.max(MIN_BG_INTERVAL_MS, Math.round(3_600_000 / rate));
-}
-
-// Battery / thermal throttles for background work.
-export interface BgThrottles {
-  onlyWhileCharging: boolean;
-  pauseWhenHot: boolean;
-  pauseOnLowBattery: boolean;
-}
-
-// Returns a short human reason to pause, or null to proceed. Without the native
-// module (no power signal) it never blocks — the loop just runs unthrottled.
-function powerBlockReason(p: NativePower | null, t: BgThrottles): string | null {
-  if (!p) return null;
-  if (t.onlyWhileCharging && !p.charging) return 'on battery';
-  if (t.pauseOnLowBattery && !p.charging && p.level >= 0 && p.level < 0.2) return 'battery low';
-  const hot = p.thermal >= 2 || (p.headroom >= 0 && p.headroom > 0.85);
-  if (t.pauseWhenHot && hot) return 'device warm';
-  return null;
-}
-
-const POWER_CACHE_MS = 8_000; // don't re-read battery/thermal more than this often
-
-// What a single description yields. `caption` is the display/search sentence;
-// the rest are folded into the searchable term bag and the tag chips.
-export interface VisionResult {
-  caption: string;
-  subjects: string[];
-  text: string; // text visibly written in the meme, verbatim
-  tags: string[]; // open-vocabulary search keywords (format/topic/emotion/name)
-}
+// This module owns the FOREGROUND path (the React hook + in-app paced loop).
+// The headless, OS-scheduled background path lives in backgroundTask.ts and
+// shares the pure pieces in visionCore.ts.
 
 export interface VisionApi {
   enabled: boolean; // user has opted in (model is allowed to download/load)
@@ -138,75 +82,6 @@ export interface VisionApi {
 }
 
 const Ctx = createContext<VisionApi | null>(null);
-
-// Keep the model terse and machine-readable. Low temperature is baked into the
-// model constant's generationConfig (0.1), so with a strict schema it returns
-// compact JSON we can parse deterministically.
-const SYSTEM_PROMPT =
-  'You are a meme cataloging engine. You look at a single image and output ONLY ' +
-  'a compact JSON object describing it for search. No prose, no markdown, no code fences.';
-
-// Terse on purpose: decode is per-token, so a tight schema + short caption keeps
-// each call fast. (react-native-executorch has no hard max-token knob, so brevity
-// is enforced via the prompt.)
-const USER_PROMPT =
-  'Describe this meme so it can be found later by search. Respond with ONLY this JSON ' +
-  'object and nothing else, no prose:\n' +
-  '{"caption": "<=14 words: what is happening and why it is funny>", ' +
-  '"subjects": ["<main people, characters, or objects>"], ' +
-  '"text": "<text visible in the image, verbatim; empty string if none>", ' +
-  '"tags": ["<4-8 lowercase keywords: meme format/template name if known, topic, emotion, named characters>"]}\n' +
-  'If it is not a meme, still describe the image the same way. Be concise.';
-
-// Cap the injected OCR so it can't bloat the prompt (prefill cost) — a hint,
-// not a transcript.
-const OCR_HINT_MAX = 280;
-
-// Build the user turn, optionally grounding it with text ML Kit already read so
-// the small model doesn't have to re-OCR small text from a downscaled frame.
-function userTurn(ocrHint?: string): string {
-  const hint = (ocrHint ?? '').replace(/\s+/g, ' ').trim();
-  if (!hint) return USER_PROMPT;
-  return (
-    USER_PROMPT +
-    `\nText already extracted from this image by OCR — use it verbatim for the "text" field and ` +
-    `as a hint for the caption: "${hint.slice(0, OCR_HINT_MAX)}"`
-  );
-}
-
-function asStringArray(v: unknown): string[] {
-  if (!Array.isArray(v)) return [];
-  return v.map((x) => String(x).trim()).filter(Boolean).slice(0, 16);
-}
-
-// Pull a JSON object out of the model's reply and coerce it into a VisionResult.
-// Defensive: models occasionally wrap JSON in prose or fences, or emit a bare
-// description — we recover a usable caption either way.
-export function parseVision(raw: string): VisionResult {
-  const reply = (raw ?? '').trim();
-  const start = reply.indexOf('{');
-  const end = reply.lastIndexOf('}');
-  let obj: Record<string, unknown> = {};
-  if (start >= 0 && end > start) {
-    try {
-      obj = JSON.parse(reply.slice(start, end + 1)) as Record<string, unknown>;
-    } catch {
-      // fall through to raw-text fallback below
-    }
-  }
-  const caption =
-    typeof obj.caption === 'string' && obj.caption.trim()
-      ? obj.caption.trim()
-      : // No parseable caption: use the raw reply (sans any JSON braces) so the
-        // meme is still describable rather than blank.
-        reply.replace(/[{}]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 240);
-  return {
-    caption,
-    subjects: asStringArray(obj.subjects),
-    text: typeof obj.text === 'string' ? obj.text.trim() : '',
-    tags: asStringArray(obj.tags),
-  };
-}
 
 export function VisionProvider({ children }: { children: React.ReactNode }) {
   const [enabled, setEnabledState] = useState(false);
@@ -374,13 +249,23 @@ export function VisionProvider({ children }: { children: React.ReactNode }) {
   }, [hydrated, bgEnabled, enabled, llm.isReady, bgIntensity]);
 
   // Keep-alive foreground service (Android): hold the process alive while
-  // background mode is active so the loop above survives backgrounding. No-op
+  // background mode is active so the in-app loop survives backgrounding. No-op
   // without the native module. On iOS this only buys a short extension.
   useEffect(() => {
     if (!(hydrated && bgEnabled && enabled && llm.isReady)) return;
     startKeepAlive('Memeget', 'Describing your memes in the background');
     return () => stopKeepAlive();
   }, [hydrated, bgEnabled, enabled, llm.isReady]);
+
+  // OS-scheduled background task (WorkManager / BGTaskScheduler): runs the model
+  // HEADLESSLY (no React) when the app isn't open, via headlessVision.ts. Toggle
+  // registration with background mode; the task itself re-checks settings and
+  // throttles before doing anything.
+  useEffect(() => {
+    if (!hydrated) return;
+    if (bgEnabled && enabled) registerBackgroundDescribe();
+    else unregisterBackgroundDescribe();
+  }, [hydrated, bgEnabled, enabled]);
 
   const api = useMemo<VisionApi>(() => {
     return {
