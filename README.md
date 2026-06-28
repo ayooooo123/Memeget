@@ -89,6 +89,28 @@ npx expo run:android   # builds a dev client onto a connected device/emulator
 
 Requires a custom dev build (not Expo Go) because of the native ML modules.
 
+## Tests
+
+```bash
+npm run typecheck   # TypeScript, whole app
+npm test            # Jest unit tests (deterministic, offline)
+npm run test:smoke  # LIVE tests — hit real X/Tenor/etc. endpoints
+```
+
+- **`npm test`** is the merge gate (CI: `.github/workflows/ci.yml`). It mocks
+  `fetch` + the file download and locks in the link resolver's per-platform
+  paths — X video (best-bitrate mp4) & photo fallback, Tenor/generic Open Graph,
+  direct media URLs, content-type handling, and the error cases. Fully offline
+  and deterministic, so it's safe to require for merges.
+- **`npm run test:smoke`** (`src/linkResolver.smoke.test.ts`) is *opt-in*
+  (`RUN_SMOKE=1`) and actually contacts the real endpoints, then does a ranged
+  GET on the resolved media URL to prove it's downloadable. It's kept **out** of
+  the merge gate and runs on its own schedule/dispatch
+  (`.github/workflows/smoke.yml`) because it depends on third-party uptime and X
+  often blocks CI/datacenter IPs — a red run there means "a platform changed or
+  blocked us", not "this PR is broken". If a fixture post gets deleted, the
+  failing test name tells you which URL to swap.
+
 ## Project layout
 
 ```

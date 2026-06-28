@@ -1,0 +1,43 @@
+name: Live smoke (link extraction)
+
+# Hits the REAL X / Tenor / generic / direct-media endpoints to confirm the
+# shared-link resolver still extracts downloadable media. Deliberately SEPARATE
+# from ci.yml (the merge-gating suite): these depend on third-party uptime and X
+# may block CI runner IPs, so a red run here means "investigate a platform", not
+# "block this PR". Don't mark this a required check.
+#
+# Runs daily, on demand, and on PRs that touch the resolver.
+
+on:
+  schedule:
+    - cron: '17 7 * * *' # daily, 07:17 UTC
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'src/linkResolver.ts'
+      - 'src/linkResolver.smoke.test.ts'
+      - '.github/workflows/smoke.yml'
+
+concurrency:
+  group: smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm install --legacy-peer-deps
+
+      - name: Live smoke test
+        run: npm run test:smoke
