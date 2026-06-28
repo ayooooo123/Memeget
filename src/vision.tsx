@@ -13,6 +13,13 @@ import {
   type EnrichResult,
   type VisionEnricher,
 } from './indexer';
+import {
+  bgNativeAvailable,
+  getPower,
+  startKeepAlive,
+  stopKeepAlive,
+  type NativePower,
+} from '../modules/memeget-bg';
 
 // LFM2.5-VL, on-device, via ExecuTorch's XNNPACK backend — the SAME runtime
 // that already runs CLIP, so there's no second engine to ship. We use the
@@ -30,6 +37,9 @@ const QUALITY_KEY = 'vision.quality';
 const ENABLED_KEY = 'vision.enabled';
 const BG_ENABLED_KEY = 'vision.bg.enabled';
 const BG_INTENSITY_KEY = 'vision.bg.intensity';
+const BG_ONLY_CHARGING_KEY = 'vision.bg.onlyCharging';
+const BG_PAUSE_HOT_KEY = 'vision.bg.pauseHot';
+const BG_PAUSE_LOW_KEY = 'vision.bg.pauseLowBattery';
 
 const MODEL = {
   fast: LFM2_5_VL_450M_QUANTIZED,
@@ -68,6 +78,26 @@ function bgIntervalMs(intensity: number): number {
   return Math.max(MIN_BG_INTERVAL_MS, Math.round(3_600_000 / rate));
 }
 
+// Battery / thermal throttles for background work.
+export interface BgThrottles {
+  onlyWhileCharging: boolean;
+  pauseWhenHot: boolean;
+  pauseOnLowBattery: boolean;
+}
+
+// Returns a short human reason to pause, or null to proceed. Without the native
+// module (no power signal) it never blocks — the loop just runs unthrottled.
+function powerBlockReason(p: NativePower | null, t: BgThrottles): string | null {
+  if (!p) return null;
+  if (t.onlyWhileCharging && !p.charging) return 'on battery';
+  if (t.pauseOnLowBattery && !p.charging && p.level >= 0 && p.level < 0.2) return 'battery low';
+  const hot = p.thermal >= 2 || (p.headroom >= 0 && p.headroom > 0.85);
+  if (t.pauseWhenHot && hot) return 'device warm';
+  return null;
+}
+
+const POWER_CACHE_MS = 8_000; // don't re-read battery/thermal more than this often
+
 // What a single description yields. `caption` is the display/search sentence;
 // the rest are folded into the searchable term bag and the tag chips.
 export interface VisionResult {
@@ -89,12 +119,16 @@ export interface VisionApi {
   describe: (jpegPath: string, ocrHint?: string) => Promise<VisionResult | null>;
 
   // Background processing — a paced trickle that describes the library while the
-  // app is open, throttled by the intensity slider.
+  // app is open, throttled by the intensity slider and battery/thermal state.
   backgroundEnabled: boolean;
   backgroundIntensity: number; // 0..1
   running: boolean; // an enrichment pass (burst or background tick) is active
+  pausedReason: string | null; // non-null when a throttle is holding work
+  nativeBackgroundAvailable: boolean; // power/keep-alive native module is built
+  throttles: BgThrottles;
   setBackgroundEnabled: (on: boolean) => void;
   setBackgroundIntensity: (v: number) => void;
+  setThrottle: (key: keyof BgThrottles, value: boolean) => void;
   // Burst path for the "Describe N now" button — mutex-guarded so it can never
   // run concurrently with the background loop (one accelerator, one generation).
   // Resolves to 'busy' if another pass already holds the lock.
@@ -179,24 +213,44 @@ export function VisionProvider({ children }: { children: React.ReactNode }) {
   const [quality, setQualityState] = useState<VisionQuality>('fast');
   const [bgEnabled, setBgEnabledState] = useState(false);
   const [bgIntensity, setBgIntensityState] = useState(0.25);
+  const [throttles, setThrottles] = useState<BgThrottles>({
+    onlyWhileCharging: false,
+    pauseWhenHot: true,
+    pauseOnLowBattery: true,
+  });
+  const [pausedReason, setPausedReason] = useState<string | null>(null);
   const [hydrated, setHydrated] = useState(false);
   const [running, setRunning] = useState(false);
+  // Latest throttle prefs for the loop closure (avoids re-arming on every edit).
+  const throttlesRef = useRef(throttles);
+  throttlesRef.current = throttles;
+  // Cached battery/thermal snapshot so we don't poll native every tick.
+  const powerRef = useRef<{ at: number; value: NativePower | null }>({ at: 0, value: null });
 
   // Load persisted preferences once. Until hydrated we keep the model from
   // loading (preventLoad) so a re-install never auto-downloads ~hundreds of MB.
   useEffect(() => {
     (async () => {
-      const [en, q, bg, bi] = await Promise.all([
+      const [en, q, bg, bi, oc, ph, pl] = await Promise.all([
         getSetting(ENABLED_KEY),
         getSetting(QUALITY_KEY),
         getSetting(BG_ENABLED_KEY),
         getSetting(BG_INTENSITY_KEY),
+        getSetting(BG_ONLY_CHARGING_KEY),
+        getSetting(BG_PAUSE_HOT_KEY),
+        getSetting(BG_PAUSE_LOW_KEY),
       ]);
       if (q === 'max' || q === 'fast') setQualityState(q);
       setEnabledState(en === '1');
       setBgEnabledState(bg === '1');
       const parsed = bi != null ? Number(bi) : NaN;
       if (Number.isFinite(parsed)) setBgIntensityState(Math.max(0, Math.min(1, parsed)));
+      // Defaults apply when a key was never written (null).
+      setThrottles({
+        onlyWhileCharging: oc === '1',
+        pauseWhenHot: ph !== '0',
+        pauseOnLowBattery: pl !== '0',
+      });
       setHydrated(true);
     })().catch(() => setHydrated(true));
   }, []);
@@ -219,6 +273,25 @@ export function VisionProvider({ children }: { children: React.ReactNode }) {
     const c = Math.max(0, Math.min(1, v));
     setBgIntensityState(c);
     setSetting(BG_INTENSITY_KEY, String(c)).catch(() => {});
+  };
+  const setThrottle = (key: keyof BgThrottles, value: boolean) => {
+    setThrottles((cur) => ({ ...cur, [key]: value }));
+    const storageKey =
+      key === 'onlyWhileCharging'
+        ? BG_ONLY_CHARGING_KEY
+        : key === 'pauseWhenHot'
+          ? BG_PAUSE_HOT_KEY
+          : BG_PAUSE_LOW_KEY;
+    setSetting(storageKey, value ? '1' : '0').catch(() => {});
+  };
+
+  // Cached battery/thermal read so the loop doesn't poll native every tick.
+  const readPower = (): NativePower | null => {
+    const now = Date.now();
+    if (now - powerRef.current.at < POWER_CACHE_MS) return powerRef.current.value;
+    const value = getPower();
+    powerRef.current = { at: now, value };
+    return value;
   };
 
   // The describe primitive. Kept in a ref so the background loop / burst pass
@@ -269,6 +342,17 @@ export function VisionProvider({ children }: { children: React.ReactNode }) {
 
     const loop = async () => {
       if (cancelled) return;
+
+      // Battery/thermal gate first — cheaper than describing, and the whole
+      // point of running in the background politely.
+      const block = powerBlockReason(readPower(), throttlesRef.current);
+      if (block) {
+        setPausedReason(block);
+        timer = setTimeout(loop, 30_000); // re-check conditions soon
+        return;
+      }
+      setPausedReason(null);
+
       let status: 'done' | 'deduped' | 'failed' | 'empty' | 'busy' = 'busy';
       try {
         status = await runGuarded(() => enrichNextMeme(enricherRef.current));
@@ -285,8 +369,18 @@ export function VisionProvider({ children }: { children: React.ReactNode }) {
     return () => {
       cancelled = true;
       if (timer) clearTimeout(timer);
+      setPausedReason(null);
     };
   }, [hydrated, bgEnabled, enabled, llm.isReady, bgIntensity]);
+
+  // Keep-alive foreground service (Android): hold the process alive while
+  // background mode is active so the loop above survives backgrounding. No-op
+  // without the native module. On iOS this only buys a short extension.
+  useEffect(() => {
+    if (!(hydrated && bgEnabled && enabled && llm.isReady)) return;
+    startKeepAlive('Memeget', 'Describing your memes in the background');
+    return () => stopKeepAlive();
+  }, [hydrated, bgEnabled, enabled, llm.isReady]);
 
   const api = useMemo<VisionApi>(() => {
     return {
@@ -302,8 +396,12 @@ export function VisionProvider({ children }: { children: React.ReactNode }) {
       backgroundEnabled: bgEnabled,
       backgroundIntensity: bgIntensity,
       running,
+      pausedReason,
+      nativeBackgroundAvailable: bgNativeAvailable,
+      throttles,
       setBackgroundEnabled,
       setBackgroundIntensity,
+      setThrottle,
       runEnrichment,
     };
     // llm identity changes as state updates; depend on the fields we read.
@@ -312,6 +410,8 @@ export function VisionProvider({ children }: { children: React.ReactNode }) {
     quality,
     bgEnabled,
     bgIntensity,
+    throttles,
+    pausedReason,
     running,
     hydrated,
     llm.isReady,

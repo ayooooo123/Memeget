@@ -470,8 +470,35 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
                   <Text style={styles.faintSmall}>Conservative</Text>
                   <Text style={styles.faintSmall}>Extreme</Text>
                 </View>
-                {vision.running && !enriching && (
-                  <Text style={styles.note}>Working in the background… {described} described so far.</Text>
+                {vision.pausedReason && (
+                  <Text style={styles.faintSmall}>Paused — {vision.pausedReason}</Text>
+                )}
+                {vision.running && !enriching && !vision.pausedReason && (
+                  <Text style={styles.faintSmall}>Working in the background… {described} described so far.</Text>
+                )}
+
+                <View style={styles.bgDivider} />
+                <ThrottleRow
+                  label="Only while charging"
+                  value={vision.throttles.onlyWhileCharging}
+                  onChange={(v) => vision.setThrottle('onlyWhileCharging', v)}
+                />
+                <ThrottleRow
+                  label="Pause when device is warm"
+                  value={vision.throttles.pauseWhenHot}
+                  onChange={(v) => vision.setThrottle('pauseWhenHot', v)}
+                />
+                <ThrottleRow
+                  label="Pause on low battery"
+                  value={vision.throttles.pauseOnLowBattery}
+                  onChange={(v) => vision.setThrottle('pauseOnLowBattery', v)}
+                />
+                {!vision.nativeBackgroundAvailable && (
+                  <Text style={styles.note}>
+                    Charging/thermal awareness and true keep-running-in-background need a native
+                    build (expo prebuild). Until then this runs only while the app is open and the
+                    throttles above have no signal to act on.
+                  </Text>
                 )}
               </>
             )}
@@ -679,6 +706,28 @@ function Section({
         <Text style={styles.sectionTitle}>{title}</Text>
       </View>
       <View style={styles.card}>{children}</View>
+    </View>
+  );
+}
+
+function ThrottleRow({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: boolean;
+  onChange: (v: boolean) => void;
+}) {
+  return (
+    <View style={styles.bgHeadRow}>
+      <Text style={styles.rowLabel}>{label}</Text>
+      <Switch
+        value={value}
+        onValueChange={onChange}
+        trackColor={{ true: colors.volt, false: colors.surface3 }}
+        thumbColor="#fff"
+      />
     </View>
   );
 }

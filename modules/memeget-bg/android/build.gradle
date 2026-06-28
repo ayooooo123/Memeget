@@ -1,0 +1,15 @@
+apply plugin: 'expo-module-gradle-plugin'
+
+group = 'expo.modules.memegetbg'
+version = '0.1.0'
+
+// The expo-module-gradle-plugin wires up the Android library config
+// (compile/min/target SDK from the host app), Kotlin, and the expo-modules-core
+// dependency. We only need to declare our namespace and any extra deps.
+android {
+  namespace 'expo.modules.memegetbg'
+}
+
+dependencies {
+  implementation 'androidx.core:core-ktx:1.13.1'
+}
