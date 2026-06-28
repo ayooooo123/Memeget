@@ -1,6 +1,6 @@
 import * as SQLite from 'expo-sqlite';
 
-import type { MemeRecord, SearchHit, Tag, LinkedFolder, Exemplar } from './types';
+import type { MemeRecord, MediaKind, SearchHit, Tag, LinkedFolder, Exemplar } from './types';
 
 let dbPromise: Promise<SQLite.SQLiteDatabase> | null = null;
 
@@ -264,10 +264,32 @@ function safeParseTags(s: string): Tag[] {
   }
 }
 
-export async function countMemes(): Promise<number> {
+export async function countMemes(kind?: MediaKind): Promise<number> {
   const db = await getDb();
-  const row = await db.getFirstAsync<{ c: number }>('SELECT COUNT(*) as c FROM memes');
+  const row = kind
+    ? await db.getFirstAsync<{ c: number }>('SELECT COUNT(*) as c FROM memes WHERE kind = ?', kind)
+    : await db.getFirstAsync<{ c: number }>('SELECT COUNT(*) as c FROM memes');
   return row?.c ?? 0;
+}
+
+// Distinct meme-tag labels actually present across the indexed library, ordered
+// by how many memes carry each (most common first). Powers the quick-filter
+// chips so a user can narrow to a known format/character without typing it.
+export async function getLibraryTagLabels(limit = 40): Promise<string[]> {
+  const db = await getDb();
+  const rows = await db.getAllAsync<{ tags: string }>(
+    "SELECT tags FROM memes WHERE pending = 0 AND tags != '[]'"
+  );
+  const counts = new Map<string, number>();
+  for (const r of rows) {
+    for (const t of safeParseTags(r.tags)) {
+      counts.set(t.label, (counts.get(t.label) ?? 0) + 1);
+    }
+  }
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, limit)
+    .map(([label]) => label);
 }
 
 // How many memes currently carry a given tag label (used for teach feedback).
@@ -280,7 +302,11 @@ export async function countMemesWithLabel(label: string): Promise<number> {
   return row?.c ?? 0;
 }
 
-export async function getRecentMemes(limit = 90, offset = 0): Promise<MemeRecord[]> {
+export async function getRecentMemes(
+  limit = 90,
+  offset = 0,
+  kind?: MediaKind
+): Promise<MemeRecord[]> {
   const db = await getDb();
   // Deliberately does NOT select the embedding blob: the grid only renders
   // thumbnails + metadata, so pulling a 512-float vector per row into JS just to
@@ -291,12 +317,20 @@ export async function getRecentMemes(limit = 90, offset = 0): Promise<MemeRecord
   // Tiebreak on id: bulk indexing stamps many rows with the same indexed_at
   // (same millisecond), and without a stable secondary sort LIMIT/OFFSET paging
   // repeats and skips rows — which is what broke infinite scroll.
-  const rows = await db.getAllAsync<Omit<MemeRow, 'embedding'>>(
-    `SELECT id, uri, name, kind, ocr_text, tags, extra_terms, indexed_at, pending
-     FROM memes ORDER BY indexed_at DESC, id DESC LIMIT ? OFFSET ?`,
-    limit,
-    offset
-  );
+  const rows = kind
+    ? await db.getAllAsync<Omit<MemeRow, 'embedding'>>(
+        `SELECT id, uri, name, kind, ocr_text, tags, extra_terms, indexed_at, pending
+         FROM memes WHERE kind = ? ORDER BY indexed_at DESC, id DESC LIMIT ? OFFSET ?`,
+        kind,
+        limit,
+        offset
+      )
+    : await db.getAllAsync<Omit<MemeRow, 'embedding'>>(
+        `SELECT id, uri, name, kind, ocr_text, tags, extra_terms, indexed_at, pending
+         FROM memes ORDER BY indexed_at DESC, id DESC LIMIT ? OFFSET ?`,
+        limit,
+        offset
+      );
   return rows.map((r) => ({
     id: r.id,
     uri: r.uri,
@@ -315,12 +349,15 @@ export async function getRecentMemes(limit = 90, offset = 0): Promise<MemeRecord
 export async function searchByVector(
   queryVec: number[],
   queryText: string,
-  limit = 40
+  limit = 40,
+  kind?: MediaKind
 ): Promise<SearchHit[]> {
   const db = await getDb();
   // Pending placeholders have no embedding/OCR/tags yet, so they'd only add
   // noise — leave them out until the indexer fills them in.
-  const rows = await db.getAllAsync<MemeRow>('SELECT * FROM memes WHERE pending = 0');
+  const rows = kind
+    ? await db.getAllAsync<MemeRow>('SELECT * FROM memes WHERE pending = 0 AND kind = ?', kind)
+    : await db.getAllAsync<MemeRow>('SELECT * FROM memes WHERE pending = 0');
   const terms = queryText
     .toLowerCase()
     .split(/\s+/)

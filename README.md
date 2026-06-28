@@ -14,6 +14,7 @@ No accounts. No servers. No uploads.
 |---|---|
 | Search by description | **CLIP** (ViT-B/32) via [`react-native-executorch`](https://github.com/software-mansion/react-native-executorch). Images and your text query are embedded into the same vector space; results are ranked by cosine similarity. |
 | Meme format / character / emotion tags | **Zero-shot classification** against a curated prompt library (`src/memeLabels.ts`) — Pepe, Wojak, Doomer, Gigachad, Drake format, This Is Fine, etc. This is the editable "knowledge" layer. |
+| Quick filters | A slim chip row under the search box: tap **▦ Images / ▶ Videos** to narrow by media type, or tap a known meme tag (the formats/characters actually present in your library, plus your taught labels) to filter without typing. Filters apply to both browse and search. |
 | Words in the meme | On-device **OCR** ([`expo-text-extractor`](https://github.com/pchalupa/expo-text-extractor) → ML Kit on Android). |
 | Video | A keyframe is extracted (`expo-video-thumbnails`) and indexed like an image. |
 | Index storage | `expo-sqlite`; embeddings stored as float32 blobs, brute-force cosine search. |
