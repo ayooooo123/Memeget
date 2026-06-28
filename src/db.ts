@@ -24,7 +24,8 @@ export async function initDb(): Promise<void> {
       ocr_text TEXT NOT NULL DEFAULT '',
       tags TEXT NOT NULL DEFAULT '[]',
       extra_terms TEXT NOT NULL DEFAULT '',
-      indexed_at INTEGER NOT NULL
+      indexed_at INTEGER NOT NULL,
+      pending INTEGER NOT NULL DEFAULT 0
     );
     CREATE TABLE IF NOT EXISTS folders (
       uri TEXT PRIMARY KEY,
@@ -58,6 +59,11 @@ export async function initDb(): Promise<void> {
   const cols = await db.getAllAsync<{ name: string }>('PRAGMA table_info(memes)');
   if (!cols.some((c) => c.name === 'extra_terms')) {
     await db.execAsync(`ALTER TABLE memes ADD COLUMN extra_terms TEXT NOT NULL DEFAULT '';`);
+  }
+  // Migrate v2 databases that predate the pending flag (rows saved-but-not-yet-
+  // indexed, so a shared meme can show in the list before it's embedded).
+  if (!cols.some((c) => c.name === 'pending')) {
+    await db.execAsync(`ALTER TABLE memes ADD COLUMN pending INTEGER NOT NULL DEFAULT 0;`);
   }
   // Migrate exemplar tables that predate negative ("not this") teaching.
   const exCols = await db.getAllAsync<{ name: string }>('PRAGMA table_info(exemplars)');
@@ -94,9 +100,15 @@ export function dot(a: Float32Array | number[], b: Float32Array | number[]): num
 
 // ---- memes -------------------------------------------------------------------
 
+// True only for memes that are fully indexed. A pending placeholder (saved but
+// not yet embedded) does NOT count, so the indexer still picks the file up and
+// replaces the placeholder with the real, searchable record.
 export async function memeExists(uri: string): Promise<boolean> {
   const db = await getDb();
-  const row = await db.getFirstAsync<{ id: number }>('SELECT id FROM memes WHERE uri = ?', uri);
+  const row = await db.getFirstAsync<{ id: number }>(
+    'SELECT id FROM memes WHERE uri = ? AND pending = 0',
+    uri
+  );
   return !!row;
 }
 
@@ -129,6 +141,28 @@ export async function insertMeme(args: {
   );
 }
 
+// Insert a lightweight placeholder for a freshly-saved meme that hasn't been
+// embedded yet, so it appears in the library list immediately. Stamped with the
+// current time (sorts to the top of recents) and pending=1 so it's excluded from
+// search/training until the indexer fills in its embedding, OCR, and tags. Uses
+// INSERT OR IGNORE so it never clobbers an already-indexed row for the same uri.
+export async function insertPendingMeme(args: {
+  uri: string;
+  name: string;
+  kind: string;
+}): Promise<void> {
+  const db = await getDb();
+  await db.runAsync(
+    `INSERT OR IGNORE INTO memes (uri, name, kind, embedding, ocr_text, tags, extra_terms, indexed_at, pending)
+     VALUES (?, ?, ?, ?, '', '[]', '', ?, 1)`,
+    args.uri,
+    args.name,
+    args.kind,
+    vecToBlob([]),
+    Date.now()
+  );
+}
+
 interface MemeRow {
   id: number;
   uri: string;
@@ -139,6 +173,7 @@ interface MemeRow {
   tags: string;
   extra_terms: string;
   indexed_at: number;
+  pending: number;
 }
 
 function rowToRecord(row: MemeRow): MemeRecord & { embedding: Float32Array } {
@@ -151,6 +186,7 @@ function rowToRecord(row: MemeRow): MemeRecord & { embedding: Float32Array } {
     tags: safeParseTags(row.tags),
     extraTerms: row.extra_terms ?? '',
     indexedAt: row.indexed_at,
+    pending: row.pending === 1,
     embedding: blobToVec(row.embedding),
   };
 }
@@ -162,7 +198,7 @@ export async function getAllMemeEmbeddings(): Promise<
 > {
   const db = await getDb();
   const rows = await db.getAllAsync<{ id: number; embedding: Uint8Array; ocr_text: string }>(
-    'SELECT id, embedding, ocr_text FROM memes'
+    'SELECT id, embedding, ocr_text FROM memes WHERE pending = 0'
   );
   return rows.map((r) => ({ id: r.id, embedding: blobToVec(r.embedding), ocrText: r.ocr_text ?? '' }));
 }
@@ -172,7 +208,7 @@ export async function getAllMemeEmbeddings(): Promise<
 export async function getEmbeddingSample(limit = 500): Promise<Float32Array[]> {
   const db = await getDb();
   const rows = await db.getAllAsync<{ embedding: Uint8Array }>(
-    'SELECT embedding FROM memes ORDER BY RANDOM() LIMIT ?',
+    'SELECT embedding FROM memes WHERE pending = 0 ORDER BY RANDOM() LIMIT ?',
     limit
   );
   return rows.map((r) => blobToVec(r.embedding));
@@ -180,8 +216,10 @@ export async function getEmbeddingSample(limit = 500): Promise<Float32Array[]> {
 
 export async function getMemeEmbedding(id: number): Promise<Float32Array | null> {
   const db = await getDb();
+  // Pending placeholders carry an empty embedding; treat them as "no embedding
+  // yet" so teaching/confidence don't operate on a zero-length vector.
   const row = await db.getFirstAsync<{ embedding: Uint8Array }>(
-    'SELECT embedding FROM memes WHERE id = ?',
+    'SELECT embedding FROM memes WHERE id = ? AND pending = 0',
     id
   );
   return row ? blobToVec(row.embedding) : null;
@@ -244,15 +282,32 @@ export async function countMemesWithLabel(label: string): Promise<number> {
 
 export async function getRecentMemes(limit = 90, offset = 0): Promise<MemeRecord[]> {
   const db = await getDb();
+  // Deliberately does NOT select the embedding blob: the grid only renders
+  // thumbnails + metadata, so pulling a 512-float vector per row into JS just to
+  // scroll past it wasted megabytes of RAM on a big library — which stuttered
+  // the list and competed with the CLIP model loading on first launch. Search
+  // and teaching read embeddings on demand (searchByVector / getMemeEmbedding).
+  //
   // Tiebreak on id: bulk indexing stamps many rows with the same indexed_at
   // (same millisecond), and without a stable secondary sort LIMIT/OFFSET paging
   // repeats and skips rows — which is what broke infinite scroll.
-  const rows = await db.getAllAsync<MemeRow>(
-    'SELECT * FROM memes ORDER BY indexed_at DESC, id DESC LIMIT ? OFFSET ?',
+  const rows = await db.getAllAsync<Omit<MemeRow, 'embedding'>>(
+    `SELECT id, uri, name, kind, ocr_text, tags, extra_terms, indexed_at, pending
+     FROM memes ORDER BY indexed_at DESC, id DESC LIMIT ? OFFSET ?`,
     limit,
     offset
   );
-  return rows.map(rowToRecord);
+  return rows.map((r) => ({
+    id: r.id,
+    uri: r.uri,
+    name: r.name,
+    kind: r.kind as MemeRecord['kind'],
+    ocrText: r.ocr_text,
+    tags: safeParseTags(r.tags),
+    extraTerms: r.extra_terms ?? '',
+    indexedAt: r.indexed_at,
+    pending: r.pending === 1,
+  }));
 }
 
 // Brute-force vector search. Fine for thousands of items; swap for sqlite-vec
@@ -263,7 +318,9 @@ export async function searchByVector(
   limit = 40
 ): Promise<SearchHit[]> {
   const db = await getDb();
-  const rows = await db.getAllAsync<MemeRow>('SELECT * FROM memes');
+  // Pending placeholders have no embedding/OCR/tags yet, so they'd only add
+  // noise — leave them out until the indexer fills them in.
+  const rows = await db.getAllAsync<MemeRow>('SELECT * FROM memes WHERE pending = 0');
   const terms = queryText
     .toLowerCase()
     .split(/\s+/)

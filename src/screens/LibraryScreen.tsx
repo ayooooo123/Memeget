@@ -50,12 +50,20 @@ export function LibraryScreen() {
   const cancelRef = useRef(false);
   const hasMoreRef = useRef(true);
   const loadingMoreRef = useRef(false);
+  // How many recents are currently loaded, mirrored into a ref so refresh()
+  // (stable, no deps) can re-fetch the same span without losing the user's
+  // scroll position — important because background indexing of a freshly shared
+  // meme fires refresh repeatedly.
+  const loadedCountRef = useRef(PAGE);
 
   const refresh = useCallback(async () => {
     setFolders(await getFolders());
-    const first = await getRecentMemes(PAGE, 0);
-    setRecent(first);
-    hasMoreRef.current = first.length === PAGE;
+    const span = Math.max(PAGE, loadedCountRef.current);
+    const rows = await getRecentMemes(span, 0);
+    setRecent(rows);
+    loadedCountRef.current = rows.length;
+    // Only assume there's more to page in when we filled a clean page boundary.
+    hasMoreRef.current = rows.length === span && rows.length % PAGE === 0;
     setCount(await countMemes());
     setTaughtLabels(await getLabels().catch(() => []));
   }, []);
@@ -74,7 +82,11 @@ export function LibraryScreen() {
     try {
       const next = await getRecentMemes(PAGE, recent.length);
       hasMoreRef.current = next.length === PAGE;
-      setRecent((cur) => [...cur, ...next]);
+      setRecent((cur) => {
+        const merged = [...cur, ...next];
+        loadedCountRef.current = merged.length;
+        return merged;
+      });
     } finally {
       loadingMoreRef.current = false;
       setLoadingMore(false);
@@ -245,7 +257,11 @@ export function LibraryScreen() {
   );
 
   const onDeleted = useCallback((id: number) => {
-    setRecent((cur) => cur.filter((m) => m.id !== id));
+    setRecent((cur) => {
+      const next = cur.filter((m) => m.id !== id);
+      loadedCountRef.current = next.length;
+      return next;
+    });
     setResults((cur) => (cur ? cur.filter((m) => m.id !== id) : cur));
     setCount((c) => Math.max(0, c - 1));
   }, []);

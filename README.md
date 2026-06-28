@@ -23,9 +23,20 @@ No accounts. No servers. No uploads.
 
 The app makes **no network calls at runtime** — indexing and search are fully
 offline. The **one** exception is a *one-time* download of the CLIP model from
-Hugging Face on first launch (ExecuTorch fetches it, then caches it locally).
-After that, you can stay airplane-mode forever. To make it *truly* zero-network
-from install, the model can be bundled into the APK assets — see "Next steps".
+Hugging Face on first launch (ExecuTorch fetches it, then caches it locally at
+`{documentDirectory}/react-native-executorch/`). After that, you can stay
+airplane-mode forever. To make it *truly* zero-network from install, the model
+can be bundled into the APK assets — see "Next steps".
+
+**Online only once — across updates too.** The cached model and the SQLite index
+both live in the app's internal storage, which Android keeps across an app update
+**as long as the new APK is signed with the same key** and is installed *over* the
+existing app (don't uninstall first). To guarantee the key never drifts between
+builds, the Android signing key is pinned: a fixed `signing/debug.keystore` (the
+standard Android debug key) is copied into the generated project on every
+`prebuild` by `plugins/withFixedDebugKeystore.js`. So updating the app never
+re-downloads the model or re-indexes your library. (Uninstalling or "Clear data"
+*will* wipe both — that's the only thing that forces a re-download.)
 
 ## Getting the APK
 

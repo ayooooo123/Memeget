@@ -16,6 +16,7 @@ export interface MemeRecord {
   tags: Tag[];
   extraTerms: string; // association/world-knowledge terms, for search
   indexedAt: number;
+  pending?: boolean; // saved & visible, but not yet embedded/OCR'd/tagged
 }
 
 // A user-taught (or pack-provided) reference example: an image embedding that
