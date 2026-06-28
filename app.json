@@ -31,7 +31,9 @@
         }
       ],
       "expo-video",
-      "./plugins/withFixedDebugKeystore"
+      "./plugins/withFixedDebugKeystore",
+      "expo-task-manager",
+      "expo-background-task"
     ],
     "experiments": {
       "typedRoutes": false
