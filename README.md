@@ -86,6 +86,14 @@ weights — editable and on-device:
   future images are tagged by image-to-image similarity to your exemplars, so the
   model doesn't need to have ever heard the word. New format drops? Teach it in
   seconds.
+- **Taught-knowledge list** (Settings → *Taught knowledge*) — every tag you've
+  taught, with how many examples back it and how many memes currently carry it.
+  Tap ✕ to forget a tag.
+- **Teaching packs** (Settings → *Export / Import*) — share your taught tags as a
+  small JSON pack so other collectors inherit your meme knowledge instantly.
+  Importing merges the examples into your own (duplicates are skipped); re-tag to
+  apply them. Packs carry the CLIP model + dimension stamp and are rejected on
+  import if they don't match, so vectors are always comparable.
 - **Re-tag library** (Settings) — re-applies all current knowledge to everything
   already indexed, reusing stored embeddings (no re-scanning/re-embedding).
 
