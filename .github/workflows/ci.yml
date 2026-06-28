@@ -1,0 +1,40 @@
+name: CI
+
+# Fast checks that must pass before merging: TypeScript type-checking and the
+# Jest unit tests (chiefly the shared-link → media resolver, so the X/Tenor/
+# generic download paths can't silently break). Runs on every PR and on pushes
+# to the working branches.
+
+on:
+  pull_request:
+  push:
+    branches:
+      - claude/**
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm install --legacy-peer-deps
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test

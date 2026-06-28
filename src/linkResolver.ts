@@ -121,8 +121,8 @@ function metaContent(html: string, ...names: string[]): string | null {
 
 // ---- platform resolvers -----------------------------------------------------
 
-const isTwitter = (u: string) => /(?:^|\.)(?:twitter|x)\.com\//i.test(u);
-const isTenor = (u: string) => /(?:^|\.)tenor\.com\//i.test(u);
+const isTwitter = (u: string) => /https?:\/\/(?:[\w-]+\.)*(?:twitter|x)\.com\//i.test(u);
+const isTenor = (u: string) => /https?:\/\/(?:[\w-]+\.)*tenor\.com\//i.test(u);
 
 function tweetId(url: string): string | null {
   const m = url.match(/(?:twitter|x)\.com\/[^/]+\/status(?:es)?\/(\d+)/i);
