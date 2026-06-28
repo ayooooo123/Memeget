@@ -2,7 +2,7 @@ import React, { createContext, useContext, useMemo } from 'react';
 import {
   useImageEmbeddings,
   useTextEmbeddings,
-  CLIP_VIT_BASE_PATCH32_IMAGE,
+  CLIP_VIT_BASE_PATCH32_IMAGE_QUANTIZED,
   CLIP_VIT_BASE_PATCH32_TEXT,
 } from 'react-native-executorch';
 
@@ -12,7 +12,16 @@ import type { Tag } from './types';
 // NOTE: image and text MUST come from the same CLIP model so their vectors
 // share a space. If react-native-executorch ever renames these constants,
 // this is the only place to change.
-const IMAGE_MODEL = CLIP_VIT_BASE_PATCH32_IMAGE;
+//
+// The image encoder is the int8-quantized build: ~4x smaller to download and
+// markedly lighter on RAM than the fp32 one (which competed with the rest of the
+// app at launch). It targets the same 512-dim CLIP space as the fp32 text
+// encoder, so text-query↔image search still works. There is no quantized text
+// build, and the text side must stay CLIP to share the vector space, so it
+// remains fp32. Switching the image encoder changes embedding values slightly,
+// so a one-time re-index (Settings → Clear index, then Index) keeps old and new
+// images consistent.
+const IMAGE_MODEL = CLIP_VIT_BASE_PATCH32_IMAGE_QUANTIZED;
 const TEXT_MODEL = CLIP_VIT_BASE_PATCH32_TEXT;
 
 export interface EmbeddingsApi {
