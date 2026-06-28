@@ -112,14 +112,17 @@ const SYSTEM_PROMPT =
   'You are a meme cataloging engine. You look at a single image and output ONLY ' +
   'a compact JSON object describing it for search. No prose, no markdown, no code fences.';
 
+// Terse on purpose: decode is per-token, so a tight schema + short caption keeps
+// each call fast. (react-native-executorch has no hard max-token knob, so brevity
+// is enforced via the prompt.)
 const USER_PROMPT =
   'Describe this meme so it can be found later by search. Respond with ONLY this JSON ' +
-  'object and nothing else:\n' +
-  '{"caption": "<one vivid sentence: what is happening and why it is funny>", ' +
+  'object and nothing else, no prose:\n' +
+  '{"caption": "<=14 words: what is happening and why it is funny>", ' +
   '"subjects": ["<main people, characters, or objects>"], ' +
-  '"text": "<all text visible in the image, verbatim; empty string if none>", ' +
-  '"tags": ["<5-10 lowercase keywords: meme format/template name if known, topic, emotion, named characters>"]}\n' +
-  'If it is not a meme, still describe the image the same way.';
+  '"text": "<text visible in the image, verbatim; empty string if none>", ' +
+  '"tags": ["<4-8 lowercase keywords: meme format/template name if known, topic, emotion, named characters>"]}\n' +
+  'If it is not a meme, still describe the image the same way. Be concise.';
 
 // Cap the injected OCR so it can't bloat the prompt (prefill cost) — a hint,
 // not a transcript.
@@ -266,7 +269,7 @@ export function VisionProvider({ children }: { children: React.ReactNode }) {
 
     const loop = async () => {
       if (cancelled) return;
-      let status: 'done' | 'failed' | 'empty' | 'busy' = 'busy';
+      let status: 'done' | 'deduped' | 'failed' | 'empty' | 'busy' = 'busy';
       try {
         status = await runGuarded(() => enrichNextMeme(enricherRef.current));
       } catch {

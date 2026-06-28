@@ -29,7 +29,7 @@ import {
 } from '../db';
 import { emitLibraryChanged } from '../events';
 import { success, warn } from '../haptics';
-import { retagAll } from '../indexer';
+import { getVisionTelemetry, retagAll, type VisionTelemetry } from '../indexer';
 import { MEME_LABELS } from '../memeLabels';
 import { buildPack, parsePack, serializePack } from '../teachingPack';
 import { colors, radius, space, TABBAR_CLEARANCE } from '../theme';
@@ -49,6 +49,7 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
   const [described, setDescribed] = useState(0);
   const [pending, setPending] = useState(0);
   const [enriching, setEnriching] = useState<{ done: number; total: number } | null>(null);
+  const [tele, setTele] = useState<VisionTelemetry>({ described: 0, deduped: 0, failed: 0, avgMs: 0 });
   const enrichCancel = useRef(false);
 
   const refresh = useCallback(async () => {
@@ -59,6 +60,7 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
     setErrors(await getIndexErrors());
     setDescribed(await countMemesDescribed());
     setPending(await countMemesNeedingVision());
+    setTele(getVisionTelemetry());
   }, []);
 
   // Both tabs stay mounted (so the Library keeps its state), which means this
@@ -276,8 +278,12 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
       }
       success();
       emitLibraryChanged(); // captions/tags changed under the Library's feet
+      const dupNote = res.deduped > 0 ? ` · ${res.deduped} dup${res.deduped === 1 ? '' : 's'} skipped` : '';
       const failNote = res.failed > 0 ? ` · ${res.failed} failed` : '';
-      showToast(`Described ${res.described} meme${res.described === 1 ? '' : 's'}${failNote}`, 'success');
+      showToast(
+        `Described ${res.described} meme${res.described === 1 ? '' : 's'}${dupNote}${failNote}`,
+        'success'
+      );
     } catch (e) {
       showToast(`Describe failed: ${String(e)}`, 'error');
     } finally {
@@ -398,6 +404,12 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
             </View>
 
             <Row label="Described" value={`${described} / ${describedTotal}`} />
+            {tele.avgMs > 0 && (
+              <Text style={styles.faintSmall}>
+                ≈ {(tele.avgMs / 1000).toFixed(1)}s per meme on this device
+                {tele.deduped > 0 ? ` · ${tele.deduped} skipped as duplicates` : ''}
+              </Text>
+            )}
             {enriching ? (
               <View style={{ gap: 8 }}>
                 <View style={styles.enrichTopRow}>

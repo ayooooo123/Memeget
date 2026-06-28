@@ -227,13 +227,23 @@ function rowToRecord(row: MemeRow): MemeRecord & { embedding: Float32Array } {
 // Re-tagging reuses already-stored embeddings, so applying new knowledge
 // (exemplars, association edits) costs no re-embedding.
 export async function getAllMemeEmbeddings(): Promise<
-  { id: number; embedding: Float32Array; ocrText: string }[]
+  { id: number; embedding: Float32Array; ocrText: string; tags: Tag[]; extraTerms: string }[]
 > {
   const db = await getDb();
-  const rows = await db.getAllAsync<{ id: number; embedding: Uint8Array; ocr_text: string }>(
-    'SELECT id, embedding, ocr_text FROM memes WHERE pending = 0'
-  );
-  return rows.map((r) => ({ id: r.id, embedding: blobToVec(r.embedding), ocrText: r.ocr_text ?? '' }));
+  const rows = await db.getAllAsync<{
+    id: number;
+    embedding: Uint8Array;
+    ocr_text: string;
+    tags: string;
+    extra_terms: string;
+  }>('SELECT id, embedding, ocr_text, tags, extra_terms FROM memes WHERE pending = 0');
+  return rows.map((r) => ({
+    id: r.id,
+    embedding: blobToVec(r.embedding),
+    ocrText: r.ocr_text ?? '',
+    tags: safeParseTags(r.tags),
+    extraTerms: r.extra_terms ?? '',
+  }));
 }
 
 // A random sample of library embeddings, used as the negative/background set
@@ -293,11 +303,17 @@ export async function bulkUpdateMemeTags(
 
 // Memes still awaiting (or due to retry) an LFM2-VL description. Returns just
 // the fields the enricher needs to re-materialize the image and write back.
-export async function getMemesNeedingVision(
-  limit = 10000
-): Promise<
-  { id: number; uri: string; name: string; kind: 'image' | 'video'; tags: Tag[]; ocrText: string }[]
-> {
+export interface MemeNeedingVisionRow {
+  id: number;
+  uri: string;
+  name: string;
+  kind: 'image' | 'video';
+  tags: Tag[];
+  ocrText: string;
+  embedding: Float32Array; // normalized CLIP image vector (for duplicate-skip)
+}
+
+export async function getMemesNeedingVision(limit = 10000): Promise<MemeNeedingVisionRow[]> {
   const db = await getDb();
   const rows = await db.getAllAsync<{
     id: number;
@@ -306,8 +322,9 @@ export async function getMemesNeedingVision(
     kind: string;
     tags: string;
     ocr_text: string;
+    embedding: Uint8Array;
   }>(
-    "SELECT id, uri, name, kind, tags, ocr_text FROM memes WHERE vision_state = 'pending' ORDER BY indexed_at DESC, id DESC LIMIT ?",
+    "SELECT id, uri, name, kind, tags, ocr_text, embedding FROM memes WHERE vision_state = 'pending' ORDER BY indexed_at DESC, id DESC LIMIT ?",
     limit
   );
   return rows.map((r) => ({
@@ -317,6 +334,36 @@ export async function getMemesNeedingVision(
     kind: r.kind as 'image' | 'video',
     tags: safeParseTags(r.tags),
     ocrText: r.ocr_text ?? '',
+    embedding: blobToVec(r.embedding),
+  }));
+}
+
+// Already-described memes, used as the "twin" set for duplicate-skip: a pending
+// meme whose CLIP vector AND OCR text match one of these can copy its result
+// instead of running the model again.
+export interface DescribedVisionRow {
+  embedding: Float32Array;
+  ocrText: string;
+  caption: string;
+  tags: Tag[];
+  extraTerms: string;
+}
+
+export async function getDescribedVisionRecords(): Promise<DescribedVisionRow[]> {
+  const db = await getDb();
+  const rows = await db.getAllAsync<{
+    embedding: Uint8Array;
+    ocr_text: string;
+    caption: string;
+    tags: string;
+    extra_terms: string;
+  }>("SELECT embedding, ocr_text, caption, tags, extra_terms FROM memes WHERE vision_state = 'done'");
+  return rows.map((r) => ({
+    embedding: blobToVec(r.embedding),
+    ocrText: r.ocr_text ?? '',
+    caption: r.caption ?? '',
+    tags: safeParseTags(r.tags),
+    extraTerms: r.extra_terms ?? '',
   }));
 }
 
