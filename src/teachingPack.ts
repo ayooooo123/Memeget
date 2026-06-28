@@ -10,7 +10,7 @@
 import type { Exemplar } from './types';
 
 export const PACK_FORMAT = 'memeget-teaching-pack';
-export const PACK_VERSION = 1;
+export const PACK_VERSION = 2;
 // Matches the CLIP image encoder in embeddings.tsx. Bump if that model changes
 // in a way that moves the vector space, so stale packs are rejected on import.
 export const PACK_MODEL = 'clip-vit-base-patch32';
@@ -29,6 +29,8 @@ export interface TeachingPack {
   version: number;
   model: string;
   dim: number;
+  name: string; // human label for the pack (shown when imported); may be ''
+  author: string; // optional attribution; may be ''
   createdAt: number;
   count: number;
   exemplars: PackExemplar[];
@@ -37,7 +39,11 @@ export interface TeachingPack {
 // Build a pack from the library's exemplars. `sourceUri` is deliberately dropped
 // — it's a device-local content:// URI that means nothing on another phone and
 // would leak the author's folder layout.
-export function buildPack(exemplars: Exemplar[], createdAt: number): TeachingPack {
+export function buildPack(
+  exemplars: Exemplar[],
+  createdAt: number,
+  meta: { name?: string; author?: string } = {}
+): TeachingPack {
   const packed: PackExemplar[] = exemplars.map((e) => ({
     label: e.label,
     category: e.category,
@@ -50,6 +56,8 @@ export function buildPack(exemplars: Exemplar[], createdAt: number): TeachingPac
     version: PACK_VERSION,
     model: PACK_MODEL,
     dim: PACK_DIM,
+    name: (meta.name ?? '').trim(),
+    author: (meta.author ?? '').trim(),
     createdAt,
     count: packed.length,
     exemplars: packed,
@@ -100,11 +108,14 @@ export function parsePack(text: string): TeachingPack {
   }
   if (exemplars.length === 0) throw new Error('Teaching pack had no usable examples');
 
+  const str = (v: unknown) => (typeof v === 'string' ? v.trim().slice(0, 60) : '');
   return {
     format: PACK_FORMAT,
     version: typeof obj.version === 'number' ? obj.version : PACK_VERSION,
     model: PACK_MODEL,
     dim: PACK_DIM,
+    name: str(obj.name),
+    author: str(obj.author),
     createdAt: typeof obj.createdAt === 'number' ? obj.createdAt : 0,
     count: exemplars.length,
     exemplars,
