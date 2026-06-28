@@ -496,14 +496,14 @@ export async function getRecentMemes(
   // repeats and skips rows — which is what broke infinite scroll.
   const rows = kind
     ? await db.getAllAsync<Omit<MemeRow, 'embedding'>>(
-        `SELECT id, uri, name, kind, ocr_text, tags, extra_terms, indexed_at, pending
+        `SELECT id, uri, name, kind, ocr_text, caption, tags, extra_terms, vision_state, indexed_at, pending
          FROM memes WHERE kind = ? ORDER BY indexed_at DESC, id DESC LIMIT ? OFFSET ?`,
         kind,
         limit,
         offset
       )
     : await db.getAllAsync<Omit<MemeRow, 'embedding'>>(
-        `SELECT id, uri, name, kind, ocr_text, tags, extra_terms, indexed_at, pending
+        `SELECT id, uri, name, kind, ocr_text, caption, tags, extra_terms, vision_state, indexed_at, pending
          FROM memes ORDER BY indexed_at DESC, id DESC LIMIT ? OFFSET ?`,
         limit,
         offset
@@ -514,8 +514,10 @@ export async function getRecentMemes(
     name: r.name,
     kind: r.kind as MemeRecord['kind'],
     ocrText: r.ocr_text,
+    caption: r.caption ?? '',
     tags: safeParseTags(r.tags),
     extraTerms: r.extra_terms ?? '',
+    visionState: (r.vision_state as MemeRecord['visionState']) ?? 'pending',
     indexedAt: r.indexed_at,
     pending: r.pending === 1,
   }));
