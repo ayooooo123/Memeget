@@ -70,17 +70,72 @@ export function userTurn(ocrHint?: string): string {
   );
 }
 
+// A value the model left as an unfilled schema placeholder, e.g.
+// "<main people, characters, or objects>" or "<=14 words: ...>". The small model
+// sometimes echoes the prompt's `<...>` slots verbatim instead of filling them;
+// such values are noise and must never reach the UI.
+function isPlaceholder(s: string): boolean {
+  return /^<.*>$/.test(s.trim());
+}
+
 function asStringArray(v: unknown): string[] {
   if (!Array.isArray(v)) return [];
   return v
     .map((x) => String(x).trim())
-    .filter(Boolean)
+    .filter((s) => s && !isPlaceholder(s))
     .slice(0, 16);
 }
 
+// Pull a single "key": "value" string out of raw model text, tolerating escaped
+// quotes and JSON that's truncated before its closing brace. Returns null for a
+// missing field or an unfilled placeholder.
+function extractStringField(raw: string, key: string): string | null {
+  const m = new RegExp(`"${key}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"`).exec(raw);
+  if (!m) return null;
+  try {
+    const val = String(JSON.parse(`"${m[1]}"`)).trim();
+    return val && !isPlaceholder(val) ? val : null;
+  } catch {
+    return null;
+  }
+}
+
+// Pull a "key": [ ... ] array out of raw model text. The trailing `]` is optional
+// so a reply truncated mid-array still yields whatever items completed.
+function extractArrayField(raw: string, key: string): string[] {
+  const m = new RegExp(`"${key}"\\s*:\\s*\\[([^\\]]*)`).exec(raw);
+  if (!m) return [];
+  const items = m[1].match(/"((?:[^"\\]|\\.)*)"/g) ?? [];
+  return items
+    .map((q) => {
+      try {
+        return String(JSON.parse(q)).trim();
+      } catch {
+        return '';
+      }
+    })
+    .filter((s) => s && !isPlaceholder(s))
+    .slice(0, 16);
+}
+
+// Last-resort cleanup: strip JSON scaffolding (keys, braces, quotes) and any
+// `<...>` placeholders so a broken reply degrades to readable text instead of a
+// raw object dump in the caption.
+function stripJsonArtifacts(raw: string): string {
+  return raw
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/"(?:caption|subjects|text|tags)"\s*:/gi, ' ')
+    .replace(/[{}[\]"]/g, ' ')
+    .replace(/[,:]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 // Pull a JSON object out of the model's reply and coerce it into a VisionResult.
-// Defensive: models occasionally wrap JSON in prose/fences, or emit a bare
-// description — we recover a usable caption either way.
+// Defensive: the on-device model occasionally wraps JSON in prose, truncates it
+// before the closing brace, echoes the schema placeholders, or emits a bare
+// description. We recover usable fields field-by-field and, crucially, never let
+// raw JSON structure leak into the caption shown to the user.
 export function parseVision(raw: string): VisionResult {
   const reply = (raw ?? '').trim();
   const start = reply.indexOf('{');
@@ -90,19 +145,34 @@ export function parseVision(raw: string): VisionResult {
     try {
       obj = JSON.parse(reply.slice(start, end + 1)) as Record<string, unknown>;
     } catch {
-      // fall through to raw-text fallback below
+      // fall through to field-by-field recovery below
     }
   }
-  const caption =
-    typeof obj.caption === 'string' && obj.caption.trim()
-      ? obj.caption.trim()
-      : reply.replace(/[{}]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 240);
-  return {
-    caption,
-    subjects: asStringArray(obj.subjects),
-    text: typeof obj.text === 'string' ? obj.text.trim() : '',
-    tags: asStringArray(obj.tags),
+
+  const fromObj = (key: string): string | null => {
+    const v = obj[key];
+    if (typeof v !== 'string') return null;
+    const t = v.trim();
+    return t && !isPlaceholder(t) ? t : null;
   };
+
+  // Did the reply look like (possibly broken) JSON at all? If not, it's a bare
+  // description and the whole thing is the caption.
+  const looksLikeJson = start >= 0 || /"(?:caption|subjects|text|tags)"/.test(reply);
+
+  let caption = fromObj('caption') ?? extractStringField(reply, 'caption');
+  if (!caption) {
+    caption = looksLikeJson
+      ? stripJsonArtifacts(reply).slice(0, 240)
+      : reply.replace(/\s+/g, ' ').trim().slice(0, 240);
+  }
+
+  const text = fromObj('text') ?? extractStringField(reply, 'text') ?? '';
+
+  const subjects = obj.subjects !== undefined ? asStringArray(obj.subjects) : extractArrayField(reply, 'subjects');
+  const tags = obj.tags !== undefined ? asStringArray(obj.tags) : extractArrayField(reply, 'tags');
+
+  return { caption, subjects, text, tags };
 }
 
 // ---- background pacing -------------------------------------------------------
