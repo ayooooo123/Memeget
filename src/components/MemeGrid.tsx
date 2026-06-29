@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Image } from 'expo-image';
 import {
   ActivityIndicator,
@@ -144,10 +144,23 @@ export function MemeGrid({
   const size = (Dimensions.get('window').width - GAP * (COLS + 1)) / COLS;
   const kbHeight = useKeyboardHeight();
 
-  const openViewer = (it: Item) => {
+  // Stable across renders so the memoized GridCells aren't all re-rendered
+  // every time unrelated grid state changes (opening the viewer, toggling
+  // `loadingMore` during pagination, teaching). An unstable onPress here was
+  // defeating React.memo and re-flashing every visible thumbnail — the
+  // flicker you'd see right as the next page loaded in.
+  const openViewer = useCallback((it: Item) => {
     tap();
     setSelected(it);
-  };
+  }, []);
+
+  // Likewise kept stable so they don't bust GridCell's React.memo on every
+  // render. renderItem only depends on the constant cell `size` and openViewer.
+  const keyExtractor = useCallback((it: Item) => String(it.id), []);
+  const renderItem = useCallback(
+    ({ item }: { item: Item }) => <GridCell item={item} size={size} onPress={openViewer} />,
+    [size, openViewer]
+  );
 
   // The taught-label confidence readout is a debug aid that trains a logistic
   // head per label over a 500-vector background — hundreds of ms+ of synchronous
@@ -340,7 +353,7 @@ export function MemeGrid({
     <>
       <FlatList
         data={items}
-        keyExtractor={(it) => String(it.id)}
+        keyExtractor={keyExtractor}
         numColumns={COLS}
         ListHeaderComponent={header}
         ListEmptyComponent={emptyState ?? null}
@@ -350,18 +363,20 @@ export function MemeGrid({
         keyboardDismissMode="on-drag"
         onEndReached={onEndReached}
         onEndReachedThreshold={0.6}
-        // Memory guards: keep only a few screens of image cells mounted so a
-        // large library can't pin hundreds of decoded bitmaps at once (was
-        // OOM-ing when a teach → retagAll re-render spiked on top of the grid).
-        removeClippedSubviews
-        initialNumToRender={15}
-        maxToRenderPerBatch={9}
-        windowSize={5}
-        updateCellsBatchingPeriod={60}
+        // Memory is already bounded by `windowSize`: FlatList only keeps that
+        // many viewports of cells mounted regardless. We deliberately do NOT set
+        // `removeClippedSubviews` — on Android it blanks/flickers expo-image
+        // cells as they scroll back into view (a known FlatList grid bug) and is
+        // redundant with the windowing below. Render a little ahead of the
+        // scroll so fast flings don't outrun cell rendering into blank gaps.
+        initialNumToRender={18}
+        maxToRenderPerBatch={12}
+        windowSize={7}
+        updateCellsBatchingPeriod={50}
         ListFooterComponent={
           loadingMore ? <ActivityIndicator color={colors.volt} style={{ paddingVertical: 16 }} /> : null
         }
-        renderItem={({ item }) => <GridCell item={item} size={size} onPress={openViewer} />}
+        renderItem={renderItem}
       />
 
       <ViewerSheet
