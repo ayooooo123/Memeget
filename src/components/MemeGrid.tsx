@@ -106,6 +106,7 @@ export function MemeGrid({
   onDeleted,
   onSearchLabel,
   emptyState,
+  scrollToTopSignal,
 }: {
   items: Item[];
   header?: React.ReactElement;
@@ -122,6 +123,10 @@ export function MemeGrid({
   onSearchLabel?: (label: string) => void;
   // Rendered when items is empty (e.g. a "no results" state).
   emptyState?: React.ReactElement | null;
+  // Bumped by the parent each time a new search runs; when it changes we jump
+  // the list back to the top so fresh results are visible immediately instead
+  // of stranding the user wherever they'd scrolled to while browsing.
+  scrollToTopSignal?: number;
 }) {
   const [selected, setSelected] = useState<Item | null>(null);
   const [teaching, setTeaching] = useState(false);
@@ -143,6 +148,20 @@ export function MemeGrid({
   const applyChainRef = useRef<Promise<void>>(Promise.resolve());
   const size = (Dimensions.get('window').width - GAP * (COLS + 1)) / COLS;
   const kbHeight = useKeyboardHeight();
+  const listRef = useRef<FlatList>(null);
+
+  // Whenever the parent signals a new search, snap back to the top so the
+  // results (and the "N results" header) are in view right away. Skipped on the
+  // initial mount — the list already starts at the top and an empty list can't
+  // be scrolled yet.
+  const didMountScroll = useRef(false);
+  useEffect(() => {
+    if (!didMountScroll.current) {
+      didMountScroll.current = true;
+      return;
+    }
+    listRef.current?.scrollToOffset({ offset: 0, animated: true });
+  }, [scrollToTopSignal]);
 
   // Stable across renders so the memoized GridCells aren't all re-rendered
   // every time unrelated grid state changes (opening the viewer, toggling
@@ -352,6 +371,7 @@ export function MemeGrid({
   return (
     <>
       <FlatList
+        ref={listRef}
         data={items}
         keyExtractor={keyExtractor}
         numColumns={COLS}
