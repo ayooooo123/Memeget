@@ -73,7 +73,9 @@ const GridCell = React.memo(function GridCell({
   return (
     <PressableScale scaleTo={0.94} onPress={() => onPress(item)} style={{ width: size, height: size }}>
       <Image
-        source={{ uri: item.uri }}
+        // String source (not a fresh {{ uri }} object each render) so expo-image
+        // doesn't see a "new" source and replay its transition on every render.
+        source={item.uri}
         style={styles.thumb}
         contentFit="cover"
         transition={150}
@@ -352,6 +354,11 @@ export function MemeGrid({
   return (
     <>
       <FlatList
+        // flex:1 gives the list a bounded, stable viewport height. Without it
+        // the list is content-sized, so each appended page resizes the list
+        // itself — which feeds VirtualizedList's scroll-anchor estimation and
+        // can make it oscillate by a row instead of settling.
+        style={styles.list}
         data={items}
         keyExtractor={keyExtractor}
         numColumns={COLS}
@@ -715,6 +722,7 @@ function ActionButton({
 }
 
 const styles = StyleSheet.create({
+  list: { flex: 1 },
   thumb: { width: '100%', height: '100%', backgroundColor: colors.surface2, borderRadius: radius.sm },
   play: {
     position: 'absolute',

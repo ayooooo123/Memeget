@@ -229,8 +229,12 @@ export function LibraryScreen() {
     ];
   }, [taughtLabels, libraryTags]);
 
-  // Scrolling part of the page (lives inside the grid as its header).
-  const header = (
+  // Scrolling part of the page (lives inside the grid as its header). Memoized
+  // so the FlatList isn't handed a brand-new ListHeaderComponent element on
+  // every render (e.g. when `loadingMore` toggles during pagination) — a
+  // changing header forces a header re-layout that can nudge the scroll anchor.
+  const header = useMemo(
+    () => (
     <View style={styles.listHeader}>
       {isSearch ? (
         <View style={styles.resultRow}>
@@ -290,6 +294,8 @@ export function LibraryScreen() {
         </>
       )}
     </View>
+    ),
+    [isSearch, searching, results, query, indexing, progress, hasLibrary, count, folders, emb.ready, onLink, onIndex]
   );
 
   const onTaught = useCallback(
