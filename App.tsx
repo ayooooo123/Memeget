@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { StatusBar } from 'expo-status-bar';
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Animated, Pressable, StyleSheet, Text, View } from 'react-native';
@@ -10,6 +10,7 @@ import { EmbeddingsProvider } from './src/embeddings';
 import { VisionProvider } from './src/vision';
 import { initDb, getSetting, setSetting } from './src/db';
 import { sweepStaleCache } from './src/saf';
+import { useConst } from './src/reactUtils';
 import { LibraryScreen } from './src/screens/LibraryScreen';
 import { SettingsScreen } from './src/screens/SettingsScreen';
 import { ShareReceiver } from './src/components/ShareReceiver';
@@ -103,7 +104,7 @@ function Shell() {
 }
 
 function Boot() {
-  const pulse = useRef(new Animated.Value(0.4)).current;
+  const pulse = useConst(() => new Animated.Value(0.4));
   useEffect(() => {
     Animated.loop(
       Animated.sequence([
@@ -133,7 +134,7 @@ function TabBar({
   bottomInset: number;
 }) {
   const idx = TABS.findIndex((t) => t.key === tab);
-  const slide = useRef(new Animated.Value(idx)).current;
+  const slide = useConst(() => new Animated.Value(idx));
   const [segWidth, setSegWidth] = useState(0);
 
   useEffect(() => {
