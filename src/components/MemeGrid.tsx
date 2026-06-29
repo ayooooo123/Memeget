@@ -80,7 +80,17 @@ const GridCell = React.memo(function GridCell({
         // Reuse the view and release the previous bitmap when a cell is
         // recycled (e.g. when retagAll hands the list a fresh array).
         recyclingKey={String(item.id)}
-        cachePolicy="disk"
+        // Memory-only cache (NOT "disk"). The originals already live as local
+        // content:// files in the user's linked folder, so a disk cache just
+        // duplicates the entire library into the app's cache dir — it ballooned
+        // cache to library size, and once Android purged that cache the
+        // thumbnails got stranded in a perpetual loading state. Disk-only also
+        // meant no in-memory bitmaps, so every recycled cell re-decoded a
+        // full-res image off disk while scrolling, saturating the decode thread
+        // (the "feed won't load while scrolling" jank). The in-memory LRU keeps
+        // the active window smooth; off-screen cells decode again from the local
+        // file — cheap because allowDownscaling decodes straight to thumb size.
+        cachePolicy="memory"
         allowDownscaling
       />
       {item.kind === 'video' && (
@@ -591,6 +601,9 @@ function ViewerSheet({
                 style={[styles.preview, { height: imgHeight }]}
                 contentFit="contain"
                 recyclingKey={String(item.id)}
+                // Same reasoning as the grid: it's a local file, so skip the
+                // redundant on-disk copy and only hold it in memory while open.
+                cachePolicy="memory"
                 allowDownscaling
               />
             )}
