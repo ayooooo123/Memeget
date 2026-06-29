@@ -64,6 +64,11 @@ export function LibraryScreen() {
   const cancelRef = useRef(false);
   const hasMoreRef = useRef(true);
   const loadingMoreRef = useRef(false);
+  // Latest query text, mirrored into a ref so an in-flight runSearch can tell —
+  // once it finally resolves — whether the box still holds the text it searched
+  // for. Used both here and by the kind effect below.
+  const queryRef = useRef('');
+  queryRef.current = query;
   // How many recents are currently loaded, mirrored into a ref so refresh()
   // (stable, no deps) can re-fetch the same span without losing the user's
   // scroll position — important because background indexing of a freshly shared
@@ -123,9 +128,18 @@ export function LibraryScreen() {
       setScrollToTopSignal((n) => n + 1);
       try {
         const vec = await emb.embedText(q);
-        setResults(await searchByVector(vec, q, 80, kindArg()));
+        const hits = await searchByVector(vec, q, 80, kindArg());
+        // Embedding + brute-force search are async and on-device, so they can
+        // resolve long after the box was cleared or retyped. If the current
+        // query no longer matches what we searched for, drop these results —
+        // otherwise we'd clobber browse mode back into "N results for ''", or
+        // let a slow earlier search overwrite a newer one.
+        if (queryRef.current.trim() !== q) return;
+        setResults(hits);
       } finally {
-        setSearching(false);
+        // Only clear the spinner if this is still the active search; a superseded
+        // run bailing out shouldn't yank the indicator from the live one.
+        if (queryRef.current.trim() === q) setSearching(false);
       }
     },
     [emb]
@@ -142,6 +156,9 @@ export function LibraryScreen() {
   useEffect(() => {
     if (!query.trim()) {
       setResults(null);
+      // A search in flight when the box is cleared bails without clearing its
+      // own spinner (it's no longer the active query), so reset it here.
+      setSearching(false);
       return;
     }
     const id = setTimeout(() => runSearchRef.current(query), 350);
@@ -163,8 +180,6 @@ export function LibraryScreen() {
   // When the media filter changes, re-fetch the browse page and re-run any
   // active search through the new filter. Skips the initial mount (the refresh
   // effect above already loads the unfiltered library once).
-  const queryRef = useRef(query);
-  queryRef.current = query;
   const didMountKind = useRef(false);
   useEffect(() => {
     if (!didMountKind.current) {
