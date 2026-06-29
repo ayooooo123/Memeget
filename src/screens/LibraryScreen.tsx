@@ -48,6 +48,10 @@ export function LibraryScreen() {
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<SearchHit[] | null>(null);
   const [searching, setSearching] = useState(false);
+  // Bumped each time a search kicks off so the grid scrolls back to the top —
+  // otherwise a search run while scrolled deep into the library leaves the user
+  // stranded at the bottom instead of looking at the fresh results.
+  const [scrollToTopSignal, setScrollToTopSignal] = useState(0);
 
   // Media-type narrowing applied to both browse and search. 'all' = no filter.
   const [kind, setKind] = useState<MediaKind | 'all'>('all');
@@ -116,6 +120,7 @@ export function LibraryScreen() {
       }
       if (!emb.ready) return;
       setSearching(true);
+      setScrollToTopSignal((n) => n + 1);
       try {
         const vec = await emb.embedText(q);
         setResults(await searchByVector(vec, q, 80, kindArg()));
@@ -374,6 +379,7 @@ export function LibraryScreen() {
         loadingMore={loadingMore}
         onDeleted={onDeleted}
         onSearchLabel={searchLabel}
+        scrollToTopSignal={scrollToTopSignal}
         emptyState={
           isSearch && !searching && results.length === 0 ? (
             <View style={styles.noResults}>
