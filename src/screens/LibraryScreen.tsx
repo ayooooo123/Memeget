@@ -80,6 +80,14 @@ function mergeRecords(prev: MemeRecord[], next: MemeRecord[]): MemeRecord[] {
 
 export function LibraryScreen() {
   const emb = useEmbeddings();
+  // Mirror the embeddings api into a ref so the stable callbacks below
+  // (onIndex/onTaught) don't take a new identity every time the CLIP model's
+  // download/load progress ticks. On the first launch after an app update the
+  // model reloads and `emb` re-memoizes many times a second; without this, that
+  // churn rebuilt the grid header (and re-ran the whole list) mid-scroll, which
+  // showed up as scroll jank / glitching while browsing the collection.
+  const embRef = useRef(emb);
+  embRef.current = emb;
   const [folders, setFolders] = useState<LinkedFolder[]>([]);
   const [recent, setRecent] = useState<MemeRecord[]>([]);
   const [count, setCount] = useState(0);
@@ -274,7 +282,8 @@ export function LibraryScreen() {
 
   const onIndex = useCallback(async () => {
     if (indexing) return;
-    if (!emb.ready) {
+    const embApi = embRef.current;
+    if (!embApi.ready) {
       showToast('The on-device model is still preparing — try again shortly', 'info');
       return;
     }
@@ -286,7 +295,7 @@ export function LibraryScreen() {
     cancelRef.current = false;
     setIndexing(true);
     try {
-      const res = await runIndex(emb, {
+      const res = await runIndex(embApi, {
         onProgress: setProgress,
         shouldCancel: () => cancelRef.current,
       });
@@ -300,7 +309,7 @@ export function LibraryScreen() {
       setIndexing(false);
       setProgress(null);
     }
-  }, [emb, folders.length, indexing, refresh]);
+  }, [folders.length, indexing, refresh]);
 
   const isSearch = results !== null;
   const hasLibrary = count > 0 || recent.length > 0;
@@ -316,8 +325,13 @@ export function LibraryScreen() {
     ];
   }, [taughtLabels, libraryTags]);
 
-  // Scrolling part of the page (lives inside the grid as its header).
-  const header = (
+  // Scrolling part of the page (lives inside the grid as its header). Memoized
+  // so an unrelated re-render (notably the CLIP model's load-progress ticks on a
+  // post-update launch) doesn't hand the FlatList a brand-new header element to
+  // reconcile mid-scroll — `emb.ready` is the only model field it reads, and
+  // that flips just once.
+  const header = useMemo(
+    () => (
     <View style={styles.listHeader}>
       {isSearch ? (
         <View style={styles.resultRow}>
@@ -377,16 +391,20 @@ export function LibraryScreen() {
         </>
       )}
     </View>
+    ),
+    [isSearch, searching, results, query, indexing, progress, hasLibrary, count, folders, emb.ready, onLink, onIndex]
   );
 
   const onTaught = useCallback(
     async (label: string) => {
-      if (emb.ready) await retagAll(emb);
+      const embApi = embRef.current;
+      if (embApi.ready) await retagAll(embApi);
       await refresh();
-      if (query.trim()) await runSearch(query);
+      const q = queryRef.current.trim();
+      if (q) await runSearchRef.current(q);
       return countMemesWithLabel(label);
     },
-    [emb, refresh, query, runSearch]
+    [refresh]
   );
 
   const onDeleted = useCallback((id: number) => {
@@ -398,6 +416,30 @@ export function LibraryScreen() {
     setResults((cur) => (cur ? cur.filter((m) => m.id !== id) : cur));
     setCount((c) => Math.max(0, c - 1));
   }, []);
+
+  // Memoized for the same reason as `header`: keep the element reference stable
+  // across model-load re-renders so it never busts MemeGrid's memoization.
+  const emptyState = useMemo(
+    () =>
+      isSearch && !searching && results.length === 0 ? (
+        <View style={styles.noResults}>
+          <Text style={styles.noResultsGlyph}>¯\_(ツ)_/¯</Text>
+          <Text style={styles.noResultsTitle}>Nothing matched</Text>
+          <Text style={styles.noResultsHint}>
+            Try fewer words, a vibe (“sad frog”), or text you remember from the meme.
+          </Text>
+        </View>
+      ) : !isSearch && hasLibrary && recent.length === 0 && kind !== 'all' ? (
+        <View style={styles.noResults}>
+          <Text style={styles.noResultsGlyph}>{kind === 'video' ? '▶' : '▦'}</Text>
+          <Text style={styles.noResultsTitle}>No {kind === 'video' ? 'videos' : 'images'} here</Text>
+          <Text style={styles.noResultsHint}>
+            Tap “{kind === 'video' ? '▶ Videos' : '▦ Images'}” again to show everything.
+          </Text>
+        </View>
+      ) : null,
+    [isSearch, searching, results, hasLibrary, recent.length, kind]
+  );
 
   return (
     <View style={styles.root}>
@@ -462,27 +504,7 @@ export function LibraryScreen() {
         onDeleted={onDeleted}
         onSearchLabel={searchLabel}
         scrollToTopSignal={scrollToTopSignal}
-        emptyState={
-          isSearch && !searching && results.length === 0 ? (
-            <View style={styles.noResults}>
-              <Text style={styles.noResultsGlyph}>¯\_(ツ)_/¯</Text>
-              <Text style={styles.noResultsTitle}>Nothing matched</Text>
-              <Text style={styles.noResultsHint}>
-                Try fewer words, a vibe (“sad frog”), or text you remember from the meme.
-              </Text>
-            </View>
-          ) : !isSearch && hasLibrary && recent.length === 0 && kind !== 'all' ? (
-            <View style={styles.noResults}>
-              <Text style={styles.noResultsGlyph}>{kind === 'video' ? '▶' : '▦'}</Text>
-              <Text style={styles.noResultsTitle}>
-                No {kind === 'video' ? 'videos' : 'images'} here
-              </Text>
-              <Text style={styles.noResultsHint}>
-                Tap “{kind === 'video' ? '▶ Videos' : '▦ Images'}” again to show everything.
-              </Text>
-            </View>
-          ) : null
-        }
+        emptyState={emptyState}
       />
     </View>
   );

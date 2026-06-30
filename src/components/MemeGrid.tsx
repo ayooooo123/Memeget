@@ -108,7 +108,12 @@ const GridCell = React.memo(function GridCell({
   );
 });
 
-export function MemeGrid({
+// Memoized so a re-render of the owning screen that leaves every prop unchanged
+// (notably the CLIP model's load-progress ticks right after an app update, which
+// re-render LibraryScreen many times a second) can't re-run the whole grid and
+// stutter an in-progress scroll. Relies on the parent keeping `header`,
+// `emptyState`, and the callbacks referentially stable across those re-renders.
+export const MemeGrid = React.memo(function MemeGrid({
   items,
   header,
   onTaught,
@@ -516,7 +521,7 @@ export function MemeGrid({
       </Modal>
     </>
   );
-}
+});
 
 // Full-width bottom sheet viewer with a drag-to-dismiss handle.
 function ViewerSheet({
