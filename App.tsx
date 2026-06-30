@@ -1,13 +1,16 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { StatusBar } from 'expo-status-bar';
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Animated, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Image } from 'expo-image';
 import { initExecutorch } from 'react-native-executorch';
 import { ExpoResourceFetcher } from 'react-native-executorch-expo-resource-fetcher';
 
 import { EmbeddingsProvider } from './src/embeddings';
 import { VisionProvider } from './src/vision';
-import { initDb } from './src/db';
+import { initDb, getSetting, setSetting } from './src/db';
+import { sweepStaleCache } from './src/saf';
+import { useConst } from './src/reactUtils';
 import { LibraryScreen } from './src/screens/LibraryScreen';
 import { SettingsScreen } from './src/screens/SettingsScreen';
 import { ShareReceiver } from './src/components/ShareReceiver';
@@ -19,6 +22,27 @@ import { colors, radius, shadow, TABBAR_CLEARANCE } from './src/theme';
 // resource fetcher to Expo's filesystem so model binaries can be downloaded
 // and cached on-device.
 initExecutorch({ resourceFetcher: ExpoResourceFetcher });
+
+// Bumped if we ever need to force another legacy-cache reclaim.
+const CACHE_PURGE_KEY = 'expo_image_disk_cache_purged_v1';
+
+// Reclaim cache-dir space in the background (never blocks first paint):
+//   • Every launch, drop our own leaked temp files (share_/import_/meme_work_).
+//   • Once per install, purge the legacy expo-image disk cache the old
+//     `cachePolicy="disk"` left behind — it held a full duplicate of the
+//     library and is what made the app's cache balloon over repeated use. We're
+//     memory-only now, so nothing repopulates it; clearing once is enough.
+async function maintainCaches(): Promise<void> {
+  try {
+    await sweepStaleCache();
+    if ((await getSetting(CACHE_PURGE_KEY)) !== '1') {
+      await Image.clearDiskCache().catch(() => {});
+      await setSetting(CACHE_PURGE_KEY, '1').catch(() => {});
+    }
+  } catch {
+    // best-effort housekeeping; failures must never affect the app
+  }
+}
 
 type TabKey = 'library' | 'settings';
 
@@ -47,7 +71,11 @@ function Shell() {
 
   useEffect(() => {
     initDb()
-      .then(() => setDbReady(true))
+      .then(() => {
+        setDbReady(true);
+        // Fire-and-forget so cache housekeeping never delays first paint.
+        maintainCaches();
+      })
       .catch((e) => console.warn('DB init failed', e));
   }, []);
 
@@ -76,7 +104,7 @@ function Shell() {
 }
 
 function Boot() {
-  const pulse = useRef(new Animated.Value(0.4)).current;
+  const pulse = useConst(() => new Animated.Value(0.4));
   useEffect(() => {
     Animated.loop(
       Animated.sequence([
@@ -106,7 +134,7 @@ function TabBar({
   bottomInset: number;
 }) {
   const idx = TABS.findIndex((t) => t.key === tab);
-  const slide = useRef(new Animated.Value(idx)).current;
+  const slide = useConst(() => new Animated.Value(idx));
   const [segWidth, setSegWidth] = useState(0);
 
   useEffect(() => {

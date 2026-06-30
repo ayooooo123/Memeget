@@ -15,6 +15,7 @@ import {
 } from 'react-native';
 
 import { colors, radius, type } from '../theme';
+import { useConst } from '../reactUtils';
 
 const AnimatedPressable = Animated.createAnimatedComponent(Pressable);
 
@@ -28,7 +29,9 @@ export function PressableScale({
   disabled,
   ...rest
 }: PressableProps & { children?: React.ReactNode; style?: StyleProp<ViewStyle>; scaleTo?: number }) {
-  const scale = useRef(new Animated.Value(1)).current;
+  // Lazy: a fresh Animated.Value per render (the useRef(new …) trap) is pure
+  // waste here — PressableScale wraps every grid cell, chip, and button.
+  const scale = useConst(() => new Animated.Value(1));
   const animate = (to: number) =>
     Animated.spring(scale, { toValue: to, useNativeDriver: true, speed: 50, bounciness: 0 }).start();
   return (
@@ -127,7 +130,7 @@ export function Chip({
 
 // Slim determinate progress bar; animates width changes smoothly.
 export function ProgressBar({ value, tint = colors.volt }: { value: number; tint?: string }) {
-  const anim = useRef(new Animated.Value(0)).current;
+  const anim = useConst(() => new Animated.Value(0));
   React.useEffect(() => {
     Animated.timing(anim, {
       toValue: Math.max(0, Math.min(1, value)),
@@ -170,14 +173,17 @@ export function Slider({
     onChangeRef.current(Math.max(0, Math.min(1, x / w)));
   };
 
-  const pan = useRef(
+  // Lazy: PanResponder.create() runs once instead of on every render. The
+  // gesture reads the latest onChange via onChangeRef, so a stable responder is
+  // correct.
+  const pan = useConst(() =>
     PanResponder.create({
       onStartShouldSetPanResponder: () => true,
       onMoveShouldSetPanResponder: () => true,
       onPanResponderGrant: (e) => setFromX(e.nativeEvent.locationX),
       onPanResponderMove: (e) => setFromX(e.nativeEvent.locationX),
     })
-  ).current;
+  );
 
   const pct = `${Math.max(0, Math.min(1, value)) * 100}%` as `${number}%`;
   return (
