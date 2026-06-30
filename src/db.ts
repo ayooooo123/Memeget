@@ -525,25 +525,38 @@ export async function getRecentMemes(
 
 // Brute-force vector search. Fine for thousands of items; swap for sqlite-vec
 // if a collection ever gets huge.
+//
+// The scoring loop is the single heaviest synchronous JS in the app — a dot
+// product over a 512-float vector for every meme, run on each (debounced)
+// keystroke. Doing it in one pass froze the UI mid-type on a large library, so
+// it now scores in chunks and hands the event loop a macrotask between them,
+// keeping typing/scrolling responsive. `shouldAbort` lets the caller cancel an
+// in-flight scan the instant a newer query supersedes it (returns null) instead
+// of letting stale full scans stack up behind the latest one.
+const SEARCH_CHUNK = 512;
+
 export async function searchByVector(
   queryVec: number[],
   queryText: string,
   limit = 40,
-  kind?: MediaKind
-): Promise<SearchHit[]> {
+  kind?: MediaKind,
+  shouldAbort?: () => boolean
+): Promise<SearchHit[] | null> {
   const db = await getDb();
   // Pending placeholders have no embedding/OCR/tags yet, so they'd only add
   // noise — leave them out until the indexer fills them in.
   const rows = kind
     ? await db.getAllAsync<MemeRow>('SELECT * FROM memes WHERE pending = 0 AND kind = ?', kind)
     : await db.getAllAsync<MemeRow>('SELECT * FROM memes WHERE pending = 0');
+  if (shouldAbort?.()) return null;
   const terms = queryText
     .toLowerCase()
     .split(/\s+/)
     .filter((t) => t.length > 2);
 
-  const hits = rows.map((row) => {
-    const rec = rowToRecord(row);
+  const hits: SearchHit[] = [];
+  for (let i = 0; i < rows.length; i++) {
+    const rec = rowToRecord(rows[i]);
     let score = dot(queryVec, rec.embedding); // cosine (both normalized)
     if (terms.length) {
       const hay = (
@@ -567,8 +580,15 @@ export async function searchByVector(
       if (matched === terms.length) score += 0.6;
     }
     const { embedding, ...record } = rec;
-    return { ...record, score } as SearchHit;
-  });
+    hits.push({ ...record, score } as SearchHit);
+
+    // Yield between chunks so the UI thread can render/handle touch, and bail
+    // immediately if a newer query has superseded this one.
+    if ((i & (SEARCH_CHUNK - 1)) === SEARCH_CHUNK - 1) {
+      if (shouldAbort?.()) return null;
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    }
+  }
 
   hits.sort((a, b) => b.score - a.score);
   return hits.slice(0, limit);

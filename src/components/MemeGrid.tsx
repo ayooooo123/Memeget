@@ -4,7 +4,6 @@ import {
   ActivityIndicator,
   Alert,
   Animated,
-  Dimensions,
   FlatList,
   Keyboard,
   Modal,
@@ -15,6 +14,7 @@ import {
   StyleSheet,
   Text,
   TextInput,
+  useWindowDimensions,
   View,
 } from 'react-native';
 
@@ -28,6 +28,7 @@ import { buildExemplarHeads, type ExemplarModel } from '../indexer';
 import { success, tap, warn } from '../haptics';
 import { deleteFile, materialize, readImageBase64, readVideoFrameBase64 } from '../saf';
 import { colors, radius, space, TABBAR_CLEARANCE } from '../theme';
+import { useConst } from '../reactUtils';
 import type { MemeRecord, SearchHit } from '../types';
 
 import { showToast } from './Toast';
@@ -80,7 +81,17 @@ const GridCell = React.memo(function GridCell({
         // Reuse the view and release the previous bitmap when a cell is
         // recycled (e.g. when retagAll hands the list a fresh array).
         recyclingKey={String(item.id)}
-        cachePolicy="disk"
+        // Memory-only cache (NOT "disk"). The originals already live as local
+        // content:// files in the user's linked folder, so a disk cache just
+        // duplicates the entire library into the app's cache dir — it ballooned
+        // cache to library size, and once Android purged that cache the
+        // thumbnails got stranded in a perpetual loading state. Disk-only also
+        // meant no in-memory bitmaps, so every recycled cell re-decoded a
+        // full-res image off disk while scrolling, saturating the decode thread
+        // (the "feed won't load while scrolling" jank). The in-memory LRU keeps
+        // the active window smooth; off-screen cells decode again from the local
+        // file — cheap because allowDownscaling decodes straight to thumb size.
+        cachePolicy="memory"
         allowDownscaling
       />
       {item.kind === 'video' && (
@@ -145,8 +156,13 @@ export function MemeGrid({
   // everything) is heavy and runs detached from the teach button. Serialize the
   // applies through one promise chain so a quick second teach can't kick off a
   // second retag while the first is still inside its DB transaction.
-  const applyChainRef = useRef<Promise<void>>(Promise.resolve());
-  const size = (Dimensions.get('window').width - GAP * (COLS + 1)) / COLS;
+  // Starts null and is seeded on first use, so render doesn't allocate a
+  // throwaway resolved Promise every pass.
+  const applyChainRef = useRef<Promise<void> | null>(null);
+  // useWindowDimensions re-renders on rotation/resize, so the grid reflows
+  // correctly instead of being stuck at the launch width.
+  const { width: winWidth } = useWindowDimensions();
+  const size = (winWidth - GAP * (COLS + 1)) / COLS;
   const kbHeight = useKeyboardHeight();
   const listRef = useRef<FlatList>(null);
 
@@ -343,7 +359,7 @@ export function MemeGrid({
 
     // Apply the new example across the library off the button: retrain heads and
     // re-tag everything. Chained so concurrent teaches run one retag at a time.
-    applyChainRef.current = applyChainRef.current
+    applyChainRef.current = (applyChainRef.current ?? Promise.resolve())
       .catch(() => {})
       .then(async () => {
         try {
@@ -377,8 +393,8 @@ export function MemeGrid({
         numColumns={COLS}
         ListHeaderComponent={header}
         ListEmptyComponent={emptyState ?? null}
-        columnWrapperStyle={{ gap: GAP, paddingHorizontal: GAP }}
-        contentContainerStyle={{ gap: GAP, paddingBottom: TABBAR_CLEARANCE + 24 }}
+        columnWrapperStyle={styles.column}
+        contentContainerStyle={styles.listContent}
         keyboardShouldPersistTaps="handled"
         keyboardDismissMode="on-drag"
         onEndReached={onEndReached}
@@ -530,11 +546,12 @@ function ViewerSheet({
   onShowConfidence: () => void;
   onSearchLabel?: (label: string) => void;
 }) {
-  const drag = useRef(new Animated.Value(0)).current;
+  const drag = useConst(() => new Animated.Value(0));
 
   // Drag-to-dismiss on the grab area only, so scrolling the metadata or
-  // pinch-looking at the image never accidentally closes the sheet.
-  const pan = useRef(
+  // pinch-looking at the image never accidentally closes the sheet. Lazy so the
+  // responder is built once instead of re-created on every render.
+  const pan = useConst(() =>
     PanResponder.create({
       onMoveShouldSetPanResponder: (_e, g) => g.dy > 6 && Math.abs(g.dy) > Math.abs(g.dx),
       onPanResponderMove: (_e, g) => drag.setValue(Math.max(0, g.dy)),
@@ -549,13 +566,14 @@ function ViewerSheet({
         }
       },
     })
-  ).current;
+  );
 
   useEffect(() => {
     if (item) drag.setValue(0);
   }, [item, drag]);
 
-  const imgHeight = Math.round(Dimensions.get('window').height * 0.42);
+  const { height: winHeight } = useWindowDimensions();
+  const imgHeight = Math.round(winHeight * 0.42);
 
   return (
     <Modal
@@ -591,6 +609,9 @@ function ViewerSheet({
                 style={[styles.preview, { height: imgHeight }]}
                 contentFit="contain"
                 recyclingKey={String(item.id)}
+                // Same reasoning as the grid: it's a local file, so skip the
+                // redundant on-disk copy and only hold it in memory while open.
+                cachePolicy="memory"
                 allowDownscaling
               />
             )}
@@ -735,6 +756,10 @@ function ActionButton({
 }
 
 const styles = StyleSheet.create({
+  // Hoisted out of render so the FlatList isn't handed fresh style objects on
+  // every parent re-render (search keystrokes, library refreshes).
+  column: { gap: GAP, paddingHorizontal: GAP },
+  listContent: { gap: GAP, paddingBottom: TABBAR_CLEARANCE + 24 },
   thumb: { width: '100%', height: '100%', backgroundColor: colors.surface2, borderRadius: radius.sm },
   play: {
     position: 'absolute',
