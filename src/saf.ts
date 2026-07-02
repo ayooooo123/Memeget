@@ -68,6 +68,24 @@ export async function listMedia(folderUri: string): Promise<SafFile[]> {
   return out;
 }
 
+// Best-effort last-modified time (ms since epoch) for a linked file, so the
+// library can order by when a meme was actually added to the device rather than
+// when we happened to index it. expo-file-system reports modificationTime in
+// SECONDS; we return milliseconds to line up with the Date.now() timestamps used
+// elsewhere. Returns null when the provider doesn't supply a usable time, so the
+// caller can fall back to the index time.
+export async function getModifiedTime(uri: string): Promise<number | null> {
+  try {
+    const info = await FileSystem.getInfoAsync(uri);
+    if (info.exists && typeof info.modificationTime === 'number' && info.modificationTime > 0) {
+      return Math.round(info.modificationTime * 1000);
+    }
+  } catch {
+    // best-effort; caller falls back to the index time
+  }
+  return null;
+}
+
 // Copy a SAF file into the cache directory and return a file:// path the native
 // modules can read. Caller is responsible for deleting it afterwards.
 export async function copyToCache(file: SafFile, index: number): Promise<string> {
