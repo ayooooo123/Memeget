@@ -116,12 +116,26 @@ export function ShareReceiver() {
         setStatus({ kind: 'error', msg: String((e as Error)?.message ?? e) });
       } finally {
         // Reset right away so the share intent clears and the user can move on.
+        // NOTE: we deliberately do NOT clear savingRef here. resetShareIntent()
+        // clears hasShareIntent asynchronously (a native round-trip), so for a
+        // moment the effect can still observe the old intent. If we reopened the
+        // gate now, that stale intent would re-fire the effect and import the
+        // same share a second time — which is exactly the "2 copies" bug on the
+        // slow link path, where the wide network window makes the re-fire easy
+        // to hit. The gate is reopened only once hasShareIntent actually flips
+        // false (the effect below), so the same delivery can't be handled twice.
         resetShareIntent();
-        savingRef.current = false;
         setTimeout(() => setStatus(null), 3600);
       }
     })();
   }, [hasShareIntent, shareIntent, resetShareIntent]);
+
+  // Reopen the import gate only when the share intent has genuinely cleared, not
+  // the instant the async import finishes. This closes the race where a stale,
+  // not-yet-reset intent re-triggers the import (see the note in the finally).
+  useEffect(() => {
+    if (!hasShareIntent) savingRef.current = false;
+  }, [hasShareIntent]);
 
   // Phase 2: drain the queue once the model is ready. Serialized via indexingRef
   // so overlapping shares don't build knowledge twice; a share that lands mid-run
