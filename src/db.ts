@@ -27,6 +27,7 @@ export async function initDb(): Promise<void> {
       extra_terms TEXT NOT NULL DEFAULT '',
       vision_state TEXT NOT NULL DEFAULT 'pending',
       indexed_at INTEGER NOT NULL,
+      modified_at INTEGER NOT NULL DEFAULT 0,
       pending INTEGER NOT NULL DEFAULT 0
     );
     CREATE TABLE IF NOT EXISTS settings (
@@ -81,6 +82,14 @@ export async function initDb(): Promise<void> {
   }
   if (!cols.some((c) => c.name === 'vision_state')) {
     await db.execAsync(`ALTER TABLE memes ADD COLUMN vision_state TEXT NOT NULL DEFAULT 'pending';`);
+  }
+  // Migrate databases that predate sorting by the file's last-modified time.
+  // Seed existing rows from indexed_at so they keep their current relative order
+  // until a re-index stamps them with the real file mtime; newly indexed memes
+  // get the true file time straight away.
+  if (!cols.some((c) => c.name === 'modified_at')) {
+    await db.execAsync(`ALTER TABLE memes ADD COLUMN modified_at INTEGER NOT NULL DEFAULT 0;`);
+    await db.execAsync(`UPDATE memes SET modified_at = indexed_at WHERE modified_at = 0;`);
   }
   // Migrate exemplar tables that predate negative ("not this") teaching.
   const exCols = await db.getAllAsync<{ name: string }>('PRAGMA table_info(exemplars)');
@@ -152,13 +161,17 @@ export async function insertMeme(args: {
   ocrText: string;
   tags: Tag[];
   extraTerms: string;
+  modifiedAt?: number | null; // file's last-modified time (ms); falls back to now
 }): Promise<void> {
   const db = await getDb();
+  const now = Date.now();
   // caption + vision_state use their column defaults ('' / 'pending'); the
-  // LFM2-VL pass fills them in later via setMemeVision.
+  // LFM2-VL pass fills them in later via setMemeVision. modified_at drives the
+  // library's "most recent first" order — it's the file's own last-modified
+  // time when we could read it, otherwise the index time so a row is never 0.
   await db.runAsync(
-    `INSERT OR REPLACE INTO memes (uri, name, kind, embedding, ocr_text, tags, extra_terms, indexed_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO memes (uri, name, kind, embedding, ocr_text, tags, extra_terms, indexed_at, modified_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     args.uri,
     args.name,
     args.kind,
@@ -166,7 +179,8 @@ export async function insertMeme(args: {
     args.ocrText,
     JSON.stringify(args.tags),
     args.extraTerms,
-    Date.now()
+    now,
+    args.modifiedAt ?? now
   );
 }
 
@@ -181,14 +195,19 @@ export async function insertPendingMeme(args: {
   kind: string;
 }): Promise<void> {
   const db = await getDb();
+  // A freshly shared/saved meme is by definition the newest thing in the
+  // library, so stamp modified_at = now too; it sorts to the very top and the
+  // indexer's later insertMeme replaces it with the file's real mtime.
+  const now = Date.now();
   await db.runAsync(
-    `INSERT OR IGNORE INTO memes (uri, name, kind, embedding, ocr_text, tags, extra_terms, indexed_at, pending)
-     VALUES (?, ?, ?, ?, '', '[]', '', ?, 1)`,
+    `INSERT OR IGNORE INTO memes (uri, name, kind, embedding, ocr_text, tags, extra_terms, indexed_at, modified_at, pending)
+     VALUES (?, ?, ?, ?, '', '[]', '', ?, ?, 1)`,
     args.uri,
     args.name,
     args.kind,
     vecToBlob([]),
-    Date.now()
+    now,
+    now
   );
 }
 
@@ -491,20 +510,23 @@ export async function getRecentMemes(
   // the list and competed with the CLIP model loading on first launch. Search
   // and teaching read embeddings on demand (searchByVector / getMemeEmbedding).
   //
-  // Tiebreak on id: bulk indexing stamps many rows with the same indexed_at
-  // (same millisecond), and without a stable secondary sort LIMIT/OFFSET paging
-  // repeats and skips rows — which is what broke infinite scroll.
+  // Order by the file's own last-modified time so the most recently added memes
+  // surface first, regardless of when we happened to index them (a bulk index
+  // stamps the whole library with the same indexed_at, which said nothing about
+  // recency). Tiebreak on id: many files can share a modified_at (or fall back
+  // to the same index time), and without a stable secondary sort LIMIT/OFFSET
+  // paging repeats and skips rows — which is what broke infinite scroll.
   const rows = kind
     ? await db.getAllAsync<Omit<MemeRow, 'embedding'>>(
         `SELECT id, uri, name, kind, ocr_text, caption, tags, extra_terms, vision_state, indexed_at, pending
-         FROM memes WHERE kind = ? ORDER BY indexed_at DESC, id DESC LIMIT ? OFFSET ?`,
+         FROM memes WHERE kind = ? ORDER BY modified_at DESC, id DESC LIMIT ? OFFSET ?`,
         kind,
         limit,
         offset
       )
     : await db.getAllAsync<Omit<MemeRow, 'embedding'>>(
         `SELECT id, uri, name, kind, ocr_text, caption, tags, extra_terms, vision_state, indexed_at, pending
-         FROM memes ORDER BY indexed_at DESC, id DESC LIMIT ? OFFSET ?`,
+         FROM memes ORDER BY modified_at DESC, id DESC LIMIT ? OFFSET ?`,
         limit,
         offset
       );
