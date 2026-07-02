@@ -1,6 +1,6 @@
 import * as SQLite from 'expo-sqlite';
 
-import type { MemeRecord, SearchHit, Tag, LinkedFolder, Exemplar } from './types';
+import type { MemeRecord, MediaKind, SearchHit, Tag, LinkedFolder, Exemplar } from './types';
 
 let dbPromise: Promise<SQLite.SQLiteDatabase> | null = null;
 
@@ -22,9 +22,16 @@ export async function initDb(): Promise<void> {
       kind TEXT NOT NULL,
       embedding BLOB NOT NULL,
       ocr_text TEXT NOT NULL DEFAULT '',
+      caption TEXT NOT NULL DEFAULT '',
       tags TEXT NOT NULL DEFAULT '[]',
       extra_terms TEXT NOT NULL DEFAULT '',
-      indexed_at INTEGER NOT NULL
+      vision_state TEXT NOT NULL DEFAULT 'pending',
+      indexed_at INTEGER NOT NULL,
+      pending INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE TABLE IF NOT EXISTS settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS folders (
       uri TEXT PRIMARY KEY,
@@ -43,6 +50,8 @@ export async function initDb(): Promise<void> {
       associations TEXT NOT NULL DEFAULT '[]',
       source_uri TEXT NOT NULL DEFAULT '',
       is_positive INTEGER NOT NULL DEFAULT 1,
+      origin TEXT NOT NULL DEFAULT 'self',
+      pack TEXT NOT NULL DEFAULT '',
       created_at INTEGER NOT NULL
     );
     CREATE TABLE IF NOT EXISTS index_errors (
@@ -59,10 +68,34 @@ export async function initDb(): Promise<void> {
   if (!cols.some((c) => c.name === 'extra_terms')) {
     await db.execAsync(`ALTER TABLE memes ADD COLUMN extra_terms TEXT NOT NULL DEFAULT '';`);
   }
+  // Migrate v2 databases that predate the pending flag (rows saved-but-not-yet-
+  // indexed, so a shared meme can show in the list before it's embedded).
+  if (!cols.some((c) => c.name === 'pending')) {
+    await db.execAsync(`ALTER TABLE memes ADD COLUMN pending INTEGER NOT NULL DEFAULT 0;`);
+  }
+  // Migrate databases that predate LFM2-VL enrichment (caption + vision_state).
+  // Existing rows default to vision_state='pending' so they get picked up by the
+  // first "Describe library" run.
+  if (!cols.some((c) => c.name === 'caption')) {
+    await db.execAsync(`ALTER TABLE memes ADD COLUMN caption TEXT NOT NULL DEFAULT '';`);
+  }
+  if (!cols.some((c) => c.name === 'vision_state')) {
+    await db.execAsync(`ALTER TABLE memes ADD COLUMN vision_state TEXT NOT NULL DEFAULT 'pending';`);
+  }
   // Migrate exemplar tables that predate negative ("not this") teaching.
   const exCols = await db.getAllAsync<{ name: string }>('PRAGMA table_info(exemplars)');
   if (!exCols.some((c) => c.name === 'is_positive')) {
     await db.execAsync(`ALTER TABLE exemplars ADD COLUMN is_positive INTEGER NOT NULL DEFAULT 1;`);
+  }
+  // Migrate exemplar tables that predate provenance tracking. `origin` is 'self'
+  // (you taught it) or 'pack' (imported); `pack` names the source pack so a whole
+  // import can be listed and removed as a unit. Existing rows are your own work,
+  // so they default to 'self'.
+  if (!exCols.some((c) => c.name === 'origin')) {
+    await db.execAsync(`ALTER TABLE exemplars ADD COLUMN origin TEXT NOT NULL DEFAULT 'self';`);
+  }
+  if (!exCols.some((c) => c.name === 'pack')) {
+    await db.execAsync(`ALTER TABLE exemplars ADD COLUMN pack TEXT NOT NULL DEFAULT '';`);
   }
 }
 
@@ -94,9 +127,15 @@ export function dot(a: Float32Array | number[], b: Float32Array | number[]): num
 
 // ---- memes -------------------------------------------------------------------
 
+// True only for memes that are fully indexed. A pending placeholder (saved but
+// not yet embedded) does NOT count, so the indexer still picks the file up and
+// replaces the placeholder with the real, searchable record.
 export async function memeExists(uri: string): Promise<boolean> {
   const db = await getDb();
-  const row = await db.getFirstAsync<{ id: number }>('SELECT id FROM memes WHERE uri = ?', uri);
+  const row = await db.getFirstAsync<{ id: number }>(
+    'SELECT id FROM memes WHERE uri = ? AND pending = 0',
+    uri
+  );
   return !!row;
 }
 
@@ -115,6 +154,8 @@ export async function insertMeme(args: {
   extraTerms: string;
 }): Promise<void> {
   const db = await getDb();
+  // caption + vision_state use their column defaults ('' / 'pending'); the
+  // LFM2-VL pass fills them in later via setMemeVision.
   await db.runAsync(
     `INSERT OR REPLACE INTO memes (uri, name, kind, embedding, ocr_text, tags, extra_terms, indexed_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -129,6 +170,28 @@ export async function insertMeme(args: {
   );
 }
 
+// Insert a lightweight placeholder for a freshly-saved meme that hasn't been
+// embedded yet, so it appears in the library list immediately. Stamped with the
+// current time (sorts to the top of recents) and pending=1 so it's excluded from
+// search/training until the indexer fills in its embedding, OCR, and tags. Uses
+// INSERT OR IGNORE so it never clobbers an already-indexed row for the same uri.
+export async function insertPendingMeme(args: {
+  uri: string;
+  name: string;
+  kind: string;
+}): Promise<void> {
+  const db = await getDb();
+  await db.runAsync(
+    `INSERT OR IGNORE INTO memes (uri, name, kind, embedding, ocr_text, tags, extra_terms, indexed_at, pending)
+     VALUES (?, ?, ?, ?, '', '[]', '', ?, 1)`,
+    args.uri,
+    args.name,
+    args.kind,
+    vecToBlob([]),
+    Date.now()
+  );
+}
+
 interface MemeRow {
   id: number;
   uri: string;
@@ -136,9 +199,12 @@ interface MemeRow {
   kind: string;
   embedding: Uint8Array;
   ocr_text: string;
+  caption: string;
   tags: string;
   extra_terms: string;
+  vision_state: string;
   indexed_at: number;
+  pending: number;
 }
 
 function rowToRecord(row: MemeRow): MemeRecord & { embedding: Float32Array } {
@@ -148,9 +214,12 @@ function rowToRecord(row: MemeRow): MemeRecord & { embedding: Float32Array } {
     name: row.name,
     kind: row.kind as MemeRecord['kind'],
     ocrText: row.ocr_text,
+    caption: row.caption ?? '',
     tags: safeParseTags(row.tags),
     extraTerms: row.extra_terms ?? '',
+    visionState: (row.vision_state as MemeRecord['visionState']) ?? 'pending',
     indexedAt: row.indexed_at,
+    pending: row.pending === 1,
     embedding: blobToVec(row.embedding),
   };
 }
@@ -158,13 +227,23 @@ function rowToRecord(row: MemeRow): MemeRecord & { embedding: Float32Array } {
 // Re-tagging reuses already-stored embeddings, so applying new knowledge
 // (exemplars, association edits) costs no re-embedding.
 export async function getAllMemeEmbeddings(): Promise<
-  { id: number; embedding: Float32Array; ocrText: string }[]
+  { id: number; embedding: Float32Array; ocrText: string; tags: Tag[]; extraTerms: string }[]
 > {
   const db = await getDb();
-  const rows = await db.getAllAsync<{ id: number; embedding: Uint8Array; ocr_text: string }>(
-    'SELECT id, embedding, ocr_text FROM memes'
-  );
-  return rows.map((r) => ({ id: r.id, embedding: blobToVec(r.embedding), ocrText: r.ocr_text ?? '' }));
+  const rows = await db.getAllAsync<{
+    id: number;
+    embedding: Uint8Array;
+    ocr_text: string;
+    tags: string;
+    extra_terms: string;
+  }>('SELECT id, embedding, ocr_text, tags, extra_terms FROM memes WHERE pending = 0');
+  return rows.map((r) => ({
+    id: r.id,
+    embedding: blobToVec(r.embedding),
+    ocrText: r.ocr_text ?? '',
+    tags: safeParseTags(r.tags),
+    extraTerms: r.extra_terms ?? '',
+  }));
 }
 
 // A random sample of library embeddings, used as the negative/background set
@@ -172,7 +251,7 @@ export async function getAllMemeEmbeddings(): Promise<
 export async function getEmbeddingSample(limit = 500): Promise<Float32Array[]> {
   const db = await getDb();
   const rows = await db.getAllAsync<{ embedding: Uint8Array }>(
-    'SELECT embedding FROM memes ORDER BY RANDOM() LIMIT ?',
+    'SELECT embedding FROM memes WHERE pending = 0 ORDER BY RANDOM() LIMIT ?',
     limit
   );
   return rows.map((r) => blobToVec(r.embedding));
@@ -180,8 +259,10 @@ export async function getEmbeddingSample(limit = 500): Promise<Float32Array[]> {
 
 export async function getMemeEmbedding(id: number): Promise<Float32Array | null> {
   const db = await getDb();
+  // Pending placeholders carry an empty embedding; treat them as "no embedding
+  // yet" so teaching/confidence don't operate on a zero-length vector.
   const row = await db.getFirstAsync<{ embedding: Uint8Array }>(
-    'SELECT embedding FROM memes WHERE id = ?',
+    'SELECT embedding FROM memes WHERE id = ? AND pending = 0',
     id
   );
   return row ? blobToVec(row.embedding) : null;
@@ -218,6 +299,140 @@ export async function bulkUpdateMemeTags(
   }
 }
 
+// ---- LFM2-VL enrichment ------------------------------------------------------
+
+// Memes still awaiting (or due to retry) an LFM2-VL description. Returns just
+// the fields the enricher needs to re-materialize the image and write back.
+export interface MemeNeedingVisionRow {
+  id: number;
+  uri: string;
+  name: string;
+  kind: 'image' | 'video';
+  tags: Tag[];
+  ocrText: string;
+  embedding: Float32Array; // normalized CLIP image vector (for duplicate-skip)
+}
+
+export async function getMemesNeedingVision(limit = 10000): Promise<MemeNeedingVisionRow[]> {
+  const db = await getDb();
+  const rows = await db.getAllAsync<{
+    id: number;
+    uri: string;
+    name: string;
+    kind: string;
+    tags: string;
+    ocr_text: string;
+    embedding: Uint8Array;
+  }>(
+    "SELECT id, uri, name, kind, tags, ocr_text, embedding FROM memes WHERE vision_state = 'pending' ORDER BY indexed_at DESC, id DESC LIMIT ?",
+    limit
+  );
+  return rows.map((r) => ({
+    id: r.id,
+    uri: r.uri,
+    name: r.name,
+    kind: r.kind as 'image' | 'video',
+    tags: safeParseTags(r.tags),
+    ocrText: r.ocr_text ?? '',
+    embedding: blobToVec(r.embedding),
+  }));
+}
+
+// Already-described memes, used as the "twin" set for duplicate-skip: a pending
+// meme whose CLIP vector AND OCR text match one of these can copy its result
+// instead of running the model again.
+export interface DescribedVisionRow {
+  embedding: Float32Array;
+  ocrText: string;
+  caption: string;
+  tags: Tag[];
+  extraTerms: string;
+}
+
+export async function getDescribedVisionRecords(): Promise<DescribedVisionRow[]> {
+  const db = await getDb();
+  const rows = await db.getAllAsync<{
+    embedding: Uint8Array;
+    ocr_text: string;
+    caption: string;
+    tags: string;
+    extra_terms: string;
+  }>("SELECT embedding, ocr_text, caption, tags, extra_terms FROM memes WHERE vision_state = 'done'");
+  return rows.map((r) => ({
+    embedding: blobToVec(r.embedding),
+    ocrText: r.ocr_text ?? '',
+    caption: r.caption ?? '',
+    tags: safeParseTags(r.tags),
+    extraTerms: r.extra_terms ?? '',
+  }));
+}
+
+// Write the result of a successful description pass: caption + merged tags +
+// refreshed search terms, and flip vision_state so it isn't re-described.
+export async function setMemeVision(
+  id: number,
+  args: { caption: string; tags: Tag[]; extraTerms: string }
+): Promise<void> {
+  const db = await getDb();
+  await db.runAsync(
+    "UPDATE memes SET caption = ?, tags = ?, extra_terms = ?, vision_state = 'done' WHERE id = ?",
+    args.caption,
+    JSON.stringify(args.tags),
+    args.extraTerms,
+    id
+  );
+}
+
+// Mark a meme as failed-to-describe WITHOUT touching its existing tags/terms,
+// so a transient model error doesn't wipe its CLIP/OCR data. Won't auto-retry.
+export async function markVisionFailed(id: number): Promise<void> {
+  const db = await getDb();
+  await db.runAsync("UPDATE memes SET vision_state = 'failed' WHERE id = ?", id);
+}
+
+export async function countMemesNeedingVision(): Promise<number> {
+  const db = await getDb();
+  const row = await db.getFirstAsync<{ c: number }>(
+    "SELECT COUNT(*) as c FROM memes WHERE vision_state = 'pending'"
+  );
+  return row?.c ?? 0;
+}
+
+export async function countMemesDescribed(): Promise<number> {
+  const db = await getDb();
+  const row = await db.getFirstAsync<{ c: number }>(
+    "SELECT COUNT(*) as c FROM memes WHERE vision_state = 'done'"
+  );
+  return row?.c ?? 0;
+}
+
+// Re-queue everything (failed + already-done) for a fresh description pass —
+// e.g. after switching to the higher-quality model.
+export async function resetVisionState(): Promise<void> {
+  const db = await getDb();
+  await db.execAsync("UPDATE memes SET vision_state = 'pending';");
+}
+
+// ---- settings (small key/value store) ----------------------------------------
+
+export async function getSetting(key: string): Promise<string | null> {
+  const db = await getDb();
+  const row = await db.getFirstAsync<{ value: string }>(
+    'SELECT value FROM settings WHERE key = ?',
+    key
+  );
+  return row?.value ?? null;
+}
+
+export async function setSetting(key: string, value: string): Promise<void> {
+  const db = await getDb();
+  await db.runAsync(
+    'INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)',
+    key,
+    value
+  );
+}
+
 function safeParseTags(s: string): Tag[] {
   try {
     return JSON.parse(s) as Tag[];
@@ -226,10 +441,32 @@ function safeParseTags(s: string): Tag[] {
   }
 }
 
-export async function countMemes(): Promise<number> {
+export async function countMemes(kind?: MediaKind): Promise<number> {
   const db = await getDb();
-  const row = await db.getFirstAsync<{ c: number }>('SELECT COUNT(*) as c FROM memes');
+  const row = kind
+    ? await db.getFirstAsync<{ c: number }>('SELECT COUNT(*) as c FROM memes WHERE kind = ?', kind)
+    : await db.getFirstAsync<{ c: number }>('SELECT COUNT(*) as c FROM memes');
   return row?.c ?? 0;
+}
+
+// Distinct meme-tag labels actually present across the indexed library, ordered
+// by how many memes carry each (most common first). Powers the quick-filter
+// chips so a user can narrow to a known format/character without typing it.
+export async function getLibraryTagLabels(limit = 40): Promise<string[]> {
+  const db = await getDb();
+  const rows = await db.getAllAsync<{ tags: string }>(
+    "SELECT tags FROM memes WHERE pending = 0 AND tags != '[]'"
+  );
+  const counts = new Map<string, number>();
+  for (const r of rows) {
+    for (const t of safeParseTags(r.tags)) {
+      counts.set(t.label, (counts.get(t.label) ?? 0) + 1);
+    }
+  }
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, limit)
+    .map(([label]) => label);
 }
 
 // How many memes currently carry a given tag label (used for teach feedback).
@@ -242,41 +479,92 @@ export async function countMemesWithLabel(label: string): Promise<number> {
   return row?.c ?? 0;
 }
 
-export async function getRecentMemes(limit = 90, offset = 0): Promise<MemeRecord[]> {
+export async function getRecentMemes(
+  limit = 90,
+  offset = 0,
+  kind?: MediaKind
+): Promise<MemeRecord[]> {
   const db = await getDb();
+  // Deliberately does NOT select the embedding blob: the grid only renders
+  // thumbnails + metadata, so pulling a 512-float vector per row into JS just to
+  // scroll past it wasted megabytes of RAM on a big library — which stuttered
+  // the list and competed with the CLIP model loading on first launch. Search
+  // and teaching read embeddings on demand (searchByVector / getMemeEmbedding).
+  //
   // Tiebreak on id: bulk indexing stamps many rows with the same indexed_at
   // (same millisecond), and without a stable secondary sort LIMIT/OFFSET paging
   // repeats and skips rows — which is what broke infinite scroll.
-  const rows = await db.getAllAsync<MemeRow>(
-    'SELECT * FROM memes ORDER BY indexed_at DESC, id DESC LIMIT ? OFFSET ?',
-    limit,
-    offset
-  );
-  return rows.map(rowToRecord);
+  const rows = kind
+    ? await db.getAllAsync<Omit<MemeRow, 'embedding'>>(
+        `SELECT id, uri, name, kind, ocr_text, caption, tags, extra_terms, vision_state, indexed_at, pending
+         FROM memes WHERE kind = ? ORDER BY indexed_at DESC, id DESC LIMIT ? OFFSET ?`,
+        kind,
+        limit,
+        offset
+      )
+    : await db.getAllAsync<Omit<MemeRow, 'embedding'>>(
+        `SELECT id, uri, name, kind, ocr_text, caption, tags, extra_terms, vision_state, indexed_at, pending
+         FROM memes ORDER BY indexed_at DESC, id DESC LIMIT ? OFFSET ?`,
+        limit,
+        offset
+      );
+  return rows.map((r) => ({
+    id: r.id,
+    uri: r.uri,
+    name: r.name,
+    kind: r.kind as MemeRecord['kind'],
+    ocrText: r.ocr_text,
+    caption: r.caption ?? '',
+    tags: safeParseTags(r.tags),
+    extraTerms: r.extra_terms ?? '',
+    visionState: (r.vision_state as MemeRecord['visionState']) ?? 'pending',
+    indexedAt: r.indexed_at,
+    pending: r.pending === 1,
+  }));
 }
 
 // Brute-force vector search. Fine for thousands of items; swap for sqlite-vec
 // if a collection ever gets huge.
+//
+// The scoring loop is the single heaviest synchronous JS in the app — a dot
+// product over a 512-float vector for every meme, run on each (debounced)
+// keystroke. Doing it in one pass froze the UI mid-type on a large library, so
+// it now scores in chunks and hands the event loop a macrotask between them,
+// keeping typing/scrolling responsive. `shouldAbort` lets the caller cancel an
+// in-flight scan the instant a newer query supersedes it (returns null) instead
+// of letting stale full scans stack up behind the latest one.
+const SEARCH_CHUNK = 512;
+
 export async function searchByVector(
   queryVec: number[],
   queryText: string,
-  limit = 40
-): Promise<SearchHit[]> {
+  limit = 40,
+  kind?: MediaKind,
+  shouldAbort?: () => boolean
+): Promise<SearchHit[] | null> {
   const db = await getDb();
-  const rows = await db.getAllAsync<MemeRow>('SELECT * FROM memes');
+  // Pending placeholders have no embedding/OCR/tags yet, so they'd only add
+  // noise — leave them out until the indexer fills them in.
+  const rows = kind
+    ? await db.getAllAsync<MemeRow>('SELECT * FROM memes WHERE pending = 0 AND kind = ?', kind)
+    : await db.getAllAsync<MemeRow>('SELECT * FROM memes WHERE pending = 0');
+  if (shouldAbort?.()) return null;
   const terms = queryText
     .toLowerCase()
     .split(/\s+/)
     .filter((t) => t.length > 2);
 
-  const hits = rows.map((row) => {
-    const rec = rowToRecord(row);
+  const hits: SearchHit[] = [];
+  for (let i = 0; i < rows.length; i++) {
+    const rec = rowToRecord(rows[i]);
     let score = dot(queryVec, rec.embedding); // cosine (both normalized)
     if (terms.length) {
       const hay = (
         rec.ocrText +
         ' ' +
         rec.name +
+        ' ' +
+        rec.caption +
         ' ' +
         rec.tags.map((t) => t.label).join(' ') +
         ' ' +
@@ -292,8 +580,15 @@ export async function searchByVector(
       if (matched === terms.length) score += 0.6;
     }
     const { embedding, ...record } = rec;
-    return { ...record, score } as SearchHit;
-  });
+    hits.push({ ...record, score } as SearchHit);
+
+    // Yield between chunks so the UI thread can render/handle touch, and bail
+    // immediately if a newer query has superseded this one.
+    if ((i & (SEARCH_CHUNK - 1)) === SEARCH_CHUNK - 1) {
+      if (shouldAbort?.()) return null;
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    }
+  }
 
   hits.sort((a, b) => b.score - a.score);
   return hits.slice(0, limit);
@@ -361,9 +656,10 @@ export async function addExemplar(args: {
   positive?: boolean; // false = "this is NOT a <label>" (negative example)
 }): Promise<void> {
   const db = await getDb();
+  // Examples created here are the user's own teaching — origin 'self', no pack.
   await db.runAsync(
-    `INSERT INTO exemplars (label, category, vector, associations, source_uri, is_positive, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO exemplars (label, category, vector, associations, source_uri, is_positive, origin, pack, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, 'self', '', ?)`,
     args.label,
     args.category,
     vecToBlob(args.vector),
@@ -384,6 +680,8 @@ export async function getExemplars(): Promise<Exemplar[]> {
     associations: string;
     source_uri: string;
     is_positive: number;
+    origin: string;
+    pack: string;
     created_at: number;
   }>('SELECT * FROM exemplars ORDER BY created_at DESC');
   return rows.map((r) => ({
@@ -394,6 +692,8 @@ export async function getExemplars(): Promise<Exemplar[]> {
     associations: safeParseStrings(r.associations),
     sourceUri: r.source_uri,
     positive: r.is_positive !== 0,
+    origin: r.origin === 'pack' ? 'pack' : 'self',
+    pack: r.pack ?? '',
     createdAt: r.created_at,
   }));
 }
@@ -417,6 +717,185 @@ export async function getLabels(): Promise<string[]> {
 export async function deleteExemplar(id: number): Promise<void> {
   const db = await getDb();
   await db.runAsync('DELETE FROM exemplars WHERE id = ?', id);
+}
+
+// Drop every example for a label — i.e. forget a taught tag entirely. The tags
+// already written onto memes stay until the next re-tag, when the label simply
+// stops matching (no head to train) and falls off.
+export async function deleteExemplarsByLabel(label: string): Promise<number> {
+  const db = await getDb();
+  const res = await db.runAsync('DELETE FROM exemplars WHERE label = ?', label);
+  return res.changes ?? 0;
+}
+
+// Per-label rollup for the "Taught knowledge" list: how many positive/negative
+// examples back each label, and how many memes currently carry it as a tag. One
+// pass over exemplars + one pass over meme tags, so it's cheap even with a big
+// library.
+export interface TaughtLabelStat {
+  label: string;
+  category: string;
+  positives: number;
+  negatives: number;
+  tagged: number; // memes in the library currently tagged with this label
+  fromSelf: boolean; // at least one example you taught yourself
+  fromPack: boolean; // at least one example came from an imported pack
+  packs: string[]; // distinct source-pack names contributing to this label
+}
+
+export async function getTaughtLabelStats(): Promise<TaughtLabelStat[]> {
+  const db = await getDb();
+  const exRows = await db.getAllAsync<{
+    label: string;
+    category: string;
+    is_positive: number;
+    origin: string;
+    pack: string;
+  }>('SELECT label, category, is_positive, origin, pack FROM exemplars');
+  const tagRows = await db.getAllAsync<{ tags: string }>(
+    "SELECT tags FROM memes WHERE pending = 0 AND tags != '[]'"
+  );
+
+  const taggedCounts = new Map<string, number>();
+  for (const r of tagRows) {
+    // A meme can only carry a label once, so count distinct labels per row.
+    const seen = new Set<string>();
+    for (const t of safeParseTags(r.tags)) seen.add(t.label);
+    for (const label of seen) taggedCounts.set(label, (taggedCounts.get(label) ?? 0) + 1);
+  }
+
+  const byLabel = new Map<string, TaughtLabelStat & { packSet: Set<string> }>();
+  for (const r of exRows) {
+    const stat =
+      byLabel.get(r.label) ??
+      {
+        label: r.label,
+        category: r.category,
+        positives: 0,
+        negatives: 0,
+        tagged: taggedCounts.get(r.label) ?? 0,
+        fromSelf: false,
+        fromPack: false,
+        packs: [],
+        packSet: new Set<string>(),
+      };
+    if (r.is_positive !== 0) stat.positives += 1;
+    else stat.negatives += 1;
+    if (r.origin === 'pack') {
+      stat.fromPack = true;
+      if (r.pack) stat.packSet.add(r.pack);
+    } else {
+      stat.fromSelf = true;
+    }
+    byLabel.set(r.label, stat);
+  }
+
+  return [...byLabel.values()]
+    .map(({ packSet, ...s }) => ({ ...s, packs: [...packSet].sort() }))
+    .sort((a, b) => b.tagged - a.tagged || a.label.localeCompare(b.label));
+}
+
+// One row per imported pack: which packs are installed and how much each adds.
+// Powers the pack-management list (and per-pack removal).
+export interface ImportedPack {
+  pack: string;
+  labels: number; // distinct labels the pack contributes
+  examples: number; // total exemplars from the pack
+}
+
+export async function getImportedPacks(): Promise<ImportedPack[]> {
+  const db = await getDb();
+  const rows = await db.getAllAsync<{ pack: string; label: string }>(
+    "SELECT pack, label FROM exemplars WHERE origin = 'pack'"
+  );
+  const byPack = new Map<string, { labels: Set<string>; examples: number }>();
+  for (const r of rows) {
+    const name = r.pack || 'Imported pack';
+    const g = byPack.get(name) ?? { labels: new Set<string>(), examples: 0 };
+    g.labels.add(r.label);
+    g.examples += 1;
+    byPack.set(name, g);
+  }
+  return [...byPack.entries()]
+    .map(([pack, g]) => ({ pack, labels: g.labels.size, examples: g.examples }))
+    .sort((a, b) => a.pack.localeCompare(b.pack));
+}
+
+// Remove every example imported from a given pack (your own teaching is left
+// untouched). Returns how many exemplars were dropped.
+export async function deleteExemplarsByPack(pack: string): Promise<number> {
+  const db = await getDb();
+  const res = await db.runAsync(
+    "DELETE FROM exemplars WHERE origin = 'pack' AND pack = ?",
+    pack
+  );
+  return res.changes ?? 0;
+}
+
+// Bulk-insert exemplars from an imported teaching pack, tagging each with its
+// source `pack` name and origin 'pack'. Two modes:
+//  - 'merge'   (default): keep what you have, add the pack's examples, and skip
+//    any that already exist verbatim so re-importing never piles up duplicates.
+//  - 'replace': wipe ALL existing exemplars first (yours included) so the
+//    library holds exactly this pack — for starting clean from a curated set.
+export async function importExemplars(
+  list: {
+    label: string;
+    category: string;
+    vector: number[];
+    associations: string[];
+    positive: boolean;
+  }[],
+  opts: { pack: string; mode?: 'merge' | 'replace' } = { pack: '' }
+): Promise<{ added: number; skipped: number; removed: number }> {
+  const db = await getDb();
+  const mode = opts.mode ?? 'merge';
+  const sig = (label: string, positive: boolean, vec: number[]) =>
+    // First few components rounded are a cheap, collision-safe fingerprint for
+    // a 512-dim normalized vector; exact equality across devices is unreliable.
+    `${label} ${positive ? 1 : 0} ${vec.slice(0, 8).map((v) => v.toFixed(5)).join(',')}`;
+
+  // On replace we drop everything below, so there's nothing to dedupe against.
+  const existing = mode === 'replace' ? [] : await getExemplars();
+  const seen = new Set(existing.map((e) => sig(e.label, e.positive, e.vector)));
+
+  let added = 0;
+  let skipped = 0;
+  let removed = 0;
+  const stmt = await db.prepareAsync(
+    `INSERT INTO exemplars (label, category, vector, associations, source_uri, is_positive, origin, pack, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, 'pack', ?, ?)`
+  );
+  try {
+    await db.withTransactionAsync(async () => {
+      if (mode === 'replace') {
+        const res = await db.runAsync('DELETE FROM exemplars');
+        removed = res.changes ?? 0;
+      }
+      for (const e of list) {
+        const s = sig(e.label, e.positive, e.vector);
+        if (seen.has(s)) {
+          skipped += 1;
+          continue;
+        }
+        seen.add(s);
+        await stmt.executeAsync(
+          e.label,
+          e.category,
+          vecToBlob(e.vector),
+          JSON.stringify(e.associations),
+          '', // imported examples have no local source image
+          e.positive ? 1 : 0,
+          opts.pack || 'Imported pack',
+          Date.now()
+        );
+        added += 1;
+      }
+    });
+  } finally {
+    await stmt.finalizeAsync();
+  }
+  return { added, skipped, removed };
 }
 
 // ---- indexing errors (diagnostics) ------------------------------------------

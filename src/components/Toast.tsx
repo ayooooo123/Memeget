@@ -5,6 +5,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Animated, StyleSheet, Text, View } from 'react-native';
 
 import { colors, radius, shadow } from '../theme';
+import { useConst } from '../reactUtils';
 
 export type ToastTone = 'info' | 'success' | 'error';
 
@@ -31,7 +32,7 @@ const TONE_ICON: Record<ToastTone, string> = { info: '', success: '✓ ', error:
 
 export function ToastHost({ bottomOffset = 96 }: { bottomOffset?: number }) {
   const [msg, setMsg] = useState<ToastMsg | null>(null);
-  const anim = useRef(new Animated.Value(0)).current;
+  const anim = useConst(() => new Animated.Value(0));
   const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {

@@ -6,14 +6,18 @@
     "start": "expo start --dev-client",
     "android": "expo run:android",
     "prebuild": "expo prebuild -p android --no-install",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "jest",
+    "doctor": "react-doctor"
   },
   "dependencies": {
     "expo": "~56.0.0",
     "expo-asset": "~56.0.16",
+    "expo-background-task": "~56.0.17",
     "expo-build-properties": "~56.0.17",
     "expo-clipboard": "~56.0.4",
     "expo-constants": "~56.0.17",
+    "expo-document-picker": "~56.0.0",
     "expo-file-system": "~56.0.7",
     "expo-haptics": "~56.0.3",
     "expo-image": "~56.0.10",
@@ -24,6 +28,7 @@
     "expo-sqlite": "~56.0.4",
     "expo-status-bar": "~56.0.4",
     "expo-system-ui": "~56.0.5",
+    "expo-task-manager": "~56.0.17",
     "expo-text-extractor": "^2.0.0",
     "expo-video": "~56.0.2",
     "expo-video-thumbnails": "~56.0.3",
@@ -34,7 +39,11 @@
     "react-native-safe-area-context": "~5.7.0"
   },
   "devDependencies": {
+    "@types/jest": "^30.0.0",
     "@types/react": "~19.2.0",
+    "jest": "^30.4.2",
+    "react-doctor": "^0.5.8",
+    "ts-jest": "^29.4.11",
     "typescript": "~5.9.0"
   },
   "private": true
