@@ -331,11 +331,11 @@ async function processFile(
   try {
     if (await memeExists(file.uri)) return 'skipped';
 
-    // Read the file's own last-modified time up front so the library can sort by
-    // when the meme was actually added, not by when this scan reached it. It's a
-    // best-effort stat (null on providers that don't report it) — insertMeme
+    // Read the file's own last-modified time so the library can sort by when the
+    // meme was actually added, not by when this scan reached it. It's a
+    // best-effort read (null on providers that don't report it) — insertMeme
     // falls back to the index time so a row is never left unsorted.
-    const modifiedAt = await getModifiedTime(file.uri);
+    const modifiedAt = getModifiedTime(file.uri);
 
     const work = await copyToCache(file, idx);
     temp.push(work);
