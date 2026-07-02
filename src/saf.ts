@@ -6,6 +6,8 @@ import * as FileSystem from 'expo-file-system/legacy';
 import { File } from 'expo-file-system';
 import * as VideoThumbnails from 'expo-video-thumbnails';
 
+import { getFileModifiedTime } from '../modules/memeget-bg';
+
 const IMAGE_EXTS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'heic', 'heif'];
 const VIDEO_EXTS = ['mp4', 'mov', 'mkv', 'webm', 'avi', 'm4v', '3gp'];
 
@@ -73,15 +75,15 @@ export async function listMedia(folderUri: string): Promise<SafFile[]> {
 // library can order by when a meme was actually added to the device rather than
 // when we happened to index it.
 //
-// This deliberately uses the new expo-file-system `File` API, NOT legacy
-// `getInfoAsync`: on Android the legacy call never populates modificationTime
-// for SAF content:// URIs (only the file:// branch does), so every linked meme
-// came back with no time and the library fell back to index order. The new
-// `File(uri).modificationTime` reads the SAF DocumentFile's lastModified (in
-// milliseconds already, so no unit conversion) and works for content:// URIs.
-// Returns null when the provider doesn't supply a usable time, so the caller can
-// fall back to the index time.
+// Reads the SAF DocumentFile's lastModified() directly in native code (see
+// modules/memeget-bg): expo-file-system doesn't reliably surface this for SAF
+// content:// URIs — legacy getInfoAsync never sets modificationTime for them at
+// all — which is why earlier attempts left every meme without a time and the
+// library fell back to index order. Falls back to the new `File` API where the
+// native module isn't built in, then to null so the caller uses the index time.
 export function getModifiedTime(uri: string): number | null {
+  const native = getFileModifiedTime(uri);
+  if (native != null) return Math.round(native);
   try {
     const t = new File(uri).modificationTime;
     if (typeof t === 'number' && t > 0) return Math.round(t);
