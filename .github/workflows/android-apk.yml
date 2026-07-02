@@ -1,6 +1,14 @@
 name: Android APK
 
-# Builds a standalone, sideloadable APK and publishes it to a GitHub Release.
+# Builds a standalone, sideloadable APK. Two release channels:
+#
+#   * Tag push  (v1.2.3)        -> a permanent, versioned GitHub Release tagged
+#                                  v1.2.3 with memeget-v1.2.3.apk. This is the
+#                                  "real" release history.
+#   * Push to main / manual run -> a single rolling "latest" pre-release that is
+#                                  overwritten each time, for grabbing the newest
+#                                  build without cutting a version.
+#
 # The RN Android "release" build type self-signs with the auto-generated debug
 # keystore, so the APK installs on any device (enable "Install unknown apps")
 # without needing a Metro dev server or EAS account. Everything stays local.
@@ -8,10 +16,13 @@ name: Android APK
 on:
   push:
     branches:
-      - claude/meme-indexing-mobile-app-3eecka
+      - main
+    tags:
+      - 'v*'
   workflow_dispatch:
 
-# Avoid stacking builds on rapid pushes.
+# Avoid stacking builds on rapid pushes. Tags and branches have distinct refs,
+# so a push to main never cancels an in-flight version release.
 concurrency:
   group: android-apk-${{ github.ref }}
   cancel-in-progress: true
@@ -26,6 +37,53 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Determine release metadata
+        id: meta
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VERSION_NAME="${GITHUB_REF_NAME#v}"
+            RELEASE_TAG="${GITHUB_REF_NAME}"
+            RELEASE_NAME="Memeget ${GITHUB_REF_NAME}"
+            APK_NAME="memeget-${GITHUB_REF_NAME}.apk"
+            PRERELEASE="false"
+            MAKE_LATEST="true"
+          else
+            VERSION_NAME="$(node -p "require('./app.json').expo.version")"
+            RELEASE_TAG="latest"
+            RELEASE_NAME="Memeget (latest build)"
+            APK_NAME="memeget-latest.apk"
+            PRERELEASE="true"
+            MAKE_LATEST="false"
+          fi
+          # Android requires a monotonically increasing integer versionCode for
+          # every installable build; the run number gives us that for free.
+          VERSION_CODE="${GITHUB_RUN_NUMBER}"
+          {
+            echo "version_name=${VERSION_NAME}"
+            echo "version_code=${VERSION_CODE}"
+            echo "release_tag=${RELEASE_TAG}"
+            echo "release_name=${RELEASE_NAME}"
+            echo "apk_name=${APK_NAME}"
+            echo "prerelease=${PRERELEASE}"
+            echo "make_latest=${MAKE_LATEST}"
+          } >> "$GITHUB_OUTPUT"
+          echo "Building ${RELEASE_NAME} -> ${APK_NAME} (versionName ${VERSION_NAME}, versionCode ${VERSION_CODE})"
+
+      - name: Stamp version into app config
+        env:
+          VERSION_NAME: ${{ steps.meta.outputs.version_name }}
+          VERSION_CODE: ${{ steps.meta.outputs.version_code }}
+        run: |
+          node -e '
+            const fs = require("fs");
+            const cfg = JSON.parse(fs.readFileSync("app.json", "utf8"));
+            cfg.expo.version = process.env.VERSION_NAME;
+            cfg.expo.android = cfg.expo.android || {};
+            cfg.expo.android.versionCode = Number(process.env.VERSION_CODE);
+            fs.writeFileSync("app.json", JSON.stringify(cfg, null, 2) + "\n");
+            console.log("app.json:", cfg.expo.version, "/", cfg.expo.android.versionCode);
+          '
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -58,12 +116,14 @@ jobs:
           GRADLE_OPTS: -Xmx5120m -XX:MaxMetaspaceSize=1024m -Dorg.gradle.daemon=false
         run: ./gradlew assembleRelease --no-daemon --stacktrace
 
-      - name: Locate APK
+      - name: Locate and name APK
         id: apk
         run: |
-          APK=$(find android/app/build/outputs/apk/release -name "*.apk" | head -n 1)
-          echo "Found APK: $APK"
-          echo "path=$APK" >> "$GITHUB_OUTPUT"
+          SRC=$(find android/app/build/outputs/apk/release -name "*.apk" | head -n 1)
+          echo "Found APK: $SRC"
+          DEST="${{ steps.meta.outputs.apk_name }}"
+          cp "$SRC" "$DEST"
+          echo "path=$DEST" >> "$GITHUB_OUTPUT"
 
       # Publish first: a GitHub Release stores the APK separately from Actions
       # artifact storage, so it does not consume (or get blocked by) the
@@ -71,14 +131,17 @@ jobs:
       - name: Publish to Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: android-latest
-          name: Memeget (latest Android build)
+          tag_name: ${{ steps.meta.outputs.release_tag }}
+          name: ${{ steps.meta.outputs.release_name }}
           body: |
-            Standalone debug-signed APK built from `${{ github.sha }}`.
-            Install: download the `.apk`, then enable "Install unknown apps" for your browser/files app and open it.
+            Standalone debug-signed APK · version `${{ steps.meta.outputs.version_name }}` (build ${{ steps.meta.outputs.version_code }}) · commit `${{ github.sha }}`.
+
+            Install: download the `.apk`, enable "Install unknown apps" for your browser/files app, then open it.
+
+            > The `latest` pre-release always tracks the newest build on `main`. For a pinned version, use a tagged release.
           files: ${{ steps.apk.outputs.path }}
-          make_latest: true
-          prerelease: false
+          make_latest: ${{ steps.meta.outputs.make_latest }}
+          prerelease: ${{ steps.meta.outputs.prerelease }}
 
       # Artifact upload is a convenience copy. Keep it short-lived and never let
       # a hit artifact-storage quota fail the build (the Release already has it).
@@ -86,7 +149,7 @@ jobs:
         uses: actions/upload-artifact@v4
         continue-on-error: true
         with:
-          name: memeget-apk
+          name: ${{ steps.meta.outputs.apk_name }}
           path: ${{ steps.apk.outputs.path }}
           if-no-files-found: error
           retention-days: 1

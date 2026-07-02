@@ -3,12 +3,14 @@ name: CI
 # Fast checks that must pass before merging: TypeScript type-checking and the
 # Jest unit tests (chiefly the shared-link → media resolver, so the X/Tenor/
 # generic download paths can't silently break). Runs on every PR and on pushes
-# to the working branches.
+# to main and the working branches — keeps the repo green without needing the
+# full 60-min Android build.
 
 on:
   pull_request:
   push:
     branches:
+      - main
       - claude/**
   workflow_dispatch:
 
