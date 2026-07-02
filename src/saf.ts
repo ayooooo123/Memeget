@@ -3,6 +3,7 @@
 // native modules (CLIP, OCR, thumbnailer) get a stable file:// path to work
 // with. Uses the stable legacy FileSystem API for SAF + copy operations.
 import * as FileSystem from 'expo-file-system/legacy';
+import { File } from 'expo-file-system';
 import * as VideoThumbnails from 'expo-video-thumbnails';
 
 const IMAGE_EXTS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'heic', 'heif'];
@@ -66,6 +67,28 @@ export async function listMedia(folderUri: string): Promise<SafFile[]> {
     if (kind) out.push({ uri: childUri, name, kind });
   }
   return out;
+}
+
+// Best-effort last-modified time (ms since epoch) for a linked file, so the
+// library can order by when a meme was actually added to the device rather than
+// when we happened to index it.
+//
+// This deliberately uses the new expo-file-system `File` API, NOT legacy
+// `getInfoAsync`: on Android the legacy call never populates modificationTime
+// for SAF content:// URIs (only the file:// branch does), so every linked meme
+// came back with no time and the library fell back to index order. The new
+// `File(uri).modificationTime` reads the SAF DocumentFile's lastModified (in
+// milliseconds already, so no unit conversion) and works for content:// URIs.
+// Returns null when the provider doesn't supply a usable time, so the caller can
+// fall back to the index time.
+export function getModifiedTime(uri: string): number | null {
+  try {
+    const t = new File(uri).modificationTime;
+    if (typeof t === 'number' && t > 0) return Math.round(t);
+  } catch {
+    // best-effort; caller falls back to the index time
+  }
+  return null;
 }
 
 // Copy a SAF file into the cache directory and return a file:// path the native

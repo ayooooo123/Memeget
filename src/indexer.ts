@@ -33,7 +33,7 @@ import {
   type MemeNeedingVisionRow,
 } from './db';
 import { ASSOCIATIONS, MEME_LABELS, NEGATIVE_ANCHORS, ocrTags } from './memeLabels';
-import { copyToCache, deleteCache, listMedia, saveToFolder, type SafFile } from './saf';
+import { copyToCache, deleteCache, getModifiedTime, listMedia, saveToFolder, type SafFile } from './saf';
 import type { VisionResult } from './visionCore';
 import type { Tag } from './types';
 
@@ -331,6 +331,12 @@ async function processFile(
   try {
     if (await memeExists(file.uri)) return 'skipped';
 
+    // Read the file's own last-modified time so the library can sort by when the
+    // meme was actually added, not by when this scan reached it. It's a
+    // best-effort read (null on providers that don't report it) — insertMeme
+    // falls back to the index time so a row is never left unsorted.
+    const modifiedAt = getModifiedTime(file.uri);
+
     const work = await copyToCache(file, idx);
     temp.push(work);
     let frame = work;
@@ -363,6 +369,7 @@ async function processFile(
       ocrText,
       tags,
       extraTerms: extraTermsFor(tags, know.assoc),
+      modifiedAt,
     });
     return 'added';
   } catch (e) {
