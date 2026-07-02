@@ -9,7 +9,7 @@
     "backgroundColor": "#0a0b0e",
     "newArchEnabled": true,
     "android": {
-      "package": "online.smellslikebacon.memeget",
+      "package": "com.memeget.app",
       "versionCode": 1,
       "edgeToEdgeEnabled": true
     },
