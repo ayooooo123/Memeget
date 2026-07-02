@@ -23,6 +23,7 @@ export interface MemeRecord {
   extraTerms: string; // association/world-knowledge terms, for search
   visionState: VisionState;
   indexedAt: number;
+  modifiedAt?: number; // file's last-modified time (ms); drives the recency sort
   pending?: boolean; // saved & visible, but not yet embedded/OCR'd/tagged
 }
 

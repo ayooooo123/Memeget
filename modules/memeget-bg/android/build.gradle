@@ -19,4 +19,6 @@ android {
 
 dependencies {
   implementation 'androidx.core:core-ktx:1.13.1'
+  // Read a linked SAF document's lastModified() for the library's recency sort.
+  implementation 'androidx.documentfile:documentfile:1.0.1'
 }
