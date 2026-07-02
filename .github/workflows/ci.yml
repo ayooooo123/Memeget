@@ -1,20 +1,25 @@
 name: CI
 
-# Fast feedback on every PR and push to main: install deps and typecheck.
-# Keeps the public repo green without needing the full 60-min Android build.
+# Fast checks that must pass before merging: TypeScript type-checking and the
+# Jest unit tests (chiefly the shared-link → media resolver, so the X/Tenor/
+# generic download paths can't silently break). Runs on every PR and on pushes
+# to main and the working branches — keeps the repo green without needing the
+# full 60-min Android build.
 
 on:
+  pull_request:
   push:
     branches:
       - main
-  pull_request:
+      - claude/**
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  typecheck:
+  check:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -32,3 +37,6 @@ jobs:
 
       - name: Typecheck
         run: npm run typecheck
+
+      - name: Test
+        run: npm test

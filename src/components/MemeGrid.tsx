@@ -1,10 +1,9 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Image } from 'expo-image';
 import {
   ActivityIndicator,
   Alert,
   Animated,
-  Dimensions,
   FlatList,
   Keyboard,
   Modal,
@@ -15,6 +14,7 @@ import {
   StyleSheet,
   Text,
   TextInput,
+  useWindowDimensions,
   View,
 } from 'react-native';
 
@@ -28,6 +28,7 @@ import { buildExemplarHeads, type ExemplarModel } from '../indexer';
 import { success, tap, warn } from '../haptics';
 import { deleteFile, materialize, readImageBase64, readVideoFrameBase64 } from '../saf';
 import { colors, radius, space, TABBAR_CLEARANCE } from '../theme';
+import { useConst } from '../reactUtils';
 import type { MemeRecord, SearchHit } from '../types';
 
 import { showToast } from './Toast';
@@ -80,7 +81,17 @@ const GridCell = React.memo(function GridCell({
         // Reuse the view and release the previous bitmap when a cell is
         // recycled (e.g. when retagAll hands the list a fresh array).
         recyclingKey={String(item.id)}
-        cachePolicy="disk"
+        // Memory-only cache (NOT "disk"). The originals already live as local
+        // content:// files in the user's linked folder, so a disk cache just
+        // duplicates the entire library into the app's cache dir — it ballooned
+        // cache to library size, and once Android purged that cache the
+        // thumbnails got stranded in a perpetual loading state. Disk-only also
+        // meant no in-memory bitmaps, so every recycled cell re-decoded a
+        // full-res image off disk while scrolling, saturating the decode thread
+        // (the "feed won't load while scrolling" jank). The in-memory LRU keeps
+        // the active window smooth; off-screen cells decode again from the local
+        // file — cheap because allowDownscaling decodes straight to thumb size.
+        cachePolicy="memory"
         allowDownscaling
       />
       {item.kind === 'video' && (
@@ -88,11 +99,21 @@ const GridCell = React.memo(function GridCell({
           <Text style={styles.playIcon}>▶</Text>
         </View>
       )}
+      {'pending' in item && item.pending && (
+        <View style={styles.pending}>
+          <ActivityIndicator color="#fff" size="small" />
+        </View>
+      )}
     </PressableScale>
   );
 });
 
-export function MemeGrid({
+// Memoized so a re-render of the owning screen that leaves every prop unchanged
+// (notably the CLIP model's load-progress ticks right after an app update, which
+// re-render LibraryScreen many times a second) can't re-run the whole grid and
+// stutter an in-progress scroll. Relies on the parent keeping `header`,
+// `emptyState`, and the callbacks referentially stable across those re-renders.
+export const MemeGrid = React.memo(function MemeGrid({
   items,
   header,
   onTaught,
@@ -101,6 +122,7 @@ export function MemeGrid({
   onDeleted,
   onSearchLabel,
   emptyState,
+  scrollToTopSignal,
 }: {
   items: Item[];
   header?: React.ReactElement;
@@ -117,6 +139,10 @@ export function MemeGrid({
   onSearchLabel?: (label: string) => void;
   // Rendered when items is empty (e.g. a "no results" state).
   emptyState?: React.ReactElement | null;
+  // Bumped by the parent each time a new search runs; when it changes we jump
+  // the list back to the top so fresh results are visible immediately instead
+  // of stranding the user wherever they'd scrolled to while browsing.
+  scrollToTopSignal?: number;
 }) {
   const [selected, setSelected] = useState<Item | null>(null);
   const [teaching, setTeaching] = useState(false);
@@ -131,13 +157,50 @@ export function MemeGrid({
   // Cache the trained heads so we don't retrain on every modal open; cleared
   // after teaching so the next open reflects the new example.
   const modelRef = useRef<ExemplarModel | null>(null);
-  const size = (Dimensions.get('window').width - GAP * (COLS + 1)) / COLS;
+  // Applying a taught example across the whole library (retrain heads + re-tag
+  // everything) is heavy and runs detached from the teach button. Serialize the
+  // applies through one promise chain so a quick second teach can't kick off a
+  // second retag while the first is still inside its DB transaction.
+  // Starts null and is seeded on first use, so render doesn't allocate a
+  // throwaway resolved Promise every pass.
+  const applyChainRef = useRef<Promise<void> | null>(null);
+  // useWindowDimensions re-renders on rotation/resize, so the grid reflows
+  // correctly instead of being stuck at the launch width.
+  const { width: winWidth } = useWindowDimensions();
+  const size = (winWidth - GAP * (COLS + 1)) / COLS;
   const kbHeight = useKeyboardHeight();
+  const listRef = useRef<FlatList>(null);
 
-  const openViewer = (it: Item) => {
+  // Whenever the parent signals a new search, snap back to the top so the
+  // results (and the "N results" header) are in view right away. Skipped on the
+  // initial mount — the list already starts at the top and an empty list can't
+  // be scrolled yet.
+  const didMountScroll = useRef(false);
+  useEffect(() => {
+    if (!didMountScroll.current) {
+      didMountScroll.current = true;
+      return;
+    }
+    listRef.current?.scrollToOffset({ offset: 0, animated: true });
+  }, [scrollToTopSignal]);
+
+  // Stable across renders so the memoized GridCells aren't all re-rendered
+  // every time unrelated grid state changes (opening the viewer, toggling
+  // `loadingMore` during pagination, teaching). An unstable onPress here was
+  // defeating React.memo and re-flashing every visible thumbnail — the
+  // flicker you'd see right as the next page loaded in.
+  const openViewer = useCallback((it: Item) => {
     tap();
     setSelected(it);
-  };
+  }, []);
+
+  // Likewise kept stable so they don't bust GridCell's React.memo on every
+  // render. renderItem only depends on the constant cell `size` and openViewer.
+  const keyExtractor = useCallback((it: Item) => String(it.id), []);
+  const renderItem = useCallback(
+    ({ item }: { item: Item }) => <GridCell item={item} size={size} onPress={openViewer} />,
+    [size, openViewer]
+  );
 
   // The taught-label confidence readout is a debug aid that trains a logistic
   // head per label over a 500-vector background — hundreds of ms+ of synchronous
@@ -260,6 +323,10 @@ export function MemeGrid({
   const saveExemplar = async () => {
     const label = labelInput.trim();
     if (!selected || !label) return;
+    // The teach itself is just persisting the exemplar — fast. We gate the
+    // button on that alone, not on the heavy library-wide re-tag that follows,
+    // so the button never sits frozen on "Saving…" (and a second teach isn't
+    // blocked) while the whole library is being reclassified.
     setSaving(true);
     try {
       const emb = await getMemeEmbedding(selected.id);
@@ -280,57 +347,77 @@ export function MemeGrid({
         sourceUri: selected.uri,
         positive,
       });
-      setTeaching(false);
-      modelRef.current = null; // new example → retrain heads on next open
-      const matched = onTaught ? await onTaught(label) : undefined;
-      success();
-      if (typeof matched === 'number') {
-        showToast(
-          positive
-            ? `Taught “${label}” — ${matched} meme${matched === 1 ? '' : 's'} now tagged` +
-                (matched <= 1 ? '. Teach a few more examples to catch the rest' : '')
-            : `Got it — NOT “${label}”. ${matched} meme${matched === 1 ? '' : 's'} still carry the tag`,
-          'success'
-        );
-      } else {
-        showToast(
-          positive ? `Taught “${label}” — re-tag in Settings to apply it` : `Correction for “${label}” saved`,
-          'success'
-        );
-      }
     } catch (e) {
       showToast(`Could not teach: ${String(e)}`, 'error');
+      return;
     } finally {
       setSaving(false);
     }
+
+    // Exemplar saved — close the sheet and give immediate feedback. `positive`
+    // is captured now because the sheet (and its state) may be reused before the
+    // detached apply below runs.
+    const taughtPositive = positive;
+    setTeaching(false);
+    modelRef.current = null; // new example → retrain heads on next open
+    success();
+
+    // Apply the new example across the library off the button: retrain heads and
+    // re-tag everything. Chained so concurrent teaches run one retag at a time.
+    applyChainRef.current = (applyChainRef.current ?? Promise.resolve())
+      .catch(() => {})
+      .then(async () => {
+        try {
+          const matched = onTaught ? await onTaught(label) : undefined;
+          if (typeof matched === 'number') {
+            showToast(
+              taughtPositive
+                ? `Taught “${label}” — ${matched} meme${matched === 1 ? '' : 's'} now tagged` +
+                    (matched <= 1 ? '. Teach a few more examples to catch the rest' : '')
+                : `Got it — NOT “${label}”. ${matched} meme${matched === 1 ? '' : 's'} still carry the tag`,
+              'success'
+            );
+          } else {
+            showToast(
+              taughtPositive ? `Taught “${label}” — re-tag in Settings to apply it` : `Correction for “${label}” saved`,
+              'success'
+            );
+          }
+        } catch (e) {
+          showToast(`Saved “${label}”, but applying it failed: ${String(e)}`, 'error');
+        }
+      });
   };
 
   return (
     <>
       <FlatList
+        ref={listRef}
         data={items}
-        keyExtractor={(it) => String(it.id)}
+        keyExtractor={keyExtractor}
         numColumns={COLS}
         ListHeaderComponent={header}
         ListEmptyComponent={emptyState ?? null}
-        columnWrapperStyle={{ gap: GAP, paddingHorizontal: GAP }}
-        contentContainerStyle={{ gap: GAP, paddingBottom: TABBAR_CLEARANCE + 24 }}
+        columnWrapperStyle={styles.column}
+        contentContainerStyle={styles.listContent}
         keyboardShouldPersistTaps="handled"
         keyboardDismissMode="on-drag"
         onEndReached={onEndReached}
         onEndReachedThreshold={0.6}
-        // Memory guards: keep only a few screens of image cells mounted so a
-        // large library can't pin hundreds of decoded bitmaps at once (was
-        // OOM-ing when a teach → retagAll re-render spiked on top of the grid).
-        removeClippedSubviews
-        initialNumToRender={15}
-        maxToRenderPerBatch={9}
-        windowSize={5}
-        updateCellsBatchingPeriod={60}
+        // Memory is already bounded by `windowSize`: FlatList only keeps that
+        // many viewports of cells mounted regardless. We deliberately do NOT set
+        // `removeClippedSubviews` — on Android it blanks/flickers expo-image
+        // cells as they scroll back into view (a known FlatList grid bug) and is
+        // redundant with the windowing below. Render a little ahead of the
+        // scroll so fast flings don't outrun cell rendering into blank gaps.
+        initialNumToRender={18}
+        maxToRenderPerBatch={12}
+        windowSize={7}
+        updateCellsBatchingPeriod={50}
         ListFooterComponent={
           loadingMore ? <ActivityIndicator color={colors.volt} style={{ paddingVertical: 16 }} /> : null
         }
-        renderItem={({ item }) => <GridCell item={item} size={size} onPress={openViewer} />}
+        renderItem={renderItem}
       />
 
       <ViewerSheet
@@ -434,7 +521,7 @@ export function MemeGrid({
       </Modal>
     </>
   );
-}
+});
 
 // Full-width bottom sheet viewer with a drag-to-dismiss handle.
 function ViewerSheet({
@@ -464,11 +551,12 @@ function ViewerSheet({
   onShowConfidence: () => void;
   onSearchLabel?: (label: string) => void;
 }) {
-  const drag = useRef(new Animated.Value(0)).current;
+  const drag = useConst(() => new Animated.Value(0));
 
   // Drag-to-dismiss on the grab area only, so scrolling the metadata or
-  // pinch-looking at the image never accidentally closes the sheet.
-  const pan = useRef(
+  // pinch-looking at the image never accidentally closes the sheet. Lazy so the
+  // responder is built once instead of re-created on every render.
+  const pan = useConst(() =>
     PanResponder.create({
       onMoveShouldSetPanResponder: (_e, g) => g.dy > 6 && Math.abs(g.dy) > Math.abs(g.dx),
       onPanResponderMove: (_e, g) => drag.setValue(Math.max(0, g.dy)),
@@ -483,13 +571,14 @@ function ViewerSheet({
         }
       },
     })
-  ).current;
+  );
 
   useEffect(() => {
     if (item) drag.setValue(0);
   }, [item, drag]);
 
-  const imgHeight = Math.round(Dimensions.get('window').height * 0.42);
+  const { height: winHeight } = useWindowDimensions();
+  const imgHeight = Math.round(winHeight * 0.42);
 
   return (
     <Modal
@@ -525,6 +614,9 @@ function ViewerSheet({
                 style={[styles.preview, { height: imgHeight }]}
                 contentFit="contain"
                 recyclingKey={String(item.id)}
+                // Same reasoning as the grid: it's a local file, so skip the
+                // redundant on-disk copy and only hold it in memory while open.
+                cachePolicy="memory"
                 allowDownscaling
               />
             )}
@@ -545,6 +637,15 @@ function ViewerSheet({
                 <Text style={styles.matchScore}>
                   match {Math.min(100, item.score * 100).toFixed(0)}%
                 </Text>
+              )}
+
+              {!!item.caption && (
+                <View style={styles.block}>
+                  <Text style={styles.sectionLabel}>What this is · on-device AI</Text>
+                  <Text style={styles.caption} selectable>
+                    {item.caption}
+                  </Text>
+                </View>
               )}
 
               {item.tags.length > 0 && (
@@ -660,6 +761,10 @@ function ActionButton({
 }
 
 const styles = StyleSheet.create({
+  // Hoisted out of render so the FlatList isn't handed fresh style objects on
+  // every parent re-render (search keystrokes, library refreshes).
+  column: { gap: GAP, paddingHorizontal: GAP },
+  listContent: { gap: GAP, paddingBottom: TABBAR_CLEARANCE + 24 },
   thumb: { width: '100%', height: '100%', backgroundColor: colors.surface2, borderRadius: radius.sm },
   play: {
     position: 'absolute',
@@ -671,6 +776,17 @@ const styles = StyleSheet.create({
     paddingVertical: 2,
   },
   playIcon: { color: '#fff', fontSize: 10 },
+  pending: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(0,0,0,0.35)',
+    borderRadius: radius.sm,
+  },
 
   viewerRoot: { flex: 1, backgroundColor: colors.overlay, justifyContent: 'flex-end' },
   sheet: {
@@ -748,6 +864,7 @@ const styles = StyleSheet.create({
   },
   tagWrap: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   ocr: { color: colors.textDim, fontSize: 13, lineHeight: 19 },
+  caption: { color: colors.text, fontSize: 14, lineHeight: 20, fontWeight: '500' },
   mutedSmall: { color: colors.muted, fontSize: 12 },
   debugLink: { color: colors.faint, fontSize: 12, textDecorationLine: 'underline' },
 

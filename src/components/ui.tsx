@@ -3,6 +3,7 @@
 import React, { useRef } from 'react';
 import {
   Animated,
+  PanResponder,
   Pressable,
   StyleSheet,
   Text,
@@ -14,6 +15,7 @@ import {
 } from 'react-native';
 
 import { colors, radius, type } from '../theme';
+import { useConst } from '../reactUtils';
 
 const AnimatedPressable = Animated.createAnimatedComponent(Pressable);
 
@@ -27,7 +29,9 @@ export function PressableScale({
   disabled,
   ...rest
 }: PressableProps & { children?: React.ReactNode; style?: StyleProp<ViewStyle>; scaleTo?: number }) {
-  const scale = useRef(new Animated.Value(1)).current;
+  // Lazy: a fresh Animated.Value per render (the useRef(new …) trap) is pure
+  // waste here — PressableScale wraps every grid cell, chip, and button.
+  const scale = useConst(() => new Animated.Value(1));
   const animate = (to: number) =>
     Animated.spring(scale, { toValue: to, useNativeDriver: true, speed: 50, bounciness: 0 }).start();
   return (
@@ -126,7 +130,7 @@ export function Chip({
 
 // Slim determinate progress bar; animates width changes smoothly.
 export function ProgressBar({ value, tint = colors.volt }: { value: number; tint?: string }) {
-  const anim = useRef(new Animated.Value(0)).current;
+  const anim = useConst(() => new Animated.Value(0));
   React.useEffect(() => {
     Animated.timing(anim, {
       toValue: Math.max(0, Math.min(1, value)),
@@ -142,6 +146,58 @@ export function ProgressBar({ value, tint = colors.volt }: { value: number; tint
           { backgroundColor: tint, width: anim.interpolate({ inputRange: [0, 1], outputRange: ['0%', '100%'] }) },
         ]}
       />
+    </View>
+  );
+}
+
+// Self-contained horizontal slider (0..1) — PanResponder + percentage layout,
+// so we don't pull in a native slider dependency / rebuild. Tap or drag anywhere
+// on the track. Width is read via onLayout into a ref so the gesture math is
+// always against the current track size.
+export function Slider({
+  value,
+  onChange,
+  tint = colors.volt,
+}: {
+  value: number;
+  onChange: (v: number) => void;
+  tint?: string;
+}) {
+  const widthRef = useRef(0);
+  const onChangeRef = useRef(onChange);
+  onChangeRef.current = onChange;
+
+  const setFromX = (x: number) => {
+    const w = widthRef.current;
+    if (!w) return;
+    onChangeRef.current(Math.max(0, Math.min(1, x / w)));
+  };
+
+  // Lazy: PanResponder.create() runs once instead of on every render. The
+  // gesture reads the latest onChange via onChangeRef, so a stable responder is
+  // correct.
+  const pan = useConst(() =>
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: () => true,
+      onPanResponderGrant: (e) => setFromX(e.nativeEvent.locationX),
+      onPanResponderMove: (e) => setFromX(e.nativeEvent.locationX),
+    })
+  );
+
+  const pct = `${Math.max(0, Math.min(1, value)) * 100}%` as `${number}%`;
+  return (
+    <View
+      style={styles.sliderHit}
+      onLayout={(e) => {
+        widthRef.current = e.nativeEvent.layout.width;
+      }}
+      {...pan.panHandlers}
+    >
+      <View style={styles.sliderTrack}>
+        <View style={[styles.sliderFill, { width: pct, backgroundColor: tint }]} />
+      </View>
+      <View style={[styles.sliderThumb, { left: pct, borderColor: tint }]} />
     </View>
   );
 }
@@ -196,6 +252,23 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
   },
   fill: { height: '100%', borderRadius: 2 },
+  sliderHit: { height: 28, justifyContent: 'center' },
+  sliderTrack: {
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: colors.surface3,
+    overflow: 'hidden',
+  },
+  sliderFill: { height: '100%', borderRadius: 3 },
+  sliderThumb: {
+    position: 'absolute',
+    width: 18,
+    height: 18,
+    marginLeft: -9,
+    borderRadius: 9,
+    backgroundColor: colors.text,
+    borderWidth: 2,
+  },
   statusRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   dot: { width: 7, height: 7, borderRadius: 4 },
   statusText: { color: colors.muted, fontSize: 12, fontWeight: '600' },

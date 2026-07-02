@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Pressable,
@@ -19,6 +19,7 @@ import {
   countMemesWithLabel,
   getFolders,
   getLabels,
+  getLibraryTagLabels,
   getRecentMemes,
   searchByVector,
 } from '../db';
@@ -27,16 +28,71 @@ import { onLibraryChanged } from '../events';
 import { success, tap, thud } from '../haptics';
 import { pickFolder } from '../saf';
 import { colors, radius, space, type } from '../theme';
-import type { LinkedFolder, MemeRecord, SearchHit } from '../types';
+import type { LinkedFolder, MediaKind, MemeRecord, SearchHit } from '../types';
 
 const PAGE = 90;
 
+// Two records render-identically when every field the grid/viewer reads matches.
+function sameTags(a: MemeRecord['tags'], b: MemeRecord['tags']): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i].label !== b[i].label || a[i].source !== b[i].source) return false;
+  }
+  return true;
+}
+function sameRecord(a: MemeRecord, b: MemeRecord): boolean {
+  return (
+    a.id === b.id &&
+    a.uri === b.uri &&
+    a.name === b.name &&
+    a.kind === b.kind &&
+    a.pending === b.pending &&
+    a.visionState === b.visionState &&
+    a.caption === b.caption &&
+    a.ocrText === b.ocrText &&
+    a.extraTerms === b.extraTerms &&
+    a.indexedAt === b.indexedAt &&
+    sameTags(a.tags, b.tags)
+  );
+}
+
+// Re-fetching the browse list (e.g. after every shared/indexed meme) used to
+// hand React a brand-new array of brand-new objects, so every memoized grid cell
+// re-rendered and the list visibly hitched. This reuses the previous object for
+// any row whose rendered fields are unchanged, so only genuinely new/changed
+// cells re-render — and if nothing changed at all, the SAME array is returned so
+// React bails out of the update entirely.
+function mergeRecords(prev: MemeRecord[], next: MemeRecord[]): MemeRecord[] {
+  if (prev.length === 0) return next;
+  const byId = new Map(prev.map((m) => [m.id, m]));
+  let changed = next.length !== prev.length;
+  const merged = next.map((r, i) => {
+    const old = byId.get(r.id);
+    if (old && sameRecord(old, r)) {
+      if (old !== prev[i]) changed = true; // same data, but its position moved
+      return old;
+    }
+    changed = true;
+    return r;
+  });
+  return changed ? merged : prev;
+}
+
 export function LibraryScreen() {
   const emb = useEmbeddings();
+  // Mirror the embeddings api into a ref so the stable callbacks below
+  // (onIndex/onTaught) don't take a new identity every time the CLIP model's
+  // download/load progress ticks. On the first launch after an app update the
+  // model reloads and `emb` re-memoizes many times a second; without this, that
+  // churn rebuilt the grid header (and re-ran the whole list) mid-scroll, which
+  // showed up as scroll jank / glitching while browsing the collection.
+  const embRef = useRef(emb);
+  embRef.current = emb;
   const [folders, setFolders] = useState<LinkedFolder[]>([]);
   const [recent, setRecent] = useState<MemeRecord[]>([]);
   const [count, setCount] = useState(0);
   const [taughtLabels, setTaughtLabels] = useState<string[]>([]);
+  const [libraryTags, setLibraryTags] = useState<string[]>([]);
   const [indexing, setIndexing] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [progress, setProgress] = useState<IndexProgress | null>(null);
@@ -46,25 +102,69 @@ export function LibraryScreen() {
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<SearchHit[] | null>(null);
   const [searching, setSearching] = useState(false);
+  // Bumped each time a search kicks off so the grid scrolls back to the top —
+  // otherwise a search run while scrolled deep into the library leaves the user
+  // stranded at the bottom instead of looking at the fresh results.
+  const [scrollToTopSignal, setScrollToTopSignal] = useState(0);
+
+  // Media-type narrowing applied to both browse and search. 'all' = no filter.
+  const [kind, setKind] = useState<MediaKind | 'all'>('all');
+  // Mirrored into a ref so refresh()/loadMore()/runSearch() (kept stable) read
+  // the current filter without being re-created on every kind change.
+  const kindRef = useRef<MediaKind | 'all'>('all');
+  kindRef.current = kind;
+  const kindArg = () => (kindRef.current === 'all' ? undefined : kindRef.current);
 
   const cancelRef = useRef(false);
   const hasMoreRef = useRef(true);
   const loadingMoreRef = useRef(false);
+  // Latest query text, mirrored into a ref so an in-flight runSearch can tell —
+  // once it finally resolves — whether the box still holds the text it searched
+  // for. Used both here and by the kind effect below.
+  const queryRef = useRef('');
+  queryRef.current = query;
+  // How many recents are currently loaded, mirrored into a ref so refresh()
+  // (stable, no deps) can re-fetch the same span without losing the user's
+  // scroll position — important because background indexing of a freshly shared
+  // meme fires refresh repeatedly.
+  const loadedCountRef = useRef(PAGE);
 
   const refresh = useCallback(async () => {
     setFolders(await getFolders());
-    const first = await getRecentMemes(PAGE, 0);
-    setRecent(first);
-    hasMoreRef.current = first.length === PAGE;
+    const k = kindRef.current === 'all' ? undefined : kindRef.current;
+    const span = Math.max(PAGE, loadedCountRef.current);
+    const rows = await getRecentMemes(span, 0, k);
+    setRecent((prev) => mergeRecords(prev, rows));
+    loadedCountRef.current = rows.length;
+    // Only assume there's more to page in when we filled a clean page boundary.
+    hasMoreRef.current = rows.length === span && rows.length % PAGE === 0;
     setCount(await countMemes());
     setTaughtLabels(await getLabels().catch(() => []));
+    setLibraryTags(await getLibraryTagLabels().catch(() => []));
   }, []);
+
+  // Coalesce library-changed bursts. Background indexing/sharing can fire
+  // onLibraryChanged many times in quick succession (once per meme); without
+  // this, each one kicked off a full re-fetch + re-render while you were trying
+  // to scroll. Debouncing collapses a burst into a single refresh.
+  const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scheduleRefresh = useCallback(() => {
+    if (refreshTimer.current) clearTimeout(refreshTimer.current);
+    refreshTimer.current = setTimeout(() => {
+      refreshTimer.current = null;
+      refresh();
+    }, 300);
+  }, [refresh]);
 
   useEffect(() => {
     refresh();
-    // Refresh when a meme is shared into the app from elsewhere.
-    return onLibraryChanged(refresh);
-  }, [refresh]);
+    // Refresh (debounced) when memes are shared/indexed into the app.
+    const unsub = onLibraryChanged(scheduleRefresh);
+    return () => {
+      unsub();
+      if (refreshTimer.current) clearTimeout(refreshTimer.current);
+    };
+  }, [refresh, scheduleRefresh]);
 
   const loadMore = useCallback(async () => {
     if (results !== null) return; // pagination only while browsing
@@ -72,9 +172,13 @@ export function LibraryScreen() {
     loadingMoreRef.current = true;
     setLoadingMore(true);
     try {
-      const next = await getRecentMemes(PAGE, recent.length);
+      const next = await getRecentMemes(PAGE, recent.length, kindArg());
       hasMoreRef.current = next.length === PAGE;
-      setRecent((cur) => [...cur, ...next]);
+      setRecent((cur) => {
+        const merged = [...cur, ...next];
+        loadedCountRef.current = merged.length;
+        return merged;
+      });
     } finally {
       loadingMoreRef.current = false;
       setLoadingMore(false);
@@ -92,11 +196,25 @@ export function LibraryScreen() {
       }
       if (!emb.ready) return;
       setSearching(true);
+      setScrollToTopSignal((n) => n + 1);
       try {
         const vec = await emb.embedText(q);
-        setResults(await searchByVector(vec, q, 80));
+        // The scan aborts itself the moment a newer keystroke supersedes this
+        // query (returns null), so stale full scans don't pile up on the JS
+        // thread behind the latest one.
+        const stale = () => queryRef.current.trim() !== q;
+        const hits = await searchByVector(vec, q, 80, kindArg(), stale);
+        // Embedding + brute-force search are async and on-device, so they can
+        // resolve long after the box was cleared or retyped. If the current
+        // query no longer matches what we searched for, drop these results —
+        // otherwise we'd clobber browse mode back into "N results for ''", or
+        // let a slow earlier search overwrite a newer one.
+        if (hits === null || queryRef.current.trim() !== q) return;
+        setResults(hits);
       } finally {
-        setSearching(false);
+        // Only clear the spinner if this is still the active search; a superseded
+        // run bailing out shouldn't yank the indicator from the live one.
+        if (queryRef.current.trim() === q) setSearching(false);
       }
     },
     [emb]
@@ -113,6 +231,9 @@ export function LibraryScreen() {
   useEffect(() => {
     if (!query.trim()) {
       setResults(null);
+      // A search in flight when the box is cleared bails without clearing its
+      // own spinner (it's no longer the active query), so reset it here.
+      setSearching(false);
       return;
     }
     const id = setTimeout(() => runSearchRef.current(query), 350);
@@ -124,6 +245,27 @@ export function LibraryScreen() {
     // Toggle: tapping the active chip clears the filter.
     setQuery((cur) => (cur.trim() === label ? '' : label));
   }, []);
+
+  // Tapping a media chip toggles that filter (tap again to clear back to 'all').
+  const toggleKind = useCallback((k: MediaKind) => {
+    tap();
+    setKind((cur) => (cur === k ? 'all' : k));
+  }, []);
+
+  // When the media filter changes, re-fetch the browse page and re-run any
+  // active search through the new filter. Skips the initial mount (the refresh
+  // effect above already loads the unfiltered library once).
+  const didMountKind = useRef(false);
+  useEffect(() => {
+    if (!didMountKind.current) {
+      didMountKind.current = true;
+      return;
+    }
+    loadedCountRef.current = PAGE; // drop back to a single page for the new filter
+    refresh();
+    const q = queryRef.current.trim();
+    if (q) runSearchRef.current(q);
+  }, [kind, refresh]);
 
   const onLink = useCallback(async () => {
     try {
@@ -140,7 +282,8 @@ export function LibraryScreen() {
 
   const onIndex = useCallback(async () => {
     if (indexing) return;
-    if (!emb.ready) {
+    const embApi = embRef.current;
+    if (!embApi.ready) {
       showToast('The on-device model is still preparing — try again shortly', 'info');
       return;
     }
@@ -152,7 +295,7 @@ export function LibraryScreen() {
     cancelRef.current = false;
     setIndexing(true);
     try {
-      const res = await runIndex(emb, {
+      const res = await runIndex(embApi, {
         onProgress: setProgress,
         shouldCancel: () => cancelRef.current,
       });
@@ -166,13 +309,29 @@ export function LibraryScreen() {
       setIndexing(false);
       setProgress(null);
     }
-  }, [emb, folders.length, indexing, refresh]);
+  }, [folders.length, indexing, refresh]);
 
   const isSearch = results !== null;
   const hasLibrary = count > 0 || recent.length > 0;
 
-  // Scrolling part of the page (lives inside the grid as its header).
-  const header = (
+  // Quick-filter chips: the labels the user has taught (starred) first, then the
+  // known meme tags the indexer actually applied across the library — so people
+  // can narrow to a recognized format/character by tapping instead of typing.
+  const tagChips = useMemo(() => {
+    const taught = new Set(taughtLabels);
+    return [
+      ...taughtLabels.map((label) => ({ label, taught: true })),
+      ...libraryTags.filter((l) => !taught.has(l)).map((label) => ({ label, taught: false })),
+    ];
+  }, [taughtLabels, libraryTags]);
+
+  // Scrolling part of the page (lives inside the grid as its header). Memoized
+  // so an unrelated re-render (notably the CLIP model's load-progress ticks on a
+  // post-update launch) doesn't hand the FlatList a brand-new header element to
+  // reconcile mid-scroll — `emb.ready` is the only model field it reads, and
+  // that flips just once.
+  const header = useMemo(
+    () => (
     <View style={styles.listHeader}>
       {isSearch ? (
         <View style={styles.resultRow}>
@@ -232,23 +391,55 @@ export function LibraryScreen() {
         </>
       )}
     </View>
+    ),
+    [isSearch, searching, results, query, indexing, progress, hasLibrary, count, folders, emb.ready, onLink, onIndex]
   );
 
   const onTaught = useCallback(
     async (label: string) => {
-      if (emb.ready) await retagAll(emb);
+      const embApi = embRef.current;
+      if (embApi.ready) await retagAll(embApi);
       await refresh();
-      if (query.trim()) await runSearch(query);
+      const q = queryRef.current.trim();
+      if (q) await runSearchRef.current(q);
       return countMemesWithLabel(label);
     },
-    [emb, refresh, query, runSearch]
+    [refresh]
   );
 
   const onDeleted = useCallback((id: number) => {
-    setRecent((cur) => cur.filter((m) => m.id !== id));
+    setRecent((cur) => {
+      const next = cur.filter((m) => m.id !== id);
+      loadedCountRef.current = next.length;
+      return next;
+    });
     setResults((cur) => (cur ? cur.filter((m) => m.id !== id) : cur));
     setCount((c) => Math.max(0, c - 1));
   }, []);
+
+  // Memoized for the same reason as `header`: keep the element reference stable
+  // across model-load re-renders so it never busts MemeGrid's memoization.
+  const emptyState = useMemo(
+    () =>
+      isSearch && !searching && results.length === 0 ? (
+        <View style={styles.noResults}>
+          <Text style={styles.noResultsGlyph}>¯\_(ツ)_/¯</Text>
+          <Text style={styles.noResultsTitle}>Nothing matched</Text>
+          <Text style={styles.noResultsHint}>
+            Try fewer words, a vibe (“sad frog”), or text you remember from the meme.
+          </Text>
+        </View>
+      ) : !isSearch && hasLibrary && recent.length === 0 && kind !== 'all' ? (
+        <View style={styles.noResults}>
+          <Text style={styles.noResultsGlyph}>{kind === 'video' ? '▶' : '▦'}</Text>
+          <Text style={styles.noResultsTitle}>No {kind === 'video' ? 'videos' : 'images'} here</Text>
+          <Text style={styles.noResultsHint}>
+            Tap “{kind === 'video' ? '▶ Videos' : '▦ Images'}” again to show everything.
+          </Text>
+        </View>
+      ) : null,
+    [isSearch, searching, results, hasLibrary, recent.length, kind]
+  );
 
   return (
     <View style={styles.root}>
@@ -281,15 +472,24 @@ export function LibraryScreen() {
           )}
         </View>
 
-        {taughtLabels.length > 0 && (
+        {hasLibrary && (
           <ScrollView
             horizontal
             showsHorizontalScrollIndicator={false}
             contentContainerStyle={styles.chipRow}
             keyboardShouldPersistTaps="handled"
           >
-            {taughtLabels.map((l) => (
-              <Chip key={l} label={l} taught active={query.trim() === l} onPress={() => searchLabel(l)} />
+            <Chip label="▦ Images" active={kind === 'image'} onPress={() => toggleKind('image')} />
+            <Chip label="▶ Videos" active={kind === 'video'} onPress={() => toggleKind('video')} />
+            {tagChips.length > 0 && <View style={styles.chipDivider} />}
+            {tagChips.map((c) => (
+              <Chip
+                key={c.label}
+                label={c.label}
+                taught={c.taught}
+                active={query.trim() === c.label}
+                onPress={() => searchLabel(c.label)}
+              />
             ))}
           </ScrollView>
         )}
@@ -303,17 +503,8 @@ export function LibraryScreen() {
         loadingMore={loadingMore}
         onDeleted={onDeleted}
         onSearchLabel={searchLabel}
-        emptyState={
-          isSearch && !searching && results.length === 0 ? (
-            <View style={styles.noResults}>
-              <Text style={styles.noResultsGlyph}>¯\_(ツ)_/¯</Text>
-              <Text style={styles.noResultsTitle}>Nothing matched</Text>
-              <Text style={styles.noResultsHint}>
-                Try fewer words, a vibe (“sad frog”), or text you remember from the meme.
-              </Text>
-            </View>
-          ) : null
-        }
+        scrollToTopSignal={scrollToTopSignal}
+        emptyState={emptyState}
       />
     </View>
   );
@@ -400,7 +591,8 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   clearIcon: { color: colors.textDim, fontSize: 12, fontWeight: '700' },
-  chipRow: { gap: space.sm, paddingRight: space.lg },
+  chipRow: { gap: space.sm, paddingRight: space.lg, alignItems: 'center' },
+  chipDivider: { width: 1, alignSelf: 'stretch', marginVertical: 5, backgroundColor: colors.border },
 
   listHeader: { paddingHorizontal: space.md, paddingBottom: space.sm, gap: space.md },
   resultRow: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 2 },
