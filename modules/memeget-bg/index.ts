@@ -16,6 +16,7 @@ interface MemegetBgNative {
   getPower(): NativePower;
   startForeground(title: string, text: string): void;
   stopForeground(): void;
+  getModifiedTime(uri: string): number | null;
 }
 
 // Optional on purpose: in Expo Go, in the JS-only dev flow, or before a native
@@ -52,5 +53,20 @@ export function stopKeepAlive(): void {
     native?.stopForeground();
   } catch {
     // ignore
+  }
+}
+
+// Last-modified time (ms since epoch) of a SAF content:// document, read
+// straight off its DocumentFile in native code. Returns null when the native
+// module isn't built in, the uri is unreadable, or the provider reports no time
+// — callers fall back to the index time. This is the reliable source for the
+// library's "most recently added first" order: expo-file-system doesn't surface
+// modificationTime for SAF documents.
+export function getFileModifiedTime(uri: string): number | null {
+  try {
+    const t = native?.getModifiedTime(uri);
+    return typeof t === 'number' && t > 0 ? t : null;
+  } catch {
+    return null;
   }
 }

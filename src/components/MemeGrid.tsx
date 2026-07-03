@@ -639,6 +639,14 @@ function ViewerSheet({
                 </Text>
               )}
 
+              {/* Recency debug: the file date drives library ordering; shown so
+                  the stored value can be verified against the real file. */}
+              <Text style={styles.mutedSmall}>
+                file date: {item.modifiedAt ? new Date(item.modifiedAt).toLocaleString() : 'unknown'}
+                {'  ·  indexed: '}
+                {new Date(item.indexedAt).toLocaleString()}
+              </Text>
+
               {!!item.caption && (
                 <View style={styles.block}>
                   <Text style={styles.sectionLabel}>What this is · on-device AI</Text>

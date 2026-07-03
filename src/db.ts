@@ -223,6 +223,7 @@ interface MemeRow {
   extra_terms: string;
   vision_state: string;
   indexed_at: number;
+  modified_at: number;
   pending: number;
 }
 
@@ -238,6 +239,7 @@ function rowToRecord(row: MemeRow): MemeRecord & { embedding: Float32Array } {
     extraTerms: row.extra_terms ?? '',
     visionState: (row.vision_state as MemeRecord['visionState']) ?? 'pending',
     indexedAt: row.indexed_at,
+    modifiedAt: row.modified_at ?? row.indexed_at,
     pending: row.pending === 1,
     embedding: blobToVec(row.embedding),
   };
@@ -518,14 +520,14 @@ export async function getRecentMemes(
   // paging repeats and skips rows — which is what broke infinite scroll.
   const rows = kind
     ? await db.getAllAsync<Omit<MemeRow, 'embedding'>>(
-        `SELECT id, uri, name, kind, ocr_text, caption, tags, extra_terms, vision_state, indexed_at, pending
+        `SELECT id, uri, name, kind, ocr_text, caption, tags, extra_terms, vision_state, indexed_at, modified_at, pending
          FROM memes WHERE kind = ? ORDER BY modified_at DESC, id DESC LIMIT ? OFFSET ?`,
         kind,
         limit,
         offset
       )
     : await db.getAllAsync<Omit<MemeRow, 'embedding'>>(
-        `SELECT id, uri, name, kind, ocr_text, caption, tags, extra_terms, vision_state, indexed_at, pending
+        `SELECT id, uri, name, kind, ocr_text, caption, tags, extra_terms, vision_state, indexed_at, modified_at, pending
          FROM memes ORDER BY modified_at DESC, id DESC LIMIT ? OFFSET ?`,
         limit,
         offset
@@ -541,6 +543,7 @@ export async function getRecentMemes(
     extraTerms: r.extra_terms ?? '',
     visionState: (r.vision_state as MemeRecord['visionState']) ?? 'pending',
     indexedAt: r.indexed_at,
+    modifiedAt: r.modified_at ?? r.indexed_at,
     pending: r.pending === 1,
   }));
 }
