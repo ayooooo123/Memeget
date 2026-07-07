@@ -12,11 +12,20 @@ export interface NativePower {
   headroom: number;
 }
 
+// Result of decoding a video's audio track to Whisper-ready PCM.
+export interface ExtractedAudio {
+  path: string; // file:// path to raw little-endian float32 PCM (16 kHz mono)
+  sampleRate: number; // always 16000
+  samples: number;
+  durationSec: number;
+}
+
 interface MemegetBgNative {
   getPower(): NativePower;
   startForeground(title: string, text: string): void;
   stopForeground(): void;
   getModifiedTime(uri: string): number | null;
+  extractAudio(source: string, maxSeconds: number): Promise<ExtractedAudio | null>;
 }
 
 // Optional on purpose: in Expo Go, in the JS-only dev flow, or before a native
@@ -69,4 +78,23 @@ export function getFileModifiedTime(uri: string): number | null {
   } catch {
     return null;
   }
+}
+
+// True once the native audio decoder is built into the app — the audio
+// transcription feature is unavailable without it (there is no JS decoder for
+// AAC/Opus tracks), so the UI gates on this.
+export const audioNativeAvailable = native != null && typeof native.extractAudio === 'function';
+
+// Decode a video's first audio track (Android MediaExtractor + MediaCodec in
+// native code) to mono 16 kHz float32 PCM on disk. Resolves null when the file
+// has no audio track OR when the native module isn't built in — callers treat
+// both as "nothing to transcribe" (gate features on audioNativeAvailable to
+// tell them apart). Rejects on decode errors.
+export async function extractAudio(
+  source: string,
+  maxSeconds: number
+): Promise<ExtractedAudio | null> {
+  if (!native || typeof native.extractAudio !== 'function') return null;
+  const res = await native.extractAudio(source, maxSeconds);
+  return res && typeof res.path === 'string' ? res : null;
 }

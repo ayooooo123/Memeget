@@ -193,13 +193,14 @@ export async function deleteCache(uri: string): Promise<void> {
 }
 
 // Throwaway files this app stages into the OS cache directory. Indexing
-// (meme_work_*) and link imports (import_*) delete their own temp files in a
-// `finally`, but the share path can't — Sharing.shareAsync hands the file to
-// another app and we never learn when it's done, so each Share leaks a full
-// copy of the meme into the cache dir forever. Sweeping on launch reclaims all
-// of these: nothing here is meant to survive a process restart, so any match is
-// stale by definition.
-const TEMP_CACHE_PREFIX = /^(share_|import_|meme_work_)/;
+// (meme_work_*), link imports (import_*), and audio transcription (audio_pcm_*,
+// written by the native decoder) delete their own temp files in a `finally`,
+// but the share path can't — Sharing.shareAsync hands the file to another app
+// and we never learn when it's done, so each Share leaks a full copy of the
+// meme into the cache dir forever. Sweeping on launch reclaims all of these:
+// nothing here is meant to survive a process restart, so any match is stale by
+// definition.
+const TEMP_CACHE_PREFIX = /^(share_|import_|meme_work_|audio_pcm_)/;
 
 // Delete the app's leaked temp files from the cache directory. Best-effort and
 // safe to run at any time — it only touches files this app created and never

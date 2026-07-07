@@ -6,6 +6,7 @@ import { Image } from 'expo-image';
 import { initExecutorch } from 'react-native-executorch';
 import { ExpoResourceFetcher } from 'react-native-executorch-expo-resource-fetcher';
 
+import { AudioProvider } from './src/audio';
 import { EmbeddingsProvider } from './src/embeddings';
 import { VisionProvider } from './src/vision';
 import { initDb, getSetting, setSetting } from './src/db';
@@ -56,8 +57,10 @@ export default function App() {
     <SafeAreaProvider>
       <EmbeddingsProvider>
         <VisionProvider>
-          <StatusBar style="light" />
-          <Shell />
+          <AudioProvider>
+            <StatusBar style="light" />
+            <Shell />
+          </AudioProvider>
         </VisionProvider>
       </EmbeddingsProvider>
     </SafeAreaProvider>
