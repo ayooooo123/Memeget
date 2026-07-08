@@ -17,6 +17,9 @@ on:
   push:
     branches:
       - main
+      # TEMPORARY: build this feature branch's APK for on-device testing of the
+      # new native audio decoder. Remove before merging to main.
+      - claude/audio-analysis-library-ux-wijy5w
     tags:
       - 'v*'
   workflow_dispatch:

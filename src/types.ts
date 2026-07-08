@@ -12,6 +12,13 @@ export interface Tag {
 //  (won't auto-retry; a manual "Describe library" re-run can reset failures).
 export type VisionState = 'pending' | 'done' | 'failed';
 
+// Lifecycle of the optional audio-transcription pass.
+//  none    -> nothing to analyze (images; never queued)
+//  pending -> a video awaiting transcription
+//  done    -> analyzed; transcript may be '' when the video has no audio/speech
+//  failed  -> extraction/transcription errored (won't auto-retry)
+export type AudioState = 'none' | 'pending' | 'done' | 'failed';
+
 export interface MemeRecord {
   id: number;
   uri: string; // original SAF content:// uri (used for display)
@@ -19,9 +26,11 @@ export interface MemeRecord {
   kind: MediaKind;
   ocrText: string;
   caption: string; // one-line scene/joke description from LFM2-VL ('' until enriched)
+  transcript: string; // speech heard in a video, via on-device Whisper ('' until analyzed)
   tags: Tag[];
   extraTerms: string; // association/world-knowledge terms, for search
   visionState: VisionState;
+  audioState: AudioState;
   indexedAt: number;
   modifiedAt?: number; // file's last-modified time (ms); drives the recency sort
   pending?: boolean; // saved & visible, but not yet embedded/OCR'd/tagged

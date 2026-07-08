@@ -6,13 +6,17 @@ import * as Sharing from 'expo-sharing';
 
 import { showToast } from '../components/Toast';
 import { Button, Chip, ProgressBar, Slider, StatusDot } from '../components/ui';
+import { useAudio } from '../audio';
 import { useEmbeddings } from '../embeddings';
 import { useVision, intensityLabel, memesPerHour } from '../vision';
 import {
   clearIndex,
+  countAudioFailed,
   countMemes,
   countMemesDescribed,
+  countMemesNeedingAudio,
   countMemesNeedingVision,
+  countMemesTranscribed,
   deleteExemplarsByLabel,
   deleteExemplarsByPack,
   getExemplars,
@@ -22,6 +26,7 @@ import {
   getTaughtLabelStats,
   importExemplars,
   removeFolder,
+  resetAudioFailures,
   resetVisionState,
   type ImportedPack,
   type IndexError,
@@ -38,6 +43,7 @@ import type { LinkedFolder } from '../types';
 export function SettingsScreen({ active = true }: { active?: boolean }) {
   const emb = useEmbeddings();
   const vision = useVision();
+  const audio = useAudio();
   const [folders, setFolders] = useState<LinkedFolder[]>([]);
   const [count, setCount] = useState(0);
   const [taughtStats, setTaughtStats] = useState<TaughtLabelStat[]>([]);
@@ -51,6 +57,11 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
   const [enriching, setEnriching] = useState<{ done: number; total: number } | null>(null);
   const [tele, setTele] = useState<VisionTelemetry>({ described: 0, deduped: 0, failed: 0, avgMs: 0 });
   const enrichCancel = useRef(false);
+  const [audioPending, setAudioPending] = useState(0);
+  const [audioStats, setAudioStats] = useState({ analyzed: 0, withSpeech: 0 });
+  const [audioFailed, setAudioFailed] = useState(0);
+  const [transcribing, setTranscribing] = useState<{ done: number; total: number } | null>(null);
+  const transcribeCancel = useRef(false);
 
   const refresh = useCallback(async () => {
     setFolders(await getFolders());
@@ -61,6 +72,9 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
     setDescribed(await countMemesDescribed());
     setPending(await countMemesNeedingVision());
     setTele(getVisionTelemetry());
+    setAudioPending(await countMemesNeedingAudio().catch(() => 0));
+    setAudioStats(await countMemesTranscribed().catch(() => ({ analyzed: 0, withSpeech: 0 })));
+    setAudioFailed(await countAudioFailed().catch(() => 0));
   }, []);
 
   // Both tabs stay mounted (so the Library keeps its state), which means this
@@ -292,6 +306,43 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
     }
   }, [vision, refresh]);
 
+  const onRunTranscribe = useCallback(async () => {
+    if (!audio.ready) {
+      showToast('Speech model still loading — try again shortly', 'info');
+      return;
+    }
+    transcribeCancel.current = false;
+    setTranscribing({ done: 0, total: 0 });
+    try {
+      const res = await audio.runTranscription({
+        onProgress: (p) => setTranscribing({ done: p.done, total: p.total }),
+        shouldCancel: () => transcribeCancel.current,
+      });
+      if (res === 'busy') {
+        showToast('Already transcribing — try again in a moment', 'info');
+        return;
+      }
+      success();
+      const silentNote = res.silent > 0 ? ` · ${res.silent} without speech` : '';
+      const failNote = res.failed > 0 ? ` · ${res.failed} failed` : '';
+      showToast(
+        `Transcribed ${res.transcribed} video${res.transcribed === 1 ? '' : 's'}${silentNote}${failNote}`,
+        'success'
+      );
+    } catch (e) {
+      showToast(`Transcription failed: ${String(e)}`, 'error');
+    } finally {
+      setTranscribing(null);
+      refresh();
+    }
+  }, [audio, refresh]);
+
+  const onRetryAudioFailures = useCallback(async () => {
+    const n = await resetAudioFailures();
+    await refresh();
+    showToast(`Re-queued ${n} failed video${n === 1 ? '' : 's'} for transcription`, 'info');
+  }, [refresh]);
+
   const onSwitchQuality = useCallback(
     (q: 'fast' | 'max') => {
       if (q === vision.quality) return;
@@ -345,6 +396,16 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
         ? 'Ready'
         : `Loading ${Math.round((vision.progress || 0) * 100)}%`;
   const describedTotal = described + pending;
+
+  const audioTone = audio.error ? 'bad' : audio.ready ? 'good' : 'busy';
+  const audioLabel = audio.error
+    ? 'Error'
+    : !audio.enabled
+      ? 'Off'
+      : audio.ready
+        ? 'Ready'
+        : `Loading ${Math.round((audio.progress || 0) * 100)}%`;
+  const audioTotal = audioStats.analyzed + audioPending;
 
   return (
     <ScrollView contentContainerStyle={styles.container}>
@@ -501,6 +562,85 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
                   </Text>
                 )}
               </>
+            )}
+          </>
+        )}
+      </Section>
+
+      <Section glyph="🎙" title="Audio analysis" tint={colors.volt}>
+        <Row label="Whisper (speech-to-text)">
+          <StatusDot tone={audioTone} label={audioLabel} />
+        </Row>
+        {audio.enabled && !audio.ready && !audio.error && (
+          <ProgressBar value={audio.progress || 0} />
+        )}
+        {!!audio.error && <Text style={styles.errText}>{audio.error}</Text>}
+        <Text style={styles.note}>
+          Listens to your video memes on-device and writes down what’s said, so you can find a clip
+          by the line you remember hearing. Same ExecuTorch engine as everything else — audio never
+          leaves your phone.
+        </Text>
+
+        <Button
+          small
+          variant={audio.enabled ? 'dangerGhost' : 'primary'}
+          label={audio.enabled ? 'Turn off audio analysis' : 'Enable audio analysis'}
+          onPress={() => {
+            const turningOn = !audio.enabled;
+            audio.setEnabled(turningOn);
+            if (turningOn) showToast('Downloading the speech model — first time only', 'info');
+          }}
+        />
+
+        {audio.enabled && !audio.nativeAvailable && (
+          <Text style={styles.note}>
+            Decoding a video’s audio track needs a native build (expo prebuild). This dev build
+            can’t transcribe until then.
+          </Text>
+        )}
+
+        {audio.enabled && audio.nativeAvailable && (
+          <>
+            <Row label="Analyzed" value={`${audioStats.analyzed} / ${audioTotal}`} />
+            {audioStats.analyzed > 0 && (
+              <Text style={styles.faintSmall}>
+                {audioStats.withSpeech} with speech · {audioStats.analyzed - audioStats.withSpeech}{' '}
+                silent or music-only
+              </Text>
+            )}
+            {transcribing ? (
+              <View style={{ gap: 8 }}>
+                <View style={styles.enrichTopRow}>
+                  <Text style={styles.note}>
+                    Transcribing {transcribing.done}/{transcribing.total || '…'}
+                  </Text>
+                  <Pressable onPress={() => (transcribeCancel.current = true)} hitSlop={10}>
+                    <Text style={styles.stopText}>Stop</Text>
+                  </Pressable>
+                </View>
+                <ProgressBar value={transcribing.total ? transcribing.done / transcribing.total : 0} />
+              </View>
+            ) : audioPending > 0 ? (
+              <Button
+                small
+                label={`Transcribe ${audioPending} video${audioPending === 1 ? '' : 's'}`}
+                onPress={onRunTranscribe}
+                disabled={!audio.ready}
+              />
+            ) : (
+              <Text style={styles.note}>
+                {audioStats.analyzed > 0
+                  ? 'Every video has been analyzed ✓'
+                  : 'Index some videos first, then transcribe them.'}
+              </Text>
+            )}
+            {audioFailed > 0 && !transcribing && (
+              <Button
+                small
+                variant="secondary"
+                label={`Retry ${audioFailed} failed`}
+                onPress={onRetryAudioFailures}
+              />
             )}
           </>
         )}

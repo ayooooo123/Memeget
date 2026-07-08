@@ -22,12 +22,12 @@ import * as Clipboard from 'expo-clipboard';
 import * as Sharing from 'expo-sharing';
 import { useVideoPlayer, VideoView } from 'expo-video';
 
-import { addExemplar, deleteMeme, getLabels, getMemeEmbedding } from '../db';
+import { addExemplar, deleteMeme, getLabels, getMemeEmbedding, getSimilarMemes } from '../db';
 import { EXEMPLAR_PROB_THRESHOLD, headProb } from '../embeddings';
 import { buildExemplarHeads, type ExemplarModel } from '../indexer';
 import { success, tap, warn } from '../haptics';
 import { deleteFile, materialize, readImageBase64, readVideoFrameBase64 } from '../saf';
-import { colors, radius, space, TABBAR_CLEARANCE } from '../theme';
+import { colors, radius, shadow, space, TABBAR_CLEARANCE } from '../theme';
 import { useConst } from '../reactUtils';
 import type { MemeRecord, SearchHit } from '../types';
 
@@ -36,6 +36,10 @@ import { Chip, PressableScale } from './ui';
 
 const GAP = 3;
 const COLS = 3;
+
+// How far (px) the grid must be scrolled before the back-to-top button shows —
+// roughly a couple of screens, where flick-scrolling back up gets tedious.
+const SHOW_TOP_AFTER = 1400;
 
 type Item = MemeRecord | SearchHit;
 
@@ -183,6 +187,34 @@ export const MemeGrid = React.memo(function MemeGrid({
     }
     listRef.current?.scrollToOffset({ offset: 0, animated: true });
   }, [scrollToTopSignal]);
+
+  // Back-to-top button: appears once the user is deep in the grid, fades out
+  // near the top. State only flips at the threshold crossing (the ref is the
+  // per-scroll-event gate), so scrolling doesn't re-render the grid every frame.
+  const [showTopBtn, setShowTopBtn] = useState(false);
+  const showTopRef = useRef(false);
+  const fabAnim = useConst(() => new Animated.Value(0));
+  useEffect(() => {
+    Animated.timing(fabAnim, {
+      toValue: showTopBtn ? 1 : 0,
+      duration: 180,
+      useNativeDriver: true,
+    }).start();
+  }, [showTopBtn, fabAnim]);
+  const onScroll = useCallback(
+    (e: { nativeEvent: { contentOffset: { y: number } } }) => {
+      const show = e.nativeEvent.contentOffset.y > SHOW_TOP_AFTER;
+      if (show !== showTopRef.current) {
+        showTopRef.current = show;
+        setShowTopBtn(show);
+      }
+    },
+    []
+  );
+  const scrollToTop = useCallback(() => {
+    tap();
+    listRef.current?.scrollToOffset({ offset: 0, animated: true });
+  }, []);
 
   // Stable across renders so the memoized GridCells aren't all re-rendered
   // every time unrelated grid state changes (opening the viewer, toggling
@@ -391,6 +423,7 @@ export const MemeGrid = React.memo(function MemeGrid({
 
   return (
     <>
+      <View style={styles.gridWrap}>
       <FlatList
         ref={listRef}
         data={items}
@@ -402,6 +435,8 @@ export const MemeGrid = React.memo(function MemeGrid({
         contentContainerStyle={styles.listContent}
         keyboardShouldPersistTaps="handled"
         keyboardDismissMode="on-drag"
+        onScroll={onScroll}
+        scrollEventThrottle={64}
         onEndReached={onEndReached}
         onEndReachedThreshold={0.6}
         // Memory is already bounded by `windowSize`: FlatList only keeps that
@@ -419,6 +454,32 @@ export const MemeGrid = React.memo(function MemeGrid({
         }
         renderItem={renderItem}
       />
+
+      {/* Floating back-to-top button. pointerEvents flips with visibility so a
+          fully faded-out button can never swallow taps meant for the grid. */}
+      <Animated.View
+        pointerEvents={showTopBtn ? 'auto' : 'none'}
+        style={[
+          styles.topFabWrap,
+          {
+            opacity: fabAnim,
+            transform: [
+              { scale: fabAnim.interpolate({ inputRange: [0, 1], outputRange: [0.8, 1] }) },
+            ],
+          },
+        ]}
+      >
+        <PressableScale
+          scaleTo={0.88}
+          onPress={scrollToTop}
+          style={styles.topFab}
+          accessibilityRole="button"
+          accessibilityLabel="Back to top"
+        >
+          <Text style={styles.topFabIcon}>↑</Text>
+        </PressableScale>
+      </Animated.View>
+      </View>
 
       <ViewerSheet
         item={selected}
@@ -440,6 +501,14 @@ export const MemeGrid = React.memo(function MemeGrid({
               }
             : undefined
         }
+        onSelectItem={(hit) => {
+          tap();
+          // Strip the similarity score before it becomes the viewed item, so
+          // the viewer doesn't show a bogus "match N%" (that readout is for
+          // text-search results).
+          const { score, ...rec } = hit;
+          setSelected(rec as MemeRecord);
+        }}
       />
 
       <Modal
@@ -537,6 +606,7 @@ function ViewerSheet({
   onTeach,
   onShowConfidence,
   onSearchLabel,
+  onSelectItem,
 }: {
   item: Item | null;
   busy: boolean;
@@ -550,8 +620,34 @@ function ViewerSheet({
   onTeach: (positive: boolean, preset?: string) => void;
   onShowConfidence: () => void;
   onSearchLabel?: (label: string) => void;
+  // Tap a "More like this" thumbnail to view that meme in this sheet instead.
+  onSelectItem?: (hit: SearchHit) => void;
 }) {
   const drag = useConst(() => new Animated.Value(0));
+
+  // Visually similar memes for the open item, ranked by CLIP cosine against its
+  // stored embedding. Fetched per item (cleared first so a stale strip never
+  // shows against the wrong meme); the stale flag drops a slow fetch that
+  // resolves after the user has already jumped to another meme. Pending
+  // placeholders have no embedding yet, so they simply show no strip.
+  const itemId = item ? item.id : null;
+  const itemPending = !!item && 'pending' in item && !!item.pending;
+  const [similar, setSimilar] = useState<SearchHit[] | null>(null);
+  useEffect(() => {
+    setSimilar(null);
+    if (itemId == null || itemPending) return;
+    let stale = false;
+    getSimilarMemes(itemId, 10)
+      .then((hits) => {
+        if (!stale) setSimilar(hits);
+      })
+      .catch(() => {
+        if (!stale) setSimilar([]);
+      });
+    return () => {
+      stale = true;
+    };
+  }, [itemId, itemPending]);
 
   // Drag-to-dismiss on the grab area only, so scrolling the metadata or
   // pinch-looking at the image never accidentally closes the sheet. Lazy so the
@@ -686,6 +782,52 @@ function ViewerSheet({
                 </View>
               )}
 
+              {!!item.transcript && (
+                <View style={styles.block}>
+                  <Text style={styles.sectionLabel}>Speech in video · on-device Whisper</Text>
+                  <Text style={styles.ocr} selectable>
+                    {item.transcript}
+                  </Text>
+                </View>
+              )}
+
+              {similar !== null && similar.length > 0 && (
+                <View style={styles.block}>
+                  <Text style={styles.sectionLabel}>More like this · tap to open</Text>
+                  <ScrollView
+                    horizontal
+                    showsHorizontalScrollIndicator={false}
+                    contentContainerStyle={styles.similarRow}
+                  >
+                    {similar.map((s) => (
+                      <PressableScale
+                        key={s.id}
+                        scaleTo={0.92}
+                        onPress={() => onSelectItem?.(s)}
+                        style={styles.similarCell}
+                      >
+                        <Image
+                          source={{ uri: s.uri }}
+                          style={styles.similarThumb}
+                          contentFit="cover"
+                          transition={100}
+                          recyclingKey={`sim-${s.id}`}
+                          // Same reasoning as the grid: originals are local
+                          // files, keep decoded thumbs in memory only.
+                          cachePolicy="memory"
+                          allowDownscaling
+                        />
+                        {s.kind === 'video' && (
+                          <View style={styles.similarPlay}>
+                            <Text style={styles.playIcon}>▶</Text>
+                          </View>
+                        )}
+                      </PressableScale>
+                    ))}
+                  </ScrollView>
+                </View>
+              )}
+
               <View style={styles.teachRow}>
                 <PressableScale style={styles.teachBtn} onPress={() => onTeach(true)}>
                   <Text style={styles.teachBtnText}>＋ This IS a…</Text>
@@ -772,6 +914,25 @@ const styles = StyleSheet.create({
   // Hoisted out of render so the FlatList isn't handed fresh style objects on
   // every parent re-render (search keystrokes, library refreshes).
   column: { gap: GAP, paddingHorizontal: GAP },
+  // Positioning context for the floating back-to-top button.
+  gridWrap: { flex: 1 },
+  topFabWrap: {
+    position: 'absolute',
+    right: space.lg,
+    bottom: TABBAR_CLEARANCE + 8,
+  },
+  topFab: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: colors.surface3,
+    borderWidth: 1,
+    borderColor: colors.borderLight,
+    alignItems: 'center',
+    justifyContent: 'center',
+    ...shadow.float,
+  },
+  topFabIcon: { color: colors.volt, fontSize: 18, fontWeight: '800' },
   listContent: { gap: GAP, paddingBottom: TABBAR_CLEARANCE + 24 },
   thumb: { width: '100%', height: '100%', backgroundColor: colors.surface2, borderRadius: radius.sm },
   play: {
@@ -871,6 +1032,23 @@ const styles = StyleSheet.create({
     letterSpacing: 0.5,
   },
   tagWrap: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  similarRow: { gap: 8, paddingRight: 4 },
+  similarCell: { width: 76, height: 76 },
+  similarThumb: {
+    width: '100%',
+    height: '100%',
+    borderRadius: radius.sm,
+    backgroundColor: colors.surface2,
+  },
+  similarPlay: {
+    position: 'absolute',
+    right: 4,
+    bottom: 4,
+    backgroundColor: 'rgba(0,0,0,0.65)',
+    borderRadius: radius.pill,
+    paddingHorizontal: 5,
+    paddingVertical: 1,
+  },
   ocr: { color: colors.textDim, fontSize: 13, lineHeight: 19 },
   caption: { color: colors.text, fontSize: 14, lineHeight: 20, fontWeight: '500' },
   mutedSmall: { color: colors.muted, fontSize: 12 },

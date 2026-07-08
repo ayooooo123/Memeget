@@ -17,6 +17,8 @@ No accounts. No servers. No uploads.
 | Quick filters | A slim chip row under the search box: tap **▦ Images / ▶ Videos** to narrow by media type, or tap a known meme tag (the formats/characters actually present in your library, plus your taught labels) to filter without typing. Filters apply to both browse and search. |
 | Words in the meme | On-device **OCR** ([`expo-text-extractor`](https://github.com/pchalupa/expo-text-extractor) → ML Kit on Android). |
 | Video | A keyframe is extracted (`expo-video-thumbnails`) and indexed like an image. |
+| Words *said* in the meme | Opt-in **audio analysis** (Settings): a native decoder (MediaCodec) pulls each video's audio track as 16 kHz PCM and on-device **Whisper** (via the same ExecuTorch runtime) transcribes it. The transcript shows in the viewer and is searchable — find a clip by the line you remember hearing. |
+| Similar memes | Open any meme → **More like this**: the library ranked by CLIP cosine similarity against that meme's stored embedding. Tap a thumbnail to hop to it — great for finding the other variants of a template. |
 | Index storage | `expo-sqlite`; embeddings stored as float32 blobs, brute-force cosine search. |
 | Folder access | Android **Storage Access Framework** — per-folder permission, no broad media access. |
 | Save from a link | Share an **X/Twitter**, **Tenor**, or any social-post URL into Memeget and it resolves the underlying media (tweet-syndication for X, Open Graph `og:video`/`og:image` for everything else), downloads it into your linked folder, and indexes it like a normal share — no manual download + re-import. |
@@ -49,7 +51,9 @@ There are exactly two times the app reaches out, both download-only:
 
 1. A *one-time* download of the CLIP model from Hugging Face on first launch
    (ExecuTorch fetches it, then caches it locally at
-   `{documentDirectory}/react-native-executorch/`). After that, you can stay
+   `{documentDirectory}/react-native-executorch/`). Opting in to AI descriptions
+   or audio analysis (Settings) likewise triggers a one-time download of that
+   model (LFM2-VL / Whisper), cached the same way. After that, you can stay
    airplane-mode forever. To make it *truly* zero-network from install, the model
    can be bundled into the APK assets — see "Next steps".
 2. **Only when you share a link** (see above), Memeget contacts that link's host
@@ -114,11 +118,15 @@ Requires a custom dev build (not Expo Go) because of the native ML modules.
 App.tsx                 # tab shell
 src/embeddings.tsx      # CLIP image+text hooks + zero-shot classifier
 src/indexer.ts          # SAF -> copy -> (thumbnail) -> embed -> OCR -> tag -> store
+src/audio.tsx           # Whisper transcription pass over video memes (opt-in)
+src/audioCore.ts        # React-free audio helpers: PCM decode, transcript cleanup
 src/db.ts               # SQLite schema, vector storage, cosine search
 src/saf.ts              # Storage Access Framework folder linking
 src/linkResolver.ts     # shared X/Tenor/social links -> resolve + download media
 src/memeLabels.ts       # curated meme-format/character/emotion prompts
 src/screens/            # Library (index), Search, Settings
+modules/memeget-bg/     # native module: power/thermal, keep-alive, SAF mtime,
+                        #   video audio-track -> 16 kHz PCM decoder
 ```
 
 ## Culture layer (keeping up with new memes)
@@ -156,7 +164,8 @@ weights — editable and on-device:
 - Bundle the CLIP model in assets for zero-network-from-install.
 - Multi-frame video sampling (currently one keyframe).
 - Recursive folder walking.
-- Audio/music recognition (needs an on-device fingerprint DB — deferred).
+- Music *recognition* (Shazam-style fingerprinting needs an on-device fingerprint
+  DB — deferred; speech transcription shipped, see Audio analysis above).
 - `sqlite-vec` for very large collections.
 - Incremental/background re-indexing when folders change.
 

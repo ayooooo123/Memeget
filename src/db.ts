@@ -23,9 +23,11 @@ export async function initDb(): Promise<void> {
       embedding BLOB NOT NULL,
       ocr_text TEXT NOT NULL DEFAULT '',
       caption TEXT NOT NULL DEFAULT '',
+      transcript TEXT NOT NULL DEFAULT '',
       tags TEXT NOT NULL DEFAULT '[]',
       extra_terms TEXT NOT NULL DEFAULT '',
       vision_state TEXT NOT NULL DEFAULT 'pending',
+      audio_state TEXT NOT NULL DEFAULT 'none',
       indexed_at INTEGER NOT NULL,
       modified_at INTEGER NOT NULL DEFAULT 0,
       pending INTEGER NOT NULL DEFAULT 0
@@ -90,6 +92,16 @@ export async function initDb(): Promise<void> {
   if (!cols.some((c) => c.name === 'modified_at')) {
     await db.execAsync(`ALTER TABLE memes ADD COLUMN modified_at INTEGER NOT NULL DEFAULT 0;`);
     await db.execAsync(`UPDATE memes SET modified_at = indexed_at WHERE modified_at = 0;`);
+  }
+  // Migrate databases that predate audio transcription (transcript + audio_state).
+  // Existing videos start 'pending' so the first transcription pass picks them
+  // up; images are 'none' — there is nothing to listen to.
+  if (!cols.some((c) => c.name === 'transcript')) {
+    await db.execAsync(`ALTER TABLE memes ADD COLUMN transcript TEXT NOT NULL DEFAULT '';`);
+  }
+  if (!cols.some((c) => c.name === 'audio_state')) {
+    await db.execAsync(`ALTER TABLE memes ADD COLUMN audio_state TEXT NOT NULL DEFAULT 'none';`);
+    await db.execAsync(`UPDATE memes SET audio_state = 'pending' WHERE kind = 'video';`);
   }
   // Migrate exemplar tables that predate negative ("not this") teaching.
   const exCols = await db.getAllAsync<{ name: string }>('PRAGMA table_info(exemplars)');
@@ -166,12 +178,14 @@ export async function insertMeme(args: {
   const db = await getDb();
   const now = Date.now();
   // caption + vision_state use their column defaults ('' / 'pending'); the
-  // LFM2-VL pass fills them in later via setMemeVision. modified_at drives the
-  // library's "most recent first" order — it's the file's own last-modified
-  // time when we could read it, otherwise the index time so a row is never 0.
+  // LFM2-VL pass fills them in later via setMemeVision. audio_state queues
+  // videos for the transcription pass the same way; images have no audio to
+  // analyze. modified_at drives the library's "most recent first" order — it's
+  // the file's own last-modified time when we could read it, otherwise the
+  // index time so a row is never 0.
   await db.runAsync(
-    `INSERT OR REPLACE INTO memes (uri, name, kind, embedding, ocr_text, tags, extra_terms, indexed_at, modified_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO memes (uri, name, kind, embedding, ocr_text, tags, extra_terms, indexed_at, modified_at, audio_state)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     args.uri,
     args.name,
     args.kind,
@@ -180,7 +194,8 @@ export async function insertMeme(args: {
     JSON.stringify(args.tags),
     args.extraTerms,
     now,
-    args.modifiedAt ?? now
+    args.modifiedAt ?? now,
+    args.kind === 'video' ? 'pending' : 'none'
   );
 }
 
@@ -200,14 +215,15 @@ export async function insertPendingMeme(args: {
   // indexer's later insertMeme replaces it with the file's real mtime.
   const now = Date.now();
   await db.runAsync(
-    `INSERT OR IGNORE INTO memes (uri, name, kind, embedding, ocr_text, tags, extra_terms, indexed_at, modified_at, pending)
-     VALUES (?, ?, ?, ?, '', '[]', '', ?, ?, 1)`,
+    `INSERT OR IGNORE INTO memes (uri, name, kind, embedding, ocr_text, tags, extra_terms, indexed_at, modified_at, pending, audio_state)
+     VALUES (?, ?, ?, ?, '', '[]', '', ?, ?, 1, ?)`,
     args.uri,
     args.name,
     args.kind,
     vecToBlob([]),
     now,
-    now
+    now,
+    args.kind === 'video' ? 'pending' : 'none'
   );
 }
 
@@ -219,9 +235,11 @@ interface MemeRow {
   embedding: Uint8Array;
   ocr_text: string;
   caption: string;
+  transcript: string;
   tags: string;
   extra_terms: string;
   vision_state: string;
+  audio_state: string;
   indexed_at: number;
   modified_at: number;
   pending: number;
@@ -235,9 +253,11 @@ function rowToRecord(row: MemeRow): MemeRecord & { embedding: Float32Array } {
     kind: row.kind as MemeRecord['kind'],
     ocrText: row.ocr_text,
     caption: row.caption ?? '',
+    transcript: row.transcript ?? '',
     tags: safeParseTags(row.tags),
     extraTerms: row.extra_terms ?? '',
     visionState: (row.vision_state as MemeRecord['visionState']) ?? 'pending',
+    audioState: (row.audio_state as MemeRecord['audioState']) ?? 'none',
     indexedAt: row.indexed_at,
     modifiedAt: row.modified_at ?? row.indexed_at,
     pending: row.pending === 1,
@@ -434,6 +454,79 @@ export async function resetVisionState(): Promise<void> {
   await db.execAsync("UPDATE memes SET vision_state = 'pending';");
 }
 
+// ---- audio transcription -------------------------------------------------------
+
+// Videos still awaiting a transcription pass. Just the fields the transcriber
+// needs to materialize the file and write back.
+export interface MemeNeedingAudioRow {
+  id: number;
+  uri: string;
+  name: string;
+}
+
+export async function getMemesNeedingAudio(limit = 10000): Promise<MemeNeedingAudioRow[]> {
+  const db = await getDb();
+  return db.getAllAsync<MemeNeedingAudioRow>(
+    "SELECT id, uri, name FROM memes WHERE kind = 'video' AND audio_state = 'pending' AND pending = 0 ORDER BY indexed_at DESC, id DESC LIMIT ?",
+    limit
+  );
+}
+
+// Persist a finished analysis. transcript = '' is a valid result — the video
+// was listened to and had no audio track / no recognizable speech — and still
+// flips audio_state to 'done' so it isn't re-analyzed.
+export async function setMemeTranscript(id: number, transcript: string): Promise<void> {
+  const db = await getDb();
+  await db.runAsync(
+    "UPDATE memes SET transcript = ?, audio_state = 'done' WHERE id = ?",
+    transcript,
+    id
+  );
+}
+
+// Mark a video as failed-to-transcribe without touching anything else, so a
+// broken file or a transient decoder error doesn't wedge the queue. Won't
+// auto-retry; resetAudioFailures re-queues them.
+export async function markAudioFailed(id: number): Promise<void> {
+  const db = await getDb();
+  await db.runAsync("UPDATE memes SET audio_state = 'failed' WHERE id = ?", id);
+}
+
+export async function countMemesNeedingAudio(): Promise<number> {
+  const db = await getDb();
+  const row = await db.getFirstAsync<{ c: number }>(
+    "SELECT COUNT(*) as c FROM memes WHERE kind = 'video' AND audio_state = 'pending' AND pending = 0"
+  );
+  return row?.c ?? 0;
+}
+
+// Videos analyzed (audio_state 'done'), and how many of those actually carried
+// speech — the difference is silent/music-only clips.
+export async function countMemesTranscribed(): Promise<{ analyzed: number; withSpeech: number }> {
+  const db = await getDb();
+  const row = await db.getFirstAsync<{ analyzed: number; withSpeech: number }>(
+    "SELECT COUNT(*) as analyzed, SUM(CASE WHEN transcript != '' THEN 1 ELSE 0 END) as withSpeech FROM memes WHERE kind = 'video' AND audio_state = 'done'"
+  );
+  return { analyzed: row?.analyzed ?? 0, withSpeech: row?.withSpeech ?? 0 };
+}
+
+export async function countAudioFailed(): Promise<number> {
+  const db = await getDb();
+  const row = await db.getFirstAsync<{ c: number }>(
+    "SELECT COUNT(*) as c FROM memes WHERE audio_state = 'failed'"
+  );
+  return row?.c ?? 0;
+}
+
+// Re-queue failed videos for another pass (e.g. after fixing storage issues).
+export async function resetAudioFailures(): Promise<number> {
+  const db = await getDb();
+  const res = await db.runAsync(
+    "UPDATE memes SET audio_state = 'pending' WHERE audio_state = 'failed'"
+  );
+  return res.changes ?? 0;
+}
+
 // ---- settings (small key/value store) ----------------------------------------
 
 export async function getSetting(key: string): Promise<string | null> {
@@ -520,14 +613,14 @@ export async function getRecentMemes(
   // paging repeats and skips rows — which is what broke infinite scroll.
   const rows = kind
     ? await db.getAllAsync<Omit<MemeRow, 'embedding'>>(
-        `SELECT id, uri, name, kind, ocr_text, caption, tags, extra_terms, vision_state, indexed_at, modified_at, pending
+        `SELECT id, uri, name, kind, ocr_text, caption, transcript, tags, extra_terms, vision_state, audio_state, indexed_at, modified_at, pending
          FROM memes WHERE kind = ? ORDER BY modified_at DESC, id DESC LIMIT ? OFFSET ?`,
         kind,
         limit,
         offset
       )
     : await db.getAllAsync<Omit<MemeRow, 'embedding'>>(
-        `SELECT id, uri, name, kind, ocr_text, caption, tags, extra_terms, vision_state, indexed_at, modified_at, pending
+        `SELECT id, uri, name, kind, ocr_text, caption, transcript, tags, extra_terms, vision_state, audio_state, indexed_at, modified_at, pending
          FROM memes ORDER BY modified_at DESC, id DESC LIMIT ? OFFSET ?`,
         limit,
         offset
@@ -539,9 +632,11 @@ export async function getRecentMemes(
     kind: r.kind as MemeRecord['kind'],
     ocrText: r.ocr_text,
     caption: r.caption ?? '',
+    transcript: r.transcript ?? '',
     tags: safeParseTags(r.tags),
     extraTerms: r.extra_terms ?? '',
     visionState: (r.vision_state as MemeRecord['visionState']) ?? 'pending',
+    audioState: (r.audio_state as MemeRecord['audioState']) ?? 'none',
     indexedAt: r.indexed_at,
     modifiedAt: r.modified_at ?? r.indexed_at,
     pending: r.pending === 1,
@@ -591,6 +686,8 @@ export async function searchByVector(
         ' ' +
         rec.caption +
         ' ' +
+        rec.transcript +
+        ' ' +
         rec.tags.map((t) => t.label).join(' ') +
         ' ' +
         rec.extraTerms
@@ -611,6 +708,34 @@ export async function searchByVector(
     // immediately if a newer query has superseded this one.
     if ((i & (SEARCH_CHUNK - 1)) === SEARCH_CHUNK - 1) {
       if (shouldAbort?.()) return null;
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    }
+  }
+
+  hits.sort((a, b) => b.score - a.score);
+  return hits.slice(0, limit);
+}
+
+// "More like this" for the viewer: rank the library by cosine similarity to one
+// meme's stored CLIP embedding. Same brute-force scan as text search (and the
+// same chunked yielding so opening a meme never hitches the UI), but the query
+// vector comes from the image itself — no model call needed, it's all reads.
+export async function getSimilarMemes(id: number, limit = 12): Promise<SearchHit[]> {
+  const target = await getMemeEmbedding(id);
+  if (!target || target.length === 0) return [];
+  const db = await getDb();
+  const rows = await db.getAllAsync<MemeRow>(
+    'SELECT * FROM memes WHERE pending = 0 AND id != ?',
+    id
+  );
+
+  const hits: SearchHit[] = [];
+  for (let i = 0; i < rows.length; i++) {
+    const rec = rowToRecord(rows[i]);
+    const score = dot(target, rec.embedding); // cosine (both normalized)
+    const { embedding, ...record } = rec;
+    hits.push({ ...record, score } as SearchHit);
+    if ((i & (SEARCH_CHUNK - 1)) === SEARCH_CHUNK - 1) {
       await new Promise<void>((resolve) => setTimeout(resolve, 0));
     }
   }

@@ -49,6 +49,7 @@ function sameRecord(a: MemeRecord, b: MemeRecord): boolean {
     a.pending === b.pending &&
     a.visionState === b.visionState &&
     a.caption === b.caption &&
+    a.transcript === b.transcript &&
     a.ocrText === b.ocrText &&
     a.extraTerms === b.extraTerms &&
     a.indexedAt === b.indexedAt &&
