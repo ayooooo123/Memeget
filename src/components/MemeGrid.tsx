@@ -26,7 +26,8 @@ import { addExemplar, deleteMeme, getLabels, getMemeEmbedding, getSimilarMemes }
 import { EXEMPLAR_PROB_THRESHOLD, headProb } from '../embeddings';
 import { buildExemplarHeads, type ExemplarModel } from '../indexer';
 import { success, tap, warn } from '../haptics';
-import { deleteFile, materialize, readImageBase64, readVideoFrameBase64 } from '../saf';
+import { copyFileToClipboard } from '../../modules/memeget-bg';
+import { deleteFile, materialize, readImageBase64, readVideoFrameBase64, videoMimeFor } from '../saf';
 import { colors, radius, shadow, space, TABBAR_CLEARANCE } from '../theme';
 import { useConst } from '../reactUtils';
 import type { MemeRecord, SearchHit } from '../types';
@@ -288,8 +289,23 @@ export const MemeGrid = React.memo(function MemeGrid({
     const isVideo = selected.kind === 'video';
     setBusy(true);
     try {
-      // Images copy as-is; videos copy a representative still frame, since the
-      // system clipboard can't hold a video file.
+      if (isVideo) {
+        // Put the actual video file on the clipboard as a content:// uri (the
+        // memeget-bg native module — expo-clipboard can only hold images).
+        // Apps that accept rich pastes receive the full video; if the module
+        // isn't built in or the copy fails, fall through to the still frame.
+        const copied = await copyFileToClipboard(
+          selected.uri,
+          selected.name,
+          videoMimeFor(selected.name)
+        ).catch(() => false);
+        if (copied) {
+          success();
+          showToast('Video copied — paste it in apps that accept videos', 'success');
+          return;
+        }
+      }
+      // Images copy as-is; videos fall back to a representative still frame.
       const base64 = isVideo
         ? await readVideoFrameBase64(selected.uri, selected.name)
         : await readImageBase64(selected.uri, selected.name);

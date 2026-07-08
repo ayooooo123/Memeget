@@ -1,5 +1,6 @@
 import ExpoModulesCore
 import UIKit
+import UniformTypeIdentifiers
 
 // iOS counterpart. Battery + thermal reads mirror the Android module. iOS does
 // not allow arbitrary sustained background compute, so `startForeground` only
@@ -51,6 +52,22 @@ public class MemegetBgModule: Module {
           self.bgTask = .invalid
         }
       }
+    }
+
+    // Parity with the Android module: place a file's bytes (a video) on the
+    // general pasteboard under its UTType. iOS pasteboards hold data directly,
+    // so no provider/uri indirection is needed. The app currently ships
+    // Android-only; this keeps the JS API uniform if an iOS build lands.
+    AsyncFunction("copyFileToClipboard") { (uriStr: String, name: String, mimeType: String) in
+      guard let url = URL(string: uriStr), url.isFileURL else {
+        throw NSError(
+          domain: "MemegetBg", code: 1,
+          userInfo: [NSLocalizedDescriptionKey: "copyFileToClipboard needs a file:// uri, got \(uriStr)"]
+        )
+      }
+      let data = try Data(contentsOf: url)
+      let type = UTType(mimeType: mimeType)?.identifier ?? UTType.mpeg4Movie.identifier
+      UIPasteboard.general.setData(data, forPasteboardType: type)
     }
   }
 }

@@ -1,7 +1,7 @@
 {
   "name": "memeget-bg",
   "version": "0.1.0",
-  "description": "Battery/thermal signals + background keep-alive for Memeget",
+  "description": "Battery/thermal signals, background keep-alive, and file clipboard for Memeget",
   "main": "index.ts",
   "private": true
 }
