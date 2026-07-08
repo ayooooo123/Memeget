@@ -26,6 +26,7 @@ interface MemegetBgNative {
   stopForeground(): void;
   getModifiedTime(uri: string): number | null;
   extractAudio(source: string, maxSeconds: number): Promise<ExtractedAudio | null>;
+  copyFileToClipboard(uri: string, name: string, mimeType: string): Promise<void>;
 }
 
 // Optional on purpose: in Expo Go, in the JS-only dev flow, or before a native
@@ -97,4 +98,19 @@ export async function extractAudio(
   if (!native || typeof native.extractAudio !== 'function') return null;
   const res = await native.extractAudio(source, maxSeconds);
   return res && typeof res.path === 'string' ? res : null;
+}
+
+// Put an actual file (in practice a video, which expo-clipboard can't hold) on
+// the system clipboard. Android stages the file behind a FileProvider and sets
+// a content:// clip; whether a given paste target accepts a video is up to
+// that app. Returns false when the native module isn't built in so the caller
+// can fall back (e.g. to the still-frame copy); a genuine copy failure rejects.
+export async function copyFileToClipboard(
+  uri: string,
+  name: string,
+  mimeType: string
+): Promise<boolean> {
+  if (!native || typeof native.copyFileToClipboard !== 'function') return false;
+  await native.copyFileToClipboard(uri, name, mimeType);
+  return true;
 }

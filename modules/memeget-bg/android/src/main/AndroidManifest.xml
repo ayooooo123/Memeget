@@ -11,5 +11,18 @@
       android:name="expo.modules.memegetbg.KeepAliveService"
       android:exported="false"
       android:foregroundServiceType="dataSync" />
+
+    <!-- Serves clipboard-staged files (videos) as content:// uris. Not exported:
+         the paste target gets access through the clipboard framework's uri
+         grant, which requires grantUriPermissions. -->
+    <provider
+      android:name="expo.modules.memegetbg.MemeClipFileProvider"
+      android:authorities="${applicationId}.memegetclip"
+      android:exported="false"
+      android:grantUriPermissions="true">
+      <meta-data
+        android:name="android.support.FILE_PROVIDER_PATHS"
+        android:resource="@xml/memeget_clip_paths" />
+    </provider>
   </application>
 </manifest>
