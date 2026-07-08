@@ -95,7 +95,7 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
       });
       success();
       emitLibraryChanged(); // tags changed under the Library's feet
-      showToast(`Re-tagged ${res.updated} memes with current knowledge`, 'success');
+      showToast(`Re-tag done — ${res.updated} meme${res.updated === 1 ? '' : 's'} changed`, 'success');
     } catch (e) {
       showToast(`Re-tag failed: ${String(e)}`, 'error');
     } finally {

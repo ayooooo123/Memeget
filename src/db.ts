@@ -127,9 +127,15 @@ export function vecToBlob(vec: number[]): Uint8Array {
 }
 
 export function blobToVec(blob: Uint8Array): Float32Array {
-  // Copy into a fresh, correctly-aligned buffer before viewing as Float32.
-  const bytes = Uint8Array.from(blob);
-  return new Float32Array(bytes.buffer);
+  // View in place when the bytes are already 4-aligned (the driver hands each
+  // row its own buffer, so this is safe and free). Otherwise one memcpy via
+  // slice(). The old Uint8Array.from() copied byte-by-byte through the iterator
+  // protocol — and this runs for every meme on every search scan.
+  if (blob.byteOffset % 4 === 0 && blob.byteLength % 4 === 0) {
+    return new Float32Array(blob.buffer, blob.byteOffset, blob.byteLength / 4);
+  }
+  const bytes = blob.slice();
+  return new Float32Array(bytes.buffer, 0, Math.floor(bytes.byteLength / 4));
 }
 
 export function normalize(vec: number[]): number[] {
@@ -158,6 +164,15 @@ export async function memeExists(uri: string): Promise<boolean> {
     uri
   );
   return !!row;
+}
+
+// Every fully-indexed URI in one query. The folder scan used to call
+// memeExists() once per file — thousands of round-trips on a large library just
+// to conclude "nothing new"; with this Set the skip check is a hash lookup.
+export async function getIndexedUris(): Promise<Set<string>> {
+  const db = await getDb();
+  const rows = await db.getAllAsync<{ uri: string }>('SELECT uri FROM memes WHERE pending = 0');
+  return new Set(rows.map((r) => r.uri));
 }
 
 export async function deleteMeme(id: number): Promise<void> {
@@ -268,7 +283,14 @@ function rowToRecord(row: MemeRow): MemeRecord & { embedding: Float32Array } {
 // Re-tagging reuses already-stored embeddings, so applying new knowledge
 // (exemplars, association edits) costs no re-embedding.
 export async function getAllMemeEmbeddings(): Promise<
-  { id: number; embedding: Float32Array; ocrText: string; tags: Tag[]; extraTerms: string }[]
+  {
+    id: number;
+    embedding: Float32Array;
+    ocrText: string;
+    tags: Tag[];
+    rawTags: string; // the stored JSON, kept so callers can diff without re-stringifying
+    extraTerms: string;
+  }[]
 > {
   const db = await getDb();
   const rows = await db.getAllAsync<{
@@ -283,8 +305,25 @@ export async function getAllMemeEmbeddings(): Promise<
     embedding: blobToVec(r.embedding),
     ocrText: r.ocr_text ?? '',
     tags: safeParseTags(r.tags),
+    rawTags: r.tags ?? '[]',
     extraTerms: r.extra_terms ?? '',
   }));
+}
+
+// Cheap change-stamp over (taught exemplars, indexed library size), used to
+// cache the trained label heads: retraining is the slow part of knowledge
+// building, and most builds (indexing a share, opening the teach sheet, a
+// background tick) happen when nothing was taught in between. COUNT+SUM(id)
+// changes on any add/remove mix; the meme count folds in library growth, which
+// shifts the mean/background the heads are trained against.
+export async function getKnowledgeVersion(): Promise<string> {
+  const db = await getDb();
+  const row = await db.getFirstAsync<{ ec: number; es: number; mc: number }>(
+    `SELECT (SELECT COUNT(*) FROM exemplars) AS ec,
+            (SELECT COALESCE(SUM(id), 0) FROM exemplars) AS es,
+            (SELECT COUNT(*) FROM memes WHERE pending = 0) AS mc`
+  );
+  return row ? `${row.ec}:${row.es}:${row.mc}` : '0:0:0';
 }
 
 // A random sample of library embeddings, used as the negative/background set
@@ -571,10 +610,23 @@ export async function getLibraryTagLabels(limit = 40): Promise<string[]> {
   const rows = await db.getAllAsync<{ tags: string }>(
     "SELECT tags FROM memes WHERE pending = 0 AND tags != '[]'"
   );
+  // Regex label extraction instead of JSON.parse per row — this runs on every
+  // (debounced) library refresh, including once per burst while indexing.
   const counts = new Map<string, number>();
   for (const r of rows) {
-    for (const t of safeParseTags(r.tags)) {
-      counts.set(t.label, (counts.get(t.label) ?? 0) + 1);
+    TAG_LABEL_RE.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = TAG_LABEL_RE.exec(r.tags))) {
+      // Rare labels containing JSON escapes still decode correctly.
+      let label = m[1];
+      if (label.includes('\\')) {
+        try {
+          label = JSON.parse(`"${label}"`);
+        } catch {
+          // keep the raw capture
+        }
+      }
+      counts.set(label, (counts.get(label) ?? 0) + 1);
     }
   }
   return [...counts.entries()]
@@ -655,6 +707,41 @@ export async function getRecentMemes(
 // of letting stale full scans stack up behind the latest one.
 const SEARCH_CHUNK = 512;
 
+// Search haystack straight off the raw row. Tag labels are pulled out of the
+// stored JSON with a regex instead of JSON.parse — same label text, none of the
+// per-row parse/allocation cost, and no false hits on JSON keys ("category",
+// "prompt", …) the way matching against the raw JSON string would give.
+const TAG_LABEL_RE = /"label":"((?:[^"\\]|\\.)*)"/g;
+function rowSearchText(row: MemeRow): string {
+  let labels = '';
+  TAG_LABEL_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = TAG_LABEL_RE.exec(row.tags ?? ''))) labels += ' ' + m[1];
+  return (
+    row.ocr_text +
+    ' ' +
+    row.name +
+    ' ' +
+    (row.caption ?? '') +
+    ' ' +
+    (row.transcript ?? '') +
+    labels +
+    ' ' +
+    (row.extra_terms ?? '')
+  ).toLowerCase();
+}
+
+// Materialize only the winners: rowToRecord JSON.parses every meme's tags, and
+// doing that for the whole library on each (debounced) keystroke was most of
+// the search cost. Scoring uses raw columns; the top `limit` rows get parsed.
+function materializeHits(scored: { row: MemeRow; score: number }[], limit: number): SearchHit[] {
+  scored.sort((a, b) => b.score - a.score);
+  return scored.slice(0, limit).map(({ row, score }) => {
+    const { embedding, ...record } = rowToRecord(row);
+    return { ...record, score } as SearchHit;
+  });
+}
+
 export async function searchByVector(
   queryVec: number[],
   queryText: string,
@@ -674,25 +761,14 @@ export async function searchByVector(
     .split(/\s+/)
     .filter((t) => t.length > 2);
 
-  const hits: SearchHit[] = [];
+  const scored: { row: MemeRow; score: number }[] = [];
   for (let i = 0; i < rows.length; i++) {
-    const rec = rowToRecord(rows[i]);
-    let score = dot(queryVec, rec.embedding); // cosine (both normalized)
+    const row = rows[i];
+    let score = dot(queryVec, blobToVec(row.embedding)); // cosine (both normalized)
     if (terms.length) {
-      const hay = (
-        rec.ocrText +
-        ' ' +
-        rec.name +
-        ' ' +
-        rec.caption +
-        ' ' +
-        rec.transcript +
-        ' ' +
-        rec.tags.map((t) => t.label).join(' ') +
-        ' ' +
-        rec.extraTerms
-      ).toLowerCase();
-      const matched = terms.reduce((acc, t) => acc + (hay.includes(t) ? 1 : 0), 0);
+      const hay = rowSearchText(row);
+      let matched = 0;
+      for (const t of terms) if (hay.includes(t)) matched++;
       const lexical = matched / terms.length;
       score += 0.35 * lexical; // lexical boost (incl. world-knowledge association terms)
       // A literal keyword hit (the word actually appears in the meme's text,
@@ -701,8 +777,7 @@ export async function searchByVector(
       // surface to the top instead of being buried past the result cap.
       if (matched === terms.length) score += 0.6;
     }
-    const { embedding, ...record } = rec;
-    hits.push({ ...record, score } as SearchHit);
+    scored.push({ row, score });
 
     // Yield between chunks so the UI thread can render/handle touch, and bail
     // immediately if a newer query has superseded this one.
@@ -712,8 +787,7 @@ export async function searchByVector(
     }
   }
 
-  hits.sort((a, b) => b.score - a.score);
-  return hits.slice(0, limit);
+  return materializeHits(scored, limit);
 }
 
 // "More like this" for the viewer: rank the library by cosine similarity to one
@@ -729,19 +803,16 @@ export async function getSimilarMemes(id: number, limit = 12): Promise<SearchHit
     id
   );
 
-  const hits: SearchHit[] = [];
+  const scored: { row: MemeRow; score: number }[] = [];
   for (let i = 0; i < rows.length; i++) {
-    const rec = rowToRecord(rows[i]);
-    const score = dot(target, rec.embedding); // cosine (both normalized)
-    const { embedding, ...record } = rec;
-    hits.push({ ...record, score } as SearchHit);
+    const row = rows[i];
+    scored.push({ row, score: dot(target, blobToVec(row.embedding)) }); // cosine (both normalized)
     if ((i & (SEARCH_CHUNK - 1)) === SEARCH_CHUNK - 1) {
       await new Promise<void>((resolve) => setTimeout(resolve, 0));
     }
   }
 
-  hits.sort((a, b) => b.score - a.score);
-  return hits.slice(0, limit);
+  return materializeHits(scored, limit);
 }
 
 export async function clearIndex(): Promise<void> {

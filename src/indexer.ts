@@ -2,8 +2,11 @@ import * as VideoThumbnails from 'expo-video-thumbnails';
 import { manipulateAsync, SaveFormat } from 'expo-image-manipulator';
 
 import {
+  classifyExemplars,
   classifyImage,
+  classifyPrompts,
   createYielder,
+  mergeClassified,
   trainHead,
   type EmbeddingsApi,
   type LabelHead,
@@ -20,12 +23,13 @@ import {
   getEmbeddingSample,
   getExemplars,
   getFolders,
+  getIndexedUris,
+  getKnowledgeVersion,
   getLabelVectors,
   getMemesNeedingVision,
   insertMeme,
   insertPendingMeme,
   markVisionFailed,
-  memeExists,
   putLabelVector,
   setMemeVision,
   updateMemeTags,
@@ -167,12 +171,29 @@ export interface ExemplarModel {
   mean: Float32Array | null;
 }
 
+// Trained heads are cached across knowledge builds: most builds (indexing a
+// shared meme, a background enrichment tick, opening the teach sheet) happen
+// when nothing was taught in between, and retraining every head was their
+// dominant cost. The version stamp changes on any exemplar add/remove and as
+// the library grows (which shifts the training background), so a stale model is
+// never served.
+let headsCache: { version: string; model: ExemplarModel } | null = null;
+
 // Train a logistic-regression head for every taught label from the exemplars in
 // the DB, using a random sample of the library as the negative background. Pure
 // vector math (no CLIP/api), so it can also be called standalone (e.g. the
 // detail-view debug readout). Returns the per-label heads plus the library mean
 // used to center vectors at inference time.
 export async function buildExemplarHeads(): Promise<ExemplarModel> {
+  const version = await getKnowledgeVersion();
+  if (headsCache && headsCache.version === version) return headsCache.model;
+
+  const model = await trainExemplarHeads();
+  headsCache = { version, model };
+  return model;
+}
+
+async function trainExemplarHeads(): Promise<ExemplarModel> {
   const exemplars = await getExemplars();
   if (exemplars.length === 0) return { heads: [], mean: null };
 
@@ -299,39 +320,41 @@ export async function runIndex(
     }
   }
 
-  let added = 0;
+  // Skip everything already indexed with one query + hash lookups instead of a
+  // per-file memeExists() round-trip — re-running Index over a mostly-indexed
+  // library now costs one SELECT, not thousands.
+  const known = await getIndexedUris();
+  const queue: SafFile[] = [];
   let skipped = 0;
-  let errors = 0;
-  const total = allFiles.length;
-
-  for (let i = 0; i < allFiles.length; i++) {
-    if (opts.shouldCancel?.()) break;
-    const file = allFiles[i];
-    opts.onProgress?.({ processed: i, total, added, current: file.name });
-    const r = await processFile(api, file, know, i);
-    if (r === 'added') added++;
-    else if (r === 'skipped') skipped++;
-    else errors++;
+  for (const f of allFiles) {
+    if (known.has(f.uri)) skipped++;
+    else queue.push(f);
   }
+
+  const total = allFiles.length;
+  const { added, errors } = await indexQueue(api, queue, know, {
+    shouldCancel: opts.shouldCancel,
+    onFile: (i, file, addedSoFar) =>
+      opts.onProgress?.({ processed: skipped + i, total, added: addedSoFar, current: file.name }),
+  });
 
   opts.onProgress?.({ processed: total, total, added, current: '' });
   return { added, skipped, errors };
 }
 
-// Full per-file pipeline: copy → (thumbnail) → transcode → embed → OCR →
-// classify → store. Logs failures to the index-error table and cleans up temp
-// files. Shared by the folder scan (runIndex) and the share-target importer.
-async function processFile(
-  api: EmbeddingsApi,
-  file: SafFile,
-  know: Knowledge,
-  idx: number
-): Promise<'added' | 'skipped' | 'error'> {
+// Result of stage 1 (prepare). A failed prepare still carries its temp files so
+// stage 2 can clean up and log the error with the right stage name.
+type Prepared =
+  | { ok: true; file: SafFile; modifiedAt: number | null; jpeg: string; temp: string[] }
+  | { ok: false; file: SafFile; stage: string; reason: string; temp: string[] };
+
+// Stage 1 of the per-file pipeline: copy out of SAF → (video keyframe) → JPEG
+// transcode. Pure native I/O + codecs, no model involvement — which is what
+// lets the NEXT file's stage 1 run while the current file sits in the model.
+async function prepareFile(file: SafFile, idx: number): Promise<Prepared> {
   let stage = 'copy';
   const temp: string[] = [];
   try {
-    if (await memeExists(file.uri)) return 'skipped';
-
     // Read the file's own last-modified time so the library can sort by when the
     // meme was actually added, not by when this scan reached it. It's a
     // best-effort read (null on providers that don't report it) — insertMeme
@@ -352,10 +375,25 @@ async function processFile(
     stage = 'transcode';
     const jpeg = await toJpeg(frame);
     temp.push(jpeg);
+    return { ok: true, file, modifiedAt, jpeg, temp };
+  } catch (e) {
+    return { ok: false, file, stage, reason: String((e as Error)?.message ?? e).slice(0, 300), temp };
+  }
+}
 
-    stage = 'embed';
-    const embedding = await api.embedImage(jpeg);
-    const ocrText = await ocr(jpeg);
+// Stage 2: embed + OCR → classify → store. Logs failures to the index-error
+// table and cleans up the prepare stage's temp files.
+async function finishFile(api: EmbeddingsApi, prep: Prepared, know: Knowledge): Promise<'added' | 'error'> {
+  let stage = 'embed';
+  try {
+    if (!prep.ok) {
+      stage = prep.stage;
+      throw new Error(prep.reason);
+    }
+
+    // CLIP (ExecuTorch) and OCR (ML Kit) are independent native calls on the
+    // same JPEG — running them concurrently hides the shorter one entirely.
+    const [embedding, ocrText] = await Promise.all([api.embedImage(prep.jpeg), ocr(prep.jpeg)]);
     const tags = mergeTags(
       classifyImage(embedding, know.labelVecs, know.exemplarHeads, know.mean, know.negativeVecs),
       ocrTags(ocrText)
@@ -363,23 +401,57 @@ async function processFile(
 
     stage = 'store';
     await insertMeme({
-      uri: file.uri,
-      name: file.name,
-      kind: file.kind,
+      uri: prep.file.uri,
+      name: prep.file.name,
+      kind: prep.file.kind,
       embedding,
       ocrText,
       tags,
       extraTerms: extraTermsFor(tags, know.assoc),
-      modifiedAt,
+      modifiedAt: prep.modifiedAt,
     });
     return 'added';
   } catch (e) {
     const reason = String((e as Error)?.message ?? e).slice(0, 300);
-    await addIndexError({ name: file.name, kind: file.kind, stage, reason }).catch(() => {});
+    await addIndexError({ name: prep.file.name, kind: prep.file.kind, stage, reason }).catch(() => {});
     return 'error';
   } finally {
-    for (const t of temp) await deleteCache(t);
+    for (const t of prep.temp) await deleteCache(t);
   }
+}
+
+// Pipelined core shared by the folder scan and the share importer: while file N
+// is being embedded/OCR'd (ExecuTorch + ML Kit), file N+1 is already being
+// copied/thumbnailed/transcoded (I/O + codecs). The stages run in different
+// native pools, so overlapping them hides most of the prepare cost; JS only
+// coordinates. One file is in each stage at a time, so peak memory stays flat.
+async function indexQueue(
+  api: EmbeddingsApi,
+  queue: SafFile[],
+  know: Knowledge,
+  opts: {
+    shouldCancel?: () => boolean;
+    onFile?: (index: number, file: SafFile, addedSoFar: number) => void;
+  }
+): Promise<{ added: number; errors: number }> {
+  let added = 0;
+  let errors = 0;
+  let next: Promise<Prepared> | null = queue.length ? prepareFile(queue[0], 0) : null;
+  for (let i = 0; i < queue.length; i++) {
+    const prep = await next!;
+    if (opts.shouldCancel?.()) {
+      for (const t of prep.temp) await deleteCache(t);
+      break;
+    }
+    // Kick off the next file's prepare BEFORE finishing this one — this is the
+    // overlap that makes the pipeline worth having.
+    next = i + 1 < queue.length ? prepareFile(queue[i + 1], i + 1) : null;
+    opts.onFile?.(i, queue[i], added);
+    const r = await finishFile(api, prep, know);
+    if (r === 'added') added++;
+    else errors++;
+  }
+  return { added, errors };
 }
 
 // Phase 1 of accepting a shared meme: copy each file into the first linked
@@ -433,21 +505,27 @@ export async function indexSavedFiles(
 ): Promise<{ added: number; errors: number }> {
   if (saved.length === 0) return { added: 0, errors: 0 };
   const know = await buildKnowledge(api);
-
-  let added = 0;
-  let errors = 0;
-  for (let i = 0; i < saved.length; i++) {
-    opts.onProgress?.(i, saved.length);
-    const r = await processFile(api, saved[i], know, i);
-    if (r === 'error') errors++;
-    else added++;
-  }
+  const { added, errors } = await indexQueue(api, saved, know, {
+    onFile: (i) => opts.onProgress?.(i, saved.length),
+  });
   opts.onProgress?.(saved.length, saved.length);
   return { added, errors };
 }
 
 export interface RetagResult {
-  updated: number;
+  updated: number; // rows whose tags/terms actually changed (unchanged rows are skipped)
+}
+
+// Zero-shot prompt tags are a pure function of (embedding, curated labels) —
+// teaching can never change them — so they're cached per meme across re-tags
+// and only the taught heads are re-scored each pass. That drops the per-teach
+// cost from "library × ~100 label vectors" to "library × taught heads". The
+// signature guards against a row being re-indexed (new embedding for the same
+// id) or an id being reused after a clear.
+const promptTagCache = new Map<number, { sig: number; tags: Tag[] }>();
+function embSig(e: Float32Array): number {
+  const n = e.length;
+  return n ? n + e[0] + e[n >> 1] * 3 + e[n - 1] * 7 : 0;
 }
 
 // Re-run tagging over every already-indexed meme using current knowledge
@@ -470,10 +548,14 @@ export async function retagAll(
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
     const vec = Array.from(row.embedding);
-    const base = mergeTags(
-      classifyImage(vec, know.labelVecs, know.exemplarHeads, know.mean, know.negativeVecs),
-      ocrTags(row.ocrText)
-    );
+    const sig = embSig(row.embedding);
+    let prompts = promptTagCache.get(row.id);
+    if (!prompts || prompts.sig !== sig) {
+      prompts = { sig, tags: classifyPrompts(vec, know.labelVecs, know.negativeVecs) };
+      promptTagCache.set(row.id, prompts);
+    }
+    const visual = mergeClassified(prompts.tags, classifyExemplars(vec, know.exemplarHeads, know.mean));
+    const base = mergeTags(visual, ocrTags(row.ocrText));
     // Preserve any VLM tags already on the meme — re-tagging applies new
     // taught knowledge, it shouldn't erase the vision pass's work.
     const visionTags = row.tags.filter((t) => t.source === 'vision');
@@ -481,7 +563,11 @@ export async function retagAll(
     // Likewise keep the vision search terms (subjects/text/caption keywords)
     // that already live in extra_terms — union them with the fresh assoc terms.
     const extraTerms = unionTerms(extraTermsFor(merged, know.assoc), row.extraTerms);
-    updates.push({ id: row.id, tags: merged, extraTerms });
+    // Write only what moved: on a typical teach a handful of memes change, so
+    // the transaction shrinks from "whole library" to "what the teach touched".
+    if (extraTerms !== row.extraTerms || JSON.stringify(merged) !== row.rawTags) {
+      updates.push({ id: row.id, tags: merged, extraTerms });
+    }
     opts.onProgress?.(i + 1, rows.length);
     await tick();
   }

@@ -164,11 +164,18 @@ export async function trainHead(
     };
     for (const x of positives) accum(x, 1, wPos);
     for (const x of negatives) accum(x, 0, wNeg);
+    let gmax = 0;
     for (let i = 0; i < dim; i++) {
-      gw[i] = gw[i] / total + l2 * w[i];
-      w[i] -= lr * gw[i];
+      const g = gw[i] / total + l2 * w[i];
+      const ag = g < 0 ? -g : g;
+      if (ag > gmax) gmax = ag;
+      w[i] -= lr * g;
     }
     b -= lr * (gb / total);
+    // Full-batch GD on a few-shot 512-dim problem converges well before the
+    // iteration cap on most teach sets; once the largest per-step weight move is
+    // noise (<1e-4 on unit-norm CLIP features), further passes only burn CPU.
+    if (lr * gmax < 1e-4) break;
     // Hand control back to React whenever this pass has held the JS thread for a
     // frame — so teaching stays responsive whether the negative set is 50 or
     // 5,000 vectors. (Fixed-interval yielding couldn't make that guarantee.)
@@ -190,13 +197,96 @@ function cosTo(a: number[], b: Float32Array): number {
   return s;
 }
 
-// Classify a normalized image vector against two sources:
-//  - text-prompt labels (zero-shot): softmaxed against the negative anchors;
-//    kept only if their probability exceeds the best anchor and MIN_PROB.
-//  - taught labels (few-shot): each label's logistic-regression head scores the
-//    mean-centered vector; kept if its probability beats EXEMPLAR_PROB_THRESHOLD.
-// Merged and de-duplicated by label; taught matches (the user's ground truth)
-// always win and sort first.
+// Zero-shot half: text-prompt labels softmaxed against the negative anchors,
+// kept only if their probability exceeds the best anchor and MIN_PROB. Written
+// as tight loops over one scratch array — this runs once per meme per re-tag
+// (library × ~100 vectors × 512 dims), so intermediate map/spread allocations
+// were real time. Pure function of (embedding, curated labels): teaching never
+// changes its output, which is what lets retagAll cache it per meme.
+export function classifyPrompts(
+  imageVec: number[],
+  labelVecs: LabelVec[],
+  negativeVecs: Float32Array[]
+): Tag[] {
+  const n = labelVecs.length;
+  const m = negativeVecs.length;
+  if (n === 0) return [];
+  const scratch = new Float64Array(n + m);
+  let max = -Infinity;
+  for (let i = 0; i < n; i++) {
+    const c = cosTo(imageVec, labelVecs[i].vec);
+    scratch[i] = c;
+    if (c > max) max = c;
+  }
+  for (let j = 0; j < m; j++) {
+    const c = cosTo(imageVec, negativeVecs[j]);
+    scratch[n + j] = c;
+    if (c > max) max = c;
+  }
+  // softmax over [labels, negatives] with temperature LOGIT_SCALE
+  let sum = 0;
+  for (let k = 0; k < n + m; k++) {
+    const e = Math.exp(LOGIT_SCALE * (scratch[k] - max));
+    scratch[k] = e;
+    sum += e;
+  }
+  if (sum === 0) sum = 1;
+  let negMax = 0;
+  for (let j = 0; j < m; j++) {
+    const p = scratch[n + j] / sum;
+    if (p > negMax) negMax = p;
+  }
+  const out: Tag[] = [];
+  for (let i = 0; i < n; i++) {
+    const p = scratch[i] / sum;
+    if (p > negMax && p > MIN_PROB) {
+      out.push({ label: labelVecs[i].label, category: labelVecs[i].category, score: p, source: 'prompt' });
+    }
+  }
+  return out;
+}
+
+// Few-shot half: each taught label's logistic-regression head scores the
+// mean-centered vector; kept if it beats EXEMPLAR_PROB_THRESHOLD. This is the
+// only part whose output changes when the user teaches.
+export function classifyExemplars(
+  imageVec: number[],
+  exemplarHeads: LabelHead[],
+  mean: Float32Array | null
+): Tag[] {
+  if (exemplarHeads.length === 0) return [];
+  const centered = mean ? imageVec.map((v, i) => v - mean[i]) : imageVec;
+  const out: Tag[] = [];
+  for (const h of exemplarHeads) {
+    const p = headProb(h, centered);
+    if (p > EXEMPLAR_PROB_THRESHOLD) {
+      out.push({ label: h.label, category: h.category, score: p, source: 'exemplar' });
+    }
+  }
+  return out;
+}
+
+// Merge the two halves: de-dupe by label (an exemplar match — the user's ground
+// truth — always wins over a prompt match), taught matches sort first, cap topK.
+export function mergeClassified(fromPrompts: Tag[], fromExemplars: Tag[], topK = 3): Tag[] {
+  const best = new Map<string, Tag>();
+  for (const t of fromPrompts) {
+    const cur = best.get(t.label);
+    if (!cur || t.score > cur.score) best.set(t.label, t);
+  }
+  for (const t of fromExemplars) best.set(t.label, t);
+
+  return [...best.values()]
+    .sort((a, b) => {
+      if (a.source !== b.source) return a.source === 'exemplar' ? -1 : 1;
+      return b.score - a.score;
+    })
+    .slice(0, topK);
+}
+
+// Classify a normalized image vector against both sources. Kept as the one-call
+// form for fresh indexing; re-tagging composes the halves itself so it can cache
+// the (teach-invariant) prompt half per meme.
 export function classifyImage(
   imageVec: number[],
   labelVecs: LabelVec[],
@@ -205,39 +295,9 @@ export function classifyImage(
   negativeVecs: Float32Array[],
   topK = 3
 ): Tag[] {
-  const labelCos = labelVecs.map((l) => cosTo(imageVec, l.vec));
-  const negCos = negativeVecs.map((n) => cosTo(imageVec, n));
-
-  // softmax over [labels, negatives] with temperature LOGIT_SCALE
-  const allCos = [...labelCos, ...negCos];
-  const max = allCos.reduce((m, c) => Math.max(m, c), -Infinity);
-  const exps = allCos.map((c) => Math.exp(LOGIT_SCALE * (c - max)));
-  const sum = exps.reduce((a, b) => a + b, 0) || 1;
-  const probs = exps.map((e) => e / sum);
-
-  const n = labelVecs.length;
-  const negMax = probs.slice(n).reduce((m, p) => Math.max(m, p), 0);
-
-  const fromPrompts: Tag[] = labelVecs
-    .map((l, i) => ({ label: l.label, category: l.category, score: probs[i], source: 'prompt' as const }))
-    .filter((t) => t.score > negMax && t.score > MIN_PROB);
-
-  const centered = mean ? imageVec.map((v, i) => v - mean[i]) : imageVec;
-  const fromExemplars: Tag[] = exemplarHeads
-    .map((h) => ({ label: h.label, category: h.category, score: headProb(h, centered), source: 'exemplar' as const }))
-    .filter((t) => t.score > EXEMPLAR_PROB_THRESHOLD);
-
-  // De-dupe by label: an exemplar match always wins over a prompt match.
-  const best = new Map<string, Tag>();
-  for (const t of [...fromPrompts, ...fromExemplars]) {
-    const cur = best.get(t.label);
-    if (!cur || t.source === 'exemplar' || t.score > cur.score) best.set(t.label, t);
-  }
-
-  return [...best.values()]
-    .sort((a, b) => {
-      if (a.source !== b.source) return a.source === 'exemplar' ? -1 : 1;
-      return b.score - a.score;
-    })
-    .slice(0, topK);
+  return mergeClassified(
+    classifyPrompts(imageVec, labelVecs, negativeVecs),
+    classifyExemplars(imageVec, exemplarHeads, mean),
+    topK
+  );
 }
