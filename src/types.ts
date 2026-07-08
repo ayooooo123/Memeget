@@ -7,7 +7,7 @@ export interface Tag {
   source?: 'prompt' | 'exemplar' | 'ocr' | 'vision'; // how the label was matched
 }
 
-// Lifecycle of the optional LFM2-VL enrichment pass for a meme.
+// Lifecycle of the optional VLM enrichment pass for a meme.
 //  pending -> not yet described · done -> described · failed -> describe errored
 //  (won't auto-retry; a manual "Describe library" re-run can reset failures).
 export type VisionState = 'pending' | 'done' | 'failed';
@@ -25,7 +25,7 @@ export interface MemeRecord {
   name: string;
   kind: MediaKind;
   ocrText: string;
-  caption: string; // one-line scene/joke description from LFM2-VL ('' until enriched)
+  caption: string; // one-line scene/joke description from the VLM ('' until enriched)
   transcript: string; // speech heard in a video, via on-device Whisper ('' until analyzed)
   tags: Tag[];
   extraTerms: string; // association/world-knowledge terms, for search

@@ -23,7 +23,7 @@ import { audioNativeAvailable, extractAudio } from '../modules/memeget-bg';
 import { deleteCache, materialize } from './saf';
 
 // Audio analysis: on-device Whisper (via ExecuTorch — the SAME runtime that
-// already runs CLIP and LFM2-VL) transcribes the speech in video memes so
+// already runs CLIP and the VLM) transcribes the speech in video memes so
 // "what was that clip where the guy says X" becomes a text search. Like the
 // vision pass this is an *enrichment*: videos are already indexed and
 // searchable by their keyframe; this adds what's SAID in them.

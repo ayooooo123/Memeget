@@ -10,7 +10,7 @@ import {
 } from './visionCore';
 import type { VisionEnricher } from './indexer';
 
-// Headless (no-React) LFM2.5-VL via the LLMModule CLASS — the same model the
+// Headless (no-React) VLM (Gemma 4 E2B / LFM2.5-VL) via the LLMModule CLASS — the same model the
 // useLLM hook drives, but instantiable OUTSIDE a component tree. That is the one
 // capability that makes true background indexing possible: the OS-scheduled task
 // (backgroundTask.ts) has no React provider, so it can't use the hook, but it

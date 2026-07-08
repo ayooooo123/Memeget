@@ -352,7 +352,7 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
         .then(refresh)
         .catch(() => {});
       showToast(
-        `Switched to ${q === 'max' ? 'Max · 1.6B' : 'Fast · 450M'} — re-run Describe to apply`,
+        `Switched to ${q === 'max' ? 'Best · Gemma E2B' : 'Fast · LFM 450M'} — re-run Describe to apply`,
         'info'
       );
     },
@@ -424,7 +424,7 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
       </Section>
 
       <Section glyph="👁" title="AI descriptions" tint={colors.volt}>
-        <Row label="LFM2-VL (vision-language)">
+        <Row label="Gemma 4 (vision-language)">
           <StatusDot tone={visionTone} label={visionLabel} />
         </Row>
         {vision.enabled && !vision.ready && !vision.error && (
@@ -450,17 +450,17 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
 
         {vision.enabled && (
           <>
-            <Text style={[styles.note, { marginTop: 2 }]}>Model size</Text>
+            <Text style={[styles.note, { marginTop: 2 }]}>Model</Text>
             <View style={styles.qualityRow}>
               <Chip
-                label="Fast · 450M"
-                active={vision.quality === 'fast'}
-                onPress={() => onSwitchQuality('fast')}
-              />
-              <Chip
-                label="Max · 1.6B"
+                label="Best · Gemma E2B"
                 active={vision.quality === 'max'}
                 onPress={() => onSwitchQuality('max')}
+              />
+              <Chip
+                label="Fast · LFM 450M"
+                active={vision.quality === 'fast'}
+                onPress={() => onSwitchQuality('fast')}
               />
             </View>
 

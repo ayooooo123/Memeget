@@ -40,7 +40,7 @@ import type { Tag } from './types';
 // Confidence in how a label was matched, highest first:
 //   ocr      — text literally in the image (watermark/caption)
 //   exemplar — the user's own ground truth, taught by example
-//   vision   — LFM2-VL's open-vocabulary read of the image
+//   vision   — the VLM's (Gemma) open-vocabulary read of the image
 //   prompt   — CLIP zero-shot guess against the fixed label vocabulary
 const TAG_RANK: Record<NonNullable<Tag['source']>, number> = {
   ocr: 4,
@@ -64,7 +64,7 @@ function dedupeRankTags(tags: Tag[], cap = 6): Tag[] {
 }
 
 // Fast-pass merge: CLIP/exemplar visual tags + OCR-derived tags. Kept tight (4)
-// because the slower LFM2-VL pass adds richer tags later.
+// because the slower VLM pass adds richer tags later.
 function mergeTags(visual: Tag[], fromOcr: Tag[]): Tag[] {
   return dedupeRankTags([...visual, ...fromOcr], 4);
 }
@@ -98,10 +98,11 @@ async function ocr(uri: string): Promise<string> {
   }
 }
 
-// Width fed to the VLM. LFM2-VL processes up to 512px natively and tiles
-// anything larger — every extra tile is more vision tokens and a proportionally
-// longer prefill, the dominant cost of a caption. Capping at 512 keeps most
-// memes to a single tile (the ML Kit OCR hint covers any small text we'd lose).
+// Width fed to the VLM. Both supported models resample the input to their
+// vision encoder's working resolution anyway (Gemma to a fixed square, LFM by
+// tiling over 512), so feeding more pixels only inflates decode/transcode cost —
+// and for LFM, prefill time, the dominant cost of a caption. Capping at 512
+// keeps that bounded (the ML Kit OCR hint covers any small text we'd lose).
 const VLM_FRAME_WIDTH = 512;
 
 // Turn a library item (image or video) into a local JPEG path the models can
@@ -473,7 +474,7 @@ export async function retagAll(
       classifyImage(vec, know.labelVecs, know.exemplarHeads, know.mean, know.negativeVecs),
       ocrTags(row.ocrText)
     );
-    // Preserve any LFM2-VL tags already on the meme — re-tagging applies new
+    // Preserve any VLM tags already on the meme — re-tagging applies new
     // taught knowledge, it shouldn't erase the vision pass's work.
     const visionTags = row.tags.filter((t) => t.source === 'vision');
     const merged = dedupeRankTags([...base, ...visionTags], 6);
@@ -500,7 +501,7 @@ function unionTerms(a: string, b: string): string {
   return [...set].join(' ');
 }
 
-// ---- LFM2-VL enrichment pass -------------------------------------------------
+// ---- VLM enrichment pass (Gemma 4 / LFM2.5-VL) --------------------------------
 
 export interface EnrichProgress {
   done: number;
@@ -619,7 +620,7 @@ async function describeAndSave(
     const res = await vision.describe(frame.jpeg, m.ocrText);
     if (!res) return { status: 'unready' }; // model went unready; leave pending
 
-    // LFM's open-vocabulary tags join the existing CLIP/OCR/exemplar tags,
+    // The VLM's open-vocabulary tags join the existing CLIP/OCR/exemplar tags,
     // ranked between them (above CLIP guesses, below the user's truth).
     const visionTags: Tag[] = res.tags.map((label) => ({
       label,

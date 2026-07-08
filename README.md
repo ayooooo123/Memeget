@@ -53,7 +53,7 @@ There are exactly two times the app reaches out, both download-only:
    (ExecuTorch fetches it, then caches it locally at
    `{documentDirectory}/react-native-executorch/`). Opting in to AI descriptions
    or audio analysis (Settings) likewise triggers a one-time download of that
-   model (LFM2-VL / Whisper), cached the same way. After that, you can stay
+   model (Gemma 4 / Whisper), cached the same way. After that, you can stay
    airplane-mode forever. To make it *truly* zero-network from install, the model
    can be bundled into the APK assets — see "Next steps".
 2. **Only when you share a link** (see above), Memeget contacts that link's host
@@ -141,7 +141,14 @@ weights — editable and on-device:
   (e.g. "Milady"). It stores that meme's image embedding as an **exemplar**;
   future images are tagged by image-to-image similarity to your exemplars, so the
   model doesn't need to have ever heard the word. New format drops? Teach it in
-  seconds.
+  seconds. After each teach, Memeget shows the **look-alikes** from your library —
+  tap the ones that are also that label and every confirmation becomes another
+  example, so one teach round yields a sharp label instead of a single-example
+  guess. The teach sheet also suggests the meme's **own tags** as label names.
+- **Hold a tag to confirm or fix it** — in the viewer, long-press any tag chip and
+  say whether it's right (✓ teaches it as a positive example) or wrong (✗ teaches
+  a "NOT this" correction). Model guesses become your ground truth one hold at a
+  time.
 - **Taught-knowledge list** (Settings → *Taught knowledge*) — every tag you've
   taught, with how many examples back it and how many memes currently carry it.
   Each tag shows a **you / pack / you + pack** chip so you can tell your own

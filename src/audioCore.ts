@@ -11,7 +11,7 @@ export const AUDIO_ENABLED_KEY = 'audio.enabled';
 // ships. Meme audio is short and mostly English; tiny keeps the one-time
 // download and RAM cost far below the vision models while still nailing the
 // "what was that TikTok voice saying" use case. Same ExecuTorch engine as
-// CLIP/LFM2-VL, so no new runtime is shipped.
+// CLIP/the VLM, so no new runtime is shipped.
 export const AUDIO_MODEL = WHISPER_TINY_EN;
 
 // Cap how much audio is decoded + transcribed per video. Memes are short; two

@@ -76,7 +76,7 @@ export async function initDb(): Promise<void> {
   if (!cols.some((c) => c.name === 'pending')) {
     await db.execAsync(`ALTER TABLE memes ADD COLUMN pending INTEGER NOT NULL DEFAULT 0;`);
   }
-  // Migrate databases that predate LFM2-VL enrichment (caption + vision_state).
+  // Migrate databases that predate VLM enrichment (caption + vision_state).
   // Existing rows default to vision_state='pending' so they get picked up by the
   // first "Describe library" run.
   if (!cols.some((c) => c.name === 'caption')) {
@@ -178,7 +178,7 @@ export async function insertMeme(args: {
   const db = await getDb();
   const now = Date.now();
   // caption + vision_state use their column defaults ('' / 'pending'); the
-  // LFM2-VL pass fills them in later via setMemeVision. audio_state queues
+  // VLM pass fills them in later via setMemeVision. audio_state queues
   // videos for the transcription pass the same way; images have no audio to
   // analyze. modified_at drives the library's "most recent first" order — it's
   // the file's own last-modified time when we could read it, otherwise the
@@ -340,9 +340,9 @@ export async function bulkUpdateMemeTags(
   }
 }
 
-// ---- LFM2-VL enrichment ------------------------------------------------------
+// ---- VLM enrichment ----------------------------------------------------------
 
-// Memes still awaiting (or due to retry) an LFM2-VL description. Returns just
+// Memes still awaiting (or due to retry) a VLM description. Returns just
 // the fields the enricher needs to re-materialize the image and write back.
 export interface MemeNeedingVisionRow {
   id: number;

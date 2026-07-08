@@ -26,6 +26,7 @@ import {
   BG_ONLY_CHARGING_KEY,
   BG_PAUSE_HOT_KEY,
   BG_PAUSE_LOW_KEY,
+  DEFAULT_QUALITY,
   ENABLED_KEY,
   MODEL,
   POWER_CACHE_MS,
@@ -41,11 +42,12 @@ import { registerBackgroundDescribe, unregisterBackgroundDescribe } from './back
 export { memesPerHour, intensityLabel } from './visionCore';
 export type { VisionQuality, VisionResult, BgThrottles } from './visionCore';
 
-// LFM2.5-VL, on-device, via ExecuTorch — the SAME runtime that already runs
-// CLIP, so there's no second engine to ship. Used purely as an *enrichment*
-// pass: CLIP stays the fast embedding/similarity + teach-by-example backbone;
-// LFM reads each meme and writes back a human caption, the literal text, and
-// open-vocabulary tags CLIP's fixed 97-label vocabulary can never produce.
+// Gemma 4 E2B (multimodal), on-device, via ExecuTorch — the SAME runtime that
+// already runs CLIP, so there's no second engine to ship. Used purely as an
+// *enrichment* pass: CLIP stays the fast embedding/similarity + teach-by-example
+// backbone; the VLM reads each meme and writes back a human caption, the literal
+// text, and open-vocabulary tags CLIP's fixed 97-label vocabulary can never
+// produce. A smaller LFM2.5-VL 450M stays available as the "fast" tier.
 //
 // This module owns the FOREGROUND path (the React hook + in-app paced loop).
 // The headless, OS-scheduled background path lives in backgroundTask.ts and
@@ -85,7 +87,7 @@ const Ctx = createContext<VisionApi | null>(null);
 
 export function VisionProvider({ children }: { children: React.ReactNode }) {
   const [enabled, setEnabledState] = useState(false);
-  const [quality, setQualityState] = useState<VisionQuality>('fast');
+  const [quality, setQualityState] = useState<VisionQuality>(DEFAULT_QUALITY);
   const [bgEnabled, setBgEnabledState] = useState(false);
   const [bgIntensity, setBgIntensityState] = useState(0.25);
   const [throttles, setThrottles] = useState<BgThrottles>({
