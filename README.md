@@ -139,9 +139,14 @@ weights — editable and on-device:
   the meme's searchable text, so "ethereum" finds a Milady meme that never says it.
 - **Teach-by-example** — tap any meme → *Teach a label* to name a character/format
   (e.g. "Milady"). It stores that meme's image embedding as an **exemplar**;
-  future images are tagged by image-to-image similarity to your exemplars, so the
-  model doesn't need to have ever heard the word. New format drops? Teach it in
-  seconds. After each teach, Memeget shows the **look-alikes** from your library —
+  future images are matched by a per-label classifier trained on your examples
+  (`src/learnCore.ts`), so the model doesn't need to have ever heard the word.
+  New format drops? Teach it in seconds. The learner is built for the few-shot
+  case: library samples that look like your examples are excluded from the
+  negatives (so teaching a label that's *common* in your library can't backfire),
+  each label's acceptance threshold is calibrated against your actual library,
+  a nearest-exemplar pathway catches close template variants from even a single
+  example, and your "NOT this" corrections veto it. After each teach, Memeget shows the **look-alikes** from your library —
   tap the ones that are also that label and every confirmation becomes another
   example, so one teach round yields a sharp label instead of a single-example
   guess. The teach sheet also suggests the meme's **own tags** as label names.

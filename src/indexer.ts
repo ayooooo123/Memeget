@@ -1,17 +1,17 @@
 import * as VideoThumbnails from 'expo-video-thumbnails';
 import { manipulateAsync, SaveFormat } from 'expo-image-manipulator';
 
+import type { EmbeddingsApi } from './embeddings';
 import {
   classifyExemplars,
   classifyImage,
   classifyPrompts,
   createYielder,
   mergeClassified,
-  trainHead,
-  type EmbeddingsApi,
+  trainLabelModel,
   type LabelHead,
   type LabelVec,
-} from './embeddings';
+} from './learnCore';
 import {
   addIndexError,
   bulkUpdateMemeTags,
@@ -216,34 +216,60 @@ async function trainExemplarHeads(): Promise<ExemplarModel> {
     return out;
   };
 
-  const background = sample.map(center);
+  const backgroundCentered = sample.map(center);
 
   // Group taught examples by label, split into positive ("is a <label>") and
-  // explicit negative ("is NOT a <label>") sets.
-  const byLabel = new Map<string, { category: string; pos: number[][]; neg: number[][] }>();
+  // explicit negative ("is NOT a <label>") sets — keeping both the raw vectors
+  // (for background cleaning + the kNN pathway) and the centered ones (for the
+  // logistic head).
+  interface Group {
+    category: string;
+    posRaw: number[][];
+    posCentered: number[][];
+    negRaw: number[][];
+    negCentered: number[][];
+  }
+  const byLabel = new Map<string, Group>();
   for (const e of exemplars) {
-    const g = byLabel.get(e.label) ?? { category: e.category, pos: [], neg: [] };
-    (e.positive ? g.pos : g.neg).push(center(e.vector));
+    const g =
+      byLabel.get(e.label) ??
+      { category: e.category, posRaw: [], posCentered: [], negRaw: [], negCentered: [] };
+    if (e.positive) {
+      g.posRaw.push(e.vector);
+      g.posCentered.push(center(e.vector));
+    } else {
+      g.negRaw.push(e.vector);
+      g.negCentered.push(center(e.vector));
+    }
     byLabel.set(e.label, g);
   }
 
-  // A handful of explicit "not this" corrections would be drowned out by ~500
-  // background samples, so replicate each so it carries real weight (~1 copy per
-  // 25 background items) — one correction visibly moves the boundary.
-  const negBoost = Math.max(1, Math.round(background.length / 25));
-
   const heads: LabelHead[] = [];
   for (const [label, g] of byLabel) {
-    if (g.pos.length === 0) continue; // need at least one positive to train
-    // Negatives = random background + every other label's positives (they're
-    // definitionally not this label) + this label's oversampled corrections.
-    const otherPos: number[][] = [];
-    for (const [l2, g2] of byLabel) if (l2 !== label) otherPos.push(...g2.pos);
-    const corrections: number[][] = [];
-    for (const n of g.neg) for (let k = 0; k < negBoost; k++) corrections.push(n);
-    // trainHead yields internally, so awaiting it keeps the UI alive even when
-    // many labels have been taught (one full train each, back to back).
-    heads.push(await trainHead(label, g.category, g.pos, [...background, ...otherPos, ...corrections]));
+    if (g.posRaw.length === 0) continue; // need at least one positive to train
+    const otherPosRaw: number[][] = [];
+    const otherPosCentered: number[][] = [];
+    for (const [l2, g2] of byLabel) {
+      if (l2 === label) continue;
+      otherPosRaw.push(...g2.posRaw);
+      otherPosCentered.push(...g2.posCentered);
+    }
+    // trainLabelModel yields internally, so awaiting it keeps the UI alive even
+    // when many labels have been taught (one full train each, back to back).
+    heads.push(
+      await trainLabelModel({
+        label,
+        category: g.category,
+        posRaw: g.posRaw,
+        posCentered: g.posCentered,
+        negRaw: g.negRaw,
+        negCentered: g.negCentered,
+        backgroundRaw: sample,
+        backgroundCentered,
+        otherPosRaw,
+        otherPosCentered,
+      })
+    );
   }
   return { heads, mean };
 }

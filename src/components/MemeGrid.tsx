@@ -23,7 +23,7 @@ import * as Sharing from 'expo-sharing';
 import { useVideoPlayer, VideoView } from 'expo-video';
 
 import { addExemplar, deleteMeme, getLabels, getMemeEmbedding, getSimilarMemes } from '../db';
-import { EXEMPLAR_PROB_THRESHOLD, headProb } from '../embeddings';
+import { scoreExemplar } from '../learnCore';
 import { buildExemplarHeads, type ExemplarModel } from '../indexer';
 import { success, tap, warn } from '../haptics';
 import { deleteFile, materialize, readImageBase64, readVideoFrameBase64 } from '../saf';
@@ -170,7 +170,9 @@ export const MemeGrid = React.memo(function MemeGrid({
   } | null>(null);
   const [confirmSaving, setConfirmSaving] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [matchInfo, setMatchInfo] = useState<{ label: string; score: number }[] | null>(null);
+  const [matchInfo, setMatchInfo] = useState<
+    { label: string; score: number; matched: boolean }[] | null
+  >(null);
   const [matchBusy, setMatchBusy] = useState(false);
   // Cache the trained heads so we don't retrain on every modal open; cleared
   // after teaching so the next open reflects the new example.
@@ -267,9 +269,13 @@ export const MemeGrid = React.memo(function MemeGrid({
         setMatchInfo([]);
         return;
       }
-      const centered = model.mean ? Array.from(emb, (v, i) => v - model.mean![i]) : Array.from(emb);
+      const raw = Array.from(emb);
+      const centered = model.mean ? Array.from(emb, (v, i) => v - model.mean![i]) : raw;
       const scored = model.heads
-        .map((h) => ({ label: h.label, score: headProb(h, centered) }))
+        .map((h) => {
+          const s = scoreExemplar(h, raw, centered);
+          return { label: h.label, score: s.prob, matched: s.matched };
+        })
         .sort((a, b) => b.score - a.score)
         .slice(0, 6);
       setMatchInfo(scored);
@@ -790,7 +796,7 @@ function ViewerSheet({
 }: {
   item: Item | null;
   busy: boolean;
-  matchInfo: { label: string; score: number }[] | null;
+  matchInfo: { label: string; score: number; matched: boolean }[] | null;
   matchBusy: boolean;
   onClose: () => void;
   onShare: () => void;
@@ -1043,7 +1049,7 @@ function ViewerSheet({
                   {matchInfo.map((m) => (
                     <Text key={m.label} style={styles.mutedSmall}>
                       {m.label}: {(m.score * 100).toFixed(0)}%{' '}
-                      {m.score >= EXEMPLAR_PROB_THRESHOLD ? '✓ match' : ''}
+                      {m.matched ? '✓ match' : ''}
                     </Text>
                   ))}
                 </View>
