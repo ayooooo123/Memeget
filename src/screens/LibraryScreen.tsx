@@ -300,10 +300,14 @@ export function LibraryScreen() {
         onProgress: setProgress,
         shouldCancel: () => cancelRef.current,
       });
+      // Old-space taught examples were re-based during the index; apply them.
+      if (res.migratedExemplars > 0 && embApi.ready) await retagAll(embApi);
       await refresh();
       success();
       const errNote = res.errors > 0 ? ` · ${res.errors} failed` : '';
-      showToast(`Indexed ${res.added} new · ${res.skipped} already known${errNote}`, 'success');
+      const migNote =
+        res.migratedExemplars > 0 ? ` · ${res.migratedExemplars} taught examples migrated` : '';
+      showToast(`Indexed ${res.added} new · ${res.skipped} already known${errNote}${migNote}`, 'success');
     } catch (e) {
       showToast(`Indexing failed: ${String(e)}`, 'error');
     } finally {

@@ -76,7 +76,13 @@ Remaining migration reality (now guarded at runtime):
   swapped build silently search a foreign-space index
 - exemplars carry a `model` column; only rows stamped for the ACTIVE primary
   space train heads or appear in taught-knowledge/suggestion lists, so a swap
-  disables (not corrupts) old teaching until re-taught or re-imported
+  disables (not corrupts) old teaching
+- hidden old-space examples are MIGRATED automatically: each self-taught
+  example remembers its source meme, and once the library is re-indexed the
+  meme's fresh embedding is exactly what re-teaching would store. Migration
+  runs at the end of every index pass and from a Settings button; only
+  pack-imported examples (no source image) need a pack re-exported under the
+  new model.
 - custom `.pte` preprocessing must match S2 exactly. Verified against the
   0.9.2 native runtime: images arrive resized to the model's own declared input
   size, RGB, pixel/255, NO mean/std normalization, CHW planar — bake
@@ -109,11 +115,11 @@ EXPO_PUBLIC_MEMEGET_DINOV2_DIM=768
 EXPO_PUBLIC_MEMEGET_DINOV2_MODEL_ID=dinov2
 ```
 
-When configured, new indexing writes a normalized DINO visual vector beside the
-primary image vector. The foreground app also backfills older rows in small
-batches while the visual model is ready. `More like this` automatically uses a
-matching stamped DINO vector and falls back to the primary image vector for rows
-that are missing or stale.
+When configured, DINO vectors come exclusively from the idle-time backfill loop
+— they are deliberately NOT computed during indexing, because fp32 DINOv2-base
+costs a multiple of the primary embed per frame and made fresh indexing crawl.
+The library is browsable immediately; `More like this` upgrades from primary to
+DINO similarity per pair as the backfill catches up.
 
 Groundwork in place:
 

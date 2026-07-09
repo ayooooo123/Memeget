@@ -14,6 +14,7 @@ import {
   countAudioFailed,
   countMemes,
   countMemesDescribed,
+  countStaleExemplars,
   countMemesNeedingAudio,
   countMemesNeedingVision,
   countMemesTranscribed,
@@ -26,6 +27,7 @@ import {
   getIndexModelMismatch,
   getTaughtLabelStats,
   importExemplars,
+  migrateStaleExemplars,
   removeFolder,
   resetAudioFailures,
   resetVisionState,
@@ -66,11 +68,14 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
   const [modelMismatch, setModelMismatch] = useState<{ stored: string; current: string } | null>(
     null
   );
+  const [staleExemplars, setStaleExemplars] = useState(0);
+  const [migrating, setMigrating] = useState(false);
 
   const refresh = useCallback(async () => {
     setFolders(await getFolders());
     setCount(await countMemes());
     setModelMismatch(await getIndexModelMismatch().catch(() => null));
+    setStaleExemplars(await countStaleExemplars().catch(() => 0));
     setTaughtStats(await getTaughtLabelStats().catch(() => []));
     setImportedPacks(await getImportedPacks().catch(() => []));
     setErrors(await getIndexErrors());
@@ -363,6 +368,36 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
     },
     [vision, refresh]
   );
+
+  // Re-base old-space taught examples onto the current index (see
+  // migrateStaleExemplars), then re-tag so the labels actually reappear.
+  const onMigrateExemplars = useCallback(async () => {
+    if (migrating) return;
+    setMigrating(true);
+    try {
+      const { migrated, unmigratable } = await migrateStaleExemplars();
+      if (migrated > 0 && emb.ready) {
+        await retagAll(emb);
+        emitLibraryChanged(); // tags changed under the Library's feet
+      }
+      await refresh();
+      success();
+      const packNote =
+        unmigratable > 0
+          ? ` · ${unmigratable} pack example${unmigratable === 1 ? '' : 's'} need a re-exported pack`
+          : '';
+      showToast(
+        migrated > 0
+          ? `Migrated ${migrated} taught example${migrated === 1 ? '' : 's'}${packNote}`
+          : `Nothing migrated — index the library first${packNote}`,
+        migrated > 0 ? 'success' : 'info'
+      );
+    } catch (e) {
+      showToast(`Migration failed: ${String(e)}`, 'error');
+    } finally {
+      setMigrating(false);
+    }
+  }, [migrating, emb, refresh]);
 
   const onClear = useCallback(() => {
     warn();
@@ -713,6 +748,23 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
           value={String(taughtStats.length)}
           valueTint={colors.good}
         />
+        {staleExemplars > 0 && (
+          <>
+            <Text style={styles.errText}>
+              {staleExemplars} taught example{staleExemplars === 1 ? '' : 's'} from a previous
+              embedding model {staleExemplars === 1 ? 'is' : 'are'} hidden — they aren't deleted,
+              but their vectors don't work in the current model's space. Your own examples can be
+              migrated automatically from their source memes (index the library first if you
+              haven't); pack-imported ones need a pack made with the current model.
+            </Text>
+            <Button
+              small
+              label={migrating ? 'Migrating…' : 'Migrate taught examples'}
+              onPress={onMigrateExemplars}
+              disabled={migrating || !emb.ready}
+            />
+          </>
+        )}
         {taughtStats.length === 0 ? (
           <Text style={styles.note}>
             Open any meme and use “This IS a…” to teach a new character or format by example (e.g.
