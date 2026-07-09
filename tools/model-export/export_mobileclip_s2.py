@@ -61,10 +61,27 @@ class TextTower(torch.nn.Module):
 def export_pte(module: torch.nn.Module, example_inputs, out_path: pathlib.Path) -> None:
     from executorch.backends.xnnpack.partition.xnnpack_partitioner import XnnpackPartitioner
     from executorch.exir import to_edge_transform_and_lower
+    from torch._decomp import get_decompositions
 
     module.eval()
     with torch.no_grad():
         ep = torch.export.export(module, example_inputs)
+
+    # The XNNPACK delegate can't compile standalone batch norms — the ones
+    # conv-fusion can't fold (FastViT's stem/backbone kept some even after timm
+    # reparameterization). Decompose them into elementwise ops it can take.
+    # No-op for models without batch norm (e.g. DINOv2).
+    bn_ops = []
+    for name in (
+        "_native_batch_norm_legit_no_training",
+        "_native_batch_norm_legit",
+        "native_batch_norm",
+    ):
+        op = getattr(torch.ops.aten, name, None)
+        if op is not None:
+            bn_ops.append(op.default)
+    ep = ep.run_decompositions(get_decompositions(bn_ops))
+
     prog = to_edge_transform_and_lower(ep, partitioner=[XnnpackPartitioner()]).to_executorch()
     out_path.write_bytes(prog.buffer)
     print(f"wrote {out_path} ({out_path.stat().st_size / 1e6:.1f} MB)")
