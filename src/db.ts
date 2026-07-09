@@ -1,5 +1,6 @@
 import * as SQLite from 'expo-sqlite';
 
+import { hybridSearchScore } from './searchCore';
 import type { MemeRecord, MediaKind, SearchHit, Tag, LinkedFolder, Exemplar } from './types';
 
 let dbPromise: Promise<SQLite.SQLiteDatabase> | null = null;
@@ -23,6 +24,7 @@ export async function initDb(): Promise<void> {
       embedding BLOB NOT NULL,
       ocr_text TEXT NOT NULL DEFAULT '',
       caption TEXT NOT NULL DEFAULT '',
+      caption_embedding BLOB,
       transcript TEXT NOT NULL DEFAULT '',
       tags TEXT NOT NULL DEFAULT '[]',
       extra_terms TEXT NOT NULL DEFAULT '',
@@ -81,6 +83,9 @@ export async function initDb(): Promise<void> {
   // first "Describe library" run.
   if (!cols.some((c) => c.name === 'caption')) {
     await db.execAsync(`ALTER TABLE memes ADD COLUMN caption TEXT NOT NULL DEFAULT '';`);
+  }
+  if (!cols.some((c) => c.name === 'caption_embedding')) {
+    await db.execAsync(`ALTER TABLE memes ADD COLUMN caption_embedding BLOB;`);
   }
   if (!cols.some((c) => c.name === 'vision_state')) {
     await db.execAsync(`ALTER TABLE memes ADD COLUMN vision_state TEXT NOT NULL DEFAULT 'pending';`);
@@ -250,6 +255,7 @@ interface MemeRow {
   embedding: Uint8Array;
   ocr_text: string;
   caption: string;
+  caption_embedding: Uint8Array | null;
   transcript: string;
   tags: string;
   extra_terms: string;
@@ -425,6 +431,7 @@ export interface DescribedVisionRow {
   embedding: Float32Array;
   ocrText: string;
   caption: string;
+  captionEmbedding: Float32Array | null;
   tags: Tag[];
   extraTerms: string;
 }
@@ -435,13 +442,17 @@ export async function getDescribedVisionRecords(): Promise<DescribedVisionRow[]>
     embedding: Uint8Array;
     ocr_text: string;
     caption: string;
+    caption_embedding: Uint8Array | null;
     tags: string;
     extra_terms: string;
-  }>("SELECT embedding, ocr_text, caption, tags, extra_terms FROM memes WHERE vision_state = 'done'");
+  }>(
+    "SELECT embedding, ocr_text, caption, caption_embedding, tags, extra_terms FROM memes WHERE vision_state = 'done'"
+  );
   return rows.map((r) => ({
     embedding: blobToVec(r.embedding),
     ocrText: r.ocr_text ?? '',
     caption: r.caption ?? '',
+    captionEmbedding: r.caption_embedding ? blobToVec(r.caption_embedding) : null,
     tags: safeParseTags(r.tags),
     extraTerms: r.extra_terms ?? '',
   }));
@@ -451,16 +462,53 @@ export async function getDescribedVisionRecords(): Promise<DescribedVisionRow[]>
 // refreshed search terms, and flip vision_state so it isn't re-described.
 export async function setMemeVision(
   id: number,
-  args: { caption: string; tags: Tag[]; extraTerms: string }
+  args: { caption: string; tags: Tag[]; extraTerms: string; captionEmbedding?: number[] | null }
 ): Promise<void> {
   const db = await getDb();
   await db.runAsync(
-    "UPDATE memes SET caption = ?, tags = ?, extra_terms = ?, vision_state = 'done' WHERE id = ?",
+    "UPDATE memes SET caption = ?, caption_embedding = ?, tags = ?, extra_terms = ?, vision_state = 'done' WHERE id = ?",
     args.caption,
+    args.captionEmbedding ? vecToBlob(args.captionEmbedding) : null,
     JSON.stringify(args.tags),
     args.extraTerms,
     id
   );
+}
+
+export interface MemeNeedingCaptionEmbeddingRow {
+  id: number;
+  caption: string;
+  tags: Tag[];
+  ocrText: string;
+  extraTerms: string;
+}
+
+export async function getMemesNeedingCaptionEmbedding(
+  limit = 25
+): Promise<MemeNeedingCaptionEmbeddingRow[]> {
+  const db = await getDb();
+  const rows = await db.getAllAsync<{
+    id: number;
+    caption: string;
+    tags: string;
+    ocr_text: string;
+    extra_terms: string;
+  }>(
+    "SELECT id, caption, tags, ocr_text, extra_terms FROM memes WHERE pending = 0 AND vision_state = 'done' AND caption != '' AND caption_embedding IS NULL ORDER BY indexed_at DESC, id DESC LIMIT ?",
+    limit
+  );
+  return rows.map((r) => ({
+    id: r.id,
+    caption: r.caption ?? '',
+    tags: safeParseTags(r.tags),
+    ocrText: r.ocr_text ?? '',
+    extraTerms: r.extra_terms ?? '',
+  }));
+}
+
+export async function setMemeCaptionEmbedding(id: number, embedding: number[]): Promise<void> {
+  const db = await getDb();
+  await db.runAsync('UPDATE memes SET caption_embedding = ? WHERE id = ?', vecToBlob(embedding), id);
 }
 
 // Mark a meme as failed-to-describe WITHOUT touching its existing tags/terms,
@@ -664,14 +712,14 @@ export async function getRecentMemes(
   // to the same index time), and without a stable secondary sort LIMIT/OFFSET
   // paging repeats and skips rows — which is what broke infinite scroll.
   const rows = kind
-    ? await db.getAllAsync<Omit<MemeRow, 'embedding'>>(
+    ? await db.getAllAsync<Omit<MemeRow, 'embedding' | 'caption_embedding'>>(
         `SELECT id, uri, name, kind, ocr_text, caption, transcript, tags, extra_terms, vision_state, audio_state, indexed_at, modified_at, pending
          FROM memes WHERE kind = ? ORDER BY modified_at DESC, id DESC LIMIT ? OFFSET ?`,
         kind,
         limit,
         offset
       )
-    : await db.getAllAsync<Omit<MemeRow, 'embedding'>>(
+    : await db.getAllAsync<Omit<MemeRow, 'embedding' | 'caption_embedding'>>(
         `SELECT id, uri, name, kind, ocr_text, caption, transcript, tags, extra_terms, vision_state, audio_state, indexed_at, modified_at, pending
          FROM memes ORDER BY modified_at DESC, id DESC LIMIT ? OFFSET ?`,
         limit,
@@ -764,7 +812,11 @@ export async function searchByVector(
   const scored: { row: MemeRow; score: number }[] = [];
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
-    let score = dot(queryVec, blobToVec(row.embedding)); // cosine (both normalized)
+    let score = hybridSearchScore(
+      queryVec,
+      blobToVec(row.embedding),
+      row.caption_embedding ? blobToVec(row.caption_embedding) : null
+    );
     if (terms.length) {
       const hay = rowSearchText(row);
       let matched = 0;

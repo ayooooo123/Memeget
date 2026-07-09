@@ -3,6 +3,7 @@ import { useLLM } from 'react-native-executorch';
 
 import { getSetting, setSetting } from './db';
 import {
+  backfillCaptionEmbeddings,
   enrichLibrary,
   enrichNextMeme,
   type EnrichProgress,
@@ -37,6 +38,7 @@ import {
   type VisionResult,
 } from './visionCore';
 import { registerBackgroundDescribe, unregisterBackgroundDescribe } from './backgroundTask';
+import { useEmbeddings } from './embeddings';
 
 // Re-export the pure helpers/types screens import from this module.
 export { memesPerHour, intensityLabel } from './visionCore';
@@ -86,6 +88,7 @@ export interface VisionApi {
 const Ctx = createContext<VisionApi | null>(null);
 
 export function VisionProvider({ children }: { children: React.ReactNode }) {
+  const embeddings = useEmbeddings();
   const [enabled, setEnabledState] = useState(false);
   const [quality, setQualityState] = useState<VisionQuality>(DEFAULT_QUALITY);
   const [bgEnabled, setBgEnabledState] = useState(false);
@@ -185,7 +188,27 @@ export function VisionProvider({ children }: { children: React.ReactNode }) {
     return parseVision(reply);
   };
   const enricherRef = useRef<VisionEnricher>({ ready: false, describe });
-  enricherRef.current = { ready: enabled && llm.isReady, describe };
+  enricherRef.current = {
+    ready: enabled && llm.isReady,
+    describe,
+    embedText: embeddings.ready ? embeddings.embedText : undefined,
+  };
+
+  useEffect(() => {
+    if (!embeddings.ready) return;
+    let cancelled = false;
+    const loop = async () => {
+      while (!cancelled) {
+        const n = await backfillCaptionEmbeddings(embeddings, { limit: 20 }).catch(() => 0);
+        if (n === 0) break;
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      }
+    };
+    loop();
+    return () => {
+      cancelled = true;
+    };
+  }, [embeddings.ready]);
 
   // One generation at a time on a single accelerator: this mutex makes the
   // background trickle and the manual burst mutually exclusive. A blocked caller

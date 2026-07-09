@@ -26,11 +26,13 @@ import {
   getIndexedUris,
   getKnowledgeVersion,
   getLabelVectors,
+  getMemesNeedingCaptionEmbedding,
   getMemesNeedingVision,
   insertMeme,
   insertPendingMeme,
   markVisionFailed,
   putLabelVector,
+  setMemeCaptionEmbedding,
   setMemeVision,
   updateMemeTags,
   type DescribedVisionRow,
@@ -634,10 +636,12 @@ export interface EnrichResult {
 export interface VisionEnricher {
   ready: boolean;
   describe: (jpegPath: string, ocrHint?: string) => Promise<VisionResult | null>;
+  embedText?: (text: string) => Promise<number[]>;
 }
 
 interface VisionPayload {
   caption: string;
+  captionEmbedding: number[] | null;
   tags: Tag[];
   extraTerms: string;
 }
@@ -714,6 +718,13 @@ function visionExtraTerms(merged: Tag[], assoc: Map<string, string[]>, res: Visi
   return `${extraTermsFor(merged, assoc)} ${extra}`.replace(/\s+/g, ' ').trim();
 }
 
+function captionSearchText(caption: string, tags: Tag[], extraTerms: string): string {
+  return [caption, tags.map((t) => t.label).join(' '), extraTerms]
+    .join(' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 // Run the model on one meme and persist. Returns the saved payload (to seed the
 // twin index) or a terminal status. Re-derives the frame each time so memory
 // stays flat across a whole library; times the call for telemetry.
@@ -742,10 +753,13 @@ async function describeAndSave(
     }));
     const merged = dedupeRankTags([...m.tags, ...visionTags], 6);
     const extraTerms = visionExtraTerms(merged, assoc, res);
+    const captionEmbedding = vision.embedText
+      ? await vision.embedText(captionSearchText(res.caption, merged, extraTerms))
+      : null;
 
-    await setMemeVision(m.id, { caption: res.caption, tags: merged, extraTerms });
+    await setMemeVision(m.id, { caption: res.caption, captionEmbedding, tags: merged, extraTerms });
     recordDuration(Date.now() - started);
-    return { status: 'done', payload: { caption: res.caption, tags: merged, extraTerms } };
+    return { status: 'done', payload: { caption: res.caption, captionEmbedding, tags: merged, extraTerms } };
   } catch {
     await markVisionFailed(m.id).catch(() => {});
     return { status: 'failed' };
@@ -769,8 +783,24 @@ async function enrichOne(
     const visionTags = twin.tags.filter((t) => t.source === 'vision');
     const merged = dedupeRankTags([...m.tags, ...visionTags], 6);
     const extraTerms = `${extraTermsFor(merged, assoc)} ${twin.extraTerms}`.replace(/\s+/g, ' ').trim();
-    await setMemeVision(m.id, { caption: twin.caption, tags: merged, extraTerms });
-    pushTwin({ embedding: m.embedding, ocrText: m.ocrText, caption: twin.caption, tags: merged, extraTerms });
+    const captionEmbedding =
+      twin.captionEmbedding ??
+      (vision.embedText ? await vision.embedText(captionSearchText(twin.caption, merged, extraTerms)) : null);
+    const captionEmbeddingArray = captionEmbedding ? Array.from(captionEmbedding) : null;
+    await setMemeVision(m.id, {
+      caption: twin.caption,
+      captionEmbedding: captionEmbeddingArray,
+      tags: merged,
+      extraTerms,
+    });
+    pushTwin({
+      embedding: m.embedding,
+      ocrText: m.ocrText,
+      caption: twin.caption,
+      captionEmbedding: captionEmbeddingArray ? Float32Array.from(captionEmbeddingArray) : null,
+      tags: merged,
+      extraTerms,
+    });
     telem.deduped += 1;
     return 'deduped';
   }
@@ -782,6 +812,9 @@ async function enrichOne(
       embedding: m.embedding,
       ocrText: m.ocrText,
       caption: r.payload.caption,
+      captionEmbedding: r.payload.captionEmbedding
+        ? Float32Array.from(r.payload.captionEmbedding)
+        : null,
       tags: r.payload.tags,
       extraTerms: r.payload.extraTerms,
     });
@@ -838,6 +871,20 @@ export async function enrichNextMeme(
   const twins = await getTwinIndex();
   const r = await enrichOne(vision, queue[0], assoc, twins);
   return r === 'unready' ? 'empty' : r;
+}
+
+export async function backfillCaptionEmbeddings(
+  api: Pick<EmbeddingsApi, 'embedText'>,
+  opts: { limit?: number; onProgress?: (done: number, total: number) => void } = {}
+): Promise<number> {
+  const rows = await getMemesNeedingCaptionEmbedding(opts.limit ?? 25);
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    const text = captionSearchText(row.caption, row.tags, row.extraTerms);
+    if (text) await setMemeCaptionEmbedding(row.id, await api.embedText(text));
+    opts.onProgress?.(i + 1, rows.length);
+  }
+  return rows.length;
 }
 
 // Bounded session for an OS-scheduled background run: describe up to `maxItems`
