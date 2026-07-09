@@ -37,6 +37,17 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    # Custom embedding models (see docs/embedding-roadmap.md). These are inlined
+    # into the JS bundle at build time; the app downloads each file once on
+    # first launch from the models-v1 release (built + shape-verified by
+    # .github/workflows/export-models.yml). MobileCLIP-S2 replaces CLIP as the
+    # primary image/text space (Settings shows an index/model mismatch warning
+    # until the library is re-indexed); DINOv2 powers visual similarity.
+    env:
+      EXPO_PUBLIC_MEMEGET_MOBILECLIP_S2_IMAGE_MODEL_SOURCE: https://github.com/ayooooo123/Memeget/releases/download/models-v1/mobileclip_s2_image_xnnpack_fp32.pte
+      EXPO_PUBLIC_MEMEGET_MOBILECLIP_S2_TEXT_MODEL_SOURCE: https://github.com/ayooooo123/Memeget/releases/download/models-v1/mobileclip_s2_text_xnnpack_fp32.pte
+      EXPO_PUBLIC_MEMEGET_MOBILECLIP_S2_TOKENIZER_SOURCE: https://github.com/ayooooo123/Memeget/releases/download/models-v1/mobileclip_s2_tokenizer.json
+      EXPO_PUBLIC_MEMEGET_DINOV2_IMAGE_MODEL_SOURCE: https://github.com/ayooooo123/Memeget/releases/download/models-v1/dinov2_base_xnnpack_fp32.pte
     steps:
       - name: Checkout
         uses: actions/checkout@v4
