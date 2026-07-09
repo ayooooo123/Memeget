@@ -1,6 +1,6 @@
 import * as SQLite from 'expo-sqlite';
 
-import { VISUAL_EMBEDDING_MODEL } from './embeddingModels';
+import { PRIMARY_EMBEDDING_MODEL, VISUAL_EMBEDDING_MODEL } from './embeddingModels';
 import { hybridSearchScore } from './searchCore';
 import type { MemeRecord, MediaKind, SearchHit, Tag, LinkedFolder, Exemplar } from './types';
 import { selectVisualSimilarityVector } from './visualSearch';
@@ -49,6 +49,7 @@ export async function initDb(): Promise<void> {
     );
     CREATE TABLE IF NOT EXISTS label_vectors (
       label TEXT PRIMARY KEY,
+      model TEXT NOT NULL DEFAULT 'clip-vit-base-patch32',
       vector BLOB NOT NULL
     );
     CREATE TABLE IF NOT EXISTS exemplars (
@@ -133,6 +134,12 @@ export async function initDb(): Promise<void> {
   if (!exCols.some((c) => c.name === 'pack')) {
     await db.execAsync(`ALTER TABLE exemplars ADD COLUMN pack TEXT NOT NULL DEFAULT '';`);
   }
+  const labelCols = await db.getAllAsync<{ name: string }>('PRAGMA table_info(label_vectors)');
+  if (!labelCols.some((c) => c.name === 'model')) {
+    await db.execAsync(
+      `ALTER TABLE label_vectors ADD COLUMN model TEXT NOT NULL DEFAULT 'clip-vit-base-patch32';`
+    );
+  }
 }
 
 // ---- float32 <-> blob helpers -------------------------------------------------
@@ -200,6 +207,8 @@ export async function insertMeme(args: {
   name: string;
   kind: string;
   embedding: number[]; // already normalized
+  visualEmbedding?: number[] | null; // already normalized, optional DINO/S2-side visual space
+  visualModel?: string | null;
   ocrText: string;
   tags: Tag[];
   extraTerms: string;
@@ -214,12 +223,14 @@ export async function insertMeme(args: {
   // the file's own last-modified time when we could read it, otherwise the
   // index time so a row is never 0.
   await db.runAsync(
-    `INSERT OR REPLACE INTO memes (uri, name, kind, embedding, ocr_text, tags, extra_terms, indexed_at, modified_at, audio_state)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO memes (uri, name, kind, embedding, visual_embedding, visual_model, ocr_text, tags, extra_terms, indexed_at, modified_at, audio_state)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     args.uri,
     args.name,
     args.kind,
     vecToBlob(args.embedding),
+    args.visualEmbedding ? vecToBlob(args.visualEmbedding) : null,
+    args.visualEmbedding ? (args.visualModel ?? '') : '',
     args.ocrText,
     JSON.stringify(args.tags),
     args.extraTerms,
@@ -521,6 +532,50 @@ export async function getMemesNeedingCaptionEmbedding(
 export async function setMemeCaptionEmbedding(id: number, embedding: number[]): Promise<void> {
   const db = await getDb();
   await db.runAsync('UPDATE memes SET caption_embedding = ? WHERE id = ?', vecToBlob(embedding), id);
+}
+
+export interface MemeNeedingVisualEmbeddingRow {
+  id: number;
+  uri: string;
+  name: string;
+  kind: 'image' | 'video';
+}
+
+export async function getMemesNeedingVisualEmbedding(
+  model = VISUAL_EMBEDDING_MODEL.id,
+  limit = 25
+): Promise<MemeNeedingVisualEmbeddingRow[]> {
+  const db = await getDb();
+  const rows = await db.getAllAsync<{
+    id: number;
+    uri: string;
+    name: string;
+    kind: string;
+  }>(
+    "SELECT id, uri, name, kind FROM memes WHERE pending = 0 AND (visual_embedding IS NULL OR visual_model != ?) ORDER BY indexed_at DESC, id DESC LIMIT ?",
+    model,
+    limit
+  );
+  return rows.map((r) => ({
+    id: r.id,
+    uri: r.uri,
+    name: r.name,
+    kind: r.kind as 'image' | 'video',
+  }));
+}
+
+export async function setMemeVisualEmbedding(
+  id: number,
+  model: string,
+  embedding: number[]
+): Promise<void> {
+  const db = await getDb();
+  await db.runAsync(
+    'UPDATE memes SET visual_embedding = ?, visual_model = ? WHERE id = ?',
+    vecToBlob(embedding),
+    model,
+    id
+  );
 }
 
 // Mark a meme as failed-to-describe WITHOUT touching its existing tags/terms,
@@ -932,21 +987,29 @@ export async function removeFolder(uri: string): Promise<void> {
 
 // ---- cached label vectors ----------------------------------------------------
 
-export async function getLabelVectors(): Promise<Map<string, Float32Array>> {
+export async function getLabelVectors(
+  model = PRIMARY_EMBEDDING_MODEL.id
+): Promise<Map<string, Float32Array>> {
   const db = await getDb();
   const rows = await db.getAllAsync<{ label: string; vector: Uint8Array }>(
-    'SELECT * FROM label_vectors'
+    'SELECT label, vector FROM label_vectors WHERE model = ?',
+    model
   );
   const map = new Map<string, Float32Array>();
   for (const r of rows) map.set(r.label, blobToVec(r.vector));
   return map;
 }
 
-export async function putLabelVector(label: string, vec: number[]): Promise<void> {
+export async function putLabelVector(
+  label: string,
+  vec: number[],
+  model = PRIMARY_EMBEDDING_MODEL.id
+): Promise<void> {
   const db = await getDb();
   await db.runAsync(
-    'INSERT OR REPLACE INTO label_vectors (label, vector) VALUES (?, ?)',
+    'INSERT OR REPLACE INTO label_vectors (label, model, vector) VALUES (?, ?, ?)',
     label,
+    model,
     vecToBlob(vec)
   );
 }

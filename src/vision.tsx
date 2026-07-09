@@ -4,6 +4,7 @@ import { useLLM } from 'react-native-executorch';
 import { getSetting, setSetting } from './db';
 import {
   backfillCaptionEmbeddings,
+  backfillVisualEmbeddings,
   enrichLibrary,
   enrichNextMeme,
   type EnrichProgress,
@@ -209,6 +210,22 @@ export function VisionProvider({ children }: { children: React.ReactNode }) {
       cancelled = true;
     };
   }, [embeddings.ready]);
+
+  useEffect(() => {
+    if (!embeddings.visualReady || !embeddings.embedVisualImage) return;
+    let cancelled = false;
+    const loop = async () => {
+      while (!cancelled) {
+        const n = await backfillVisualEmbeddings(embeddings, { limit: 10 }).catch(() => 0);
+        if (n === 0) break;
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      }
+    };
+    loop();
+    return () => {
+      cancelled = true;
+    };
+  }, [embeddings.visualReady, embeddings.embedVisualImage]);
 
   // One generation at a time on a single accelerator: this mutex makes the
   // background trickle and the manual burst mutually exclusive. A blocked caller

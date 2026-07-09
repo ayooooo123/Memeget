@@ -7,6 +7,11 @@ import {
 } from 'react-native-executorch';
 
 import { normalize } from './db';
+import {
+  PRIMARY_EMBEDDING_MODEL,
+  VISUAL_EMBEDDING_MODEL,
+  type EmbeddingModelSpec,
+} from './embeddingModels';
 
 // NOTE: image and text MUST come from the same CLIP model so their vectors
 // share a space. If react-native-executorch ever renames these constants,
@@ -23,37 +28,86 @@ import { normalize } from './db';
 const IMAGE_MODEL = CLIP_VIT_BASE_PATCH32_IMAGE_QUANTIZED;
 const TEXT_MODEL = CLIP_VIT_BASE_PATCH32_TEXT;
 
+function customImageModel(spec: EmbeddingModelSpec) {
+  return spec.imageModelSource
+    ? ({ modelName: 'custom' as const, modelSource: spec.imageModelSource } as any)
+    : IMAGE_MODEL;
+}
+
+function customTextModel(spec: EmbeddingModelSpec) {
+  return spec.textModelSource && spec.tokenizerSource
+    ? ({
+        modelName: 'custom' as const,
+        modelSource: spec.textModelSource,
+        tokenizerSource: spec.tokenizerSource,
+      } as any)
+    : TEXT_MODEL;
+}
+
+const PRIMARY_IMAGE_MODEL = customImageModel(PRIMARY_EMBEDDING_MODEL);
+const PRIMARY_TEXT_MODEL = customTextModel(PRIMARY_EMBEDDING_MODEL);
+const VISUAL_IMAGE_MODEL = customImageModel(VISUAL_EMBEDDING_MODEL);
+
 export interface EmbeddingsApi {
   ready: boolean;
   progress: number; // 0..1 model download/load progress
   error: string | null;
+  primaryModel: EmbeddingModelSpec;
+  primaryLabel: string;
+  visualModel: EmbeddingModelSpec;
+  visualReady: boolean;
+  visualProgress: number; // 0..1 model download/load progress
+  visualError: string | null;
   embedImage: (uri: string) => Promise<number[]>; // normalized
   embedText: (text: string) => Promise<number[]>; // normalized
+  embedVisualImage?: (uri: string) => Promise<{ model: string; embedding: number[] } | null>; // normalized
 }
 
 const Ctx = createContext<EmbeddingsApi | null>(null);
 
 export function EmbeddingsProvider({ children }: { children: React.ReactNode }) {
-  const image = useImageEmbeddings({ model: IMAGE_MODEL });
-  const text = useTextEmbeddings({ model: TEXT_MODEL });
+  const image = useImageEmbeddings({ model: PRIMARY_IMAGE_MODEL });
+  const text = useTextEmbeddings({ model: PRIMARY_TEXT_MODEL });
+  const visual = useImageEmbeddings({
+    model: VISUAL_IMAGE_MODEL,
+    preventLoad: !VISUAL_EMBEDDING_MODEL.available,
+  } as any);
 
   const api = useMemo<EmbeddingsApi>(() => {
     const imageReady = (image as any).isReady ?? false;
     const textReady = (text as any).isReady ?? false;
+    const visualReady = VISUAL_EMBEDDING_MODEL.available && ((visual as any).isReady ?? false);
     const dp = (image as any).downloadProgress;
     const tp = (text as any).downloadProgress;
+    const vp = (visual as any).downloadProgress;
     const progress =
       typeof dp === 'number' && typeof tp === 'number' ? (dp + tp) / 2 : dp ?? tp ?? 0;
     const err = (image as any).error ?? (text as any).error ?? null;
+    const visualErr = VISUAL_EMBEDDING_MODEL.available ? ((visual as any).error ?? null) : null;
 
     return {
       ready: imageReady && textReady,
       progress,
       error: err ? String(err) : null,
+      primaryModel: PRIMARY_EMBEDDING_MODEL,
+      primaryLabel: PRIMARY_EMBEDDING_MODEL.label,
+      visualModel: VISUAL_EMBEDDING_MODEL,
+      visualReady,
+      visualProgress: typeof vp === 'number' ? vp : 0,
+      visualError: visualErr ? String(visualErr) : null,
       embedImage: async (uri: string) => normalize(Array.from(await image.forward(uri))),
       embedText: async (t: string) => normalize(Array.from(await text.forward(t))),
+      embedVisualImage: VISUAL_EMBEDDING_MODEL.available
+        ? async (uri: string) => {
+            if (!((visual as any).isReady ?? false)) return null;
+            return {
+              model: VISUAL_EMBEDDING_MODEL.id,
+              embedding: normalize(Array.from(await visual.forward(uri))),
+            };
+          }
+        : undefined,
     };
-  }, [image, text]);
+  }, [image, text, visual]);
 
   return <Ctx.Provider value={api}>{children}</Ctx.Provider>;
 }
