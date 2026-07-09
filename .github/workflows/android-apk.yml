@@ -18,8 +18,8 @@ on:
     branches:
       - main
       # TEMPORARY: build this feature branch's APK for on-device testing of the
-      # new native audio decoder. Remove before merging to main.
-      - claude/audio-analysis-library-ux-wijy5w
+      # Gemma VLM switch + teach/search overhaul. Remove before merging to main.
+      - claude/gemma-local-vl-model-7viqpi
     tags:
       - 'v*'
   workflow_dispatch:
