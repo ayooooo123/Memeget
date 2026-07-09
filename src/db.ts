@@ -1123,6 +1123,89 @@ export async function getExemplars(): Promise<Exemplar[]> {
   }));
 }
 
+// ---- stale-exemplar migration ---------------------------------------------------
+//
+// After a primary-model swap, exemplars taught under the old model are hidden
+// (their vectors mean nothing in the new space) — but every self-taught example
+// remembers WHICH meme it came from. Once the library has been re-indexed in
+// the new space, that meme's fresh embedding IS what teaching it again would
+// store, so the example can be migrated automatically instead of re-taught.
+// Pack-imported examples carry no source image (vectors only) and cannot be
+// migrated — those need a pack re-exported under the new model.
+
+export async function countStaleExemplars(): Promise<number> {
+  const db = await getDb();
+  const row = await db.getFirstAsync<{ c: number }>(
+    'SELECT COUNT(*) as c FROM exemplars WHERE model != ?',
+    PRIMARY_EMBEDDING_MODEL.id
+  );
+  return row?.c ?? 0;
+}
+
+export async function migrateStaleExemplars(): Promise<{ migrated: number; unmigratable: number }> {
+  const db = await getDb();
+  const stale = await db.getAllAsync<{
+    id: number;
+    label: string;
+    category: string;
+    associations: string;
+    source_uri: string;
+    is_positive: number;
+    origin: string;
+    pack: string;
+  }>(
+    'SELECT id, label, category, associations, source_uri, is_positive, origin, pack FROM exemplars WHERE model != ?',
+    PRIMARY_EMBEDDING_MODEL.id
+  );
+
+  let migrated = 0;
+  let unmigratable = 0;
+  for (const e of stale) {
+    if (!e.source_uri) {
+      unmigratable++; // imported pack — no source image to re-embed from
+      continue;
+    }
+    const meme = await db.getFirstAsync<{ embedding: Uint8Array }>(
+      'SELECT embedding FROM memes WHERE uri = ? AND pending = 0',
+      e.source_uri
+    );
+    if (!meme || meme.embedding.byteLength === 0) {
+      unmigratable++; // source meme gone or not re-indexed yet
+      continue;
+    }
+    // Skip if an equivalent current-space example already exists (e.g. the
+    // user re-taught it manually before migrating).
+    const dup = await db.getFirstAsync<{ id: number }>(
+      'SELECT id FROM exemplars WHERE model = ? AND label = ? AND source_uri = ? AND is_positive = ?',
+      PRIMARY_EMBEDDING_MODEL.id,
+      e.label,
+      e.source_uri,
+      e.is_positive
+    );
+    if (!dup) {
+      await db.runAsync(
+        `INSERT INTO exemplars (label, category, vector, associations, source_uri, is_positive, origin, pack, model, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        e.label,
+        e.category,
+        meme.embedding,
+        e.associations,
+        e.source_uri,
+        e.is_positive,
+        e.origin,
+        e.pack,
+        PRIMARY_EMBEDDING_MODEL.id,
+        Date.now()
+      );
+    }
+    // The old-space original is superseded either way — drop it so the stale
+    // count converges to just the genuinely unmigratable rows.
+    await db.runAsync('DELETE FROM exemplars WHERE id = ?', e.id);
+    migrated++;
+  }
+  return { migrated, unmigratable };
+}
+
 export async function countExemplars(): Promise<number> {
   const db = await getDb();
   const row = await db.getFirstAsync<{ c: number }>(

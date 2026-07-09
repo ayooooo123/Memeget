@@ -33,6 +33,7 @@ import {
   insertPendingMeme,
   markVisionFailed,
   markVisualEmbeddingFailed,
+  migrateStaleExemplars,
   putLabelVector,
   setMemeCaptionEmbedding,
   setMemeVisualEmbedding,
@@ -161,6 +162,9 @@ export interface IndexResult {
   added: number;
   skipped: number;
   errors: number;
+  // Old-space taught examples automatically re-based onto the fresh index
+  // (see migrateStaleExemplars) — when > 0 the caller should re-tag.
+  migratedExemplars: number;
 }
 
 // Everything needed to tag an image: zero-shot text labels, taught exemplars,
@@ -376,8 +380,13 @@ export async function runIndex(
       opts.onProgress?.({ processed: skipped + i, total, added: addedSoFar, current: file.name }),
   });
 
+  // The library is now (re)indexed in the active primary space, which is the
+  // one moment old-space taught examples can be re-based automatically from
+  // their source memes' fresh embeddings. Cheap no-op when nothing is stale.
+  const { migrated } = await migrateStaleExemplars().catch(() => ({ migrated: 0 }));
+
   opts.onProgress?.({ processed: total, total, added, current: '' });
-  return { added, skipped, errors };
+  return { added, skipped, errors, migratedExemplars: migrated };
 }
 
 // Result of stage 1 (prepare). A failed prepare still carries its temp files so
@@ -429,13 +438,16 @@ async function finishFile(api: EmbeddingsApi, prep: Prepared, know: Knowledge): 
       throw new Error(prep.reason);
     }
 
-    // CLIP (ExecuTorch) and OCR (ML Kit) are independent native calls on the
-    // same JPEG — running them concurrently hides the shorter one entirely.
-    const [embedding, ocrText, visual] = await Promise.all([
-      api.embedImage(prep.jpeg),
-      ocr(prep.jpeg),
-      api.embedVisualImage ? api.embedVisualImage(prep.jpeg) : Promise.resolve(null),
-    ]);
+    // Primary embed (ExecuTorch) and OCR (ML Kit) are independent native calls
+    // on the same JPEG — running them concurrently hides the shorter one.
+    //
+    // The DINO visual embed is deliberately NOT here: fp32 DINOv2-base costs a
+    // multiple of the primary embed per frame, and putting it in the indexing
+    // hot path made a fresh index crawl. The idle-time backfill loop
+    // (backfillVisualEmbeddings) owns visual vectors instead — the library is
+    // browsable/searchable immediately and "More like this" upgrades to DINO
+    // as the backfill catches up.
+    const [embedding, ocrText] = await Promise.all([api.embedImage(prep.jpeg), ocr(prep.jpeg)]);
     const tags = mergeTags(
       classifyImage(embedding, know.labelVecs, know.exemplarHeads, know.mean, know.negativeVecs),
       ocrTags(ocrText)
@@ -447,8 +459,6 @@ async function finishFile(api: EmbeddingsApi, prep: Prepared, know: Knowledge): 
       name: prep.file.name,
       kind: prep.file.kind,
       embedding,
-      visualEmbedding: visual?.embedding ?? null,
-      visualModel: visual?.model ?? null,
       ocrText,
       tags,
       extraTerms: extraTermsFor(tags, know.assoc),
