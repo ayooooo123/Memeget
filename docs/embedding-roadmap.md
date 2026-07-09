@@ -26,7 +26,10 @@ then stores a second CLIP text vector for each VLM-described meme:
 
 - input text: caption + merged labels + extra search terms
 - storage: `memes.caption_embedding`
-- ranking: `max(image_score, 0.2 * image_score + 0.8 * caption_score)`
+- ranking: `image_score + 0.9 * max(0, caption_score - 0.55)` — only the margin
+  ABOVE the unrelated-text baseline counts. CLIP text↔text cosines sit at ~0.5+
+  even for unrelated captions, so blending the raw cosine would hand every
+  described meme a flat boost and bury undescribed-but-relevant results.
 
 This avoids re-embedding images and improves queries where text-to-image CLIP is
 weak but Gemma/LFM has already described the joke, scene, subject, or format in
@@ -66,15 +69,20 @@ When those are present, `EmbeddingsProvider` loads both towers through
 the active image/text model, teaching-pack compatibility stamps with S2, and the
 label-vector cache is rebuilt under the S2 model id.
 
-Remaining migration reality:
+Remaining migration reality (now guarded at runtime):
 
-- existing `memes.embedding` rows are still CLIP-space until the library is
-  re-indexed
-- existing exemplar vectors cannot be mixed with S2 vectors, so old taught
-  labels need re-teaching or source-image migration if the original source URIs
-  are still readable
-- custom `.pte` preprocessing must match S2 exactly; bake resize/normalization
-  into the graph unless the runtime provides a confirmed S2 preprocessor
+- every index run stamps `settings.index.primaryModel`; on mismatch Settings
+  shows a hard "Clear index → re-Index → re-teach" warning instead of letting a
+  swapped build silently search a foreign-space index
+- exemplars carry a `model` column; only rows stamped for the ACTIVE primary
+  space train heads or appear in taught-knowledge/suggestion lists, so a swap
+  disables (not corrupts) old teaching until re-taught or re-imported
+- custom `.pte` preprocessing must match S2 exactly. Verified against the
+  0.9.2 native runtime: images arrive resized to the model's own declared input
+  size, RGB, pixel/255, NO mean/std normalization, CHW planar — bake
+  normalization into the exported graph. Text models receive int64
+  `(tokenIds, attentionMask)` and must output the final pooled embedding
+  (the app L2-normalizes in JS).
 
 ## Tier 3: DINOv2 visual similarity
 
@@ -110,10 +118,13 @@ that are missing or stale.
 Groundwork in place:
 
 - nullable `visual_embedding` and `visual_model` columns
-- `src/visualSearch.ts` chooses DINO vectors only when present, available, and
-  stamped for the active visual model
-- `getSimilarMemes()` routes through that helper and falls back to the primary
-  image vector while DINOv2 is unavailable or not backfilled
+- `src/visualSearch.ts` chooses the space PER PAIR: DINO only when both rows
+  carry a vector stamped for the active visual model, otherwise
+  primary-vs-primary — a cross-space dot (768-dim DINO against 512-dim CLIP)
+  is never computed
+- the backfill stamps permanently-failing rows (`visual_model = 'failed:<id>'`)
+  so an unreadable file can't wedge the loop, and bails without stamping when
+  the model goes transiently unready
 
 The current learner already recovers much of DINO's value through calibrated
 heads and nearest-exemplar matching. DINOv2 should be treated as an additive

@@ -1,4 +1,5 @@
 import {
+  selectPairVectors,
   selectVisualSimilarityVector,
   visualEmbeddingNeedsRefresh,
   type VisualSimilarityRecord,
@@ -54,6 +55,34 @@ describe('visual search routing', () => {
         { ...VISUAL_EMBEDDING_MODEL, available: false }
       )
     ).toBe(imageEmbedding);
+  });
+
+  it('scores a pair in the visual space only when BOTH rows carry a stamped vector', () => {
+    const dinoA = v(0, 1, 0);
+    const dinoB = v(0, 0.9, 0.1);
+    const both = selectPairVectors(
+      rec({ visualEmbedding: dinoA, visualModel: VISUAL_EMBEDDING_MODEL.id }),
+      rec({ visualEmbedding: dinoB, visualModel: VISUAL_EMBEDDING_MODEL.id }),
+      ACTIVE_DINO
+    );
+    expect(both.a).toBe(dinoA);
+    expect(both.b).toBe(dinoB);
+  });
+
+  it('never mixes spaces in a pair: one stale side drops BOTH to the image space', () => {
+    const targetImage = v(1, 0);
+    const candidateImage = v(0.8, 0.6);
+    const { a, b } = selectPairVectors(
+      rec({
+        imageEmbedding: targetImage,
+        visualEmbedding: v(0, 1, 0), // target has a fresh DINO vector…
+        visualModel: VISUAL_EMBEDDING_MODEL.id,
+      }),
+      rec({ imageEmbedding: candidateImage }), // …but the candidate is not backfilled yet
+      ACTIVE_DINO
+    );
+    expect(a).toBe(targetImage);
+    expect(b).toBe(candidateImage);
   });
 
   it('knows whether a row needs visual embedding refresh', () => {
