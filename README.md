@@ -175,8 +175,10 @@ weights — editable and on-device:
 ## Next steps / roadmap
 
 - Bundle the CLIP model in assets for zero-network-from-install.
-- Track modern embedding backends (MobileCLIP-S2 / DINOv2) as custom-export work;
-  see `docs/embedding-roadmap.md`.
+- Modern embedding backends: model-space stamps are centralized for a future
+  MobileCLIP-S2 migration, and the DB/search path has a DINOv2 visual-similarity
+  slot that currently falls back to CLIP until a compatible export exists. See
+  `docs/embedding-roadmap.md`.
 - Multi-frame video sampling (currently one keyframe).
 - Recursive folder walking.
 - Music *recognition* (Shazam-style fingerprinting needs an on-device fingerprint

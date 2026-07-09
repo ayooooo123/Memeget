@@ -5,6 +5,16 @@ Memeget currently uses the only image/text embedding pair exposed by
 CLIP text tower. The package registry does not currently expose MobileCLIP,
 SigLIP, or DINO image embeddings.
 
+The code now centralizes vector-space metadata in `src/embeddingModels.ts`:
+
+- `PRIMARY_EMBEDDING_MODEL`: current CLIP ViT-B/32 image/text space
+- `VISUAL_EMBEDDING_MODEL`: reserved DINOv2 visual-similarity space
+- `FUTURE_EMBEDDING_MODELS.mobileClipS2`: planned MobileCLIP-S2 primary space
+- `modelStamp()` / `isTeachingPackCompatible()` compatibility helpers
+
+Teaching packs derive their model/dimension stamp from that registry, so a
+future S2 switch has one compatibility gate instead of duplicated literals.
+
 ## Tier 1: hybrid caption retrieval
 
 Implemented now. The app keeps the CLIP image vector as the universal backbone,
@@ -35,6 +45,15 @@ image/text encoder when it is available in the runtime or exported reliably:
   exactly. Do not rely on the current CLIP-oriented native image preprocessor
   unless the exported graph bakes in resize/normalization.
 
+Groundwork already in place:
+
+- S2 is represented as an unavailable future primary model in
+  `FUTURE_EMBEDDING_MODELS.mobileClipS2`
+- teaching-pack compatibility is centralized through the active primary model
+- future migration should update `PRIMARY_EMBEDDING_MODEL`, invalidate cached
+  `label_vectors`, and require a full re-index/re-teach unless exemplar source
+  images are re-readable
+
 ## Tier 3: DINOv2 visual similarity
 
 DINOv2 is not a replacement for text search because it has no text tower. It is
@@ -47,9 +66,17 @@ a second visual-similarity space for:
 Expected schema shape:
 
 - keep `memes.embedding` as the text-search CLIP/S2 vector
-- add `memes.visual_embedding` for DINOv2
-- add a model stamp for the visual space so future custom exports can migrate
-  independently from text search
+- use `memes.visual_embedding` for DINOv2
+- use `memes.visual_model` as the visual-space model stamp so future custom
+  exports can migrate independently from text search
+
+Groundwork already in place:
+
+- nullable `visual_embedding` and `visual_model` columns
+- `src/visualSearch.ts` chooses DINO vectors only when present, available, and
+  stamped for the active visual model
+- `getSimilarMemes()` routes through that helper and falls back to CLIP while
+  DINOv2 is unavailable
 
 The current learner already recovers much of DINO's value through calibrated
 heads and nearest-exemplar matching. DINOv2 should be treated as an additive

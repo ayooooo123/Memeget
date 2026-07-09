@@ -1,7 +1,9 @@
 import * as SQLite from 'expo-sqlite';
 
+import { VISUAL_EMBEDDING_MODEL } from './embeddingModels';
 import { hybridSearchScore } from './searchCore';
 import type { MemeRecord, MediaKind, SearchHit, Tag, LinkedFolder, Exemplar } from './types';
+import { selectVisualSimilarityVector } from './visualSearch';
 
 let dbPromise: Promise<SQLite.SQLiteDatabase> | null = null;
 
@@ -22,6 +24,8 @@ export async function initDb(): Promise<void> {
       name TEXT NOT NULL,
       kind TEXT NOT NULL,
       embedding BLOB NOT NULL,
+      visual_embedding BLOB,
+      visual_model TEXT NOT NULL DEFAULT '',
       ocr_text TEXT NOT NULL DEFAULT '',
       caption TEXT NOT NULL DEFAULT '',
       caption_embedding BLOB,
@@ -72,6 +76,12 @@ export async function initDb(): Promise<void> {
   const cols = await db.getAllAsync<{ name: string }>('PRAGMA table_info(memes)');
   if (!cols.some((c) => c.name === 'extra_terms')) {
     await db.execAsync(`ALTER TABLE memes ADD COLUMN extra_terms TEXT NOT NULL DEFAULT '';`);
+  }
+  if (!cols.some((c) => c.name === 'visual_embedding')) {
+    await db.execAsync(`ALTER TABLE memes ADD COLUMN visual_embedding BLOB;`);
+  }
+  if (!cols.some((c) => c.name === 'visual_model')) {
+    await db.execAsync(`ALTER TABLE memes ADD COLUMN visual_model TEXT NOT NULL DEFAULT '';`);
   }
   // Migrate v2 databases that predate the pending flag (rows saved-but-not-yet-
   // indexed, so a shared meme can show in the list before it's embedded).
@@ -253,6 +263,8 @@ interface MemeRow {
   name: string;
   kind: string;
   embedding: Uint8Array;
+  visual_embedding: Uint8Array | null;
+  visual_model: string;
   ocr_text: string;
   caption: string;
   caption_embedding: Uint8Array | null;
@@ -712,14 +724,14 @@ export async function getRecentMemes(
   // to the same index time), and without a stable secondary sort LIMIT/OFFSET
   // paging repeats and skips rows — which is what broke infinite scroll.
   const rows = kind
-    ? await db.getAllAsync<Omit<MemeRow, 'embedding' | 'caption_embedding'>>(
+    ? await db.getAllAsync<Omit<MemeRow, 'embedding' | 'visual_embedding' | 'caption_embedding'>>(
         `SELECT id, uri, name, kind, ocr_text, caption, transcript, tags, extra_terms, vision_state, audio_state, indexed_at, modified_at, pending
          FROM memes WHERE kind = ? ORDER BY modified_at DESC, id DESC LIMIT ? OFFSET ?`,
         kind,
         limit,
         offset
       )
-    : await db.getAllAsync<Omit<MemeRow, 'embedding' | 'caption_embedding'>>(
+    : await db.getAllAsync<Omit<MemeRow, 'embedding' | 'visual_embedding' | 'caption_embedding'>>(
         `SELECT id, uri, name, kind, ocr_text, caption, transcript, tags, extra_terms, vision_state, audio_state, indexed_at, modified_at, pending
          FROM memes ORDER BY modified_at DESC, id DESC LIMIT ? OFFSET ?`,
         limit,
@@ -847,9 +859,22 @@ export async function searchByVector(
 // same chunked yielding so opening a meme never hitches the UI), but the query
 // vector comes from the image itself — no model call needed, it's all reads.
 export async function getSimilarMemes(id: number, limit = 12): Promise<SearchHit[]> {
-  const target = await getMemeEmbedding(id);
-  if (!target || target.length === 0) return [];
   const db = await getDb();
+  const source = await db.getFirstAsync<{
+    embedding: Uint8Array;
+    visual_embedding: Uint8Array | null;
+    visual_model: string;
+  }>('SELECT embedding, visual_embedding, visual_model FROM memes WHERE id = ? AND pending = 0', id);
+  if (!source) return [];
+  const target = selectVisualSimilarityVector(
+    {
+      imageEmbedding: blobToVec(source.embedding),
+      visualEmbedding: source.visual_embedding ? blobToVec(source.visual_embedding) : null,
+      visualModel: source.visual_model ?? '',
+    },
+    VISUAL_EMBEDDING_MODEL
+  );
+  if (target.length === 0) return [];
   const rows = await db.getAllAsync<MemeRow>(
     'SELECT * FROM memes WHERE pending = 0 AND id != ?',
     id
@@ -858,7 +883,15 @@ export async function getSimilarMemes(id: number, limit = 12): Promise<SearchHit
   const scored: { row: MemeRow; score: number }[] = [];
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
-    scored.push({ row, score: dot(target, blobToVec(row.embedding)) }); // cosine (both normalized)
+    const candidate = selectVisualSimilarityVector(
+      {
+        imageEmbedding: blobToVec(row.embedding),
+        visualEmbedding: row.visual_embedding ? blobToVec(row.visual_embedding) : null,
+        visualModel: row.visual_model ?? '',
+      },
+      VISUAL_EMBEDDING_MODEL
+    );
+    scored.push({ row, score: dot(target, candidate) }); // cosine (both normalized)
     if ((i & (SEARCH_CHUNK - 1)) === SEARCH_CHUNK - 1) {
       await new Promise<void>((resolve) => setTimeout(resolve, 0));
     }
