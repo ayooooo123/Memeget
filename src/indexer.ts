@@ -151,6 +151,23 @@ async function buildAssociations(): Promise<Map<string, string[]>> {
   return assoc;
 }
 
+// Coordination with the idle-time backfills: while any heavy pass runs
+// (indexing, re-tagging), the DINO/caption backfill loops must stand down —
+// fp32 DINOv2 running flat-out saturates the CPU and starves everything else,
+// which is what made a fresh index sit on "Preparing to index…" for minutes.
+let heavyPasses = 0;
+async function withHeavyPass<T>(fn: () => Promise<T>): Promise<T> {
+  heavyPasses++;
+  try {
+    return await fn();
+  } finally {
+    heavyPasses--;
+  }
+}
+export function heavyPassActive(): boolean {
+  return heavyPasses > 0;
+}
+
 export interface IndexProgress {
   processed: number;
   total: number;
@@ -344,6 +361,17 @@ export async function runIndex(
   api: EmbeddingsApi,
   opts: { onProgress?: (p: IndexProgress) => void; shouldCancel?: () => boolean } = {}
 ): Promise<IndexResult> {
+  return withHeavyPass(async () => {
+  // Give the progress card something honest to show right away: the first run
+  // after a model change re-embeds the whole zero-shot label vocabulary with
+  // the new text tower before any file is touched, and with no signal that
+  // read as a hang.
+  opts.onProgress?.({
+    processed: 0,
+    total: 0,
+    added: 0,
+    current: 'warming up models — first run after a model change takes a minute',
+  });
   const know = await buildKnowledge(api);
   await clearIndexErrors();
 
@@ -387,6 +415,7 @@ export async function runIndex(
 
   opts.onProgress?.({ processed: total, total, added, current: '' });
   return { added, skipped, errors, migratedExemplars: migrated };
+  });
 }
 
 // Result of stage 1 (prepare). A failed prepare still carries its temp files so
@@ -558,13 +587,15 @@ export async function indexSavedFiles(
   opts: { onProgress?: (done: number, total: number) => void } = {}
 ): Promise<{ added: number; errors: number }> {
   if (saved.length === 0) return { added: 0, errors: 0 };
-  const know = await buildKnowledge(api);
-  await stampIndexModel().catch(() => {});
-  const { added, errors } = await indexQueue(api, saved, know, {
-    onFile: (i) => opts.onProgress?.(i, saved.length),
+  return withHeavyPass(async () => {
+    const know = await buildKnowledge(api);
+    await stampIndexModel().catch(() => {});
+    const { added, errors } = await indexQueue(api, saved, know, {
+      onFile: (i) => opts.onProgress?.(i, saved.length),
+    });
+    opts.onProgress?.(saved.length, saved.length);
+    return { added, errors };
   });
-  opts.onProgress?.(saved.length, saved.length);
-  return { added, errors };
 }
 
 export interface RetagResult {
@@ -590,6 +621,7 @@ export async function retagAll(
   api: EmbeddingsApi,
   opts: { onProgress?: (done: number, total: number) => void } = {}
 ): Promise<RetagResult> {
+  return withHeavyPass(async () => {
   const know = await buildKnowledge(api);
   const rows = await getAllMemeEmbeddings();
 
@@ -630,6 +662,7 @@ export async function retagAll(
   // Single transaction for all the writes — fast even on a big library.
   await bulkUpdateMemeTags(updates);
   return { updated: updates.length };
+  });
 }
 
 // Merge two whitespace-separated term strings into a de-duplicated bag.
@@ -934,6 +967,13 @@ export async function backfillVisualEmbeddings(
   const model = api.visualModel.id;
   const rows = await getMemesNeedingVisualEmbedding(model, opts.limit ?? 10);
   for (let i = 0; i < rows.length; i++) {
+    // Yield to indexing/re-tagging the moment one starts — this loop is idle
+    // work and DINO is the heaviest model in the app. Returning nonzero keeps
+    // the caller's loop alive; it re-checks the gate before calling again.
+    if (heavyPassActive()) return rows.length;
+    // Breathe between items even when idle so the backfill never pins the CPU
+    // (thermals, UI responsiveness) — it has all day.
+    if (i > 0) await new Promise<void>((r) => setTimeout(r, 400));
     const prep = await prepareVisualBackfillRow(rows[i], i);
     try {
       if (!prep.ok) {

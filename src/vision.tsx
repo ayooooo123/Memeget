@@ -5,6 +5,7 @@ import { getSetting, setSetting } from './db';
 import {
   backfillCaptionEmbeddings,
   backfillVisualEmbeddings,
+  heavyPassActive,
   enrichLibrary,
   enrichNextMeme,
   type EnrichProgress,
@@ -198,11 +199,17 @@ export function VisionProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     if (!embeddings.ready) return;
     let cancelled = false;
+    const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
     const loop = async () => {
       while (!cancelled) {
+        // Idle work: stand down whenever indexing/re-tagging holds the device.
+        if (heavyPassActive()) {
+          await sleep(10_000);
+          continue;
+        }
         const n = await backfillCaptionEmbeddings(embeddings, { limit: 20 }).catch(() => 0);
         if (n === 0) break;
-        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        await sleep(500);
       }
     };
     loop();
@@ -214,11 +221,22 @@ export function VisionProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     if (!embeddings.visualReady || !embeddings.embedVisualImage) return;
     let cancelled = false;
+    const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
     const loop = async () => {
       while (!cancelled) {
-        const n = await backfillVisualEmbeddings(embeddings, { limit: 10 }).catch(() => 0);
-        if (n === 0) break;
-        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        // DINO is the heaviest model in the app and this loop has all day:
+        // stand down completely while any heavy pass runs (the un-gated loop is
+        // what starved "Preparing to index…" for minutes), and take a real
+        // breather between batches even when idle.
+        if (heavyPassActive()) {
+          await sleep(10_000);
+          continue;
+        }
+        const n = await backfillVisualEmbeddings(embeddings, { limit: 5 }).catch(() => 0);
+        if (cancelled) break;
+        // Drained → poll slowly so memes indexed later this session still get
+        // their DINO vectors without an app restart.
+        await sleep(n === 0 ? 60_000 : 2_000);
       }
     };
     loop();

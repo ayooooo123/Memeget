@@ -95,9 +95,16 @@ export function getModifiedTime(uri: string): number | null {
 
 // Copy a SAF file into the cache directory and return a file:// path the native
 // modules can read. Caller is responsible for deleting it afterwards.
+//
+// The name must be unique PER CALL, not per queue index: the index pipeline,
+// the DINO backfill, and the VLM enrichment loop can all be materializing
+// frames concurrently, and an index-keyed name let two passes silently clobber
+// (and then delete) each other's temp files mid-read. The sweep prefix
+// ('meme_work_') still matches for stale-cache cleanup.
+let workSeq = 0;
 export async function copyToCache(file: SafFile, index: number): Promise<string> {
   const ext = extOf(file.name) || (file.kind === 'video' ? 'mp4' : 'jpg');
-  const dest = `${FileSystem.cacheDirectory}meme_work_${index}.${ext}`;
+  const dest = `${FileSystem.cacheDirectory}meme_work_${++workSeq}_${index}.${ext}`;
   await FileSystem.copyAsync({ from: file.uri, to: dest });
   return dest;
 }
