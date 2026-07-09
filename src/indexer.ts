@@ -32,10 +32,12 @@ import {
   insertMeme,
   insertPendingMeme,
   markVisionFailed,
+  markVisualEmbeddingFailed,
   putLabelVector,
   setMemeCaptionEmbedding,
   setMemeVisualEmbedding,
   setMemeVision,
+  stampIndexModel,
   updateMemeTags,
   type DescribedVisionRow,
   type MemeNeedingVisualEmbeddingRow,
@@ -363,6 +365,10 @@ export async function runIndex(
     else queue.push(f);
   }
 
+  // Record which primary space this index is being built in, so a later model
+  // swap is detected instead of silently searched across spaces.
+  await stampIndexModel().catch(() => {});
+
   const total = allFiles.length;
   const { added, errors } = await indexQueue(api, queue, know, {
     shouldCancel: opts.shouldCancel,
@@ -543,6 +549,7 @@ export async function indexSavedFiles(
 ): Promise<{ added: number; errors: number }> {
   if (saved.length === 0) return { added: 0, errors: 0 };
   const know = await buildKnowledge(api);
+  await stampIndexModel().catch(() => {});
   const { added, errors } = await indexQueue(api, saved, know, {
     onFile: (i) => opts.onProgress?.(i, saved.length),
   });
@@ -904,19 +911,33 @@ async function prepareVisualBackfillRow(
   return prepareFile({ uri: row.uri, name: row.name, kind: row.kind }, idx);
 }
 
+// Returns the number of rows FETCHED (0 = queue drained, caller can stop
+// looping). Termination is guaranteed by failure stamping: a row that can't be
+// prepared or embedded is marked failed and stops matching the pending query,
+// so no batch can be re-served forever. A model that went unready mid-batch is
+// transient — bail with 0 and let the next readiness change retry.
 export async function backfillVisualEmbeddings(
   api: Pick<EmbeddingsApi, 'embedVisualImage' | 'visualModel' | 'visualReady'>,
   opts: { limit?: number; onProgress?: (done: number, total: number) => void } = {}
 ): Promise<number> {
   if (!api.visualReady || !api.embedVisualImage || !api.visualModel.available) return 0;
-  const rows = await getMemesNeedingVisualEmbedding(api.visualModel.id, opts.limit ?? 10);
+  const model = api.visualModel.id;
+  const rows = await getMemesNeedingVisualEmbedding(model, opts.limit ?? 10);
   for (let i = 0; i < rows.length; i++) {
     const prep = await prepareVisualBackfillRow(rows[i], i);
     try {
-      if (prep.ok) {
+      if (!prep.ok) {
+        // Unreadable file (deleted from the folder, corrupt) — permanent.
+        await markVisualEmbeddingFailed(rows[i].id, model).catch(() => {});
+      } else {
         const visual = await api.embedVisualImage(prep.jpeg);
-        if (visual) await setMemeVisualEmbedding(rows[i].id, visual.model, visual.embedding);
+        if (!visual) return 0; // model went unready — stop, don't stamp
+        await setMemeVisualEmbedding(rows[i].id, visual.model, visual.embedding);
       }
+    } catch {
+      // Per-image native failure (decode error etc.) — permanent for this row;
+      // stamping it keeps the loop marching instead of aborting the batch.
+      await markVisualEmbeddingFailed(rows[i].id, model).catch(() => {});
     } finally {
       for (const t of prep.temp) await deleteCache(t);
     }

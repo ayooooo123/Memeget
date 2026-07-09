@@ -23,6 +23,7 @@ import {
   getFolders,
   getImportedPacks,
   getIndexErrors,
+  getIndexModelMismatch,
   getTaughtLabelStats,
   importExemplars,
   removeFolder,
@@ -62,10 +63,14 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
   const [audioFailed, setAudioFailed] = useState(0);
   const [transcribing, setTranscribing] = useState<{ done: number; total: number } | null>(null);
   const transcribeCancel = useRef(false);
+  const [modelMismatch, setModelMismatch] = useState<{ stored: string; current: string } | null>(
+    null
+  );
 
   const refresh = useCallback(async () => {
     setFolders(await getFolders());
     setCount(await countMemes());
+    setModelMismatch(await getIndexModelMismatch().catch(() => null));
     setTaughtStats(await getTaughtLabelStats().catch(() => []));
     setImportedPacks(await getImportedPacks().catch(() => []));
     setErrors(await getIndexErrors());
@@ -432,6 +437,13 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
         {!emb.ready && !emb.error && <ProgressBar value={emb.progress || 0} />}
         {!!emb.error && <Text style={styles.errText}>{emb.error}</Text>}
         {!!emb.visualError && <Text style={styles.errText}>{emb.visualError}</Text>}
+        {modelMismatch && (
+          <Text style={styles.errText}>
+            ⚠ Index/model mismatch: the index was built with {modelMismatch.stored}, but this build
+            runs {modelMismatch.current}. Search and taught labels are unreliable until you Clear
+            index (below), re-Index, and re-teach or re-import your labels.
+          </Text>
+        )}
         <Text style={styles.note}>
           Runs fully on your device via ExecuTorch. The model binary downloads once on first launch,
           then everything — indexing and search — happens offline with no network calls.

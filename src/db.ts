@@ -1,9 +1,9 @@
 import * as SQLite from 'expo-sqlite';
 
-import { PRIMARY_EMBEDDING_MODEL, VISUAL_EMBEDDING_MODEL } from './embeddingModels';
+import { modelStamp, PRIMARY_EMBEDDING_MODEL, VISUAL_EMBEDDING_MODEL } from './embeddingModels';
 import { hybridSearchScore } from './searchCore';
 import type { MemeRecord, MediaKind, SearchHit, Tag, LinkedFolder, Exemplar } from './types';
-import { selectVisualSimilarityVector } from './visualSearch';
+import { selectPairVectors, type VisualSimilarityRecord } from './visualSearch';
 
 let dbPromise: Promise<SQLite.SQLiteDatabase> | null = null;
 
@@ -140,6 +140,32 @@ export async function initDb(): Promise<void> {
       `ALTER TABLE label_vectors ADD COLUMN model TEXT NOT NULL DEFAULT 'clip-vit-base-patch32';`
     );
   }
+  // Exemplar vectors live in the primary image space too — stamp them so a
+  // primary-model swap can't silently train heads on mixed-space vectors.
+  // Existing rows are CLIP-taught.
+  if (!exCols.some((c) => c.name === 'model')) {
+    await db.execAsync(
+      `ALTER TABLE exemplars ADD COLUMN model TEXT NOT NULL DEFAULT 'clip-vit-base-patch32';`
+    );
+  }
+}
+
+// ---- primary-space guard -------------------------------------------------------
+
+// The stamp of the primary model the index was (last) built with. Written on
+// every index run; compared against the running app's model so a swapped build
+// can't silently search a foreign-space index.
+export const INDEX_MODEL_KEY = 'index.primaryModel';
+
+export async function getIndexModelMismatch(): Promise<{ stored: string; current: string } | null> {
+  const stored = await getSetting(INDEX_MODEL_KEY);
+  const current = modelStamp(PRIMARY_EMBEDDING_MODEL);
+  if (!stored || stored === current) return null;
+  return { stored, current };
+}
+
+export async function stampIndexModel(): Promise<void> {
+  await setSetting(INDEX_MODEL_KEY, modelStamp(PRIMARY_EMBEDDING_MODEL));
 }
 
 // ---- float32 <-> blob helpers -------------------------------------------------
@@ -347,12 +373,17 @@ export async function getAllMemeEmbeddings(): Promise<
 // shifts the mean/background the heads are trained against.
 export async function getKnowledgeVersion(): Promise<string> {
   const db = await getDb();
+  // Scoped to the active primary space (stale-space exemplars can't train
+  // heads) and prefixed with the model id so a swap always invalidates.
   const row = await db.getFirstAsync<{ ec: number; es: number; mc: number }>(
-    `SELECT (SELECT COUNT(*) FROM exemplars) AS ec,
-            (SELECT COALESCE(SUM(id), 0) FROM exemplars) AS es,
-            (SELECT COUNT(*) FROM memes WHERE pending = 0) AS mc`
+    `SELECT (SELECT COUNT(*) FROM exemplars WHERE model = ?) AS ec,
+            (SELECT COALESCE(SUM(id), 0) FROM exemplars WHERE model = ?) AS es,
+            (SELECT COUNT(*) FROM memes WHERE pending = 0) AS mc`,
+    PRIMARY_EMBEDDING_MODEL.id,
+    PRIMARY_EMBEDDING_MODEL.id
   );
-  return row ? `${row.ec}:${row.es}:${row.mc}` : '0:0:0';
+  const counts = row ? `${row.ec}:${row.es}:${row.mc}` : '0:0:0';
+  return `${PRIMARY_EMBEDDING_MODEL.id}:${counts}`;
 }
 
 // A random sample of library embeddings, used as the negative/background set
@@ -541,6 +572,16 @@ export interface MemeNeedingVisualEmbeddingRow {
   kind: 'image' | 'video';
 }
 
+// Failure stamp for the visual backfill: rows whose file can no longer be read
+// (deleted, corrupt) get `visual_model = 'failed:<model>'` so the pending query
+// stops returning them — otherwise the backfill loop would re-copy and
+// re-transcode the same broken files forever. The stamp never matches the
+// active model id, so similarity routing still falls back to the image vector,
+// and it self-clears if the visual model ever changes.
+export function visualFailureStamp(model: string): string {
+  return `failed:${model}`;
+}
+
 export async function getMemesNeedingVisualEmbedding(
   model = VISUAL_EMBEDDING_MODEL.id,
   limit = 25
@@ -552,8 +593,9 @@ export async function getMemesNeedingVisualEmbedding(
     name: string;
     kind: string;
   }>(
-    "SELECT id, uri, name, kind FROM memes WHERE pending = 0 AND (visual_embedding IS NULL OR visual_model != ?) ORDER BY indexed_at DESC, id DESC LIMIT ?",
+    'SELECT id, uri, name, kind FROM memes WHERE pending = 0 AND (visual_embedding IS NULL OR visual_model != ?) AND visual_model != ? ORDER BY indexed_at DESC, id DESC LIMIT ?',
     model,
+    visualFailureStamp(model),
     limit
   );
   return rows.map((r) => ({
@@ -562,6 +604,15 @@ export async function getMemesNeedingVisualEmbedding(
     name: r.name,
     kind: r.kind as 'image' | 'video',
   }));
+}
+
+export async function markVisualEmbeddingFailed(id: number, model: string): Promise<void> {
+  const db = await getDb();
+  await db.runAsync(
+    'UPDATE memes SET visual_embedding = NULL, visual_model = ? WHERE id = ?',
+    visualFailureStamp(model),
+    id
+  );
 }
 
 export async function setMemeVisualEmbedding(
@@ -921,15 +972,12 @@ export async function getSimilarMemes(id: number, limit = 12): Promise<SearchHit
     visual_model: string;
   }>('SELECT embedding, visual_embedding, visual_model FROM memes WHERE id = ? AND pending = 0', id);
   if (!source) return [];
-  const target = selectVisualSimilarityVector(
-    {
-      imageEmbedding: blobToVec(source.embedding),
-      visualEmbedding: source.visual_embedding ? blobToVec(source.visual_embedding) : null,
-      visualModel: source.visual_model ?? '',
-    },
-    VISUAL_EMBEDDING_MODEL
-  );
-  if (target.length === 0) return [];
+  const target: VisualSimilarityRecord = {
+    imageEmbedding: blobToVec(source.embedding),
+    visualEmbedding: source.visual_embedding ? blobToVec(source.visual_embedding) : null,
+    visualModel: source.visual_model ?? '',
+  };
+  if (target.imageEmbedding.length === 0) return [];
   const rows = await db.getAllAsync<MemeRow>(
     'SELECT * FROM memes WHERE pending = 0 AND id != ?',
     id
@@ -938,15 +986,15 @@ export async function getSimilarMemes(id: number, limit = 12): Promise<SearchHit
   const scored: { row: MemeRow; score: number }[] = [];
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
-    const candidate = selectVisualSimilarityVector(
-      {
-        imageEmbedding: blobToVec(row.embedding),
-        visualEmbedding: row.visual_embedding ? blobToVec(row.visual_embedding) : null,
-        visualModel: row.visual_model ?? '',
-      },
-      VISUAL_EMBEDDING_MODEL
-    );
-    scored.push({ row, score: dot(target, candidate) }); // cosine (both normalized)
+    const candidate: VisualSimilarityRecord = {
+      imageEmbedding: blobToVec(row.embedding),
+      visualEmbedding: row.visual_embedding ? blobToVec(row.visual_embedding) : null,
+      visualModel: row.visual_model ?? '',
+    };
+    // Space is chosen PER PAIR: DINO only when both sides carry a matching
+    // stamped vector, else primary-vs-primary — never a cross-space dot.
+    const { a, b } = selectPairVectors(target, candidate, VISUAL_EMBEDDING_MODEL);
+    scored.push({ row, score: dot(a, b) }); // cosine (both normalized)
     if ((i & (SEARCH_CHUNK - 1)) === SEARCH_CHUNK - 1) {
       await new Promise<void>((resolve) => setTimeout(resolve, 0));
     }
@@ -958,6 +1006,8 @@ export async function getSimilarMemes(id: number, limit = 12): Promise<SearchHit
 export async function clearIndex(): Promise<void> {
   const db = await getDb();
   await db.execAsync('DELETE FROM memes;');
+  // An empty index has no space yet — the next index run re-stamps it.
+  await db.runAsync('DELETE FROM settings WHERE key = ?', INDEX_MODEL_KEY);
 }
 
 // ---- folders -----------------------------------------------------------------
@@ -1026,19 +1076,25 @@ export async function addExemplar(args: {
 }): Promise<void> {
   const db = await getDb();
   // Examples created here are the user's own teaching — origin 'self', no pack.
+  // Stamped with the active primary model: the vector only means anything in
+  // that space.
   await db.runAsync(
-    `INSERT INTO exemplars (label, category, vector, associations, source_uri, is_positive, origin, pack, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, 'self', '', ?)`,
+    `INSERT INTO exemplars (label, category, vector, associations, source_uri, is_positive, origin, pack, model, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, 'self', '', ?, ?)`,
     args.label,
     args.category,
     vecToBlob(args.vector),
     JSON.stringify(args.associations),
     args.sourceUri,
     args.positive === false ? 0 : 1,
+    PRIMARY_EMBEDDING_MODEL.id,
     Date.now()
   );
 }
 
+// Only exemplars taught in the ACTIVE primary space — vectors from a previous
+// primary model can't train today's heads. Stale-space rows stay stored (and
+// visible via the mismatch warning) until re-taught.
 export async function getExemplars(): Promise<Exemplar[]> {
   const db = await getDb();
   const rows = await db.getAllAsync<{
@@ -1052,7 +1108,7 @@ export async function getExemplars(): Promise<Exemplar[]> {
     origin: string;
     pack: string;
     created_at: number;
-  }>('SELECT * FROM exemplars ORDER BY created_at DESC');
+  }>('SELECT * FROM exemplars WHERE model = ? ORDER BY created_at DESC', PRIMARY_EMBEDDING_MODEL.id);
   return rows.map((r) => ({
     id: r.id,
     label: r.label,
@@ -1069,7 +1125,10 @@ export async function getExemplars(): Promise<Exemplar[]> {
 
 export async function countExemplars(): Promise<number> {
   const db = await getDb();
-  const row = await db.getFirstAsync<{ c: number }>('SELECT COUNT(*) as c FROM exemplars');
+  const row = await db.getFirstAsync<{ c: number }>(
+    'SELECT COUNT(*) as c FROM exemplars WHERE model = ?',
+    PRIMARY_EMBEDDING_MODEL.id
+  );
   return row?.c ?? 0;
 }
 
@@ -1078,7 +1137,8 @@ export async function countExemplars(): Promise<number> {
 export async function getLabels(): Promise<string[]> {
   const db = await getDb();
   const rows = await db.getAllAsync<{ label: string }>(
-    'SELECT DISTINCT label FROM exemplars ORDER BY label COLLATE NOCASE'
+    'SELECT DISTINCT label FROM exemplars WHERE model = ? ORDER BY label COLLATE NOCASE',
+    PRIMARY_EMBEDDING_MODEL.id
   );
   return rows.map((r) => r.label);
 }
@@ -1120,7 +1180,10 @@ export async function getTaughtLabelStats(): Promise<TaughtLabelStat[]> {
     is_positive: number;
     origin: string;
     pack: string;
-  }>('SELECT label, category, is_positive, origin, pack FROM exemplars');
+  }>(
+    'SELECT label, category, is_positive, origin, pack FROM exemplars WHERE model = ?',
+    PRIMARY_EMBEDDING_MODEL.id
+  );
   const tagRows = await db.getAllAsync<{ tags: string }>(
     "SELECT tags FROM memes WHERE pending = 0 AND tags != '[]'"
   );
@@ -1231,9 +1294,11 @@ export async function importExemplars(
   let added = 0;
   let skipped = 0;
   let removed = 0;
+  // Import is gated on pack↔app model compatibility upstream, so imported
+  // vectors are by definition in the active primary space.
   const stmt = await db.prepareAsync(
-    `INSERT INTO exemplars (label, category, vector, associations, source_uri, is_positive, origin, pack, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, 'pack', ?, ?)`
+    `INSERT INTO exemplars (label, category, vector, associations, source_uri, is_positive, origin, pack, model, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, 'pack', ?, ?, ?)`
   );
   try {
     await db.withTransactionAsync(async () => {
@@ -1256,6 +1321,7 @@ export async function importExemplars(
           '', // imported examples have no local source image
           e.positive ? 1 : 0,
           opts.pack || 'Imported pack',
+          PRIMARY_EMBEDDING_MODEL.id,
           Date.now()
         );
         added += 1;
