@@ -27,15 +27,18 @@ import {
   getKnowledgeVersion,
   getLabelVectors,
   getMemesNeedingCaptionEmbedding,
+  getMemesNeedingVisualEmbedding,
   getMemesNeedingVision,
   insertMeme,
   insertPendingMeme,
   markVisionFailed,
   putLabelVector,
   setMemeCaptionEmbedding,
+  setMemeVisualEmbedding,
   setMemeVision,
   updateMemeTags,
   type DescribedVisionRow,
+  type MemeNeedingVisualEmbeddingRow,
   type MemeNeedingVisionRow,
 } from './db';
 import { ASSOCIATIONS, MEME_LABELS, NEGATIVE_ANCHORS, ocrTags } from './memeLabels';
@@ -279,12 +282,13 @@ async function trainExemplarHeads(): Promise<ExemplarModel> {
 // Compute (and cache) CLIP text vectors for every curated label + negative
 // anchor, then load taught exemplars and build the association lookup.
 export async function buildKnowledge(api: EmbeddingsApi): Promise<Knowledge> {
-  const cache = await getLabelVectors();
+  const modelId = api.primaryModel.id;
+  const cache = await getLabelVectors(modelId);
 
   for (const def of MEME_LABELS) {
     if (!cache.has(def.label)) {
       const vec = await api.embedText(def.prompt);
-      await putLabelVector(def.label, vec);
+      await putLabelVector(def.label, vec, modelId);
       cache.set(def.label, Float32Array.from(vec));
     }
   }
@@ -292,7 +296,7 @@ export async function buildKnowledge(api: EmbeddingsApi): Promise<Knowledge> {
     const key = `${NEG_PREFIX}${i}`;
     if (!cache.has(key)) {
       const vec = await api.embedText(NEGATIVE_ANCHORS[i]);
-      await putLabelVector(key, vec);
+      await putLabelVector(key, vec, modelId);
       cache.set(key, Float32Array.from(vec));
     }
   }
@@ -421,7 +425,11 @@ async function finishFile(api: EmbeddingsApi, prep: Prepared, know: Knowledge): 
 
     // CLIP (ExecuTorch) and OCR (ML Kit) are independent native calls on the
     // same JPEG — running them concurrently hides the shorter one entirely.
-    const [embedding, ocrText] = await Promise.all([api.embedImage(prep.jpeg), ocr(prep.jpeg)]);
+    const [embedding, ocrText, visual] = await Promise.all([
+      api.embedImage(prep.jpeg),
+      ocr(prep.jpeg),
+      api.embedVisualImage ? api.embedVisualImage(prep.jpeg) : Promise.resolve(null),
+    ]);
     const tags = mergeTags(
       classifyImage(embedding, know.labelVecs, know.exemplarHeads, know.mean, know.negativeVecs),
       ocrTags(ocrText)
@@ -433,6 +441,8 @@ async function finishFile(api: EmbeddingsApi, prep: Prepared, know: Knowledge): 
       name: prep.file.name,
       kind: prep.file.kind,
       embedding,
+      visualEmbedding: visual?.embedding ?? null,
+      visualModel: visual?.model ?? null,
       ocrText,
       tags,
       extraTerms: extraTermsFor(tags, know.assoc),
@@ -882,6 +892,34 @@ export async function backfillCaptionEmbeddings(
     const row = rows[i];
     const text = captionSearchText(row.caption, row.tags, row.extraTerms);
     if (text) await setMemeCaptionEmbedding(row.id, await api.embedText(text));
+    opts.onProgress?.(i + 1, rows.length);
+  }
+  return rows.length;
+}
+
+async function prepareVisualBackfillRow(
+  row: MemeNeedingVisualEmbeddingRow,
+  idx: number
+): Promise<Prepared> {
+  return prepareFile({ uri: row.uri, name: row.name, kind: row.kind }, idx);
+}
+
+export async function backfillVisualEmbeddings(
+  api: Pick<EmbeddingsApi, 'embedVisualImage' | 'visualModel' | 'visualReady'>,
+  opts: { limit?: number; onProgress?: (done: number, total: number) => void } = {}
+): Promise<number> {
+  if (!api.visualReady || !api.embedVisualImage || !api.visualModel.available) return 0;
+  const rows = await getMemesNeedingVisualEmbedding(api.visualModel.id, opts.limit ?? 10);
+  for (let i = 0; i < rows.length; i++) {
+    const prep = await prepareVisualBackfillRow(rows[i], i);
+    try {
+      if (prep.ok) {
+        const visual = await api.embedVisualImage(prep.jpeg);
+        if (visual) await setMemeVisualEmbedding(rows[i].id, visual.model, visual.embedding);
+      }
+    } finally {
+      for (const t of prep.temp) await deleteCache(t);
+    }
     opts.onProgress?.(i + 1, rows.length);
   }
   return rows.length;

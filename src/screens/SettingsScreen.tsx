@@ -412,11 +412,26 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
       <Text style={styles.title}>Settings</Text>
 
       <Section glyph="✦" title="On-device model" tint={colors.volt}>
-        <Row label="CLIP (image + text)">
+        <Row label={`${emb.primaryLabel} (image + text)`}>
           <StatusDot tone={modelTone} label={modelLabel} />
         </Row>
+        {emb.visualModel.available && (
+          <Row label={`${emb.visualModel.label} (visual similarity)`}>
+            <StatusDot
+              tone={emb.visualError ? 'bad' : emb.visualReady ? 'good' : 'busy'}
+              label={
+                emb.visualError
+                  ? 'Error'
+                  : emb.visualReady
+                    ? 'Ready'
+                    : `Loading ${Math.round((emb.visualProgress || 0) * 100)}%`
+              }
+            />
+          </Row>
+        )}
         {!emb.ready && !emb.error && <ProgressBar value={emb.progress || 0} />}
         {!!emb.error && <Text style={styles.errText}>{emb.error}</Text>}
+        {!!emb.visualError && <Text style={styles.errText}>{emb.visualError}</Text>}
         <Text style={styles.note}>
           Runs fully on your device via ExecuTorch. The model binary downloads once on first launch,
           then everything — indexing and search — happens offline with no network calls.

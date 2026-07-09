@@ -18,7 +18,7 @@ No accounts. No servers. No uploads.
 | Words in the meme | On-device **OCR** ([`expo-text-extractor`](https://github.com/pchalupa/expo-text-extractor) → ML Kit on Android). |
 | Video | A keyframe is extracted (`expo-video-thumbnails`) and indexed like an image. |
 | Words *said* in the meme | Opt-in **audio analysis** (Settings): a native decoder (MediaCodec) pulls each video's audio track as 16 kHz PCM and on-device **Whisper** (via the same ExecuTorch runtime) transcribes it. The transcript shows in the viewer and is searchable — find a clip by the line you remember hearing. |
-| Similar memes | Open any meme → **More like this**: the library ranked by CLIP cosine similarity against that meme's stored embedding. Tap a thumbnail to hop to it — great for finding the other variants of a template. |
+| Similar memes | Open any meme → **More like this**: the library ranked by stored visual vectors. By default this uses CLIP cosine similarity; if a custom DINOv2 visual model is configured, DINO vectors are stored/backfilled and used for this flow. Tap a thumbnail to hop to it — great for finding the other variants of a template. |
 | Index storage | `expo-sqlite`; image and caption embeddings stored as float32 blobs, brute-force cosine search. |
 | Folder access | Android **Storage Access Framework** — per-folder permission, no broad media access. |
 | Save from a link | Share an **X/Twitter**, **Tenor**, or any social-post URL into Memeget and it resolves the underlying media (tweet-syndication for X, Open Graph `og:video`/`og:image` for everything else), downloads it into your linked folder, and indexes it like a normal share — no manual download + re-import. |
@@ -55,7 +55,10 @@ There are exactly two times the app reaches out, both download-only:
    or audio analysis (Settings) likewise triggers a one-time download of that
    model (Gemma 4 / Whisper), cached the same way. After that, you can stay
    airplane-mode forever. To make it *truly* zero-network from install, the model
-   can be bundled into the APK assets — see "Next steps".
+   can be bundled into the APK assets — see "Next steps". Developer builds can
+   also point Memeget at custom MobileCLIP-S2 and DINOv2 ExecuTorch exports via
+   `EXPO_PUBLIC_MEMEGET_*` model-source variables; those are not bundled in the
+   default APK.
 2. **Only when you share a link** (see above), Memeget contacts that link's host
    (plus X's public syndication endpoint for tweets) to download the media you
    asked for. No URL is fetched unless you explicitly share one, and nothing
@@ -116,7 +119,7 @@ Requires a custom dev build (not Expo Go) because of the native ML modules.
 
 ```
 App.tsx                 # tab shell
-src/embeddings.tsx      # CLIP image+text hooks + zero-shot classifier
+src/embeddings.tsx      # CLIP/custom primary hooks + optional DINO visual hook
 src/searchCore.ts       # Hybrid image/caption retrieval scoring
 src/indexer.ts          # SAF -> copy -> (thumbnail) -> embed -> OCR -> tag -> store
 src/audio.tsx           # Whisper transcription pass over video memes (opt-in)
