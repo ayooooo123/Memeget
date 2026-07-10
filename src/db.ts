@@ -612,6 +612,20 @@ export async function getMemesNeedingVisualEmbedding(
   }));
 }
 
+// Cheap pending check so the backfill loop can decide whether the (demand-
+// loaded) visual model is worth summoning at all.
+export async function countMemesNeedingVisualEmbedding(
+  model = VISUAL_EMBEDDING_MODEL.id
+): Promise<number> {
+  const db = await getDb();
+  const row = await db.getFirstAsync<{ c: number }>(
+    'SELECT COUNT(*) as c FROM memes WHERE pending = 0 AND (visual_embedding IS NULL OR visual_model != ?) AND visual_model != ?',
+    model,
+    visualFailureStamp(model)
+  );
+  return row?.c ?? 0;
+}
+
 export async function markVisualEmbeddingFailed(id: number, model: string): Promise<void> {
   const db = await getDb();
   await db.runAsync(

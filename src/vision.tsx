@@ -1,7 +1,12 @@
 import React, { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { useLLM } from 'react-native-executorch';
 
-import { countMemesNeedingVision, getSetting, setSetting } from './db';
+import {
+  countMemesNeedingVision,
+  countMemesNeedingVisualEmbedding,
+  getSetting,
+  setSetting,
+} from './db';
 import { onLibraryChanged } from './events';
 import {
   backfillCaptionEmbeddings,
@@ -266,13 +271,19 @@ export function VisionProvider({ children }: { children: React.ReactNode }) {
     };
   }, [embeddings.ready]);
 
+  // Latest embeddings api for the long-lived backfill loop below (the api
+  // object takes a new identity as load state changes).
+  const embeddingsRef = useRef(embeddings);
+  embeddingsRef.current = embeddings;
+
   useEffect(() => {
-    if (!embeddings.visualReady || !embeddings.embedVisualImage) return;
+    if (!embeddings.visualModel.available) return;
     let cancelled = false;
     const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
     const loop = async () => {
       while (!cancelled) {
-        // DINO is the heaviest model in the app and this loop has all day:
+        const emb = embeddingsRef.current;
+        // DINO is the heaviest embedding model and this loop has all day:
         // stand down completely while any heavy pass runs (the un-gated loop is
         // what starved "Preparing to index…" for minutes), and take a real
         // breather between batches even when idle.
@@ -280,18 +291,31 @@ export function VisionProvider({ children }: { children: React.ReactNode }) {
           await sleep(10_000);
           continue;
         }
-        const n = await backfillVisualEmbeddings(embeddings, { limit: 5 }).catch(() => 0);
+        // Demand lifecycle: summon the model only when rows actually await a
+        // visual vector, and release it (RAM back to the system, no cold start
+        // on the next app open) once the queue drains.
+        const pending = await countMemesNeedingVisualEmbedding(emb.visualModel.id).catch(() => 0);
         if (cancelled) break;
-        // Drained → poll slowly so memes indexed later this session still get
-        // their DINO vectors without an app restart.
-        await sleep(n === 0 ? 60_000 : 2_000);
+        if (pending === 0) {
+          emb.setVisualWanted(false);
+          await sleep(60_000);
+          continue;
+        }
+        emb.setVisualWanted(true);
+        if (!embeddingsRef.current.visualReady) {
+          await sleep(3_000); // loading — check back shortly
+          continue;
+        }
+        const n = await backfillVisualEmbeddings(embeddingsRef.current, { limit: 5 }).catch(() => 0);
+        if (cancelled) break;
+        await sleep(n === 0 ? 10_000 : 2_000);
       }
     };
     loop();
     return () => {
       cancelled = true;
     };
-  }, [embeddings.visualReady, embeddings.embedVisualImage]);
+  }, [embeddings.visualModel.available]);
 
   // One generation at a time on a single accelerator: this mutex makes the
   // background trickle and the manual burst mutually exclusive. A blocked caller
@@ -326,6 +350,7 @@ export function VisionProvider({ children }: { children: React.ReactNode }) {
     if (!(hydrated && bgEnabled && enabled && llm.isReady)) return;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let emptyStreak = 0; // consecutive empty polls before the model is released
     const interval = bgIntervalMs(bgIntensity);
 
     const loop = async () => {
@@ -356,12 +381,21 @@ export function VisionProvider({ children }: { children: React.ReactNode }) {
         status = 'failed';
       }
       if (cancelled) return;
-      // Queue drained → release the model entirely (multi-GB of RAM back to
-      // the system); the demand effect re-summons it when new memes arrive.
+      // Queue drained → linger a few polls before releasing the model. Shares
+      // arrive in bursts, and unloading a multi-GB model the instant the queue
+      // empties made every follow-up meme pay the full cold start. After the
+      // linger the RAM goes back to the system; the demand effect re-summons
+      // the model when new memes arrive.
       if (status === 'empty') {
-        setModelWanted(false);
+        emptyStreak++;
+        if (emptyStreak >= 3) {
+          setModelWanted(false);
+          return;
+        }
+        timer = setTimeout(loop, 60_000);
         return;
       }
+      emptyStreak = 0;
       // busy → a burst holds the lock, retry soon; otherwise pace by the
       // chosen throughput.
       timer = setTimeout(loop, status === 'busy' ? 3_000 : interval);
