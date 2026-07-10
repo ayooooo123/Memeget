@@ -24,7 +24,7 @@ import {
   searchByVector,
 } from '../db';
 import { noteInteractive, runIndex, retagAll, type IndexProgress } from '../indexer';
-import { onLibraryChanged } from '../events';
+import { emitLibraryChanged, onLibraryChanged } from '../events';
 import { success, tap, thud } from '../haptics';
 import { pickFolder } from '../saf';
 import { colors, radius, space, type } from '../theme';
@@ -334,6 +334,9 @@ export function LibraryScreen() {
         await retagAll(embApi, { shouldCancel: () => cancelRef.current });
       }
       await refresh();
+      // Tell the other providers (notably the demand-loaded VLM, which summons
+      // itself when pending describe work appears) that the library changed.
+      emitLibraryChanged();
       success();
       const errNote = res.errors > 0 ? ` · ${res.errors} failed` : '';
       const migNote =
