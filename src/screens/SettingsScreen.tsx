@@ -283,9 +283,11 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
   );
 
   const onRunEnrich = useCallback(async () => {
+    if (!vision.enabled) return;
+    // The model is demand-loaded; this tap may be what summons it.
+    // runEnrichment waits for the load internally.
     if (!vision.ready) {
-      showToast('Vision model still loading — try again shortly', 'info');
-      return;
+      showToast('Loading the vision model — the first describe after a cold start takes a bit', 'info');
     }
     enrichCancel.current = false;
     setEnriching({ done: 0, total: 0 });
@@ -427,14 +429,16 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
       ? 'Ready'
       : `Loading ${Math.round((emb.progress || 0) * 100)}%`;
 
-  const visionTone = vision.error ? 'bad' : vision.ready ? 'good' : 'busy';
+  const visionTone = vision.error ? 'bad' : vision.ready || vision.modelIdle ? 'good' : 'busy';
   const visionLabel = vision.error
     ? 'Error'
     : !vision.enabled
       ? 'Off'
       : vision.ready
         ? 'Ready'
-        : `Loading ${Math.round((vision.progress || 0) * 100)}%`;
+        : vision.modelIdle
+          ? 'On demand' // loads only when there's something to describe
+          : `Loading ${Math.round((vision.progress || 0) * 100)}%`;
   const describedTotal = described + pending;
 
   const audioTone = audio.error ? 'bad' : audio.ready ? 'good' : 'busy';
@@ -489,7 +493,7 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
         <Row label="Gemma 4 (vision-language)">
           <StatusDot tone={visionTone} label={visionLabel} />
         </Row>
-        {vision.enabled && !vision.ready && !vision.error && (
+        {vision.enabled && !vision.ready && !vision.modelIdle && !vision.error && (
           <ProgressBar value={vision.progress || 0} />
         )}
         {!!vision.error && <Text style={styles.errText}>{vision.error}</Text>}
@@ -548,9 +552,13 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
             ) : pending > 0 ? (
               <Button
                 small
-                label={`Describe ${pending} meme${pending === 1 ? '' : 's'}`}
+                label={
+                  vision.ready
+                    ? `Describe ${pending} meme${pending === 1 ? '' : 's'}`
+                    : `Describe ${pending} meme${pending === 1 ? '' : 's'} (loads model)`
+                }
                 onPress={onRunEnrich}
-                disabled={!vision.ready}
+                disabled={!vision.enabled}
               />
             ) : (
               <Text style={styles.note}>

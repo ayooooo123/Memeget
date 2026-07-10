@@ -1,7 +1,8 @@
 import React, { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { useLLM } from 'react-native-executorch';
 
-import { getSetting, setSetting } from './db';
+import { countMemesNeedingVision, getSetting, setSetting } from './db';
+import { onLibraryChanged } from './events';
 import {
   backfillCaptionEmbeddings,
   backfillVisualEmbeddings,
@@ -61,6 +62,7 @@ export interface VisionApi {
   enabled: boolean; // user has opted in (model is allowed to download/load)
   quality: VisionQuality;
   ready: boolean; // model loaded and able to describe
+  modelIdle: boolean; // enabled but demand-unloaded (no describe work right now)
   progress: number; // 0..1 model download/load progress
   busy: boolean; // a generation is currently running
   error: string | null;
@@ -137,7 +139,53 @@ export function VisionProvider({ children }: { children: React.ReactNode }) {
     })().catch(() => setHydrated(true));
   }, []);
 
-  const llm = useLLM({ model: MODEL[quality], preventLoad: !(hydrated && enabled) });
+  // Demand-loaded: a multi-GB VLM must not cold-start on every app open just
+  // because descriptions are enabled. `modelWanted` flips on only when there is
+  // actual describe work (pending memes with the background trickle on, or a
+  // user-triggered burst) and back off when the queue drains — useLLM unloads
+  // the model when preventLoad flips true, freeing the RAM.
+  const [modelWanted, setModelWanted] = useState(false);
+  const llm = useLLM({
+    model: MODEL[quality],
+    preventLoad: !(hydrated && enabled && modelWanted),
+  });
+
+  // Summon the model whenever the background trickle has work: on
+  // hydrate/settings changes and every time the library changes (a fresh
+  // index/share adds pending memes).
+  useEffect(() => {
+    if (!(hydrated && enabled && bgEnabled)) return;
+    let cancelled = false;
+    const check = async () => {
+      const n = await countMemesNeedingVision().catch(() => 0);
+      if (!cancelled && n > 0) setModelWanted(true);
+    };
+    check();
+    const unsub = onLibraryChanged(check);
+    return () => {
+      cancelled = true;
+      unsub();
+    };
+  }, [hydrated, enabled, bgEnabled]);
+
+  // Resolve when the model becomes usable (or definitively failed) — lets the
+  // burst path wait for an on-demand load instead of being disabled until one.
+  const readyWaitersRef = useRef<(() => void)[]>([]);
+  useEffect(() => {
+    if (llm.isReady || llm.error) {
+      readyWaitersRef.current.forEach((resolve) => resolve());
+      readyWaitersRef.current = [];
+    }
+  }, [llm.isReady, llm.error]);
+  const llmReadyRef = useRef(false);
+  llmReadyRef.current = llm.isReady;
+  const ensureModelLoaded = (): Promise<void> => {
+    setModelWanted(true);
+    if (llmReadyRef.current) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      readyWaitersRef.current.push(resolve);
+    });
+  };
 
   const setEnabled = (on: boolean) => {
     setEnabledState(on);
@@ -261,9 +309,14 @@ export function VisionProvider({ children }: { children: React.ReactNode }) {
     }
   };
 
-  const runEnrichment = (
+  const runEnrichment = async (
     opts?: { onProgress?: (p: EnrichProgress) => void; shouldCancel?: () => boolean }
-  ) => runGuarded(() => enrichLibrary(enricherRef.current, opts ?? {}));
+  ) => {
+    // On-demand model: the burst may be the thing that summons it. If the load
+    // fails, enricher.ready stays false and enrichLibrary reports it cleanly.
+    await ensureModelLoaded();
+    return runGuarded(() => enrichLibrary(enricherRef.current, opts ?? {}));
+  };
 
   // Paced background loop: describe one pending meme, wait the interval implied
   // by the intensity slider, repeat. Only alive while the app is open (a true
@@ -303,10 +356,15 @@ export function VisionProvider({ children }: { children: React.ReactNode }) {
         status = 'failed';
       }
       if (cancelled) return;
-      // empty → poll slowly for newly-indexed memes; busy → a burst holds the
-      // lock, retry soon; otherwise pace by the chosen throughput.
-      const delay = status === 'empty' ? 60_000 : status === 'busy' ? 3_000 : interval;
-      timer = setTimeout(loop, delay);
+      // Queue drained → release the model entirely (multi-GB of RAM back to
+      // the system); the demand effect re-summons it when new memes arrive.
+      if (status === 'empty') {
+        setModelWanted(false);
+        return;
+      }
+      // busy → a burst holds the lock, retry soon; otherwise pace by the
+      // chosen throughput.
+      timer = setTimeout(loop, status === 'busy' ? 3_000 : interval);
     };
     timer = setTimeout(loop, 2_000); // small settle delay after becoming ready
     return () => {
@@ -340,6 +398,7 @@ export function VisionProvider({ children }: { children: React.ReactNode }) {
       enabled,
       quality,
       ready: enabled && llm.isReady,
+      modelIdle: enabled && !modelWanted && !llm.isReady,
       progress: llm.downloadProgress ?? 0,
       busy: llm.isGenerating,
       error: llm.error ? String(llm.error.message ?? llm.error) : null,
@@ -367,6 +426,7 @@ export function VisionProvider({ children }: { children: React.ReactNode }) {
     pausedReason,
     running,
     hydrated,
+    modelWanted,
     llm.isReady,
     llm.isGenerating,
     llm.downloadProgress,
