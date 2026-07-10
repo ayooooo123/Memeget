@@ -58,19 +58,13 @@ class TextTower(torch.nn.Module):
         return self.model.encode_text(token_ids)
 
 
-def export_pte(module: torch.nn.Module, example_inputs, out_path: pathlib.Path) -> None:
-    from executorch.backends.xnnpack.partition.xnnpack_partitioner import XnnpackPartitioner
-    from executorch.exir import to_edge_transform_and_lower
-    from torch._decomp import get_decompositions
-
-    module.eval()
-    with torch.no_grad():
-        ep = torch.export.export(module, example_inputs)
-
+def _decompose_batch_norms(ep):
     # The XNNPACK delegate can't compile standalone batch norms — the ones
     # conv-fusion can't fold (FastViT's stem/backbone kept some even after timm
     # reparameterization). Decompose them into elementwise ops it can take.
     # No-op for models without batch norm (e.g. DINOv2).
+    from torch._decomp import get_decompositions
+
     bn_ops = []
     for name in (
         "_native_batch_norm_legit_no_training",
@@ -80,16 +74,70 @@ def export_pte(module: torch.nn.Module, example_inputs, out_path: pathlib.Path) 
         op = getattr(torch.ops.aten, name, None)
         if op is not None:
             bn_ops.append(op.default)
-    ep = ep.run_decompositions(get_decompositions(bn_ops))
+    return ep.run_decompositions(get_decompositions(bn_ops))
+
+
+def _quantize_dynamic_int8(module: torch.nn.Module, example_inputs) -> torch.nn.Module:
+    """Dynamic per-channel int8 (weights int8, activations quantized on the fly)
+    via the PT2E flow — the transformer/linear-heavy parts shrink ~4x and load/
+    run much faster; convs (FastViT's early stages) stay fp32, which keeps this
+    conservative accuracy-wise. No calibration data needed for dynamic quant."""
+    from torch.ao.quantization.quantize_pt2e import convert_pt2e, prepare_pt2e
+
+    try:
+        from executorch.backends.xnnpack.quantizer.xnnpack_quantizer import (
+            XNNPACKQuantizer,
+            get_symmetric_quantization_config,
+        )
+    except ImportError:  # older executorch layout
+        from torch.ao.quantization.quantizer.xnnpack_quantizer import (
+            XNNPACKQuantizer,
+            get_symmetric_quantization_config,
+        )
+
+    quantizer = XNNPACKQuantizer()
+    quantizer.set_global(get_symmetric_quantization_config(is_per_channel=True, is_dynamic=True))
+
+    try:
+        gm = torch.export.export_for_training(module, example_inputs).module()
+    except AttributeError:
+        gm = torch.export.export(module, example_inputs).module()
+    gm = prepare_pt2e(gm, quantizer)
+    gm(*example_inputs)  # one pass to finalize observers (dynamic: no calibration set)
+    return convert_pt2e(gm)
+
+
+def export_pte(
+    module: torch.nn.Module,
+    example_inputs,
+    out_path: pathlib.Path,
+    quantize: bool = False,
+) -> None:
+    from executorch.backends.xnnpack.partition.xnnpack_partitioner import XnnpackPartitioner
+    from executorch.exir import to_edge_transform_and_lower
+
+    module.eval()
+    with torch.no_grad():
+        target = _quantize_dynamic_int8(module, example_inputs) if quantize else module
+        ep = torch.export.export(target, example_inputs)
+
+    ep = _decompose_batch_norms(ep)
 
     prog = to_edge_transform_and_lower(ep, partitioner=[XnnpackPartitioner()]).to_executorch()
     out_path.write_bytes(prog.buffer)
     print(f"wrote {out_path} ({out_path.stat().st_size / 1e6:.1f} MB)")
 
 
-def verify_pte(out_path: pathlib.Path, example_inputs, want_dim: int) -> None:
+def verify_pte(
+    out_path: pathlib.Path,
+    example_inputs,
+    want_dim: int,
+    reference: torch.nn.Module | None = None,
+) -> None:
     """Load the exported program with the ExecuTorch python runtime and check
-    the output shape — catches silent export breakage before anything ships."""
+    the output shape — and, when a reference module is given, that the exported
+    embedding still points the same way (cosine vs eager fp32). Catches both
+    silent export breakage and a botched quantization before anything ships."""
     try:
         from executorch.runtime import Runtime
     except Exception as e:  # pragma: no cover - depends on wheel contents
@@ -101,7 +149,18 @@ def verify_pte(out_path: pathlib.Path, example_inputs, want_dim: int) -> None:
     out = method.execute(list(example_inputs))[0]
     got = tuple(out.shape)
     assert got == (1, want_dim), f"{out_path.name}: output shape {got}, want (1, {want_dim})"
-    print(f"verified {out_path.name}: output {got}")
+
+    if reference is not None:
+        with torch.no_grad():
+            ref = reference(*example_inputs).flatten()
+        cand = torch.tensor(out).flatten().to(ref.dtype)
+        cos = torch.nn.functional.cosine_similarity(ref, cand, dim=0).item()
+        assert cos > 0.8, f"{out_path.name}: cosine vs fp32 reference {cos:.4f} — export is broken"
+        if cos < 0.98:
+            print(f"WARNING: {out_path.name}: cosine vs fp32 reference {cos:.4f} (quantization drift)")
+        print(f"verified {out_path.name}: output {got}, cos(fp32)={cos:.4f}")
+    else:
+        print(f"verified {out_path.name}: output {got}")
 
 
 def write_tokenizer(out_path: pathlib.Path) -> None:
@@ -143,19 +202,27 @@ def main() -> None:
     mean, std = list(norm.mean), list(norm.std)
     print(f"baking normalization mean={mean} std={std}")
 
+    image_tower = ImageTower(model, mean, std)
     image_inputs = (torch.rand(1, 3, IMAGE_SIZE, IMAGE_SIZE),)
     image_path = args.out_dir / "mobileclip_s2_image_xnnpack_fp32.pte"
-    export_pte(ImageTower(model, mean, std), image_inputs, image_path)
-    verify_pte(image_path, image_inputs, EMBED_DIM)
+    export_pte(image_tower, image_inputs, image_path)
+    verify_pte(image_path, image_inputs, EMBED_DIM, reference=image_tower)
+    image_q_path = args.out_dir / "mobileclip_s2_image_xnnpack_int8dyn.pte"
+    export_pte(image_tower, image_inputs, image_q_path, quantize=True)
+    verify_pte(image_q_path, image_inputs, EMBED_DIM, reference=image_tower)
 
     ids = torch.zeros(1, CONTEXT_LEN, dtype=torch.long)
     ids[0, 0] = 49406  # BOT
     ids[0, 1] = 49407  # EOT
     mask = (ids != 0).long()
     text_inputs = (ids, mask)
+    text_tower = TextTower(model)
     text_path = args.out_dir / "mobileclip_s2_text_xnnpack_fp32.pte"
-    export_pte(TextTower(model), text_inputs, text_path)
-    verify_pte(text_path, text_inputs, EMBED_DIM)
+    export_pte(text_tower, text_inputs, text_path)
+    verify_pte(text_path, text_inputs, EMBED_DIM, reference=text_tower)
+    text_q_path = args.out_dir / "mobileclip_s2_text_xnnpack_int8dyn.pte"
+    export_pte(text_tower, text_inputs, text_q_path, quantize=True)
+    verify_pte(text_q_path, text_inputs, EMBED_DIM, reference=text_tower)
 
     write_tokenizer(args.out_dir / "mobileclip_s2_tokenizer.json")
 

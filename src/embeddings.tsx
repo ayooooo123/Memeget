@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useMemo } from 'react';
+import React, { createContext, useContext, useMemo, useState } from 'react';
 import {
   useImageEmbeddings,
   useTextEmbeddings,
@@ -58,6 +58,10 @@ export interface EmbeddingsApi {
   visualReady: boolean;
   visualProgress: number; // 0..1 model download/load progress
   visualError: string | null;
+  // Demand control for the visual (DINO) tower: it exists only for the
+  // idle-time backfill, so it loads when that loop has work and unloads when
+  // drained — no cold start or resident RAM on ordinary app opens.
+  setVisualWanted: (on: boolean) => void;
   embedImage: (uri: string) => Promise<number[]>; // normalized
   embedText: (text: string) => Promise<number[]>; // normalized
   embedVisualImage?: (uri: string) => Promise<{ model: string; embedding: number[] } | null>; // normalized
@@ -68,9 +72,10 @@ const Ctx = createContext<EmbeddingsApi | null>(null);
 export function EmbeddingsProvider({ children }: { children: React.ReactNode }) {
   const image = useImageEmbeddings({ model: PRIMARY_IMAGE_MODEL });
   const text = useTextEmbeddings({ model: PRIMARY_TEXT_MODEL });
+  const [visualWanted, setVisualWanted] = useState(false);
   const visual = useImageEmbeddings({
     model: VISUAL_IMAGE_MODEL,
-    preventLoad: !VISUAL_EMBEDDING_MODEL.available,
+    preventLoad: !VISUAL_EMBEDDING_MODEL.available || !visualWanted,
   } as any);
 
   const api = useMemo<EmbeddingsApi>(() => {
@@ -95,6 +100,7 @@ export function EmbeddingsProvider({ children }: { children: React.ReactNode }) 
       visualReady,
       visualProgress: typeof vp === 'number' ? vp : 0,
       visualError: visualErr ? String(visualErr) : null,
+      setVisualWanted,
       embedImage: async (uri: string) => normalize(Array.from(await image.forward(uri))),
       embedText: async (t: string) => normalize(Array.from(await text.forward(t))),
       embedVisualImage: VISUAL_EMBEDDING_MODEL.available
