@@ -288,6 +288,14 @@ export function VisionProvider({ children }: { children: React.ReactNode }) {
       }
       setPausedReason(null);
 
+      // Stand down while the user is actively searching or a heavy pass runs —
+      // a generation can't be preempted once started, so at least don't start
+      // one under the user's fingers.
+      if (heavyPassActive()) {
+        timer = setTimeout(loop, 3_000);
+        return;
+      }
+
       let status: 'done' | 'deduped' | 'failed' | 'empty' | 'busy' = 'busy';
       try {
         status = await runGuarded(() => enrichNextMeme(enricherRef.current));

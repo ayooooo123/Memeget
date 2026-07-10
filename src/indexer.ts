@@ -164,8 +164,19 @@ async function withHeavyPass<T>(fn: () => Promise<T>): Promise<T> {
     heavyPasses--;
   }
 }
+
+// Interactive work (a live search) also outranks idle loops: a text embed
+// stuck behind a DINO batch or a queued describe is what made search feel
+// dead while "AI description stuff" ran. Searches stamp this; the stand-down
+// window covers the debounce + embed + scan.
+const INTERACTIVE_WINDOW_MS = 8_000;
+let lastInteractive = 0;
+export function noteInteractive(): void {
+  lastInteractive = Date.now();
+}
+
 export function heavyPassActive(): boolean {
-  return heavyPasses > 0;
+  return heavyPasses > 0 || Date.now() - lastInteractive < INTERACTIVE_WINDOW_MS;
 }
 
 export interface IndexProgress {
@@ -411,6 +422,8 @@ export async function runIndex(
   // The library is now (re)indexed in the active primary space, which is the
   // one moment old-space taught examples can be re-based automatically from
   // their source memes' fresh embeddings. Cheap no-op when nothing is stale.
+  // Say so on the card — post-bar silence reads as a hang.
+  opts.onProgress?.({ processed: total, total, added, current: 'migrating taught examples…' });
   const { migrated } = await migrateStaleExemplars().catch(() => ({ migrated: 0 }));
 
   opts.onProgress?.({ processed: total, total, added, current: '' });
@@ -497,6 +510,22 @@ async function finishFile(api: EmbeddingsApi, prep: Prepared, know: Knowledge): 
   } catch (e) {
     const reason = String((e as Error)?.message ?? e).slice(0, 300);
     await addIndexError({ name: prep.file.name, kind: prep.file.kind, stage, reason }).catch(() => {});
+    // A file the pipeline can't process (e.g. an animated GIF the transcoder
+    // rejects) used to stay a pending placeholder forever — a spinner in the
+    // grid on every launch. Store it as a degraded row instead: visible,
+    // findable by filename, and permanently skipped by every model pass. The
+    // error stays in the Settings diagnostics list.
+    await insertMeme({
+      uri: prep.file.uri,
+      name: prep.file.name,
+      kind: prep.file.kind,
+      embedding: [],
+      ocrText: '',
+      tags: [],
+      extraTerms: '',
+      modifiedAt: prep.ok ? prep.modifiedAt : null,
+      degraded: true,
+    }).catch(() => {});
     return 'error';
   } finally {
     for (const t of prep.temp) await deleteCache(t);
@@ -619,7 +648,7 @@ function embSig(e: Float32Array): number {
 // no image re-embedding — only cheap vector math.
 export async function retagAll(
   api: EmbeddingsApi,
-  opts: { onProgress?: (done: number, total: number) => void } = {}
+  opts: { onProgress?: (done: number, total: number) => void; shouldCancel?: () => boolean } = {}
 ): Promise<RetagResult> {
   return withHeavyPass(async () => {
   const know = await buildKnowledge(api);
@@ -633,7 +662,15 @@ export async function retagAll(
   const updates: { id: number; tags: Tag[]; extraTerms: string }[] = [];
   const tick = createYielder();
   for (let i = 0; i < rows.length; i++) {
+    // Cancellable (the Stop button reaches this now): rows classified so far
+    // are still written below, so a stopped re-tag makes partial progress.
+    if (opts.shouldCancel?.()) break;
     const row = rows[i];
+    // Degraded rows (files the pipeline couldn't process) have no embedding.
+    if (row.embedding.length === 0) {
+      opts.onProgress?.(i + 1, rows.length);
+      continue;
+    }
     const vec = Array.from(row.embedding);
     const sig = embSig(row.embedding);
     let prompts = promptTagCache.get(row.id);
