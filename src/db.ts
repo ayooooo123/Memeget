@@ -232,13 +232,16 @@ export async function insertMeme(args: {
   uri: string;
   name: string;
   kind: string;
-  embedding: number[]; // already normalized
+  embedding: number[]; // already normalized; [] for a degraded row
   visualEmbedding?: number[] | null; // already normalized, optional DINO/S2-side visual space
   visualModel?: string | null;
   ocrText: string;
   tags: Tag[];
   extraTerms: string;
   modifiedAt?: number | null; // file's last-modified time (ms); falls back to now
+  // A file the index pipeline could not process: stored so it's visible in the
+  // grid (not an eternal pending spinner) but excluded from every model pass.
+  degraded?: boolean;
 }): Promise<void> {
   const db = await getDb();
   const now = Date.now();
@@ -249,20 +252,23 @@ export async function insertMeme(args: {
   // the file's own last-modified time when we could read it, otherwise the
   // index time so a row is never 0.
   await db.runAsync(
-    `INSERT OR REPLACE INTO memes (uri, name, kind, embedding, visual_embedding, visual_model, ocr_text, tags, extra_terms, indexed_at, modified_at, audio_state)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO memes (uri, name, kind, embedding, visual_embedding, visual_model, ocr_text, tags, extra_terms, indexed_at, modified_at, vision_state, audio_state)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     args.uri,
     args.name,
     args.kind,
     vecToBlob(args.embedding),
     args.visualEmbedding ? vecToBlob(args.visualEmbedding) : null,
-    args.visualEmbedding ? (args.visualModel ?? '') : '',
+    // Degraded rows are pre-stamped visual-failed so the DINO backfill never
+    // retries a file the pipeline already couldn't read.
+    args.degraded ? visualFailureStamp(VISUAL_EMBEDDING_MODEL.id) : args.visualEmbedding ? (args.visualModel ?? '') : '',
     args.ocrText,
     JSON.stringify(args.tags),
     args.extraTerms,
     now,
     args.modifiedAt ?? now,
-    args.kind === 'video' ? 'pending' : 'none'
+    args.degraded ? 'failed' : 'pending',
+    args.degraded ? 'none' : args.kind === 'video' ? 'pending' : 'none'
   );
 }
 
@@ -391,7 +397,7 @@ export async function getKnowledgeVersion(): Promise<string> {
 export async function getEmbeddingSample(limit = 500): Promise<Float32Array[]> {
   const db = await getDb();
   const rows = await db.getAllAsync<{ embedding: Uint8Array }>(
-    'SELECT embedding FROM memes WHERE pending = 0 ORDER BY RANDOM() LIMIT ?',
+    'SELECT embedding FROM memes WHERE pending = 0 AND length(embedding) > 0 ORDER BY RANDOM() LIMIT ?',
     limit
   );
   return rows.map((r) => blobToVec(r.embedding));
@@ -908,8 +914,12 @@ function materializeHits(scored: { row: MemeRow; score: number }[], limit: numbe
   });
 }
 
+// `queryVec` may be null: lexical-only mode, used to serve instant results
+// while the text-embed model is busy behind heavy background work. Scores are
+// then purely keyword/OCR/tag/caption-text matches; the caller re-runs with
+// the real vector when it arrives.
 export async function searchByVector(
-  queryVec: number[],
+  queryVec: number[] | null,
   queryText: string,
   limit = 40,
   kind?: MediaKind,
@@ -922,19 +932,26 @@ export async function searchByVector(
     ? await db.getAllAsync<MemeRow>('SELECT * FROM memes WHERE pending = 0 AND kind = ?', kind)
     : await db.getAllAsync<MemeRow>('SELECT * FROM memes WHERE pending = 0');
   if (shouldAbort?.()) return null;
-  const terms = queryText
+  let terms = queryText
     .toLowerCase()
     .split(/\s+/)
     .filter((t) => t.length > 2);
+  // Lexical-only mode has no dense channel to fall back on; keep short words
+  // rather than handing back an unranked list.
+  if (!queryVec && terms.length === 0) {
+    terms = queryText.toLowerCase().split(/\s+/).filter(Boolean);
+  }
 
   const scored: { row: MemeRow; score: number }[] = [];
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
-    let score = hybridSearchScore(
-      queryVec,
-      blobToVec(row.embedding),
-      row.caption_embedding ? blobToVec(row.caption_embedding) : null
-    );
+    let score = queryVec
+      ? hybridSearchScore(
+          queryVec,
+          blobToVec(row.embedding),
+          row.caption_embedding ? blobToVec(row.caption_embedding) : null
+        )
+      : 0;
     if (terms.length) {
       const hay = rowSearchText(row);
       let matched = 0;
