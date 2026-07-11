@@ -82,7 +82,12 @@ def _quantize_dynamic_int8(module: torch.nn.Module, example_inputs) -> torch.nn.
     via the PT2E flow — the transformer/linear-heavy parts shrink ~4x and load/
     run much faster; convs (FastViT's early stages) stay fp32, which keeps this
     conservative accuracy-wise. No calibration data needed for dynamic quant."""
-    from torch.ao.quantization.quantize_pt2e import convert_pt2e, prepare_pt2e
+    # The PT2E entry points moved from torch.ao to torchao in the torch that
+    # executorch 1.0 pins; support both layouts.
+    try:
+        from torchao.quantization.pt2e.quantize_pt2e import convert_pt2e, prepare_pt2e
+    except ImportError:
+        from torch.ao.quantization.quantize_pt2e import convert_pt2e, prepare_pt2e
 
     try:
         from executorch.backends.xnnpack.quantizer.xnnpack_quantizer import (
@@ -104,7 +109,21 @@ def _quantize_dynamic_int8(module: torch.nn.Module, example_inputs) -> torch.nn.
         gm = torch.export.export(module, example_inputs).module()
     gm = prepare_pt2e(gm, quantizer)
     gm(*example_inputs)  # one pass to finalize observers (dynamic: no calibration set)
-    return convert_pt2e(gm)
+    gm = convert_pt2e(gm)
+
+    # The CI wheel's ExecuTorch python runtime is broken (undefined torch
+    # symbol), so post-lowering verification silently skips — check the thing
+    # quantization can actually ruin HERE, in eager, where no runtime is needed.
+    with torch.no_grad():
+        ref = module(*example_inputs).flatten()
+        cand = gm(*example_inputs).flatten()
+    cos = torch.nn.functional.cosine_similarity(ref, cand, dim=0).item()
+    assert cos > 0.8, f"int8 quantization broke the embedding (cos vs fp32 = {cos:.4f})"
+    if cos < 0.98:
+        print(f"WARNING: int8 quantization drift: cos vs fp32 = {cos:.4f}")
+    else:
+        print(f"int8 quantization verified in eager: cos vs fp32 = {cos:.4f}")
+    return gm
 
 
 def export_pte(
