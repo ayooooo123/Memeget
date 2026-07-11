@@ -112,7 +112,6 @@ jobs:
             Normalization is baked into each graph; the app L2-normalizes outputs.
           files: |
             dist/mobileclip_s2_image_xnnpack_fp32.pte
-            dist/mobileclip_s2_image_xnnpack_int8dyn.pte
             dist/mobileclip_s2_text_xnnpack_fp32.pte
             dist/mobileclip_s2_text_xnnpack_int8dyn.pte
             dist/mobileclip_s2_tokenizer.json

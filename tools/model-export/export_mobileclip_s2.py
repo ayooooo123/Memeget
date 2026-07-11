@@ -226,9 +226,10 @@ def main() -> None:
     image_path = args.out_dir / "mobileclip_s2_image_xnnpack_fp32.pte"
     export_pte(image_tower, image_inputs, image_path)
     verify_pte(image_path, image_inputs, EMBED_DIM, reference=image_tower)
-    image_q_path = args.out_dir / "mobileclip_s2_image_xnnpack_int8dyn.pte"
-    export_pte(image_tower, image_inputs, image_q_path, quantize=True)
-    verify_pte(image_q_path, image_inputs, EMBED_DIM, reference=image_tower)
+    # NO int8 image tower: the eager quantization gate measured cos 0.34 vs
+    # fp32 — reparameterized FastViT does not survive dynamic int8. It ships
+    # fp32 (the smallest of the three files anyway); a static-quant export with
+    # real calibration data is the future path if its size ever matters.
 
     ids = torch.zeros(1, CONTEXT_LEN, dtype=torch.long)
     ids[0, 0] = 49406  # BOT
