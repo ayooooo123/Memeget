@@ -112,8 +112,6 @@ jobs:
           files: |
             dist/mobileclip_s2_image_xnnpack_fp32.pte
             dist/mobileclip_s2_text_xnnpack_fp32.pte
-            dist/mobileclip_s2_text_xnnpack_int8dyn.pte
             dist/mobileclip_s2_tokenizer.json
             dist/dinov2_base_xnnpack_fp32.pte
-            dist/dinov2_base_xnnpack_int8dyn.pte
             dist/SHA256SUMS
