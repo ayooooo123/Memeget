@@ -51,9 +51,7 @@ def main() -> None:
     out_path = args.out_dir / "dinov2_base_xnnpack_fp32.pte"
     export_pte(wrapper, inputs, out_path)
     verify_pte(out_path, inputs, EMBED_DIM, reference=wrapper)
-    q_path = args.out_dir / "dinov2_base_xnnpack_int8dyn.pte"
-    export_pte(wrapper, inputs, q_path, quantize=True)
-    verify_pte(q_path, inputs, EMBED_DIM, reference=wrapper)
+    # int8 parked — see the note in export_mobileclip_s2.py.
 
 
 if __name__ == "__main__":

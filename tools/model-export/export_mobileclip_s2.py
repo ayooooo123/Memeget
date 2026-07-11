@@ -248,9 +248,11 @@ def main() -> None:
     text_path = args.out_dir / "mobileclip_s2_text_xnnpack_fp32.pte"
     export_pte(text_tower, text_inputs, text_path)
     verify_pte(text_path, text_inputs, EMBED_DIM, reference=text_tower)
-    text_q_path = args.out_dir / "mobileclip_s2_text_xnnpack_int8dyn.pte"
-    export_pte(text_tower, text_inputs, text_q_path, quantize=True)
-    verify_pte(text_q_path, text_inputs, EMBED_DIM, reference=text_tower)
+    # int8 is PARKED, not deleted: export_pte(..., quantize=True) works code-
+    # wise, but nine CI runs against executorch 1.0's quantization stack hit
+    # five distinct failure modes — including silently WRONG quantization
+    # (cos 0.33–0.43 vs fp32) that only the eager gate caught. Re-attempt when
+    # a coherent executorch/torch/torchao set demonstrably passes the gate.
 
     write_tokenizer(args.out_dir / "mobileclip_s2_tokenizer.json")
 
