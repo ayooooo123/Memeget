@@ -82,6 +82,14 @@ def _quantize_dynamic_int8(module: torch.nn.Module, example_inputs) -> torch.nn.
     via the PT2E flow — the transformer/linear-heavy parts shrink ~4x and load/
     run much faster; convs (FastViT's early stages) stay fp32, which keeps this
     conservative accuracy-wise. No calibration data needed for dynamic quant."""
+    # torchao's quantize_pt2e references torch.ao.quantization.quantizer in a
+    # module-level annotation. That's a SUBMODULE — visible as an attribute only
+    # after something imports it — so force the import first (run #8 failed on
+    # exactly this AttributeError).
+    try:
+        import torch.ao.quantization.quantizer.quantizer  # noqa: F401
+    except ImportError:
+        pass
     # The PT2E entry points moved from torch.ao to torchao in the torch that
     # executorch 1.0 pins; support both layouts.
     try:
