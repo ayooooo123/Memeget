@@ -67,7 +67,14 @@ jobs:
           # executorch pins its own matching torch; install it first so the
           # resolver picks compatible versions for everything else.
           pip install "executorch==${ET_VERSION}" --extra-index-url https://download.pytorch.org/whl/cpu
+          # The PT2E quantization flow lives in torchao and its import breaks
+          # when torchao is older than the resolved torch (run #5: torchao
+          # referencing torch.ao.quantization.quantizer, removed in newer
+          # torch). Upgrade torchao to match whatever torch was resolved.
+          pip install --upgrade torchao --extra-index-url https://download.pytorch.org/whl/cpu
           pip install open_clip_torch timm transformers tokenizers --extra-index-url https://download.pytorch.org/whl/cpu
+          echo '--- resolved versions ---'
+          pip freeze | grep -iE '^(torch|torchao|executorch|open-clip|timm|transformers|tokenizers)' || true
 
       - name: Export MobileCLIP-S2 (image + text + tokenizer)
         working-directory: tools/model-export
