@@ -64,14 +64,13 @@ jobs:
           PIP_NO_CACHE_DIR: '1'
         run: |
           python -m pip install --upgrade pip
-          # executorch pins its own matching torch; install it first so the
-          # resolver picks compatible versions for everything else.
-          pip install "executorch==${ET_VERSION}" --extra-index-url https://download.pytorch.org/whl/cpu
-          # The PT2E quantization flow lives in torchao and its import breaks
-          # when torchao is older than the resolved torch (run #5: torchao
-          # referencing torch.ao.quantization.quantizer, removed in newer
-          # torch). Upgrade torchao to match whatever torch was resolved.
-          pip install --upgrade torchao --extra-index-url https://download.pytorch.org/whl/cpu
+          # Pin torch to the 2.9 line: executorch 1.0's stock torchao targets
+          # it, and letting the resolver drift to a newer torch produced either
+          # broken imports (run #5) or — worse — silently WRONG quantization
+          # that only the cosine gate caught (runs #6/#7: cos 0.33–0.43 where
+          # a healthy dynamic-int8 transformer scores ≥0.99). One coherent
+          # wheel set, no piecemeal upgrades.
+          pip install "executorch==${ET_VERSION}" "torch==2.9.*" --extra-index-url https://download.pytorch.org/whl/cpu
           pip install open_clip_torch timm transformers tokenizers --extra-index-url https://download.pytorch.org/whl/cpu
           echo '--- resolved versions ---'
           pip freeze | grep -iE '^(torch|torchao|executorch|open-clip|timm|transformers|tokenizers)' || true
