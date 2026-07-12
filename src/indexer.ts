@@ -1069,37 +1069,68 @@ export async function backfillVisualEmbeddings(
   return rows.length;
 }
 
+// Fast path for a poster: MediaMetadataRetriever reads the SAF content:// uri
+// directly (the module opens a file descriptor off the resolver), so grabbing
+// one frame does NOT require copying the whole multi-megabyte video into the
+// cache the way the embed pipeline must. Frame → downscaled jpeg → permanent
+// thumbs dir. Throws on any failure; the caller falls back to the copy path
+// (some providers/containers only cooperate with a real local file).
+async function extractPosterDirect(uri: string): Promise<string> {
+  const { uri: frame } = await VideoThumbnails.getThumbnailAsync(uri, { time: 1000 });
+  try {
+    const jpeg = await toJpeg(frame);
+    try {
+      return await persistThumb(jpeg);
+    } finally {
+      await deleteCache(jpeg);
+    }
+  } finally {
+    await deleteCache(frame);
+  }
+}
+
 // Extract grid posters for videos indexed before posters existed (or whose
-// inline extraction failed transiently). No model involved — just SAF copy +
-// keyframe + jpeg — so it needs no readiness gate, only the heavy-pass/
-// interactive stand-down: it uses the same hardware codecs as the viewer's
-// player and the index pipeline. Returns rows FETCHED (0 = drained);
-// THUMB_FAILED stamping guarantees termination, same as the visual backfill.
+// inline extraction failed transiently). No model involved, and the fast path
+// doesn't even copy the file — so a few hundred missing posters drain in
+// seconds, not minutes. A small worker pool keeps several frame grabs in
+// flight (frame retrieval is I/O + a single decoded frame; Android handles a
+// few retrievers at once fine), while the heavy-pass/interactive stand-down
+// still yields the codecs to indexing and the viewer. Returns rows FETCHED
+// (0 = drained); THUMB_FAILED stamping guarantees termination, same as the
+// visual backfill.
+const THUMB_POOL = 3;
 export async function backfillVideoThumbs(
   opts: { limit?: number } = {}
 ): Promise<number> {
   const rows = await getVideosNeedingThumb(opts.limit ?? 24);
-  for (let i = 0; i < rows.length; i++) {
-    if (heavyPassActive()) return rows.length;
-    // Short breather: each item is one SAF copy + keyframe + jpeg (no model),
-    // so the loop can move briskly — blank tiles are what the user is staring
-    // at. Interactive use still gets a full stand-down via the gate above.
-    if (i > 0) await new Promise<void>((r) => setTimeout(r, 100));
-    const prep = await prepareFile({ uri: rows[i].uri, name: rows[i].name, kind: 'video' }, i);
-    try {
-      if (!prep.ok) {
-        // Unreadable/undecodable file — permanent, stop re-serving it.
-        await setMemeThumb(rows[i].id, THUMB_FAILED).catch(() => {});
-      } else {
-        const thumb = await persistThumb(prep.jpeg);
-        await setMemeThumb(rows[i].id, thumb);
+  let next = 0;
+  const worker = async () => {
+    while (!heavyPassActive()) {
+      const i = next++;
+      if (i >= rows.length) return;
+      const row = rows[i];
+      try {
+        await setMemeThumb(row.id, await extractPosterDirect(row.uri));
+        continue;
+      } catch {
+        // fall through to the copy path
       }
-    } catch {
-      await setMemeThumb(rows[i].id, THUMB_FAILED).catch(() => {});
-    } finally {
-      for (const t of prep.temp) await deleteCache(t);
+      const prep = await prepareFile({ uri: row.uri, name: row.name, kind: 'video' }, i);
+      try {
+        if (!prep.ok) {
+          // Unreadable/undecodable file — permanent, stop re-serving it.
+          await setMemeThumb(row.id, THUMB_FAILED).catch(() => {});
+        } else {
+          await setMemeThumb(row.id, await persistThumb(prep.jpeg));
+        }
+      } catch {
+        await setMemeThumb(row.id, THUMB_FAILED).catch(() => {});
+      } finally {
+        for (const t of prep.temp) await deleteCache(t);
+      }
     }
-  }
+  };
+  await Promise.all(Array.from({ length: Math.min(THUMB_POOL, rows.length) }, worker));
   return rows.length;
 }
 
