@@ -135,9 +135,9 @@ export async function readImageBase64(uri: string, name: string): Promise<string
 }
 
 // Grab a representative frame from a video and return it as base64 (no data-URI
-// prefix). The system clipboard can't hold a video file, so copying a video
-// really means copying a still frame you can paste anywhere — same path the
-// indexer uses to thumbnail videos. Materializes the content:// uri to a temp
+// prefix) — the FALLBACK copy path for videos, used only when the native
+// whole-video clipboard (memeget-bg copyFileToClipboard) isn't built in. Same
+// thumbnail path the indexer uses. Materializes the content:// uri to a temp
 // file first (the thumbnailer needs a real file path), then cleans both up.
 export async function readVideoFrameBase64(uri: string, name: string): Promise<string> {
   const file = await materialize(uri, name);

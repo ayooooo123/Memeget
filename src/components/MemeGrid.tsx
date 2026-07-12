@@ -26,7 +26,8 @@ import { addExemplar, deleteMeme, getLabels, getMemeEmbedding, getSimilarMemes }
 import { scoreExemplar } from '../learnCore';
 import { buildExemplarHeads, noteInteractive, type ExemplarModel } from '../indexer';
 import { success, tap, warn } from '../haptics';
-import { deleteFile, materialize, readImageBase64, readVideoFrameBase64 } from '../saf';
+import { copyFileToClipboard } from '../../modules/memeget-bg';
+import { deleteCache, deleteFile, materialize, readImageBase64, readVideoFrameBase64 } from '../saf';
 import { colors, radius, shadow, space, TABBAR_CLEARANCE } from '../theme';
 import { useConst } from '../reactUtils';
 import type { MemeRecord, SearchHit } from '../types';
@@ -315,14 +316,31 @@ export const MemeGrid = React.memo(function MemeGrid({
     noteInteractive();
     setBusy(true);
     try {
-      // Images copy as-is; videos copy a representative still frame, since the
-      // system clipboard can't hold a video file.
-      const base64 = isVideo
-        ? await readVideoFrameBase64(selected.uri, selected.name)
-        : await readImageBase64(selected.uri, selected.name);
+      if (isVideo) {
+        // Copy the ENTIRE video: stage it into the cache and put a content://
+        // uri on the clipboard natively — expo-clipboard is image-only. The
+        // staged copy must outlive the clipboard entry so pastes keep working;
+        // it's a share_-prefixed file the launch-time sweep reclaims, same
+        // lifecycle as Share. Whether a paste target accepts a video clip is
+        // up to that app; the frame path below covers builds without the
+        // native function.
+        const path = await materialize(selected.uri, selected.name);
+        if (copyFileToClipboard(path, selected.name)) {
+          success();
+          showToast('Video copied — paste it in apps that take video', 'success');
+          return;
+        }
+        await deleteCache(path);
+        const base64 = await readVideoFrameBase64(selected.uri, selected.name);
+        await Clipboard.setImageAsync(base64);
+        success();
+        showToast('Frame copied — paste it anywhere', 'success');
+        return;
+      }
+      const base64 = await readImageBase64(selected.uri, selected.name);
       await Clipboard.setImageAsync(base64);
       success();
-      showToast(isVideo ? 'Frame copied — paste it anywhere' : 'Meme copied — paste it anywhere', 'success');
+      showToast('Meme copied — paste it anywhere', 'success');
     } catch (e) {
       showToast(`Could not copy: ${String(e)}`, 'error');
     } finally {
