@@ -7,9 +7,10 @@ import {
   getSetting,
   setSetting,
 } from './db';
-import { onLibraryChanged } from './events';
+import { emitLibraryChanged, onLibraryChanged } from './events';
 import {
   backfillCaptionEmbeddings,
+  backfillVideoThumbs,
   backfillVisualEmbeddings,
   heavyPassActive,
   enrichLibrary,
@@ -270,6 +271,34 @@ export function VisionProvider({ children }: { children: React.ReactNode }) {
       cancelled = true;
     };
   }, [embeddings.ready]);
+
+  // Video grid posters: pure I/O + codec work, no model — runs once per app
+  // session until the queue drains, standing down for indexing/interactive use
+  // (it shares the hardware decoders with both). Each batch that lands nudges
+  // the library so blank tiles fill in live rather than on the next launch.
+  useEffect(() => {
+    let cancelled = false;
+    const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+    const loop = async () => {
+      while (!cancelled) {
+        if (heavyPassActive()) {
+          await sleep(10_000);
+          continue;
+        }
+        const n = await backfillVideoThumbs({ limit: 8 }).catch(() => 0);
+        if (cancelled) break;
+        if (n > 0) emitLibraryChanged();
+        // Drained: poll slowly — new videos arrive via indexing/shares, and the
+        // per-video poster is stamped inline there, so this is only a safety
+        // net for transient failures.
+        await sleep(n === 0 ? 120_000 : 1_000);
+      }
+    };
+    loop();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Latest embeddings api for the long-lived backfill loop below (the api
   // object takes a new identity as load state changes).

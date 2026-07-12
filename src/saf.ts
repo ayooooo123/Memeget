@@ -125,6 +125,38 @@ export async function copyToCache(file: SafFile, index: number): Promise<string>
   return dest;
 }
 
+// Persisted video posters live in the DOCUMENTS dir, not the cache: the OS may
+// purge the cache at will (and our own launch sweep does), but a poster must
+// survive as long as its meme row references it. Small jpegs, one per video.
+const THUMBS_DIR = `${FileSystem.documentDirectory}thumbs/`;
+let thumbSeq = 0;
+
+// Copy an extracted poster jpeg into permanent storage and return its path
+// (what gets stored in the meme row's thumb_uri).
+export async function persistThumb(srcJpeg: string): Promise<string> {
+  await FileSystem.makeDirectoryAsync(THUMBS_DIR, { intermediates: true }).catch(() => {});
+  const dest = `${THUMBS_DIR}thumb_${Date.now()}_${++thumbSeq}.jpg`;
+  await FileSystem.copyAsync({ from: srcJpeg, to: dest });
+  return dest;
+}
+
+// Delete posters no longer referenced by any meme row (deleted memes, cleared
+// index). Best-effort; runs after an index pass, when the reference set is
+// fresh. Returns how many it removed.
+export async function sweepOrphanThumbs(keep: Set<string>): Promise<number> {
+  try {
+    const entries = await FileSystem.readDirectoryAsync(THUMBS_DIR);
+    const stale = entries.filter((name) => !keep.has(THUMBS_DIR + name));
+    await Promise.all(
+      stale.map((name) => FileSystem.deleteAsync(THUMBS_DIR + name, { idempotent: true }).catch(() => {}))
+    );
+    return stale.length;
+  } catch {
+    // dir doesn't exist yet, or listing failed — nothing to reclaim
+    return 0;
+  }
+}
+
 // Copy any SAF/content:// uri into the cache as a stable file:// path so native
 // share sheets (which can't stream a raw content uri) have a real file to send.
 export async function materialize(uri: string, name: string): Promise<string> {

@@ -19,6 +19,7 @@ import {
   countMemesDescribed,
   dot,
   getAllMemeEmbeddings,
+  getAllThumbUris,
   getDescribedVisionRecords,
   getEmbeddingSample,
   getExemplars,
@@ -29,6 +30,7 @@ import {
   getMemesNeedingCaptionEmbedding,
   getMemesNeedingVisualEmbedding,
   getMemesNeedingVision,
+  getVideosNeedingThumb,
   insertMeme,
   insertPendingMeme,
   markVisionFailed,
@@ -36,16 +38,27 @@ import {
   migrateStaleExemplars,
   putLabelVector,
   setMemeCaptionEmbedding,
+  setMemeThumb,
   setMemeVisualEmbedding,
   setMemeVision,
   stampIndexModel,
+  THUMB_FAILED,
   updateMemeTags,
   type DescribedVisionRow,
   type MemeNeedingVisualEmbeddingRow,
   type MemeNeedingVisionRow,
 } from './db';
 import { ASSOCIATIONS, MEME_LABELS, NEGATIVE_ANCHORS, ocrTags } from './memeLabels';
-import { copyToCache, deleteCache, getModifiedTime, listMedia, saveToFolder, type SafFile } from './saf';
+import {
+  copyToCache,
+  deleteCache,
+  getModifiedTime,
+  listMedia,
+  persistThumb,
+  saveToFolder,
+  sweepOrphanThumbs,
+  type SafFile,
+} from './saf';
 import type { VisionResult } from './visionCore';
 import type { Tag } from './types';
 
@@ -426,6 +439,14 @@ export async function runIndex(
   opts.onProgress?.({ processed: total, total, added, current: 'migrating taught examples…' });
   const { migrated } = await migrateStaleExemplars().catch(() => ({ migrated: 0 }));
 
+  // Reclaim posters whose meme rows are gone (deleted memes, a cleared+rebuilt
+  // index). Cheap set-difference over one small directory.
+  try {
+    await sweepOrphanThumbs(await getAllThumbUris());
+  } catch {
+    // best-effort; orphans get another chance next index
+  }
+
   opts.onProgress?.({ processed: total, total, added, current: '' });
   return { added, skipped, errors, migratedExemplars: migrated };
   });
@@ -470,6 +491,16 @@ async function prepareFile(file: SafFile, idx: number): Promise<Prepared> {
   }
 }
 
+// Persist a video's already-extracted keyframe as its permanent grid poster.
+// The grid's image view can't decode a frame from every codec ("mp4 gif"
+// tiles rendered blank straight off the content:// uri), so every video gets a
+// plain-jpeg poster on disk. Returns '' for images and on failure (the
+// backfill retries those).
+async function persistVideoThumb(prep: Prepared): Promise<string> {
+  if (!prep.ok || prep.file.kind !== 'video') return '';
+  return persistThumb(prep.jpeg).catch(() => '');
+}
+
 // Stage 2: embed + OCR → classify → store. Logs failures to the index-error
 // table and cleans up the prepare stage's temp files.
 async function finishFile(api: EmbeddingsApi, prep: Prepared, know: Knowledge): Promise<'added' | 'error'> {
@@ -505,6 +536,7 @@ async function finishFile(api: EmbeddingsApi, prep: Prepared, know: Knowledge): 
       tags,
       extraTerms: extraTermsFor(tags, know.assoc),
       modifiedAt: prep.modifiedAt,
+      thumbUri: await persistVideoThumb(prep),
     });
     return 'added';
   } catch (e) {
@@ -524,6 +556,10 @@ async function finishFile(api: EmbeddingsApi, prep: Prepared, know: Knowledge): 
       tags: [],
       extraTerms: '',
       modifiedAt: prep.ok ? prep.modifiedAt : null,
+      // A degraded row can still have a poster when only the embed/store side
+      // failed; a failed prepare has no frame — stamp it so the backfill
+      // doesn't retry a file the pipeline already couldn't read.
+      thumbUri: (await persistVideoThumb(prep)) || (prep.file.kind === 'video' ? THUMB_FAILED : ''),
       degraded: true,
     }).catch(() => {});
     return 'error';
@@ -1029,6 +1065,37 @@ export async function backfillVisualEmbeddings(
       for (const t of prep.temp) await deleteCache(t);
     }
     opts.onProgress?.(i + 1, rows.length);
+  }
+  return rows.length;
+}
+
+// Extract grid posters for videos indexed before posters existed (or whose
+// inline extraction failed transiently). No model involved — just SAF copy +
+// keyframe + jpeg — so it needs no readiness gate, only the heavy-pass/
+// interactive stand-down: it uses the same hardware codecs as the viewer's
+// player and the index pipeline. Returns rows FETCHED (0 = drained);
+// THUMB_FAILED stamping guarantees termination, same as the visual backfill.
+export async function backfillVideoThumbs(
+  opts: { limit?: number } = {}
+): Promise<number> {
+  const rows = await getVideosNeedingThumb(opts.limit ?? 8);
+  for (let i = 0; i < rows.length; i++) {
+    if (heavyPassActive()) return rows.length;
+    if (i > 0) await new Promise<void>((r) => setTimeout(r, 300));
+    const prep = await prepareFile({ uri: rows[i].uri, name: rows[i].name, kind: 'video' }, i);
+    try {
+      if (!prep.ok) {
+        // Unreadable/undecodable file — permanent, stop re-serving it.
+        await setMemeThumb(rows[i].id, THUMB_FAILED).catch(() => {});
+      } else {
+        const thumb = await persistThumb(prep.jpeg);
+        await setMemeThumb(rows[i].id, thumb);
+      }
+    } catch {
+      await setMemeThumb(rows[i].id, THUMB_FAILED).catch(() => {});
+    } finally {
+      for (const t of prep.temp) await deleteCache(t);
+    }
   }
   return rows.length;
 }

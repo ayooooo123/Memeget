@@ -119,6 +119,11 @@ export async function initDb(): Promise<void> {
     await db.execAsync(`ALTER TABLE memes ADD COLUMN audio_state TEXT NOT NULL DEFAULT 'none';`);
     await db.execAsync(`UPDATE memes SET audio_state = 'pending' WHERE kind = 'video';`);
   }
+  // Migrate databases that predate persisted video posters. Existing videos
+  // start '' so the thumbnail backfill picks them up.
+  if (!cols.some((c) => c.name === 'thumb_uri')) {
+    await db.execAsync(`ALTER TABLE memes ADD COLUMN thumb_uri TEXT NOT NULL DEFAULT '';`);
+  }
   // Migrate exemplar tables that predate negative ("not this") teaching.
   const exCols = await db.getAllAsync<{ name: string }>('PRAGMA table_info(exemplars)');
   if (!exCols.some((c) => c.name === 'is_positive')) {
@@ -239,6 +244,8 @@ export async function insertMeme(args: {
   tags: Tag[];
   extraTerms: string;
   modifiedAt?: number | null; // file's last-modified time (ms); falls back to now
+  // Persisted poster jpeg for a video (the grid can't decode every codec).
+  thumbUri?: string | null;
   // A file the index pipeline could not process: stored so it's visible in the
   // grid (not an eternal pending spinner) but excluded from every model pass.
   degraded?: boolean;
@@ -252,8 +259,8 @@ export async function insertMeme(args: {
   // the file's own last-modified time when we could read it, otherwise the
   // index time so a row is never 0.
   await db.runAsync(
-    `INSERT OR REPLACE INTO memes (uri, name, kind, embedding, visual_embedding, visual_model, ocr_text, tags, extra_terms, indexed_at, modified_at, vision_state, audio_state)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO memes (uri, name, kind, embedding, visual_embedding, visual_model, ocr_text, tags, extra_terms, indexed_at, modified_at, vision_state, audio_state, thumb_uri)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     args.uri,
     args.name,
     args.kind,
@@ -268,7 +275,8 @@ export async function insertMeme(args: {
     now,
     args.modifiedAt ?? now,
     args.degraded ? 'failed' : 'pending',
-    args.degraded ? 'none' : args.kind === 'video' ? 'pending' : 'none'
+    args.degraded ? 'none' : args.kind === 'video' ? 'pending' : 'none',
+    args.thumbUri ?? ''
   );
 }
 
@@ -319,7 +327,13 @@ interface MemeRow {
   indexed_at: number;
   modified_at: number;
   pending: number;
+  thumb_uri: string;
 }
+
+// Sentinel stored in thumb_uri when poster extraction failed permanently for a
+// video, so the backfill stops re-serving the row (same pattern as the visual-
+// embedding failure stamp). rowToRecord hides it from the UI.
+export const THUMB_FAILED = 'failed';
 
 function rowToRecord(row: MemeRow): MemeRecord & { embedding: Float32Array } {
   return {
@@ -337,6 +351,7 @@ function rowToRecord(row: MemeRow): MemeRecord & { embedding: Float32Array } {
     indexedAt: row.indexed_at,
     modifiedAt: row.modified_at ?? row.indexed_at,
     pending: row.pending === 1,
+    thumbUri: row.thumb_uri && row.thumb_uri !== THUMB_FAILED ? row.thumb_uri : undefined,
     embedding: blobToVec(row.embedding),
   };
 }
@@ -626,6 +641,35 @@ export async function countMemesNeedingVisualEmbedding(
   return row?.c ?? 0;
 }
 
+// Videos whose grid poster hasn't been extracted yet. Excludes THUMB_FAILED
+// stamps (same never-re-serve reasoning as the visual backfill) and pending
+// placeholders (the indexer will stamp those with a poster itself).
+export async function getVideosNeedingThumb(limit = 10): Promise<
+  { id: number; uri: string; name: string }[]
+> {
+  const db = await getDb();
+  return db.getAllAsync<{ id: number; uri: string; name: string }>(
+    "SELECT id, uri, name FROM memes WHERE kind = 'video' AND pending = 0 AND thumb_uri = '' ORDER BY modified_at DESC, id DESC LIMIT ?",
+    limit
+  );
+}
+
+export async function setMemeThumb(id: number, thumbUri: string): Promise<void> {
+  const db = await getDb();
+  await db.runAsync('UPDATE memes SET thumb_uri = ? WHERE id = ?', thumbUri, id);
+}
+
+// Every live poster path, for the orphan sweep (posters whose meme row was
+// deleted or re-indexed away must not pile up in the documents dir forever).
+export async function getAllThumbUris(): Promise<Set<string>> {
+  const db = await getDb();
+  const rows = await db.getAllAsync<{ thumb_uri: string }>(
+    `SELECT thumb_uri FROM memes WHERE thumb_uri != '' AND thumb_uri != ?`,
+    THUMB_FAILED
+  );
+  return new Set(rows.map((r) => r.thumb_uri));
+}
+
 export async function markVisualEmbeddingFailed(id: number, model: string): Promise<void> {
   const db = await getDb();
   await db.runAsync(
@@ -851,14 +895,14 @@ export async function getRecentMemes(
   // paging repeats and skips rows — which is what broke infinite scroll.
   const rows = kind
     ? await db.getAllAsync<Omit<MemeRow, 'embedding' | 'visual_embedding' | 'caption_embedding'>>(
-        `SELECT id, uri, name, kind, ocr_text, caption, transcript, tags, extra_terms, vision_state, audio_state, indexed_at, modified_at, pending
+        `SELECT id, uri, name, kind, ocr_text, caption, transcript, tags, extra_terms, vision_state, audio_state, indexed_at, modified_at, pending, thumb_uri
          FROM memes WHERE kind = ? ORDER BY modified_at DESC, id DESC LIMIT ? OFFSET ?`,
         kind,
         limit,
         offset
       )
     : await db.getAllAsync<Omit<MemeRow, 'embedding' | 'visual_embedding' | 'caption_embedding'>>(
-        `SELECT id, uri, name, kind, ocr_text, caption, transcript, tags, extra_terms, vision_state, audio_state, indexed_at, modified_at, pending
+        `SELECT id, uri, name, kind, ocr_text, caption, transcript, tags, extra_terms, vision_state, audio_state, indexed_at, modified_at, pending, thumb_uri
          FROM memes ORDER BY modified_at DESC, id DESC LIMIT ? OFFSET ?`,
         limit,
         offset
@@ -878,6 +922,7 @@ export async function getRecentMemes(
     indexedAt: r.indexed_at,
     modifiedAt: r.modified_at ?? r.indexed_at,
     pending: r.pending === 1,
+    thumbUri: r.thumb_uri && r.thumb_uri !== THUMB_FAILED ? r.thumb_uri : undefined,
   }));
 }
 
