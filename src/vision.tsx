@@ -5,6 +5,7 @@ import {
   countMemesNeedingVision,
   countMemesNeedingVisualEmbedding,
   getSetting,
+  getVideosNeedingThumb,
   setSetting,
 } from './db';
 import { emitLibraryChanged, onLibraryChanged } from './events';
@@ -282,16 +283,16 @@ export function VisionProvider({ children }: { children: React.ReactNode }) {
     const loop = async () => {
       while (!cancelled) {
         if (heavyPassActive()) {
-          await sleep(10_000);
+          await sleep(5_000);
           continue;
         }
-        const n = await backfillVideoThumbs({ limit: 8 }).catch(() => 0);
+        const n = await backfillVideoThumbs({ limit: 24 }).catch(() => 0);
         if (cancelled) break;
         if (n > 0) emitLibraryChanged();
         // Drained: poll slowly — new videos arrive via indexing/shares, and the
         // per-video poster is stamped inline there, so this is only a safety
         // net for transient failures.
-        await sleep(n === 0 ? 120_000 : 1_000);
+        await sleep(n === 0 ? 120_000 : 250);
       }
     };
     loop();
@@ -315,9 +316,25 @@ export function VisionProvider({ children }: { children: React.ReactNode }) {
         // DINO is the heaviest embedding model and this loop has all day:
         // stand down completely while any heavy pass runs (the un-gated loop is
         // what starved "Preparing to index…" for minutes), and take a real
-        // breather between batches even when idle.
+        // breather between batches even when idle. RELEASE the model too, not
+        // just the batches: an fp32 DINO load kicked off moments before an
+        // index trigger otherwise keeps loading/resident through the whole
+        // pass, fighting the index pipeline for CPU + RAM while its status
+        // sits at "loading" — which read as a hang. Unload is cheap next to an
+        // index run; it re-summons the moment the pass ends.
         if (heavyPassActive()) {
+          emb.setVisualWanted(false);
           await sleep(10_000);
+          continue;
+        }
+        // Grid posters outrank visual vectors: both this loop and the thumb
+        // backfill chew the same codecs/CPU, but a missing poster is a blank
+        // tile the user is looking at, while a missing DINO vector just means
+        // "More like this" ranks on the image embedding for a while longer.
+        // The poster queue is small and drains once; let it finish first.
+        const thumbsPending = await getVideosNeedingThumb(1).catch(() => []);
+        if (thumbsPending.length > 0) {
+          await sleep(5_000);
           continue;
         }
         // Demand lifecycle: summon the model only when rows actually await a

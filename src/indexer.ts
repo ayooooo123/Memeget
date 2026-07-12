@@ -1078,10 +1078,13 @@ export async function backfillVisualEmbeddings(
 export async function backfillVideoThumbs(
   opts: { limit?: number } = {}
 ): Promise<number> {
-  const rows = await getVideosNeedingThumb(opts.limit ?? 8);
+  const rows = await getVideosNeedingThumb(opts.limit ?? 24);
   for (let i = 0; i < rows.length; i++) {
     if (heavyPassActive()) return rows.length;
-    if (i > 0) await new Promise<void>((r) => setTimeout(r, 300));
+    // Short breather: each item is one SAF copy + keyframe + jpeg (no model),
+    // so the loop can move briskly — blank tiles are what the user is staring
+    // at. Interactive use still gets a full stand-down via the gate above.
+    if (i > 0) await new Promise<void>((r) => setTimeout(r, 100));
     const prep = await prepareFile({ uri: rows[i].uri, name: rows[i].name, kind: 'video' }, i);
     try {
       if (!prep.ok) {
