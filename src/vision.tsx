@@ -5,7 +5,6 @@ import {
   countMemesNeedingVision,
   countMemesNeedingVisualEmbedding,
   getSetting,
-  getVideosNeedingThumb,
   setSetting,
 } from './db';
 import { emitLibraryChanged, onLibraryChanged } from './events';
@@ -14,8 +13,10 @@ import {
   backfillVideoThumbs,
   backfillVisualEmbeddings,
   heavyPassActive,
+  indexingActive,
   enrichLibrary,
   enrichNextMeme,
+  videoThumbsPending,
   type EnrichProgress,
   type EnrichResult,
   type VisionEnricher,
@@ -274,15 +275,16 @@ export function VisionProvider({ children }: { children: React.ReactNode }) {
   }, [embeddings.ready]);
 
   // Video grid posters: pure I/O + codec work, no model — runs once per app
-  // session until the queue drains, standing down for indexing/interactive use
-  // (it shares the hardware decoders with both). Each batch that lands nudges
-  // the library so blank tiles fill in live rather than on the next launch.
+  // session until the queue drains. Yields to indexing/re-tagging only, NOT to
+  // the interactive window: the user browsing the grid is exactly when blank
+  // tiles are visible, so freezing on every touch made the backfill look dead.
+  // Each batch that lands nudges the library so tiles fill in live.
   useEffect(() => {
     let cancelled = false;
     const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
     const loop = async () => {
       while (!cancelled) {
-        if (heavyPassActive()) {
+        if (indexingActive()) {
           await sleep(5_000);
           continue;
         }
@@ -332,8 +334,7 @@ export function VisionProvider({ children }: { children: React.ReactNode }) {
         // tile the user is looking at, while a missing DINO vector just means
         // "More like this" ranks on the image embedding for a while longer.
         // The poster queue is small and drains once; let it finish first.
-        const thumbsPending = await getVideosNeedingThumb(1).catch(() => []);
-        if (thumbsPending.length > 0) {
+        if (await videoThumbsPending().catch(() => false)) {
           await sleep(5_000);
           continue;
         }

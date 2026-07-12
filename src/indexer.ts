@@ -192,6 +192,15 @@ export function heavyPassActive(): boolean {
   return heavyPasses > 0 || Date.now() - lastInteractive < INTERACTIVE_WINDOW_MS;
 }
 
+// Narrower gate for light idle work (the poster backfill): yield to indexing/
+// re-tagging, but NOT to the interactive window. Posters are what the user is
+// actively watching for — gating them on "the user touched the app in the
+// last 8s" froze the backfill for exactly as long as anyone sat there waiting
+// for tiles to fill in.
+export function indexingActive(): boolean {
+  return heavyPasses > 0;
+}
+
 export interface IndexProgress {
   processed: number;
   total: number;
@@ -1089,44 +1098,91 @@ async function extractPosterDirect(uri: string): Promise<string> {
   }
 }
 
+// MediaMetadataRetriever is known to occasionally HANG (not fail) on certain
+// streams — and one hung native call would wedge the whole worker pool below,
+// silently ending the backfill for the session. Race every grab against a
+// timeout; the abandoned native op can't be cancelled (its temp files are
+// reclaimed by the launch sweep), but the loop keeps marching.
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error('timeout')), ms);
+    p.then(
+      (v) => {
+        clearTimeout(t);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(t);
+        reject(e);
+      }
+    );
+  });
+}
+const THUMB_DIRECT_TIMEOUT_MS = 8_000;
+const THUMB_FALLBACK_TIMEOUT_MS = 20_000;
+
+// Videos whose poster extraction TIMED OUT this session. Deliberately not
+// stamped THUMB_FAILED (a timeout can be transient codec contention, and a
+// permanent stamp would blank the tile forever) — but re-serving them every
+// batch would re-wedge the pool, so they sit out until the next app launch.
+const thumbSkip = new Set<number>();
+
+async function nextThumbRows(limit: number): Promise<{ id: number; uri: string; name: string }[]> {
+  const rows = await getVideosNeedingThumb(limit + thumbSkip.size);
+  return rows.filter((r) => !thumbSkip.has(r.id)).slice(0, limit);
+}
+
+// Whether any video still awaits a poster (excluding this session's timed-out
+// skips) — the DINO backfill defers to this queue.
+export async function videoThumbsPending(): Promise<boolean> {
+  return (await nextThumbRows(1)).length > 0;
+}
+
 // Extract grid posters for videos indexed before posters existed (or whose
 // inline extraction failed transiently). No model involved, and the fast path
 // doesn't even copy the file — so a few hundred missing posters drain in
 // seconds, not minutes. A small worker pool keeps several frame grabs in
 // flight (frame retrieval is I/O + a single decoded frame; Android handles a
-// few retrievers at once fine), while the heavy-pass/interactive stand-down
-// still yields the codecs to indexing and the viewer. Returns rows FETCHED
-// (0 = drained); THUMB_FAILED stamping guarantees termination, same as the
-// visual backfill.
+// few retrievers at once fine). Yields to indexing/re-tagging only — NOT the
+// interactive window: posters are what the user is actively watching for.
+// Returns rows FETCHED (0 = drained); THUMB_FAILED stamping and the timeout
+// skip-set guarantee termination.
 const THUMB_POOL = 3;
 export async function backfillVideoThumbs(
   opts: { limit?: number } = {}
 ): Promise<number> {
-  const rows = await getVideosNeedingThumb(opts.limit ?? 24);
+  const rows = await nextThumbRows(opts.limit ?? 24);
   let next = 0;
   const worker = async () => {
-    while (!heavyPassActive()) {
+    while (!indexingActive()) {
       const i = next++;
       if (i >= rows.length) return;
       const row = rows[i];
       try {
-        await setMemeThumb(row.id, await extractPosterDirect(row.uri));
+        await setMemeThumb(row.id, await withTimeout(extractPosterDirect(row.uri), THUMB_DIRECT_TIMEOUT_MS));
         continue;
       } catch {
-        // fall through to the copy path
+        // fall through to the copy path (direct read refused, or timed out —
+        // the file-path retriever is a different native route and may succeed)
       }
-      const prep = await prepareFile({ uri: row.uri, name: row.name, kind: 'video' }, i);
       try {
-        if (!prep.ok) {
-          // Unreadable/undecodable file — permanent, stop re-serving it.
-          await setMemeThumb(row.id, THUMB_FAILED).catch(() => {});
-        } else {
-          await setMemeThumb(row.id, await persistThumb(prep.jpeg));
+        const prep = await withTimeout(
+          prepareFile({ uri: row.uri, name: row.name, kind: 'video' }, i),
+          THUMB_FALLBACK_TIMEOUT_MS
+        );
+        try {
+          if (!prep.ok) {
+            // Unreadable/undecodable file — permanent, stop re-serving it.
+            await setMemeThumb(row.id, THUMB_FAILED).catch(() => {});
+          } else {
+            await setMemeThumb(row.id, await persistThumb(prep.jpeg));
+          }
+        } finally {
+          for (const t of prep.temp) await deleteCache(t);
         }
-      } catch {
-        await setMemeThumb(row.id, THUMB_FAILED).catch(() => {});
-      } finally {
-        for (const t of prep.temp) await deleteCache(t);
+      } catch (e) {
+        if (String((e as Error)?.message) === 'timeout') thumbSkip.add(row.id);
+        else await setMemeThumb(row.id, THUMB_FAILED).catch(() => {});
       }
     }
   };
