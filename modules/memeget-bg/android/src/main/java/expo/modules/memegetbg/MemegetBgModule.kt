@@ -13,10 +13,43 @@ import androidx.documentfile.provider.DocumentFile
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 import java.io.File
+import java.io.FileOutputStream
+import java.io.IOException
 
 class MemegetBgModule : Module() {
   override fun definition() = ModuleDefinition {
     Name("MemegetBg")
+
+    // Put an actual file — in practice a video, which expo-clipboard can't
+    // handle — on the system clipboard as a content:// uri. The file is staged
+    // into a dedicated cache subdir (cleared on each copy, so it holds at most
+    // one file) because the paste target reads the uri lazily, possibly long
+    // after we return; the SAF source uri can't go on the clipboard directly
+    // since other apps have no grant to read the user's linked folder.
+    // Whether a paste target accepts a video uri is up to that app — many only
+    // take text/images, which is why JS keeps the still-frame fallback.
+    AsyncFunction("copyFileToClipboard") { uriStr: String, name: String, mimeType: String ->
+      val ctx = appContext.reactContext ?: throw IllegalStateException("React context lost")
+
+      val dir = File(ctx.cacheDir, "clipboard")
+      dir.mkdirs()
+      dir.listFiles()?.forEach { it.delete() }
+
+      // Keep the (sanitized) real filename: FileProvider derives the served
+      // MIME type from the extension, and paste targets show the name.
+      val safe = name.replace(Regex("[^a-zA-Z0-9._-]"), "_").ifBlank { "clip.bin" }
+      val out = File(dir, safe)
+      val src = if (uriStr.contains("://")) Uri.parse(uriStr) else Uri.fromFile(File(uriStr))
+      val input = ctx.contentResolver.openInputStream(src)
+        ?: throw IOException("Could not open $uriStr")
+      input.use { i -> FileOutputStream(out).use { o -> i.copyTo(o) } }
+
+      val contentUri = FileProvider.getUriForFile(ctx, "${ctx.packageName}.memegetclip", out)
+      val mime = ctx.contentResolver.getType(contentUri) ?: mimeType
+      val clip = ClipData(name, arrayOf(mime), ClipData.Item(contentUri))
+      val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+      cm.setPrimaryClip(clip)
+    }
 
     // Last-modified time (ms since epoch) of a SAF content:// document, read
     // straight off its DocumentFile. This exists because expo-file-system's own
@@ -33,30 +66,6 @@ class MemegetBgModule : Module() {
         if (lm > 0L) lm.toDouble() else null
       } catch (e: Exception) {
         null
-      }
-    }
-
-    // Put a whole FILE on the system clipboard as a content:// uri — this is
-    // how a video gets copied, which expo-clipboard can't do (its setImageAsync
-    // only takes base64 image data). The file must live under this app's files/
-    // cache dir so expo-file-system's FileProvider (grantUriPermissions=true)
-    // can serve it; the clipboard service then grants read access to whichever
-    // app pastes. Returns false instead of throwing so JS can fall back to
-    // copying a still frame.
-    Function("copyFileToClipboard") { path: String, label: String ->
-      val ctx = appContext.reactContext ?: return@Function false
-      try {
-        val file = File(if (path.startsWith("file://")) Uri.parse(path).path!! else path)
-        if (!file.exists()) return@Function false
-        val uri = FileProvider.getUriForFile(ctx, "${ctx.packageName}.FileSystemFileProvider", file)
-        // newUri pulls the mime type from the provider (FileProvider infers it
-        // from the extension), so paste targets see video/mp4 etc., not a blob.
-        val clip = ClipData.newUri(ctx.contentResolver, label, uri)
-        val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        cm.setPrimaryClip(clip)
-        true
-      } catch (e: Exception) {
-        false
       }
     }
 

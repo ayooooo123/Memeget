@@ -43,6 +43,22 @@ function extOf(name: string): string {
   return dot >= 0 ? name.slice(dot + 1).toLowerCase() : '';
 }
 
+// MIME type for a video file from its extension, for the clipboard clip
+// description — paste targets decide whether to accept the clip by its type.
+const VIDEO_MIME: Record<string, string> = {
+  mp4: 'video/mp4',
+  mov: 'video/quicktime',
+  mkv: 'video/x-matroska',
+  webm: 'video/webm',
+  avi: 'video/x-msvideo',
+  m4v: 'video/x-m4v',
+  '3gp': 'video/3gpp',
+};
+
+export function videoMimeFor(name: string): string {
+  return VIDEO_MIME[extOf(name)] ?? 'video/mp4';
+}
+
 function kindOf(name: string): 'image' | 'video' | null {
   const ext = extOf(name);
   if (IMAGE_EXTS.includes(ext)) return 'image';
@@ -135,10 +151,12 @@ export async function readImageBase64(uri: string, name: string): Promise<string
 }
 
 // Grab a representative frame from a video and return it as base64 (no data-URI
-// prefix) — the FALLBACK copy path for videos, used only when the native
-// whole-video clipboard (memeget-bg copyFileToClipboard) isn't built in. Same
-// thumbnail path the indexer uses. Materializes the content:// uri to a temp
-// file first (the thumbnailer needs a real file path), then cleans both up.
+// prefix). Fallback for copying a video when the native file-clipboard module
+// (memeget-bg's copyFileToClipboard) isn't built in — expo-clipboard itself can
+// only hold images, so without native support copying a video means copying a
+// still frame you can paste anywhere. Same path the indexer uses to thumbnail
+// videos. Materializes the content:// uri to a temp file first (the thumbnailer
+// needs a real file path), then cleans both up.
 export async function readVideoFrameBase64(uri: string, name: string): Promise<string> {
   const file = await materialize(uri, name);
   let thumb: string | null = null;
