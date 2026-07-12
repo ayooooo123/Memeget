@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Exposes only the dedicated clipboard staging subdir of the app cache, so a
+     clipboard grant can never leak any other cached file. -->
+<paths>
+    <cache-path name="clipboard" path="clipboard/" />
+</paths>

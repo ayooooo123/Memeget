@@ -27,7 +27,7 @@ import { scoreExemplar } from '../learnCore';
 import { buildExemplarHeads, noteInteractive, type ExemplarModel } from '../indexer';
 import { success, tap, warn } from '../haptics';
 import { copyFileToClipboard } from '../../modules/memeget-bg';
-import { deleteCache, deleteFile, materialize, readImageBase64, readVideoFrameBase64 } from '../saf';
+import { deleteFile, materialize, readImageBase64, readVideoFrameBase64, videoMimeFor } from '../saf';
 import { colors, radius, shadow, space, TABBAR_CLEARANCE } from '../theme';
 import { useConst } from '../reactUtils';
 import type { MemeRecord, SearchHit } from '../types';
@@ -317,30 +317,28 @@ export const MemeGrid = React.memo(function MemeGrid({
     setBusy(true);
     try {
       if (isVideo) {
-        // Copy the ENTIRE video: stage it into the cache and put a content://
-        // uri on the clipboard natively — expo-clipboard is image-only. The
-        // staged copy must outlive the clipboard entry so pastes keep working;
-        // it's a share_-prefixed file the launch-time sweep reclaims, same
-        // lifecycle as Share. Whether a paste target accepts a video clip is
-        // up to that app; the frame path below covers builds without the
-        // native function.
-        const path = await materialize(selected.uri, selected.name);
-        if (copyFileToClipboard(path, selected.name)) {
+        // Put the actual video file on the clipboard as a content:// uri (the
+        // memeget-bg native module — expo-clipboard can only hold images).
+        // Apps that accept rich pastes receive the full video; if the module
+        // isn't built in or the copy fails, fall through to the still frame.
+        const copied = await copyFileToClipboard(
+          selected.uri,
+          selected.name,
+          videoMimeFor(selected.name)
+        ).catch(() => false);
+        if (copied) {
           success();
-          showToast('Video copied — paste it in apps that take video', 'success');
+          showToast('Video copied — paste it in apps that accept videos', 'success');
           return;
         }
-        await deleteCache(path);
-        const base64 = await readVideoFrameBase64(selected.uri, selected.name);
-        await Clipboard.setImageAsync(base64);
-        success();
-        showToast('Frame copied — paste it anywhere', 'success');
-        return;
       }
-      const base64 = await readImageBase64(selected.uri, selected.name);
+      // Images copy as-is; videos fall back to a representative still frame.
+      const base64 = isVideo
+        ? await readVideoFrameBase64(selected.uri, selected.name)
+        : await readImageBase64(selected.uri, selected.name);
       await Clipboard.setImageAsync(base64);
       success();
-      showToast('Meme copied — paste it anywhere', 'success');
+      showToast(isVideo ? 'Frame copied — paste it anywhere' : 'Meme copied — paste it anywhere', 'success');
     } catch (e) {
       showToast(`Could not copy: ${String(e)}`, 'error');
     } finally {
