@@ -462,13 +462,15 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
         {emb.visualModel.available && (
           <Row label={`${emb.visualModel.label} (visual similarity)`}>
             <StatusDot
-              tone={emb.visualError ? 'bad' : emb.visualReady ? 'good' : 'busy'}
+              tone={emb.visualError ? 'bad' : emb.visualReady || !emb.visualWanted ? 'good' : 'busy'}
               label={
                 emb.visualError
                   ? 'Error'
                   : emb.visualReady
                     ? 'Ready'
-                    : `Loading ${Math.round((emb.visualProgress || 0) * 100)}%`
+                    : !emb.visualWanted
+                      ? 'On demand' // deliberately unloaded until its backfill has work
+                      : `Loading ${Math.round((emb.visualProgress || 0) * 100)}%`
               }
             />
           </Row>

@@ -58,6 +58,10 @@ export interface EmbeddingsApi {
   visualReady: boolean;
   visualProgress: number; // 0..1 model download/load progress
   visualError: string | null;
+  // Whether the visual tower is currently summoned. False = deliberately
+  // unloaded (drained queue, deferring to a heavy pass/poster backfill) — the
+  // Settings row shows "On demand" then, not a bogus perpetual "Loading 0%".
+  visualWanted: boolean;
   // Demand control for the visual (DINO) tower: it exists only for the
   // idle-time backfill, so it loads when that loop has work and unloads when
   // drained — no cold start or resident RAM on ordinary app opens.
@@ -100,6 +104,7 @@ export function EmbeddingsProvider({ children }: { children: React.ReactNode }) 
       visualReady,
       visualProgress: typeof vp === 'number' ? vp : 0,
       visualError: visualErr ? String(visualErr) : null,
+      visualWanted,
       setVisualWanted,
       embedImage: async (uri: string) => normalize(Array.from(await image.forward(uri))),
       embedText: async (t: string) => normalize(Array.from(await text.forward(t))),
@@ -113,7 +118,7 @@ export function EmbeddingsProvider({ children }: { children: React.ReactNode }) 
           }
         : undefined,
     };
-  }, [image, text, visual]);
+  }, [image, text, visual, visualWanted]);
 
   return <Ctx.Provider value={api}>{children}</Ctx.Provider>;
 }
