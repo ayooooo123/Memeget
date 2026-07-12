@@ -34,6 +34,11 @@ export interface MemeRecord {
   indexedAt: number;
   modifiedAt?: number; // file's last-modified time (ms); drives the recency sort
   pending?: boolean; // saved & visible, but not yet embedded/OCR'd/tagged
+  // Persisted poster frame for a video (file:// jpeg). Videos need one because
+  // the grid's image view can't decode a frame from every codec — tiles for
+  // "mp4 gif" style files rendered blank straight off the content:// uri.
+  // Absent for images, and for videos until the indexer/backfill extracts it.
+  thumbUri?: string;
 }
 
 // A user-taught (or pack-provided) reference example: an image embedding that
