@@ -26,6 +26,7 @@ interface MemegetBgNative {
   stopForeground(): void;
   getModifiedTime(uri: string): number | null;
   extractAudio(source: string, maxSeconds: number): Promise<ExtractedAudio | null>;
+  copyFileToClipboard(path: string, label: string): boolean;
 }
 
 // Optional on purpose: in Expo Go, in the JS-only dev flow, or before a native
@@ -77,6 +78,23 @@ export function getFileModifiedTime(uri: string): number | null {
     return typeof t === 'number' && t > 0 ? t : null;
   } catch {
     return null;
+  }
+}
+
+// Put a whole file (image OR video) on the system clipboard as a content://
+// uri, via ClipData in native code — expo-clipboard can only hold base64 image
+// data, so this is the only way to copy an entire video. The path must be a
+// file:// (or plain) path inside this app's cache or files dir, where the
+// bundled FileProvider can serve it; the file must OUTLIVE the clipboard entry
+// (don't delete it after copying — the launch-time cache sweep reclaims it).
+// Returns false when the native module (or this function — older builds) isn't
+// present or the copy failed, so callers can fall back to frame copy.
+export function copyFileToClipboard(path: string, label: string): boolean {
+  try {
+    if (!native || typeof native.copyFileToClipboard !== 'function') return false;
+    return native.copyFileToClipboard(path, label) === true;
+  } catch {
+    return false;
   }
 }
 
