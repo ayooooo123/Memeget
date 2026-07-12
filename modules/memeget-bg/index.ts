@@ -26,6 +26,7 @@ interface MemegetBgNative {
   stopForeground(): void;
   getModifiedTime(uri: string): number | null;
   extractAudio(source: string, maxSeconds: number): Promise<ExtractedAudio | null>;
+  extractVideoFrame(source: string, seconds: number): Promise<string | null>;
   copyFileToClipboard(uri: string, name: string, mimeType: string): Promise<void>;
 }
 
@@ -98,6 +99,22 @@ export async function extractAudio(
   if (!native || typeof native.extractAudio !== 'function') return null;
   const res = await native.extractAudio(source, maxSeconds);
   return res && typeof res.path === 'string' ? res : null;
+}
+
+// Decode one frame of a video via MediaCodec (native) and return a file://
+// jpeg path in the cache dir — the caller owns deleting it. This is the poster
+// path of last resort: MediaMetadataRetriever (used by expo-image AND
+// expo-video-thumbnails) refuses some perfectly playable streams; MediaCodec
+// is the player's own decode path. Resolves null when the native module isn't
+// built in or the file genuinely can't be decoded.
+export async function extractVideoFrame(source: string, seconds: number): Promise<string | null> {
+  if (!native || typeof native.extractVideoFrame !== 'function') return null;
+  try {
+    const p = await native.extractVideoFrame(source, seconds);
+    return typeof p === 'string' && p ? p : null;
+  } catch {
+    return null;
+  }
 }
 
 // Put an actual file (in practice a video, which expo-clipboard can't hold) on

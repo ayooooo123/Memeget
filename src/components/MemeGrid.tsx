@@ -92,27 +92,40 @@ const GridCell = React.memo(function GridCell({
 }) {
   return (
     <PressableScale scaleTo={0.94} onPress={() => onPress(item)} style={{ width: size, height: size }}>
-      <Image
-        source={{ uri: thumbSource(item) }}
-        style={styles.thumb}
-        contentFit="cover"
-        transition={150}
-        // Reuse the view and release the previous bitmap when a cell is
-        // recycled (e.g. when retagAll hands the list a fresh array).
-        recyclingKey={String(item.id)}
-        // Memory-only cache (NOT "disk"). The originals already live as local
-        // content:// files in the user's linked folder, so a disk cache just
-        // duplicates the entire library into the app's cache dir — it ballooned
-        // cache to library size, and once Android purged that cache the
-        // thumbnails got stranded in a perpetual loading state. Disk-only also
-        // meant no in-memory bitmaps, so every recycled cell re-decoded a
-        // full-res image off disk while scrolling, saturating the decode thread
-        // (the "feed won't load while scrolling" jank). The in-memory LRU keeps
-        // the active window smooth; off-screen cells decode again from the local
-        // file — cheap because allowDownscaling decodes straight to thumb size.
-        cachePolicy="memory"
-        allowDownscaling
-      />
+      {item.kind === 'video' && !item.thumbUri ? (
+        // No poster (backfill hasn't reached it, or every decoder refused the
+        // file): show a deliberate filmstrip stub with the filename instead of
+        // asking the image view to decode the video — it goes through the same
+        // retriever that already failed, so the tile would just render blank.
+        <View style={[styles.thumb, styles.videoStub]}>
+          <Text style={styles.videoStubGlyph}>🎞</Text>
+          <Text style={styles.videoStubName} numberOfLines={2}>
+            {item.name}
+          </Text>
+        </View>
+      ) : (
+        <Image
+          source={{ uri: thumbSource(item) }}
+          style={styles.thumb}
+          contentFit="cover"
+          transition={150}
+          // Reuse the view and release the previous bitmap when a cell is
+          // recycled (e.g. when retagAll hands the list a fresh array).
+          recyclingKey={String(item.id)}
+          // Memory-only cache (NOT "disk"). The originals already live as local
+          // content:// files in the user's linked folder, so a disk cache just
+          // duplicates the entire library into the app's cache dir — it ballooned
+          // cache to library size, and once Android purged that cache the
+          // thumbnails got stranded in a perpetual loading state. Disk-only also
+          // meant no in-memory bitmaps, so every recycled cell re-decoded a
+          // full-res image off disk while scrolling, saturating the decode thread
+          // (the "feed won't load while scrolling" jank). The in-memory LRU keeps
+          // the active window smooth; off-screen cells decode again from the local
+          // file — cheap because allowDownscaling decodes straight to thumb size.
+          cachePolicy="memory"
+          allowDownscaling
+        />
+      )}
       {item.kind === 'video' && (
         <View style={styles.play}>
           <Text style={styles.playIcon}>▶</Text>
@@ -1167,6 +1180,9 @@ const styles = StyleSheet.create({
   topFabIcon: { color: colors.volt, fontSize: 18, fontWeight: '800' },
   listContent: { gap: GAP, paddingBottom: TABBAR_CLEARANCE + 24 },
   thumb: { width: '100%', height: '100%', backgroundColor: colors.surface2, borderRadius: radius.sm },
+  videoStub: { alignItems: 'center', justifyContent: 'center', padding: 8, gap: 4 },
+  videoStubGlyph: { fontSize: 22, opacity: 0.6 },
+  videoStubName: { color: colors.faint, fontSize: 9, textAlign: 'center' },
   play: {
     position: 'absolute',
     right: 6,

@@ -124,6 +124,19 @@ export async function initDb(): Promise<void> {
   if (!cols.some((c) => c.name === 'thumb_uri')) {
     await db.execAsync(`ALTER TABLE memes ADD COLUMN thumb_uri TEXT NOT NULL DEFAULT '';`);
   }
+  // One-time un-stamp: builds that shipped posters before the MediaCodec
+  // extractor stamped 'failed' on every video MediaMetadataRetriever refused —
+  // exactly the files the new decoder exists for. Clear those stamps once so
+  // the backfill re-serves them through all three extraction paths.
+  const thumbRetry = await db.getFirstAsync<{ value: string }>(
+    `SELECT value FROM settings WHERE key = 'thumb_retry_v2'`
+  );
+  if (!thumbRetry) {
+    await db.execAsync(`UPDATE memes SET thumb_uri = '' WHERE thumb_uri = 'failed';`);
+    await db.runAsync(
+      `INSERT OR REPLACE INTO settings (key, value) VALUES ('thumb_retry_v2', '1')`
+    );
+  }
   // Migrate exemplar tables that predate negative ("not this") teaching.
   const exCols = await db.getAllAsync<{ name: string }>('PRAGMA table_info(exemplars)');
   if (!exCols.some((c) => c.name === 'is_positive')) {

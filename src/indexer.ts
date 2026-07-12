@@ -48,6 +48,7 @@ import {
   type MemeNeedingVisualEmbeddingRow,
   type MemeNeedingVisionRow,
 } from './db';
+import { extractVideoFrame } from '../modules/memeget-bg';
 import { ASSOCIATIONS, MEME_LABELS, NEGATIVE_ANCHORS, ocrTags } from './memeLabels';
 import {
   copyToCache,
@@ -566,9 +567,11 @@ async function finishFile(api: EmbeddingsApi, prep: Prepared, know: Knowledge): 
       extraTerms: '',
       modifiedAt: prep.ok ? prep.modifiedAt : null,
       // A degraded row can still have a poster when only the embed/store side
-      // failed; a failed prepare has no frame — stamp it so the backfill
-      // doesn't retry a file the pipeline already couldn't read.
-      thumbUri: (await persistVideoThumb(prep)) || (prep.file.kind === 'video' ? THUMB_FAILED : ''),
+      // failed; after a failed prepare, leave '' so the backfill's three-path
+      // ladder (including the MediaCodec extractor, which reads streams the
+      // pipeline's retriever can't) gets its shot before anything is stamped
+      // failed.
+      thumbUri: await persistVideoThumb(prep),
       degraded: true,
     }).catch(() => {});
     return 'error';
@@ -1147,6 +1150,65 @@ export async function videoThumbsPending(): Promise<boolean> {
 // interactive window: posters are what the user is actively watching for.
 // Returns rows FETCHED (0 = drained); THUMB_FAILED stamping and the timeout
 // skip-set guarantee termination.
+const isTimeout = (e: unknown): boolean => String((e as Error)?.message) === 'timeout';
+
+// One video's poster, tried three ways, cheapest first:
+//  1. MediaMetadataRetriever straight off the SAF uri (no copy)
+//  2. MediaMetadataRetriever on a real local copy (provider/container quirks)
+//  3. our own MediaCodec decoder (native) — the player's decode path, for the
+//     "mp4 gif" style streams MMR flatly refuses even though they play fine
+// Returns the persisted path, 'timeout' (transient — retry next session), or
+// null (genuinely undecodable — stamp THUMB_FAILED).
+async function extractPosterAnyway(
+  row: { id: number; uri: string; name: string },
+  idx: number
+): Promise<string | 'timeout' | null> {
+  let timedOut = false;
+
+  try {
+    return await withTimeout(extractPosterDirect(row.uri), THUMB_DIRECT_TIMEOUT_MS);
+  } catch (e) {
+    timedOut ||= isTimeout(e);
+  }
+
+  try {
+    const prep = await withTimeout(
+      prepareFile({ uri: row.uri, name: row.name, kind: 'video' }, idx),
+      THUMB_FALLBACK_TIMEOUT_MS
+    );
+    try {
+      if (prep.ok) return await persistThumb(prep.jpeg);
+    } finally {
+      for (const t of prep.temp) await deleteCache(t);
+    }
+  } catch (e) {
+    timedOut ||= isTimeout(e);
+  }
+
+  try {
+    const frame = await withTimeout(
+      extractVideoFrame(row.uri, 1),
+      THUMB_FALLBACK_TIMEOUT_MS
+    );
+    if (frame) {
+      try {
+        const jpeg = await toJpeg(frame);
+        try {
+          return await persistThumb(jpeg);
+        } finally {
+          await deleteCache(jpeg);
+        }
+      } finally {
+        await deleteCache(frame);
+      }
+    }
+  } catch (e) {
+    timedOut ||= isTimeout(e);
+  }
+
+  return timedOut ? 'timeout' : null;
+}
+
 const THUMB_POOL = 3;
 export async function backfillVideoThumbs(
   opts: { limit?: number } = {}
@@ -1158,32 +1220,9 @@ export async function backfillVideoThumbs(
       const i = next++;
       if (i >= rows.length) return;
       const row = rows[i];
-      try {
-        await setMemeThumb(row.id, await withTimeout(extractPosterDirect(row.uri), THUMB_DIRECT_TIMEOUT_MS));
-        continue;
-      } catch {
-        // fall through to the copy path (direct read refused, or timed out —
-        // the file-path retriever is a different native route and may succeed)
-      }
-      try {
-        const prep = await withTimeout(
-          prepareFile({ uri: row.uri, name: row.name, kind: 'video' }, i),
-          THUMB_FALLBACK_TIMEOUT_MS
-        );
-        try {
-          if (!prep.ok) {
-            // Unreadable/undecodable file — permanent, stop re-serving it.
-            await setMemeThumb(row.id, THUMB_FAILED).catch(() => {});
-          } else {
-            await setMemeThumb(row.id, await persistThumb(prep.jpeg));
-          }
-        } finally {
-          for (const t of prep.temp) await deleteCache(t);
-        }
-      } catch (e) {
-        if (String((e as Error)?.message) === 'timeout') thumbSkip.add(row.id);
-        else await setMemeThumb(row.id, THUMB_FAILED).catch(() => {});
-      }
+      const result = await extractPosterAnyway(row, i).catch(() => null);
+      if (result === 'timeout') thumbSkip.add(row.id);
+      else await setMemeThumb(row.id, result ?? THUMB_FAILED).catch(() => {});
     }
   };
   await Promise.all(Array.from({ length: Math.min(THUMB_POOL, rows.length) }, worker));

@@ -81,6 +81,16 @@ class MemegetBgModule : Module() {
       AudioExtractor.extract(ctx, source, maxSeconds)
     }
 
+    // Decode ONE frame of a video via MediaCodec (the player's decode path)
+    // and return a file:// jpeg — the poster fallback for streams that
+    // MediaMetadataRetriever refuses (which is what both expo-image and
+    // expo-video-thumbnails use). Resolves null when truly undecodable.
+    AsyncFunction("extractVideoFrame") { source: String, seconds: Double ->
+      val ctx = appContext.reactContext
+        ?: throw IllegalStateException("React context unavailable")
+      VideoFrameExtractor.extract(ctx, source, seconds)
+    }
+
     // Battery + thermal snapshot the JS loop polls to decide whether to keep
     // describing. Cheap, synchronous reads.
     Function("getPower") {
