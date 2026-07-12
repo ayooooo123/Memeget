@@ -143,11 +143,31 @@ export async function readVideoFrameBase64(uri: string, name: string): Promise<s
   const file = await materialize(uri, name);
   let thumb: string | null = null;
   try {
-    const { uri: t } = await VideoThumbnails.getThumbnailAsync(file, { time: 1000 });
-    thumb = t;
-    return await FileSystem.readAsStringAsync(t, {
-      encoding: FileSystem.EncodingType.Base64,
-    });
+    // Retried: Android caps concurrent codec instances, and by the time the
+    // user hits Copy the viewer's own player holds one and the background
+    // loops (DINO backfill, describes) may hold others — the first attempt can
+    // fail purely from contention. Later attempts run after the interactive
+    // stand-down has let those loops yield. t=0 also covers sub-second clips
+    // where seeking to 1000ms has nothing to decode.
+    const attempts = [
+      { time: 1000, delayMs: 0 },
+      { time: 0, delayMs: 400 },
+      { time: 0, delayMs: 1500 },
+    ];
+    let lastErr: unknown = null;
+    for (const a of attempts) {
+      if (a.delayMs) await new Promise<void>((resolve) => setTimeout(resolve, a.delayMs));
+      try {
+        const { uri: t } = await VideoThumbnails.getThumbnailAsync(file, { time: a.time });
+        thumb = t;
+        return await FileSystem.readAsStringAsync(t, {
+          encoding: FileSystem.EncodingType.Base64,
+        });
+      } catch (e) {
+        lastErr = e;
+      }
+    }
+    throw lastErr;
   } finally {
     await FileSystem.deleteAsync(file, { idempotent: true }).catch(() => {});
     if (thumb) await FileSystem.deleteAsync(thumb, { idempotent: true }).catch(() => {});

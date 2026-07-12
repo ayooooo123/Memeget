@@ -24,7 +24,7 @@ import { useVideoPlayer, VideoView } from 'expo-video';
 
 import { addExemplar, deleteMeme, getLabels, getMemeEmbedding, getSimilarMemes } from '../db';
 import { scoreExemplar } from '../learnCore';
-import { buildExemplarHeads, type ExemplarModel } from '../indexer';
+import { buildExemplarHeads, noteInteractive, type ExemplarModel } from '../indexer';
 import { success, tap, warn } from '../haptics';
 import { deleteFile, materialize, readImageBase64, readVideoFrameBase64 } from '../saf';
 import { colors, radius, shadow, space, TABBAR_CLEARANCE } from '../theme';
@@ -239,6 +239,9 @@ export const MemeGrid = React.memo(function MemeGrid({
   // flicker you'd see right as the next page loaded in.
   const openViewer = useCallback((it: Item) => {
     tap();
+    // The viewer is interactive foreground work: stand the background loops
+    // down (they hold hardware codecs the video preview / frame-copy need).
+    noteInteractive();
     setSelected(it);
   }, []);
 
@@ -288,6 +291,7 @@ export const MemeGrid = React.memo(function MemeGrid({
   // fastest way to get a meme onto another platform on mobile.
   const onShare = async () => {
     if (!selected || busy) return;
+    noteInteractive();
     setBusy(true);
     try {
       if (!(await Sharing.isAvailableAsync())) {
@@ -306,6 +310,9 @@ export const MemeGrid = React.memo(function MemeGrid({
   const onCopy = async () => {
     if (!selected || busy) return;
     const isVideo = selected.kind === 'video';
+    // Frame extraction needs a hardware decoder; make the background loops
+    // yield theirs before we try (retries inside cover the in-flight one).
+    noteInteractive();
     setBusy(true);
     try {
       // Images copy as-is; videos copy a representative still frame, since the
