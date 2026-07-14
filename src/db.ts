@@ -124,15 +124,20 @@ export async function initDb(): Promise<void> {
   if (!cols.some((c) => c.name === 'thumb_uri')) {
     await db.execAsync(`ALTER TABLE memes ADD COLUMN thumb_uri TEXT NOT NULL DEFAULT '';`);
   }
-  // One-time un-stamp (v3: earlier passes stamped 'failed' silently, with no
-  // error capture — re-serve those files so the reasons land in diagnostics).
+  // One-time re-extract (v4): every earlier poster was a fixed t=1s grab —
+  // black for any clip with a fade-in — and gif-named video files never got
+  // one at all. Clear ALL poster state (good, missing, and failed) so the
+  // luma-checked native extractor redoes the lot; the orphaned jpegs are
+  // reclaimed by the next index run's sweep.
   const thumbRetry = await db.getFirstAsync<{ value: string }>(
-    `SELECT value FROM settings WHERE key = 'thumb_retry_v3'`
+    `SELECT value FROM settings WHERE key = 'thumb_retry_v4'`
   );
   if (!thumbRetry) {
-    await db.execAsync(`UPDATE memes SET thumb_uri = '' WHERE thumb_uri = 'failed';`);
+    await db.execAsync(
+      `UPDATE memes SET thumb_uri = '' WHERE kind = 'video' OR (kind = 'image' AND lower(name) LIKE '%.gif');`
+    );
     await db.runAsync(
-      `INSERT OR REPLACE INTO settings (key, value) VALUES ('thumb_retry_v3', '1')`
+      `INSERT OR REPLACE INTO settings (key, value) VALUES ('thumb_retry_v4', '1')`
     );
   }
   // Migrate exemplar tables that predate negative ("not this") teaching.
@@ -662,15 +667,23 @@ export async function countMemesNeedingVisualEmbedding(
   return row?.c ?? 0;
 }
 
-// Videos whose grid poster hasn't been extracted yet. Excludes THUMB_FAILED
-// stamps (same never-re-serve reasoning as the visual backfill) and pending
-// placeholders (the indexer will stamp those with a poster itself).
+// Rows whose grid poster hasn't been extracted yet: every video, plus
+// .gif-named IMAGE rows the pipeline couldn't process (no embedding) — those
+// are almost always mp4 bytes wearing a .gif name ("Tenor gifs"), which the
+// image decoder can't render but the video decode path posters fine. Excludes
+// THUMB_FAILED stamps (same never-re-serve reasoning as the visual backfill)
+// and pending placeholders (indexing finishes those first).
+const NEEDS_THUMB_WHERE = `pending = 0 AND thumb_uri = '' AND (
+  kind = 'video'
+  OR (kind = 'image' AND lower(name) LIKE '%.gif' AND (embedding IS NULL OR length(embedding) = 0))
+)`;
+
 export async function getVideosNeedingThumb(limit = 10): Promise<
   { id: number; uri: string; name: string }[]
 > {
   const db = await getDb();
   return db.getAllAsync<{ id: number; uri: string; name: string }>(
-    "SELECT id, uri, name FROM memes WHERE kind = 'video' AND pending = 0 AND thumb_uri = '' ORDER BY modified_at DESC, id DESC LIMIT ?",
+    `SELECT id, uri, name FROM memes WHERE ${NEEDS_THUMB_WHERE} ORDER BY modified_at DESC, id DESC LIMIT ?`,
     limit
   );
 }
@@ -680,15 +693,19 @@ export async function setMemeThumb(id: number, thumbUri: string): Promise<void> 
   await db.runAsync('UPDATE memes SET thumb_uri = ? WHERE id = ?', thumbUri, id);
 }
 
-// Poster coverage for the Settings diagnostics card: how many videos have a
-// poster, how many were stamped undecodable, how many still await one.
+// Poster coverage for the Settings diagnostics card: how many poster-needing
+// rows (videos + gif-named video files) have one, how many were stamped
+// undecodable, how many still await one.
 export async function getPosterStats(): Promise<{ total: number; done: number; failed: number; missing: number }> {
   const db = await getDb();
   const row = await db.getFirstAsync<{ total: number; done: number; failed: number }>(
     `SELECT COUNT(*) AS total,
             SUM(CASE WHEN thumb_uri != '' AND thumb_uri != ? THEN 1 ELSE 0 END) AS done,
             SUM(CASE WHEN thumb_uri = ? THEN 1 ELSE 0 END) AS failed
-     FROM memes WHERE kind = 'video' AND pending = 0`,
+     FROM memes WHERE pending = 0 AND (
+       kind = 'video'
+       OR (kind = 'image' AND lower(name) LIKE '%.gif' AND (embedding IS NULL OR length(embedding) = 0))
+     )`,
     THUMB_FAILED,
     THUMB_FAILED
   );
