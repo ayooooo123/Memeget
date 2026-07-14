@@ -165,6 +165,14 @@ export function VisionProvider({ children }: { children: React.ReactNode }) {
     if (!(hydrated && enabled && bgEnabled)) return;
     let cancelled = false;
     const check = async () => {
+      // Never START a multi-GB VLM load while indexing/re-tagging holds the
+      // device — with a big describe backlog this effect fired the load right
+      // on top of the index warm-up, and the two ground each other to a halt
+      // ("Indexing 0/…" for minutes). An already-loaded model stays loaded
+      // (unload/reload churn costs more than it frees); this only defers cold
+      // starts. Re-checked on every library change, including the ones the
+      // index run itself emits, so the load happens promptly once it's done.
+      if (heavyPassActive()) return;
       const n = await countMemesNeedingVision().catch(() => 0);
       if (!cancelled && n > 0) setModelWanted(true);
     };
