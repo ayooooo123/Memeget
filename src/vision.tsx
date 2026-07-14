@@ -2,6 +2,7 @@ import React, { createContext, useContext, useEffect, useMemo, useRef, useState 
 import { useLLM } from 'react-native-executorch';
 
 import {
+  addIndexError,
   countMemesNeedingVision,
   countMemesNeedingVisualEmbedding,
   getSetting,
@@ -308,13 +309,28 @@ export function VisionProvider({ children }: { children: React.ReactNode }) {
         };
       });
     const unsub = onLibraryChanged(() => wake?.());
+    // A systemic loop failure (bad SQL after a migration, a native module
+    // regression) must not masquerade as "queue drained" — log the first one
+    // to the diagnostics list so it's visible in Settings.
+    let loggedLoopError = false;
     const loop = async () => {
       while (!cancelled) {
         if (indexingActive()) {
           await sleep(5_000);
           continue;
         }
-        const n = await backfillVideoThumbs({ limit: 24 }).catch(() => 0);
+        const n = await backfillVideoThumbs({ limit: 24 }).catch(async (e) => {
+          if (!loggedLoopError) {
+            loggedLoopError = true;
+            await addIndexError({
+              name: '(poster loop)',
+              kind: 'video',
+              stage: 'poster-loop',
+              reason: String((e as Error)?.message ?? e).slice(0, 300),
+            }).catch(() => {});
+          }
+          return 0;
+        });
         if (cancelled) break;
         if (n > 0) emitLibraryChanged();
         // Hold the keep-alive service while there's an actual backlog, so the
