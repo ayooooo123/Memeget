@@ -5,6 +5,7 @@ import {
   addIndexError,
   countMemesNeedingVision,
   countMemesNeedingVisualEmbedding,
+  countPendingMemes,
   getSetting,
   setSetting,
 } from './db';
@@ -15,6 +16,7 @@ import {
   backfillVisualEmbeddings,
   heavyPassActive,
   indexingActive,
+  indexPendingMemes,
   enrichLibrary,
   enrichNextMeme,
   videoThumbsPending,
@@ -356,6 +358,36 @@ export function VisionProvider({ children }: { children: React.ReactNode }) {
   // object takes a new identity as load state changes).
   const embeddingsRef = useRef(embeddings);
   embeddingsRef.current = embeddings;
+
+  // Recovery sweep for stuck share-imports: pending placeholder rows (share
+  // arrived while the model was loading / the app died mid-import) previously
+  // sat as spinner tiles forever unless the user manually ran Index. Sweep
+  // them whenever the device is otherwise quiet.
+  useEffect(() => {
+    if (!embeddings.ready) return;
+    let cancelled = false;
+    const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+    const loop = async () => {
+      while (!cancelled) {
+        if (heavyPassActive()) {
+          await sleep(10_000);
+          continue;
+        }
+        const pending = await countPendingMemes().catch(() => 0);
+        if (cancelled) break;
+        if (pending > 0) {
+          const r = await indexPendingMemes(embeddingsRef.current).catch(() => null);
+          if (cancelled) break;
+          if (r && r.added + r.errors > 0) emitLibraryChanged();
+        }
+        await sleep(60_000);
+      }
+    };
+    loop();
+    return () => {
+      cancelled = true;
+    };
+  }, [embeddings.ready]);
 
   useEffect(() => {
     if (!embeddings.visualModel.available) return;

@@ -254,6 +254,25 @@ export async function getPendingUris(): Promise<Set<string>> {
   return new Set(rows.map((r) => r.uri));
 }
 
+// Full pending rows, for the recovery sweep that re-indexes them without
+// waiting for the user to run a manual Index.
+export async function getPendingMemes(): Promise<
+  { id: number; uri: string; name: string; kind: string }[]
+> {
+  const db = await getDb();
+  return db.getAllAsync<{ id: number; uri: string; name: string; kind: string }>(
+    'SELECT id, uri, name, kind FROM memes WHERE pending = 1 ORDER BY id DESC'
+  );
+}
+
+export async function countPendingMemes(): Promise<number> {
+  const db = await getDb();
+  const row = await db.getFirstAsync<{ c: number }>(
+    'SELECT COUNT(*) as c FROM memes WHERE pending = 1'
+  );
+  return row?.c ?? 0;
+}
+
 export async function deleteMeme(id: number): Promise<void> {
   const db = await getDb();
   await db.runAsync('DELETE FROM memes WHERE id = ?', id);
