@@ -239,6 +239,16 @@ export async function getIndexedUris(): Promise<Set<string>> {
   return new Set(rows.map((r) => r.uri));
 }
 
+// Placeholder rows from share-imports whose immediate index failed (model was
+// loading, app was killed…). The next full index finishes them — and should do
+// so FIRST: these are the newest memes, sorted to the top of the library,
+// showing eternal spinners until their real row lands.
+export async function getPendingUris(): Promise<Set<string>> {
+  const db = await getDb();
+  const rows = await db.getAllAsync<{ uri: string }>('SELECT uri FROM memes WHERE pending = 1');
+  return new Set(rows.map((r) => r.uri));
+}
+
 export async function deleteMeme(id: number): Promise<void> {
   const db = await getDb();
   await db.runAsync('DELETE FROM memes WHERE id = ?', id);

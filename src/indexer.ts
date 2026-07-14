@@ -30,6 +30,7 @@ import {
   getMemesNeedingCaptionEmbedding,
   getMemesNeedingVisualEmbedding,
   getMemesNeedingVision,
+  getPendingUris,
   getVideosNeedingThumb,
   insertMeme,
   insertPendingMeme,
@@ -338,24 +339,44 @@ async function trainExemplarHeads(): Promise<ExemplarModel> {
 
 // Compute (and cache) CLIP text vectors for every curated label + negative
 // anchor, then load taught exemplars and build the association lookup.
-export async function buildKnowledge(api: EmbeddingsApi): Promise<Knowledge> {
+// `onStatus` streams what the slow parts are actually doing — a silent
+// buildKnowledge is what made "Indexing 0/…" read as a hang: vocabulary
+// re-embeds only happen after a model change, but retraining the taught-label
+// heads happens whenever the teach state changed, and with many taught labels
+// that's real minutes of on-device math.
+export async function buildKnowledge(
+  api: EmbeddingsApi,
+  onStatus?: (s: string) => void
+): Promise<Knowledge> {
   const modelId = api.primaryModel.id;
   const cache = await getLabelVectors(modelId);
 
-  for (const def of MEME_LABELS) {
-    if (!cache.has(def.label)) {
-      const vec = await api.embedText(def.prompt);
-      await putLabelVector(def.label, vec, modelId);
-      cache.set(def.label, Float32Array.from(vec));
+  const missingLabels = MEME_LABELS.filter((d) => !cache.has(d.label));
+  const missingAnchors = NEGATIVE_ANCHORS.map((_, i) => i).filter(
+    (i) => !cache.has(`${NEG_PREFIX}${i}`)
+  );
+  const vocabTotal = missingLabels.length + missingAnchors.length;
+  let vocabDone = 0;
+  const noteVocab = () => {
+    vocabDone++;
+    if (vocabDone % 10 === 0 || vocabDone === vocabTotal) {
+      onStatus?.(`embedding label vocabulary ${vocabDone}/${vocabTotal} (model changed)…`);
     }
+  };
+  if (vocabTotal > 0) onStatus?.(`embedding label vocabulary 0/${vocabTotal} (model changed)…`);
+
+  for (const def of missingLabels) {
+    const vec = await api.embedText(def.prompt);
+    await putLabelVector(def.label, vec, modelId);
+    cache.set(def.label, Float32Array.from(vec));
+    noteVocab();
   }
-  for (let i = 0; i < NEGATIVE_ANCHORS.length; i++) {
+  for (const i of missingAnchors) {
     const key = `${NEG_PREFIX}${i}`;
-    if (!cache.has(key)) {
-      const vec = await api.embedText(NEGATIVE_ANCHORS[i]);
-      await putLabelVector(key, vec, modelId);
-      cache.set(key, Float32Array.from(vec));
-    }
+    const vec = await api.embedText(NEGATIVE_ANCHORS[i]);
+    await putLabelVector(key, vec, modelId);
+    cache.set(key, Float32Array.from(vec));
+    noteVocab();
   }
 
   const labelVecs: LabelVec[] = MEME_LABELS.filter((d) => cache.has(d.label)).map((d) => ({
@@ -366,7 +387,9 @@ export async function buildKnowledge(api: EmbeddingsApi): Promise<Knowledge> {
   const negativeVecs = NEGATIVE_ANCHORS.map((_, i) => cache.get(`${NEG_PREFIX}${i}`)!).filter(Boolean);
 
   const exemplars = await getExemplars();
+  onStatus?.('training taught labels…');
   const { heads: exemplarHeads, mean } = await buildExemplarHeads();
+  onStatus?.('');
 
   // Association lookup: curated terms + any added with an exemplar.
   const assoc = new Map<string, string[]>(Object.entries(ASSOCIATIONS));
@@ -396,17 +419,14 @@ export async function runIndex(
   opts: { onProgress?: (p: IndexProgress) => void; shouldCancel?: () => boolean } = {}
 ): Promise<IndexResult> {
   return withHeavyPass(async () => {
-  // Give the progress card something honest to show right away: the first run
-  // after a model change re-embeds the whole zero-shot label vocabulary with
-  // the new text tower before any file is touched, and with no signal that
-  // read as a hang.
-  opts.onProgress?.({
-    processed: 0,
-    total: 0,
-    added: 0,
-    current: 'warming up models — first run after a model change takes a minute',
-  });
-  const know = await buildKnowledge(api);
+  // Give the progress card something honest to show right away, then stream
+  // buildKnowledge's real phases through it — a static "warming up" line over
+  // minutes of head-retraining read as a hang (and wrongly blamed a "model
+  // change" on every single run).
+  const status = (s: string) =>
+    opts.onProgress?.({ processed: 0, total: 0, added: 0, current: s || 'preparing to index…' });
+  status('preparing to index…');
+  const know = await buildKnowledge(api, status);
   await clearIndexErrors();
 
   const folders = await getFolders();
@@ -429,6 +449,15 @@ export async function runIndex(
   for (const f of allFiles) {
     if (known.has(f.uri)) skipped++;
     else queue.push(f);
+  }
+
+  // Stuck share-imports jump the queue: pending placeholder rows sort to the
+  // very top of the library showing eternal spinners, so an index run should
+  // replace them with real rows in its first seconds, not after grinding
+  // through however many other new files the folder scan found.
+  const pendingUris = await getPendingUris().catch(() => new Set<string>());
+  if (pendingUris.size > 0) {
+    queue.sort((a, b) => Number(pendingUris.has(b.uri)) - Number(pendingUris.has(a.uri)));
   }
 
   // Record which primary space this index is being built in, so a later model
