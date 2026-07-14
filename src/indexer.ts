@@ -1181,7 +1181,20 @@ export async function videoThumbsPending(): Promise<boolean> {
 // Returns rows FETCHED (0 = drained); THUMB_FAILED stamping and the timeout
 // skip-set guarantee termination.
 const isTimeout = (e: unknown): boolean => String((e as Error)?.message) === 'timeout';
-const errText = (e: unknown): string => String((e as Error)?.message ?? e).slice(0, 90);
+// Expo wraps native rejections in boilerplate — "Call to function 'X' has
+// been rejected. → Caused by: java.lang.IllegalStateException: <reason>" —
+// which ate the whole diagnostics budget before the reason. Keep only the
+// part after the last cause, minus the exception class name.
+const errText = (e: unknown): string => {
+  let s = String((e as Error)?.message ?? e);
+  const causedBy = s.lastIndexOf('Caused by:');
+  if (causedBy >= 0) {
+    s = s
+      .slice(causedBy + 'Caused by:'.length)
+      .replace(/^\s*[a-zA-Z0-9_.$]*(Exception|Error)[:\s]*/, '');
+  }
+  return s.trim().slice(0, 120);
+};
 
 // One video's poster, tried three ways:
 //  1. our own MediaCodec decoder (native) in AUTO mode — the player's decode
