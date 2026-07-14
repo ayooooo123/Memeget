@@ -39,6 +39,7 @@ import {
 } from '../db';
 import { emitLibraryChanged } from '../events';
 import { success, warn } from '../haptics';
+import { acquireKeepAlive } from '../keepAlive';
 import {
   backfillVideoThumbs,
   clearThumbSkips,
@@ -111,6 +112,7 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
   const onRetryPosters = useCallback(async () => {
     if (retryingPosters) return;
     setRetryingPosters(true);
+    const release = acquireKeepAlive('Extracting video previews');
     try {
       const n = await resetFailedThumbs();
       clearThumbSkips();
@@ -129,6 +131,7 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
         showToast('Video posters rebuilt', 'success');
       }
     } finally {
+      release();
       setRetryingPosters(false);
     }
   }, [retryingPosters]);
