@@ -50,6 +50,7 @@ import {
   type MemeNeedingVisionRow,
 } from './db';
 import { extractVideoFrame } from '../modules/memeget-bg';
+import { acquireKeepAlive } from './keepAlive';
 import { ASSOCIATIONS, MEME_LABELS, NEGATIVE_ANCHORS, ocrTags } from './memeLabels';
 import {
   copyToCache,
@@ -170,13 +171,18 @@ async function buildAssociations(): Promise<Map<string, string[]>> {
 // (indexing, re-tagging), the DINO/caption backfill loops must stand down —
 // fp32 DINOv2 running flat-out saturates the CPU and starves everything else,
 // which is what made a fresh index sit on "Preparing to index…" for minutes.
+// Heavy passes also hold the keep-alive foreground service: a multi-minute
+// index must keep running when the user switches apps or the screen sleeps,
+// not silently freeze until they come back.
 let heavyPasses = 0;
-async function withHeavyPass<T>(fn: () => Promise<T>): Promise<T> {
+async function withHeavyPass<T>(fn: () => Promise<T>, label = 'Indexing your library'): Promise<T> {
   heavyPasses++;
+  const release = acquireKeepAlive(label);
   try {
     return await fn();
   } finally {
     heavyPasses--;
+    release();
   }
 }
 

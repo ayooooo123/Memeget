@@ -21,13 +21,8 @@ import {
   type EnrichResult,
   type VisionEnricher,
 } from './indexer';
-import {
-  bgNativeAvailable,
-  getPower,
-  startKeepAlive,
-  stopKeepAlive,
-  type NativePower,
-} from '../modules/memeget-bg';
+import { bgNativeAvailable, getPower, type NativePower } from '../modules/memeget-bg';
+import { acquireKeepAlive } from './keepAlive';
 import {
   bgIntervalMs,
   parseVision,
@@ -263,6 +258,7 @@ export function VisionProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     if (!embeddings.ready) return;
     let cancelled = false;
+    let hold: (() => void) | null = null;
     const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
     const loop = async () => {
       while (!cancelled) {
@@ -273,12 +269,16 @@ export function VisionProvider({ children }: { children: React.ReactNode }) {
         }
         const n = await backfillCaptionEmbeddings(embeddings, { limit: 20 }).catch(() => 0);
         if (n === 0) break;
+        if (!hold) hold = acquireKeepAlive('Indexing captions');
         await sleep(500);
       }
+      hold?.();
+      hold = null;
     };
     loop();
     return () => {
       cancelled = true;
+      hold?.();
     };
   }, [embeddings.ready]);
 
@@ -289,6 +289,7 @@ export function VisionProvider({ children }: { children: React.ReactNode }) {
   // Each batch that lands nudges the library so tiles fill in live.
   useEffect(() => {
     let cancelled = false;
+    let hold: (() => void) | null = null;
     const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
     const loop = async () => {
       while (!cancelled) {
@@ -299,6 +300,14 @@ export function VisionProvider({ children }: { children: React.ReactNode }) {
         const n = await backfillVideoThumbs({ limit: 24 }).catch(() => 0);
         if (cancelled) break;
         if (n > 0) emitLibraryChanged();
+        // Hold the keep-alive service while there's an actual backlog, so the
+        // drain continues with the app backgrounded; drop it when idle so the
+        // notification doesn't sit there forever.
+        if (n > 0 && !hold) hold = acquireKeepAlive('Extracting video previews');
+        if (n === 0 && hold) {
+          hold();
+          hold = null;
+        }
         // Drained: poll slowly — new videos arrive via indexing/shares, and the
         // per-video poster is stamped inline there, so this is only a safety
         // net for transient failures.
@@ -308,6 +317,7 @@ export function VisionProvider({ children }: { children: React.ReactNode }) {
     loop();
     return () => {
       cancelled = true;
+      hold?.();
     };
   }, []);
 
@@ -319,7 +329,15 @@ export function VisionProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     if (!embeddings.visualModel.available) return;
     let cancelled = false;
+    let hold: (() => void) | null = null;
     const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+    const setHold = (on: boolean) => {
+      if (on && !hold) hold = acquireKeepAlive('Analyzing visual similarity');
+      if (!on && hold) {
+        hold();
+        hold = null;
+      }
+    };
     const loop = async () => {
       while (!cancelled) {
         const emb = embeddingsRef.current;
@@ -334,6 +352,7 @@ export function VisionProvider({ children }: { children: React.ReactNode }) {
         // index run; it re-summons the moment the pass ends.
         if (heavyPassActive()) {
           emb.setVisualWanted(false);
+          setHold(false);
           await sleep(10_000);
           continue;
         }
@@ -348,15 +367,19 @@ export function VisionProvider({ children }: { children: React.ReactNode }) {
         }
         // Demand lifecycle: summon the model only when rows actually await a
         // visual vector, and release it (RAM back to the system, no cold start
-        // on the next app open) once the queue drains.
+        // on the next app open) once the queue drains. The keep-alive hold
+        // tracks the same signal: this backfill takes hours on a big library
+        // and must keep grinding with the app in the background.
         const pending = await countMemesNeedingVisualEmbedding(emb.visualModel.id).catch(() => 0);
         if (cancelled) break;
         if (pending === 0) {
           emb.setVisualWanted(false);
+          setHold(false);
           await sleep(60_000);
           continue;
         }
         emb.setVisualWanted(true);
+        setHold(true);
         if (!embeddingsRef.current.visualReady) {
           await sleep(3_000); // loading — check back shortly
           continue;
@@ -369,6 +392,7 @@ export function VisionProvider({ children }: { children: React.ReactNode }) {
     loop();
     return () => {
       cancelled = true;
+      hold?.();
     };
   }, [embeddings.visualModel.available]);
 
@@ -380,9 +404,13 @@ export function VisionProvider({ children }: { children: React.ReactNode }) {
     if (busyRef.current) return 'busy';
     busyRef.current = true;
     setRunning(true);
+    // A burst can run with the background trickle off (the effect-based hold
+    // above only covers bgEnabled) — hold the service for its whole duration.
+    const release = acquireKeepAlive('Describing your memes');
     try {
       return await fn();
     } finally {
+      release();
       busyRef.current = false;
       setRunning(false);
     }
@@ -463,13 +491,14 @@ export function VisionProvider({ children }: { children: React.ReactNode }) {
     };
   }, [hydrated, bgEnabled, enabled, llm.isReady, bgIntensity]);
 
-  // Keep-alive foreground service (Android): hold the process alive while
-  // background mode is active so the in-app loop survives backgrounding. No-op
+  // Keep-alive foreground service (Android): hold the process alive while the
+  // describe model is up so the paced loop survives backgrounding. No-op
   // without the native module. On iOS this only buys a short extension.
+  // Ref-counted (src/keepAlive.ts) so it composes with the index/backfill
+  // holds instead of the loops stopping each other's service.
   useEffect(() => {
     if (!(hydrated && bgEnabled && enabled && llm.isReady)) return;
-    startKeepAlive('Memeget', 'Describing your memes in the background');
-    return () => stopKeepAlive();
+    return acquireKeepAlive('Describing your memes');
   }, [hydrated, bgEnabled, enabled, llm.isReady]);
 
   // OS-scheduled background task (WorkManager / BGTaskScheduler): runs the model

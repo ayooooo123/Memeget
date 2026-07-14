@@ -19,6 +19,7 @@ import {
   type MemeNeedingAudioRow,
 } from './db';
 import { emitLibraryChanged } from './events';
+import { acquireKeepAlive } from './keepAlive';
 import { audioNativeAvailable, extractAudio } from '../modules/memeget-bg';
 import { deleteCache, materialize } from './saf';
 
@@ -141,6 +142,10 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
     }
     busyRef.current = true;
     setRunning(true);
+    // A full transcription pass over a video-heavy library runs for a long
+    // time — hold the keep-alive foreground service so it survives the user
+    // switching apps or the screen sleeping.
+    const release = acquireKeepAlive('Transcribing your videos');
     try {
       const queue = await getMemesNeedingAudio();
       const total = queue.length;
@@ -161,6 +166,7 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
       emitLibraryChanged();
       return result;
     } finally {
+      release();
       busyRef.current = false;
       setRunning(false);
     }
