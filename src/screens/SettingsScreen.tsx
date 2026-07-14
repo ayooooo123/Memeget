@@ -25,11 +25,13 @@ import {
   getImportedPacks,
   getIndexErrors,
   getIndexModelMismatch,
+  getPosterStats,
   getTaughtLabelStats,
   importExemplars,
   migrateStaleExemplars,
   removeFolder,
   resetAudioFailures,
+  resetFailedThumbs,
   resetVisionState,
   type ImportedPack,
   type IndexError,
@@ -37,7 +39,13 @@ import {
 } from '../db';
 import { emitLibraryChanged } from '../events';
 import { success, warn } from '../haptics';
-import { getVisionTelemetry, retagAll, type VisionTelemetry } from '../indexer';
+import {
+  backfillVideoThumbs,
+  clearThumbSkips,
+  getVisionTelemetry,
+  retagAll,
+  type VisionTelemetry,
+} from '../indexer';
 import { MEME_LABELS } from '../memeLabels';
 import { buildPack, parsePack, serializePack } from '../teachingPack';
 import { colors, radius, space, TABBAR_CLEARANCE } from '../theme';
@@ -70,6 +78,8 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
   );
   const [staleExemplars, setStaleExemplars] = useState(0);
   const [migrating, setMigrating] = useState(false);
+  const [posterStats, setPosterStats] = useState({ total: 0, done: 0, failed: 0, missing: 0 });
+  const [retryingPosters, setRetryingPosters] = useState(false);
 
   const refresh = useCallback(async () => {
     setFolders(await getFolders());
@@ -78,6 +88,7 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
     setStaleExemplars(await countStaleExemplars().catch(() => 0));
     setTaughtStats(await getTaughtLabelStats().catch(() => []));
     setImportedPacks(await getImportedPacks().catch(() => []));
+    setPosterStats(await getPosterStats().catch(() => ({ total: 0, done: 0, failed: 0, missing: 0 })));
     setErrors(await getIndexErrors());
     setDescribed(await countMemesDescribed());
     setPending(await countMemesNeedingVision());
@@ -92,6 +103,35 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
   useEffect(() => {
     if (active) refresh();
   }, [active, refresh]);
+
+  // Clear the undecodable stamps and run the poster backfill in the foreground
+  // with feedback — the idle loop would get there too, but silently, and after
+  // several silent failures what the user needs is to SEE it finish (or see
+  // the per-file reasons land in the indexing-errors list right below).
+  const onRetryPosters = useCallback(async () => {
+    if (retryingPosters) return;
+    setRetryingPosters(true);
+    try {
+      const n = await resetFailedThumbs();
+      clearThumbSkips();
+      showToast(`Retrying posters for ${n} videos…`, 'info');
+      while ((await backfillVideoThumbs({ limit: 24 }).catch(() => 0)) > 0) {
+        setPosterStats(await getPosterStats().catch(() => ({ total: 0, done: 0, failed: 0, missing: 0 })));
+      }
+      emitLibraryChanged();
+      const stats = await getPosterStats();
+      setPosterStats(stats);
+      setErrors(await getIndexErrors());
+      if (stats.failed > 0) {
+        showToast(`${stats.failed} still failed — see “Indexing errors” for why`, 'error');
+        setShowErrors(true);
+      } else {
+        showToast('Video posters rebuilt', 'success');
+      }
+    } finally {
+      setRetryingPosters(false);
+    }
+  }, [retryingPosters]);
 
   const onRetag = useCallback(async () => {
     if (!emb.ready) {
@@ -721,6 +761,22 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
       <Section glyph="▦" title="Index" tint={colors.accent}>
         <Row label="Indexed memes" value={String(count)} />
         <Row label="Known meme formats" value={String(MEME_LABELS.length)} />
+        {posterStats.total > 0 && (
+          <Row
+            label="Video posters"
+            value={`${posterStats.done}/${posterStats.total}${posterStats.failed ? ` · ${posterStats.failed} failed` : ''}${posterStats.missing ? ` · ${posterStats.missing} queued` : ''}`}
+            valueTint={posterStats.failed > 0 ? colors.danger : undefined}
+          />
+        )}
+        {posterStats.failed > 0 && (
+          <Button
+            small
+            variant="secondary"
+            label={retryingPosters ? 'Retrying…' : `Retry ${posterStats.failed} failed posters`}
+            onPress={onRetryPosters}
+            disabled={retryingPosters}
+          />
+        )}
         {errors.length > 0 && (
           <Pressable onPress={() => setShowErrors((s) => !s)}>
             <Row label="Indexing errors" value={`${errors.length} ${showErrors ? '▴' : '▾'}`} valueTint={colors.danger} />
@@ -742,7 +798,9 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
                 <Text style={styles.errName} numberOfLines={1}>
                   {e.name}
                 </Text>
-                <Text style={styles.errReason} numberOfLines={2}>
+                {/* Poster failures pack three per-path reasons into one row —
+                    give them room; they're the only debugging signal we get. */}
+                <Text style={styles.errReason} numberOfLines={4}>
                   [{e.stage}] {e.reason}
                 </Text>
               </View>

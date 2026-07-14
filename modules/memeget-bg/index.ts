@@ -106,15 +106,13 @@ export async function extractAudio(
 // path of last resort: MediaMetadataRetriever (used by expo-image AND
 // expo-video-thumbnails) refuses some perfectly playable streams; MediaCodec
 // is the player's own decode path. Resolves null when the native module isn't
-// built in or the file genuinely can't be decoded.
+// built in; REJECTS with a specific reason ("no decoder for video/av01",
+// "decode timeout", …) on failure so the caller can record why — those
+// messages are the only debugging signal off a device without a debugger.
 export async function extractVideoFrame(source: string, seconds: number): Promise<string | null> {
   if (!native || typeof native.extractVideoFrame !== 'function') return null;
-  try {
-    const p = await native.extractVideoFrame(source, seconds);
-    return typeof p === 'string' && p ? p : null;
-  } catch {
-    return null;
-  }
+  const p = await native.extractVideoFrame(source, seconds);
+  return typeof p === 'string' && p ? p : null;
 }
 
 // Put an actual file (in practice a video, which expo-clipboard can't hold) on

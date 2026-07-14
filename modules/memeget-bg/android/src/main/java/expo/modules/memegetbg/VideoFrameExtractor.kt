@@ -23,16 +23,22 @@ object VideoFrameExtractor {
   private const val TIMEOUT_US = 10_000L
   private const val DEADLINE_NS = 15_000_000_000L // hard cap per file
 
-  // Returns a file:// path to the JPEG, or null when the file has no video
-  // track / can't be decoded / times out. Never throws — this is a last-resort
-  // path and the JS side treats null as "genuinely undecodable".
-  fun extract(ctx: Context, source: String, seconds: Double): String? {
+  // Returns a file:// path to the JPEG. Throws with a SPECIFIC reason on any
+  // failure (no video track, no decoder for the codec, decode timeout…) — the
+  // JS poster ladder records these into the diagnostics list, which is the
+  // only way to learn WHY a file resists postering on a device we can't
+  // attach a debugger to.
+  fun extract(ctx: Context, source: String, seconds: Double): String {
     val extractor = MediaExtractor()
     try {
-      if (source.startsWith("content://")) {
-        extractor.setDataSource(ctx, Uri.parse(source), null)
-      } else {
-        extractor.setDataSource(source.removePrefix("file://"))
+      try {
+        if (source.startsWith("content://")) {
+          extractor.setDataSource(ctx, Uri.parse(source), null)
+        } else {
+          extractor.setDataSource(source.removePrefix("file://"))
+        }
+      } catch (e: Exception) {
+        throw IllegalStateException("open failed: ${e.message}")
       }
 
       var trackIndex = -1
@@ -46,7 +52,7 @@ object VideoFrameExtractor {
           break
         }
       }
-      if (trackIndex < 0 || format == null) return null
+      if (trackIndex < 0 || format == null) throw IllegalStateException("no video track")
 
       extractor.selectTrack(trackIndex)
       // Land on the sync frame at/before the requested time; a sub-second clip
@@ -57,7 +63,7 @@ object VideoFrameExtractor {
       val codec = try {
         MediaCodec.createDecoderByType(mime)
       } catch (e: Exception) {
-        return null // no decoder for this codec on this device
+        throw IllegalStateException("no decoder for $mime")
       }
       try {
         // ByteBuffer output in flexible YUV so the frame is CPU-readable.
@@ -65,8 +71,12 @@ object VideoFrameExtractor {
           MediaFormat.KEY_COLOR_FORMAT,
           MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible
         )
-        codec.configure(format, null, null, 0)
-        codec.start()
+        try {
+          codec.configure(format, null, null, 0)
+          codec.start()
+        } catch (e: Exception) {
+          throw IllegalStateException("$mime configure failed: ${e.message}")
+        }
 
         val deadline = System.nanoTime() + DEADLINE_NS
         val info = MediaCodec.BufferInfo()
@@ -94,15 +104,15 @@ object VideoFrameExtractor {
               if (image != null) {
                 val path = writeJpeg(ctx, image)
                 codec.releaseOutputBuffer(outIdx, false)
-                return path
+                return path ?: throw IllegalStateException("$mime frame->jpeg failed")
               }
             }
             val eos = (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0
             codec.releaseOutputBuffer(outIdx, false)
-            if (eos) return null
+            if (eos) throw IllegalStateException("$mime stream ended with no decodable frame")
           }
         }
-        return null
+        throw IllegalStateException("$mime decode timeout")
       } finally {
         try {
           codec.stop()
@@ -111,8 +121,6 @@ object VideoFrameExtractor {
         }
         codec.release()
       }
-    } catch (e: Exception) {
-      return null
     } finally {
       extractor.release()
     }
