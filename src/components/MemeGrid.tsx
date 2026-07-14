@@ -49,13 +49,13 @@ const CONFIRM_MIN_COSINE = 0.6;
 
 type Item = MemeRecord | SearchHit;
 
-// What an <Image> thumbnail should load for an item: videos use their persisted
-// poster jpeg when one exists — the image view can't decode a frame from every
-// video codec, and "mp4 gif" style files rendered blank straight off their
-// content:// uri. Falls back to the original uri (images; videos not yet
-// backfilled, where a decodable codec still shows a frame like before).
+// What an <Image> thumbnail should load for an item: the persisted poster
+// jpeg when one exists — the image view can't decode a frame from every video
+// codec, and "mp4 gif" style files (including mp4 bytes wearing a .gif name,
+// which land as kind 'image') rendered blank straight off their content://
+// uri. Falls back to the original uri for everything without a poster.
 function thumbSource(item: Pick<Item, 'kind' | 'uri' | 'thumbUri'>): string {
-  return item.kind === 'video' && item.thumbUri ? item.thumbUri : item.uri;
+  return item.thumbUri || item.uri;
 }
 
 // Track the on-screen keyboard height so the teach sheet (a bottom-anchored

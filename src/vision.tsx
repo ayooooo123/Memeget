@@ -290,7 +290,24 @@ export function VisionProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     let cancelled = false;
     let hold: (() => void) | null = null;
-    const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+    // Interruptible sleep: a library change (indexing landed a new video)
+    // wakes the loop immediately — posters are no longer stamped inline
+    // during indexing (only the backfill's extractor luma-checks frames), so
+    // a fresh row would otherwise sit posterless until the next slow poll.
+    let wake: (() => void) | null = null;
+    const sleep = (ms: number) =>
+      new Promise<void>((resolve) => {
+        const t = setTimeout(() => {
+          wake = null;
+          resolve();
+        }, ms);
+        wake = () => {
+          clearTimeout(t);
+          wake = null;
+          resolve();
+        };
+      });
+    const unsub = onLibraryChanged(() => wake?.());
     const loop = async () => {
       while (!cancelled) {
         if (indexingActive()) {
@@ -308,15 +325,13 @@ export function VisionProvider({ children }: { children: React.ReactNode }) {
           hold();
           hold = null;
         }
-        // Drained: poll slowly — new videos arrive via indexing/shares, and the
-        // per-video poster is stamped inline there, so this is only a safety
-        // net for transient failures.
         await sleep(n === 0 ? 120_000 : 250);
       }
     };
     loop();
     return () => {
       cancelled = true;
+      unsub();
       hold?.();
     };
   }, []);

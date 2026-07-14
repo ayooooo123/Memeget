@@ -536,18 +536,12 @@ async function prepareFile(file: SafFile, idx: number): Promise<Prepared> {
   }
 }
 
-// Persist a video's already-extracted keyframe as its permanent grid poster.
-// The grid's image view can't decode a frame from every codec ("mp4 gif"
-// tiles rendered blank straight off the content:// uri), so every video gets a
-// plain-jpeg poster on disk. Returns '' for images and on failure (the
-// backfill retries those).
-async function persistVideoThumb(prep: Prepared): Promise<string> {
-  if (!prep.ok || prep.file.kind !== 'video') return '';
-  return persistThumb(prep.jpeg).catch(() => '');
-}
-
 // Stage 2: embed + OCR → classify → store. Logs failures to the index-error
-// table and cleans up the prepare stage's temp files.
+// table and cleans up the prepare stage's temp files. Posters are deliberately
+// NOT stamped here: the embed frame is a fixed t=1s grab that lands on
+// fade-from-black intros, so every poster instead flows through the backfill's
+// luma-checked native extractor (the poster loop wakes on the library-changed
+// events indexing emits, so tiles fill within seconds of a row landing).
 async function finishFile(api: EmbeddingsApi, prep: Prepared, know: Knowledge): Promise<'added' | 'error'> {
   let stage = 'embed';
   try {
@@ -581,7 +575,6 @@ async function finishFile(api: EmbeddingsApi, prep: Prepared, know: Knowledge): 
       tags,
       extraTerms: extraTermsFor(tags, know.assoc),
       modifiedAt: prep.modifiedAt,
-      thumbUri: await persistVideoThumb(prep),
     });
     return 'added';
   } catch (e) {
@@ -601,12 +594,6 @@ async function finishFile(api: EmbeddingsApi, prep: Prepared, know: Knowledge): 
       tags: [],
       extraTerms: '',
       modifiedAt: prep.ok ? prep.modifiedAt : null,
-      // A degraded row can still have a poster when only the embed/store side
-      // failed; after a failed prepare, leave '' so the backfill's three-path
-      // ladder (including the MediaCodec extractor, which reads streams the
-      // pipeline's retriever can't) gets its shot before anything is stamped
-      // failed.
-      thumbUri: await persistVideoThumb(prep),
       degraded: true,
     }).catch(() => {});
     return 'error';
@@ -1188,11 +1175,13 @@ export async function videoThumbsPending(): Promise<boolean> {
 const isTimeout = (e: unknown): boolean => String((e as Error)?.message) === 'timeout';
 const errText = (e: unknown): string => String((e as Error)?.message ?? e).slice(0, 90);
 
-// One video's poster, tried three ways, cheapest first:
-//  1. MediaMetadataRetriever straight off the SAF uri (no copy)
-//  2. MediaMetadataRetriever on a real local copy (provider/container quirks)
-//  3. our own MediaCodec decoder (native) — the player's decode path, for the
-//     "mp4 gif" style streams MMR flatly refuses even though they play fine
+// One video's poster, tried three ways:
+//  1. our own MediaCodec decoder (native) in AUTO mode — the player's decode
+//     path, duration-aware and near-black-frame-rejecting (a fixed t=1s
+//     poster landed on fade-from-black intros), and it reads "mp4 gif" style
+//     streams MMR flatly refuses. The primary path.
+//  2. MediaMetadataRetriever straight off the SAF uri (no copy)
+//  3. MediaMetadataRetriever on a real local copy (provider/container quirks)
 // Returns the persisted path, 'timeout' (transient — retry next session), or
 // null (genuinely undecodable — stamp THUMB_FAILED). A final failure logs all
 // three per-path reasons to the diagnostics list: extraction failures happen
@@ -1204,6 +1193,26 @@ async function extractPosterAnyway(
 ): Promise<string | 'timeout' | null> {
   let timedOut = false;
   const errs: string[] = [];
+
+  try {
+    const frame = await withTimeout(extractVideoFrame(row.uri, -1), THUMB_FALLBACK_TIMEOUT_MS);
+    if (frame) {
+      try {
+        const jpeg = await toJpeg(frame);
+        try {
+          return await persistThumb(jpeg);
+        } finally {
+          await deleteCache(jpeg);
+        }
+      } finally {
+        await deleteCache(frame);
+      }
+    }
+    errs.push('codec: native module not built in');
+  } catch (e) {
+    timedOut ||= isTimeout(e);
+    errs.push(`codec: ${errText(e)}`);
+  }
 
   try {
     return await withTimeout(extractPosterDirect(row.uri), THUMB_DIRECT_TIMEOUT_MS);
@@ -1226,29 +1235,6 @@ async function extractPosterAnyway(
   } catch (e) {
     timedOut ||= isTimeout(e);
     errs.push(`copy: ${errText(e)}`);
-  }
-
-  try {
-    const frame = await withTimeout(
-      extractVideoFrame(row.uri, 1),
-      THUMB_FALLBACK_TIMEOUT_MS
-    );
-    if (frame) {
-      try {
-        const jpeg = await toJpeg(frame);
-        try {
-          return await persistThumb(jpeg);
-        } finally {
-          await deleteCache(jpeg);
-        }
-      } finally {
-        await deleteCache(frame);
-      }
-    }
-    errs.push('codec: native module not built in');
-  } catch (e) {
-    timedOut ||= isTimeout(e);
-    errs.push(`codec: ${errText(e)}`);
   }
 
   if (timedOut) return 'timeout';
