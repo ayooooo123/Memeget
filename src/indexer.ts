@@ -1151,6 +1151,7 @@ export async function videoThumbsPending(): Promise<boolean> {
 // Returns rows FETCHED (0 = drained); THUMB_FAILED stamping and the timeout
 // skip-set guarantee termination.
 const isTimeout = (e: unknown): boolean => String((e as Error)?.message) === 'timeout';
+const errText = (e: unknown): string => String((e as Error)?.message ?? e).slice(0, 90);
 
 // One video's poster, tried three ways, cheapest first:
 //  1. MediaMetadataRetriever straight off the SAF uri (no copy)
@@ -1158,17 +1159,22 @@ const isTimeout = (e: unknown): boolean => String((e as Error)?.message) === 'ti
 //  3. our own MediaCodec decoder (native) — the player's decode path, for the
 //     "mp4 gif" style streams MMR flatly refuses even though they play fine
 // Returns the persisted path, 'timeout' (transient — retry next session), or
-// null (genuinely undecodable — stamp THUMB_FAILED).
+// null (genuinely undecodable — stamp THUMB_FAILED). A final failure logs all
+// three per-path reasons to the diagnostics list: extraction failures happen
+// on a device we can't attach to, and "which path said what" is the only way
+// to tell a missing codec from a broken file from a permission problem.
 async function extractPosterAnyway(
   row: { id: number; uri: string; name: string },
   idx: number
 ): Promise<string | 'timeout' | null> {
   let timedOut = false;
+  const errs: string[] = [];
 
   try {
     return await withTimeout(extractPosterDirect(row.uri), THUMB_DIRECT_TIMEOUT_MS);
   } catch (e) {
     timedOut ||= isTimeout(e);
+    errs.push(`direct: ${errText(e)}`);
   }
 
   try {
@@ -1178,11 +1184,13 @@ async function extractPosterAnyway(
     );
     try {
       if (prep.ok) return await persistThumb(prep.jpeg);
+      errs.push(`copy: ${prep.stage}: ${prep.reason.slice(0, 90)}`);
     } finally {
       for (const t of prep.temp) await deleteCache(t);
     }
   } catch (e) {
     timedOut ||= isTimeout(e);
+    errs.push(`copy: ${errText(e)}`);
   }
 
   try {
@@ -1202,11 +1210,26 @@ async function extractPosterAnyway(
         await deleteCache(frame);
       }
     }
+    errs.push('codec: native module not built in');
   } catch (e) {
     timedOut ||= isTimeout(e);
+    errs.push(`codec: ${errText(e)}`);
   }
 
-  return timedOut ? 'timeout' : null;
+  if (timedOut) return 'timeout';
+  await addIndexError({
+    name: row.name,
+    kind: 'video',
+    stage: 'poster',
+    reason: errs.join(' | ').slice(0, 300),
+  }).catch(() => {});
+  return null;
+}
+
+// The Settings retry button clears the failure stamps in the DB; the session
+// skip-set has to go with them or the retried rows stay invisible here.
+export function clearThumbSkips(): void {
+  thumbSkip.clear();
 }
 
 const THUMB_POOL = 3;

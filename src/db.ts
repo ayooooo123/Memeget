@@ -124,17 +124,15 @@ export async function initDb(): Promise<void> {
   if (!cols.some((c) => c.name === 'thumb_uri')) {
     await db.execAsync(`ALTER TABLE memes ADD COLUMN thumb_uri TEXT NOT NULL DEFAULT '';`);
   }
-  // One-time un-stamp: builds that shipped posters before the MediaCodec
-  // extractor stamped 'failed' on every video MediaMetadataRetriever refused —
-  // exactly the files the new decoder exists for. Clear those stamps once so
-  // the backfill re-serves them through all three extraction paths.
+  // One-time un-stamp (v3: earlier passes stamped 'failed' silently, with no
+  // error capture — re-serve those files so the reasons land in diagnostics).
   const thumbRetry = await db.getFirstAsync<{ value: string }>(
-    `SELECT value FROM settings WHERE key = 'thumb_retry_v2'`
+    `SELECT value FROM settings WHERE key = 'thumb_retry_v3'`
   );
   if (!thumbRetry) {
     await db.execAsync(`UPDATE memes SET thumb_uri = '' WHERE thumb_uri = 'failed';`);
     await db.runAsync(
-      `INSERT OR REPLACE INTO settings (key, value) VALUES ('thumb_retry_v2', '1')`
+      `INSERT OR REPLACE INTO settings (key, value) VALUES ('thumb_retry_v3', '1')`
     );
   }
   // Migrate exemplar tables that predate negative ("not this") teaching.
@@ -670,6 +668,32 @@ export async function getVideosNeedingThumb(limit = 10): Promise<
 export async function setMemeThumb(id: number, thumbUri: string): Promise<void> {
   const db = await getDb();
   await db.runAsync('UPDATE memes SET thumb_uri = ? WHERE id = ?', thumbUri, id);
+}
+
+// Poster coverage for the Settings diagnostics card: how many videos have a
+// poster, how many were stamped undecodable, how many still await one.
+export async function getPosterStats(): Promise<{ total: number; done: number; failed: number; missing: number }> {
+  const db = await getDb();
+  const row = await db.getFirstAsync<{ total: number; done: number; failed: number }>(
+    `SELECT COUNT(*) AS total,
+            SUM(CASE WHEN thumb_uri != '' AND thumb_uri != ? THEN 1 ELSE 0 END) AS done,
+            SUM(CASE WHEN thumb_uri = ? THEN 1 ELSE 0 END) AS failed
+     FROM memes WHERE kind = 'video' AND pending = 0`,
+    THUMB_FAILED,
+    THUMB_FAILED
+  );
+  const total = row?.total ?? 0;
+  const done = row?.done ?? 0;
+  const failed = row?.failed ?? 0;
+  return { total, done, failed, missing: total - done - failed };
+}
+
+// Clear THUMB_FAILED stamps so the backfill re-serves those videos — the
+// Settings "Retry failed posters" button, for after an extraction fix lands.
+export async function resetFailedThumbs(): Promise<number> {
+  const db = await getDb();
+  const res = await db.runAsync(`UPDATE memes SET thumb_uri = '' WHERE thumb_uri = ?`, THUMB_FAILED);
+  return res.changes ?? 0;
 }
 
 // Every live poster path, for the orphan sweep (posters whose meme row was
