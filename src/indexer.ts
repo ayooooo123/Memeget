@@ -1146,13 +1146,21 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
 const THUMB_DIRECT_TIMEOUT_MS = 8_000;
 const THUMB_FALLBACK_TIMEOUT_MS = 20_000;
 
-// Videos whose poster extraction TIMED OUT this session. Deliberately not
-// stamped THUMB_FAILED (a timeout can be transient codec contention, and a
-// permanent stamp would blank the tile forever) — but re-serving them every
-// batch would re-wedge the pool, so they sit out until the next app launch.
-const thumbSkip = new Set<number>();
+// Videos whose poster extraction TIMED OUT recently. Deliberately not stamped
+// THUMB_FAILED (a timeout is usually transient codec/CPU contention — a
+// describe generation or an index running underneath — and a permanent stamp
+// would blank the tile forever), but re-serving them every batch would
+// re-wedge the pool. They sit out for a cooldown, then retry: benching them
+// for the whole session turned one busy stretch into "many thumbnails still
+// missing" until the next app launch.
+const THUMB_SKIP_RETRY_MS = 10 * 60_000;
+const thumbSkip = new Map<number, number>(); // meme id -> retry-after timestamp
 
 async function nextThumbRows(limit: number): Promise<{ id: number; uri: string; name: string }[]> {
+  const now = Date.now();
+  for (const [id, until] of thumbSkip) {
+    if (until <= now) thumbSkip.delete(id);
+  }
   const rows = await getVideosNeedingThumb(limit + thumbSkip.size);
   return rows.filter((r) => !thumbSkip.has(r.id)).slice(0, limit);
 }
@@ -1265,7 +1273,7 @@ export async function backfillVideoThumbs(
       if (i >= rows.length) return;
       const row = rows[i];
       const result = await extractPosterAnyway(row, i).catch(() => null);
-      if (result === 'timeout') thumbSkip.add(row.id);
+      if (result === 'timeout') thumbSkip.set(row.id, Date.now() + THUMB_SKIP_RETRY_MS);
       else await setMemeThumb(row.id, result ?? THUMB_FAILED).catch(() => {});
     }
   };

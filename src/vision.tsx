@@ -487,6 +487,15 @@ export function VisionProvider({ children }: { children: React.ReactNode }) {
         timer = setTimeout(loop, 3_000);
         return;
       }
+      // Posters outrank describes too: a generation pins the CPU for its whole
+      // run, and extraction attempts racing their timeouts underneath it got
+      // written off as hung — which is how a big poster backlog "finished"
+      // with swaths of tiles still empty. The poster queue drains in minutes;
+      // this loop has all day.
+      if (await videoThumbsPending().catch(() => false)) {
+        timer = setTimeout(loop, 5_000);
+        return;
+      }
 
       let status: 'done' | 'deduped' | 'failed' | 'empty' | 'busy' = 'busy';
       try {
