@@ -47,6 +47,10 @@ function sameRecord(a: MemeRecord, b: MemeRecord): boolean {
     a.name === b.name &&
     a.kind === b.kind &&
     a.pending === b.pending &&
+    // The poster backfill updates ONLY this field — omitting it here kept the
+    // stale object alive, so freshly extracted posters never appeared until an
+    // app restart even though the DB said they were done.
+    a.thumbUri === b.thumbUri &&
     a.visionState === b.visionState &&
     a.caption === b.caption &&
     a.transcript === b.transcript &&
