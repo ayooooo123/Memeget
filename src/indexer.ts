@@ -30,6 +30,7 @@ import {
   getMemesNeedingCaptionEmbedding,
   getMemesNeedingVisualEmbedding,
   getMemesNeedingVision,
+  getPendingMemes,
   getPendingUris,
   getVideosNeedingThumb,
   insertMeme,
@@ -695,6 +696,23 @@ export async function indexSavedFiles(
     opts.onProgress?.(saved.length, saved.length);
     return { added, errors };
   });
+}
+
+// Recovery sweep for share-imports whose at-share-time index never finished
+// (model still loading, app killed mid-import): their placeholder rows sit at
+// the top of the library as eternal spinner tiles, and nothing retried them
+// without the user manually running Index. Re-indexes exactly those files.
+// insertMeme replaces the placeholder by uri; a file that has since vanished
+// from the folder degrades its row instead, so the sweep always terminates.
+export async function indexPendingMemes(
+  api: EmbeddingsApi
+): Promise<{ added: number; errors: number }> {
+  const rows = await getPendingMemes();
+  if (rows.length === 0) return { added: 0, errors: 0 };
+  return indexSavedFiles(
+    api,
+    rows.map((r) => ({ uri: r.uri, name: r.name, kind: r.kind as SafFile['kind'] }))
+  );
 }
 
 export interface RetagResult {
