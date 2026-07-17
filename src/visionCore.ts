@@ -65,8 +65,13 @@ export const SYSTEM_PROMPT =
 // truncation there loses the whole object. Line-delimited output has no nesting
 // to corrupt and degrades gracefully: a reply cut off early still yields every
 // line that finished. One filled-in example anchors the format and stops the
-// model echoing the field hints back verbatim. (react-native-executorch has no
-// hard max-token knob, so brevity is enforced via the prompt.)
+// model echoing the field hints back verbatim.
+//
+// react-native-executorch 0.9.2 has no max-token field, but it DOES expose
+// llm.interrupt(), which resolves generate() with the text so far. Because TAGS
+// is the last line and the parser tolerates truncation, we hard-stop generation
+// the moment the TAGS line finishes (see captionLikelyComplete) instead of
+// letting a small model ramble on past the four lines — pure decode-time savings.
 export const USER_PROMPT =
   'Describe this meme so it can be found later by search. Reply with EXACTLY these ' +
   'four lines, each starting with the label in caps, and nothing else:\n' +
@@ -83,6 +88,28 @@ export const USER_PROMPT =
 
 // Cap the injected OCR so it can't bloat the prompt (prefill cost) — a hint.
 export const OCR_HINT_MAX = 280;
+
+// Hard backstop on decoded tokens per caption. The four lines are short (a
+// <=14-word caption + three brief lists ≈ 60–100 tokens), so this only fires
+// when the TAGS-line detector misses and the model runs away — it never clips a
+// well-formed reply. Paired with captionLikelyComplete in the interrupt path.
+export const CAPTION_TOKEN_BUDGET = 160;
+
+// True once the model's streamed output contains everything worth keeping, so
+// the caller can interrupt() the rest of the generation. The prompt fixes the
+// order with TAGS last, so a finished, newline-terminated TAGS line means the
+// four fields are all in — anything after it (explanations, a repeated example,
+// a looping small model) is pure waste. We also require a CAPTION line so an
+// out-of-order early "TAGS:" can't stop us before the headline field lands;
+// parseVision still recovers whatever did stream if we stop a hair early.
+export function captionLikelyComplete(response: string): boolean {
+  if (!/(^|\n)\s*caption\s*[:\-]/i.test(response)) return false;
+  const tags = /(^|\n)\s*tags\s*[:\-]/i.exec(response);
+  if (!tags) return false;
+  const afterTags = response.slice(tags.index + tags[0].length);
+  // Some tag text, then a line break: the TAGS line is done.
+  return /\S/.test(afterTags) && /\n/.test(afterTags);
+}
 
 // Build the user turn, optionally grounding it with text ML Kit already read so
 // the small model doesn't have to re-OCR small text from a downscaled frame.

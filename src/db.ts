@@ -218,6 +218,24 @@ export async function initDb(): Promise<void> {
       `ALTER TABLE exemplars ADD COLUMN model TEXT NOT NULL DEFAULT 'clip-vit-base-patch32';`
     );
   }
+
+  // Indexes for the queries that scan the whole table on every call. Without
+  // these, the library grid's paged sort and the four backfill pollers each do a
+  // full-table scan per invocation — cheap on a few hundred memes, real cost at
+  // tens of thousands. Created after all migrations so every referenced column
+  // exists. Partial indexes on the state columns stay tiny: they only carry the
+  // rows still awaiting a pass, and shrink to nothing as each backfill drains.
+  await db.execAsync(`
+    CREATE INDEX IF NOT EXISTS idx_memes_recent ON memes(modified_at DESC, id DESC);
+    CREATE INDEX IF NOT EXISTS idx_memes_vision_pending
+      ON memes(indexed_at DESC, id DESC) WHERE vision_state = 'pending';
+    CREATE INDEX IF NOT EXISTS idx_memes_audio_pending
+      ON memes(indexed_at DESC, id DESC) WHERE audio_state = 'pending';
+    CREATE INDEX IF NOT EXISTS idx_memes_visual_pending
+      ON memes(indexed_at DESC, id DESC) WHERE visual_embedding IS NULL;
+    CREATE INDEX IF NOT EXISTS idx_memes_thumb_pending
+      ON memes(modified_at DESC, id DESC) WHERE thumb_uri = '';
+  `);
 }
 
 // ---- primary-space guard -------------------------------------------------------
@@ -1193,12 +1211,30 @@ export async function searchByVector(
   return scored.slice(0, limit).map(({ entry, score }) => ({ ...entry.record, score }) as SearchHit);
 }
 
+// Set the first time the user actually opens "More like this". The DINOv2 visual
+// backfill (the heaviest model in the app, a 346 MB fp32 export) is gated on this
+// so it never loads or grinds through the whole library for someone who never
+// uses the feature — getSimilarMemes falls back to the primary CLIP vector until
+// visual vectors exist, so first use still ranks correctly and upgrades as the
+// now-unblocked backfill catches up.
+export const VISUAL_FEATURE_KEY = 'visual.featureUsed';
+
+export async function markVisualFeatureUsed(): Promise<void> {
+  await setSetting(VISUAL_FEATURE_KEY, '1');
+}
+
+export async function getVisualFeatureUsed(): Promise<boolean> {
+  return (await getSetting(VISUAL_FEATURE_KEY)) === '1';
+}
+
 // "More like this" for the viewer: rank the library by cosine similarity to one
 // meme's stored CLIP embedding. Same brute-force scan as text search (and the
 // same chunked yielding so opening a meme never hitches the UI), but the query
 // vector comes from the image itself — no model call needed, it's all reads.
 export async function getSimilarMemes(id: number, limit = 12): Promise<SearchHit[]> {
   const db = await getDb();
+  // Opening this view is the signal that unblocks the DINO visual backfill.
+  markVisualFeatureUsed().catch(() => {});
   const source = await db.getFirstAsync<{
     embedding: Uint8Array;
     visual_embedding: Uint8Array | null;

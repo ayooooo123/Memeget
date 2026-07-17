@@ -7,6 +7,7 @@ import {
   countMemesNeedingVisualEmbedding,
   countPendingMemes,
   getSetting,
+  getVisualFeatureUsed,
   setSetting,
 } from './db';
 import { emitLibraryChanged, emitThumbsUpdated, onLibraryChanged } from './events';
@@ -29,6 +30,7 @@ import { codecInteractiveActive } from './interactive';
 import { acquireKeepAlive } from './keepAlive';
 import {
   bgIntervalMs,
+  captionLikelyComplete,
   parseVision,
   powerBlockReason,
   userTurn,
@@ -43,6 +45,7 @@ import {
   POWER_CACHE_MS,
   QUALITY_KEY,
   SYSTEM_PROMPT,
+  CAPTION_TOKEN_BUDGET,
   type BgThrottles,
   type VisionQuality,
   type VisionResult,
@@ -156,6 +159,36 @@ export function VisionProvider({ children }: { children: React.ReactNode }) {
     model: MODEL[quality],
     preventLoad: !(hydrated && enabled && modelWanted),
   });
+
+  // Early-stop: react-native-executorch streams the reply into `llm.response`
+  // and exposes interrupt(), which resolves the in-flight generate() with the
+  // text so far. TAGS is the last of the four lines, so the instant it finishes
+  // there is nothing left worth decoding — a small model would otherwise keep
+  // going (explanations, repeating the example, looping). Stopping there is pure
+  // savings and safe: parseVision already tolerates a truncated reply. Fields
+  // are read defensively so an executorch build without them just skips the
+  // optimization (full generation, unchanged behavior) instead of crashing.
+  const g = llm as unknown as {
+    isGenerating?: boolean;
+    response?: string;
+    interrupt?: () => void;
+    getGeneratedTokenCount?: () => number;
+  };
+  const interruptedRef = useRef(false);
+  const generatingRef = useRef(false);
+  useEffect(() => {
+    const generating = !!g.isGenerating;
+    // Arm a fresh guard on each new generation (false → true transition).
+    if (generating && !generatingRef.current) interruptedRef.current = false;
+    generatingRef.current = generating;
+    if (!generating || interruptedRef.current || typeof g.interrupt !== 'function') return;
+    const tokens = g.getGeneratedTokenCount?.() ?? 0;
+    if (captionLikelyComplete(g.response ?? '') || tokens > CAPTION_TOKEN_BUDGET) {
+      interruptedRef.current = true;
+      g.interrupt();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [llm.isGenerating, (llm as { response?: string }).response]);
 
   // Summon the model whenever the background trickle has work: on
   // hydrate/settings changes and every time the library changes (a fresh
@@ -429,6 +462,18 @@ export function VisionProvider({ children }: { children: React.ReactNode }) {
           emb.setVisualWanted(false);
           setHold(false);
           await sleep(10_000);
+          continue;
+        }
+        // Don't load DINO or grind the library until the user has actually
+        // opened "More like this" at least once. Until then the feature ranks in
+        // primary CLIP space (getSimilarMemes' built-in fallback), so gating
+        // costs nothing on first use but saves a 346 MB model load + hours of
+        // background embedding for everyone who never taps it. Re-checked each
+        // pass, so the backfill starts within a poll of first use.
+        if (!(await getVisualFeatureUsed().catch(() => true))) {
+          emb.setVisualWanted(false);
+          setHold(false);
+          await sleep(30_000);
           continue;
         }
         // Grid posters outrank visual vectors: both this loop and the thumb
