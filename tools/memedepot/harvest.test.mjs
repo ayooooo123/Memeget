@@ -17,6 +17,7 @@ import {
   buildBaseline,
   parseRobots,
   isDisallowed,
+  jsonTerm,
 } from './harvest.mjs';
 
 test('normalizeTerm lowercases, strips punctuation, drops junk', () => {
@@ -27,6 +28,32 @@ test('normalizeTerm lowercases, strips punctuation, drops junk', () => {
   assert.equal(normalizeTerm('a'), ''); // too short
   assert.equal(normalizeTerm('12345'), ''); // pure number
   assert.equal(normalizeTerm(null), '');
+});
+
+test('normalizeTerm guards against [object Object] leakage', () => {
+  // String([object Object]) after punctuation-stripping collapses to this.
+  assert.equal(normalizeTerm('[object Object]'), '');
+  assert.equal(normalizeTerm('object object'), '');
+  assert.equal(normalizeTerm('object object object'), '');
+});
+
+test('jsonTerm extracts a name from tag objects, never "[object Object]"', () => {
+  assert.equal(jsonTerm('Gigachad'), 'Gigachad');
+  assert.equal(jsonTerm({ name: 'Wojak' }), 'Wojak');
+  assert.equal(jsonTerm({ title: 'Doomer' }), 'Doomer');
+  assert.equal(jsonTerm({ slug: 'this-is-fine', id: 7 }), 'this-is-fine');
+  assert.equal(jsonTerm({ id: 7, color: 'green' }), 'green'); // lone string field
+  assert.equal(jsonTerm({ id: 7 }), ''); // nothing string-like → dropped
+  assert.equal(jsonTerm(null), '');
+});
+
+test('extractTagsFromHtml unwraps OBJECT-valued tag arrays (the real-run bug)', () => {
+  // memedepot embeds tags as objects; a naive String() produced "[object Object]".
+  const html = `<div data-x='"tags":[{"id":1,"name":"Gigachad"},{"id":2,"name":"Wojak"}]'></div>`;
+  const got = extractTagsFromHtml(html);
+  assert.ok(got.includes('Gigachad'), JSON.stringify(got));
+  assert.ok(got.includes('Wojak'), JSON.stringify(got));
+  assert.ok(!got.some((t) => /object/i.test(t)), `no object leakage in ${JSON.stringify(got)}`);
 });
 
 test('titleCase keeps short connectors lowercase', () => {

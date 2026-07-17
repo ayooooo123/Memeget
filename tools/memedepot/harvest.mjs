@@ -54,7 +54,25 @@ export function normalizeTerm(raw) {
   if (t.length < 3 || t.length > 40) return '';
   if (STOPWORDS.has(t)) return '';
   if (/^\d+$/.test(t)) return ''; // pure numbers
+  if (/^object( object)*$/.test(t)) return ''; // "[object Object]" leakage guard
   return t;
+}
+
+// Pull a term string out of a JSON value that may be a bare string or a tag
+// OBJECT like {name|title|label|slug|tag|text: "..."} — memedepot embeds tags as
+// objects, so a naive String() yields "[object Object]". Returns '' when nothing
+// string-like is found, so an unnamed object can't leak junk downstream.
+export function jsonTerm(v) {
+  if (typeof v === 'string') return v;
+  if (v && typeof v === 'object' && !Array.isArray(v)) {
+    for (const key of ['name', 'title', 'label', 'slug', 'tag', 'text', 'value']) {
+      if (typeof v[key] === 'string' && v[key].trim()) return v[key];
+    }
+    // Fall back to a lone string field if the object has exactly one.
+    const strings = Object.values(v).filter((x) => typeof x === 'string' && x.trim());
+    if (strings.length === 1) return strings[0];
+  }
+  return '';
 }
 
 // Display label from a normalized term (Title Case). The first word is always
@@ -119,7 +137,7 @@ export function extractTagsFromHtml(html) {
       for (const node of Array.isArray(data) ? data : [data]) {
         const k = node?.keywords;
         if (typeof k === 'string') terms.push(...k.split(',').map((s) => s.trim()));
-        else if (Array.isArray(k)) terms.push(...k.map(String));
+        else if (Array.isArray(k)) terms.push(...k.map(jsonTerm).filter(Boolean));
       }
     } catch {
       /* malformed JSON-LD — skip */
@@ -131,7 +149,7 @@ export function extractTagsFromHtml(html) {
   for (const a of arrs) {
     try {
       const parsed = JSON.parse(a[1]);
-      if (Array.isArray(parsed)) terms.push(...parsed.map(String));
+      if (Array.isArray(parsed)) terms.push(...parsed.map(jsonTerm).filter(Boolean));
     } catch {
       /* skip */
     }
@@ -283,6 +301,20 @@ async function main() {
     if (++done % 25 === 0) console.log(`  …${done}/${urls.length}`);
     await sleep(opts.delayMs);
   }
+
+  // Diagnostic: surface the most common RAW (pre-normalization) terms so a bad
+  // extraction — wrong tag-object shape, junk leakage — is visible directly in
+  // the CI run logs, instead of costing another blind harvest round-trip.
+  const rawFreq = {};
+  for (const r of rawTerms) {
+    const k = String(r).trim();
+    if (k) rawFreq[k] = (rawFreq[k] ?? 0) + 1;
+  }
+  const topRaw = Object.entries(rawFreq)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 20);
+  console.log(`  raw terms: ${rawTerms.length} total, ${Object.keys(rawFreq).length} distinct`);
+  if (topRaw.length) console.log(`  top raw: ${topRaw.map(([t, c]) => `${t} (${c})`).join(', ')}`);
 
   const baseline = buildBaseline(aggregate(rawTerms), {
     max: opts.maxTags,

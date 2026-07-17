@@ -76,7 +76,17 @@ label collision.
   site structure we can't inspect from here. The first real run may surface junk
   or miss a tag source — that's why the output lands in a **reviewed PR**, and
   why `main()` refuses to ship an empty overwrite. Adjust the strategies against
-  a saved page if a run comes back thin.
+  a saved page if a run comes back thin. memedepot embeds tags as JSON *objects*
+  (`{name: …}`), so array entries are unwrapped via `jsonTerm`, not `String()`
+  (which would leak `[object Object]`); `normalizeTerm` guards that string too.
+  The crawl also logs its top raw (pre-normalization) terms, so a wrong
+  object shape is visible in the run logs without another blind harvest.
+- **Auto-PR needs a repo setting.** `peter-evans/create-pull-request` uses the
+  Actions `GITHUB_TOKEN`, which by default is blocked from opening PRs
+  (`GitHub Actions is not permitted to create or approve pull requests`). Enable
+  Settings → Actions → General → Workflow permissions → *Allow GitHub Actions to
+  create and approve pull requests*. Without it the run still pushes the
+  `automation/memedepot-tags` branch — a PR just has to be opened manually.
 - Raising the label cap should be gated on the search-quality eval harness
   (`docs/memedepot-corpus.md`) — more zero-shot classes means more chances at a
   false-positive tag.
