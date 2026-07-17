@@ -14,6 +14,7 @@ on:
   push:
     branches:
       - claude/gemma-local-vl-model-7viqpi
+      - claude/xnnpack-models-github-6vi7ni
       - main
     paths:
       - 'tools/model-export/**'
