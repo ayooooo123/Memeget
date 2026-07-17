@@ -71,7 +71,10 @@ jobs:
           # a healthy dynamic-int8 transformer scores ≥0.99). One coherent
           # wheel set, no piecemeal upgrades.
           pip install "executorch==${ET_VERSION}" "torch==2.9.*" --extra-index-url https://download.pytorch.org/whl/cpu
-          pip install open_clip_torch timm transformers tokenizers --extra-index-url https://download.pytorch.org/whl/cpu
+          # scikit-image ships a handful of real photos used as the static-quant
+          # calibration set (no network needed); export falls back to synthetic
+          # inputs if it's missing, so this is a quality aid, not a hard dep.
+          pip install open_clip_torch timm transformers tokenizers scikit-image --extra-index-url https://download.pytorch.org/whl/cpu
           echo '--- resolved versions ---'
           pip freeze | grep -iE '^(torch|torchao|executorch|open-clip|timm|transformers|tokenizers)' || true
 
@@ -109,9 +112,17 @@ jobs:
             | `dinov2_base_xnnpack_fp32.pte` | visual-similarity tower | [1,3,224,224] f32 0..1 | [1,768] |
 
             Normalization is baked into each graph; the app L2-normalizes outputs.
+
+            `*_int8.pte` variants are published **only when** they pass an eager
+            cosine ≥ 0.98 gate vs their fp32 twin (see the export logs) — a
+            drifting quantization is skipped, so a missing int8 asset means "it
+            didn't clear the bar this run", never a silent quality regression.
           files: |
             dist/mobileclip_s2_image_xnnpack_fp32.pte
+            dist/mobileclip_s2_image_xnnpack_int8.pte
             dist/mobileclip_s2_text_xnnpack_fp32.pte
+            dist/mobileclip_s2_text_xnnpack_int8.pte
             dist/mobileclip_s2_tokenizer.json
             dist/dinov2_base_xnnpack_fp32.pte
+            dist/dinov2_base_xnnpack_int8.pte
             dist/SHA256SUMS

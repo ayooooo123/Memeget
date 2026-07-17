@@ -41,7 +41,12 @@ def main() -> None:
 
     from transformers import Dinov2Model
 
-    from export_mobileclip_s2 import export_pte, verify_pte
+    from export_mobileclip_s2 import (
+        calibration_images,
+        export_int8_if_good,
+        export_pte,
+        verify_pte,
+    )
 
     model = Dinov2Model.from_pretrained("facebook/dinov2-base")
     model.eval()
@@ -51,7 +56,21 @@ def main() -> None:
     out_path = args.out_dir / "dinov2_base_xnnpack_fp32.pte"
     export_pte(wrapper, inputs, out_path)
     verify_pte(out_path, inputs, EMBED_DIM, reference=wrapper)
-    # int8 parked — see the note in export_mobileclip_s2.py.
+
+    # int8 DINOv2 — the highest-value quant target: it's the biggest file
+    # (346 MB fp32 → ~90 MB) and a plain ViT, which quantizes cleanly. Try
+    # dynamic first (weights-only, no calibration); if it clears the cos ≥ 0.98
+    # gate it ships, else fall back to static/calibrated, else keep fp32. Written
+    # only on a pass, so "More like this" quality can never regress.
+    int8_path = args.out_dir / "dinov2_base_xnnpack_int8.pte"
+    cos = export_int8_if_good(wrapper, inputs, int8_path, mode="dynamic")
+    if cos is None and not int8_path.exists():
+        export_int8_if_good(
+            wrapper, inputs, int8_path, mode="static",
+            calib_inputs=calibration_images(IMAGE_SIZE),
+        )
+    if int8_path.exists():
+        verify_pte(int8_path, inputs, EMBED_DIM, reference=wrapper)
 
 
 if __name__ == "__main__":
