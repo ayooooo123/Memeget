@@ -26,7 +26,9 @@ export const MAX_VIDEO_FRAMES = 8;
 // Distinct frames the heavy on-device VLM (LFM2-VL) will caption. Far smaller
 // because each is a full generation — the dominant cost of the whole app. A
 // static clip stops after the first non-repeating frame, so most videos cost 1.
-export const MAX_VLM_FRAMES = 3;
+// Capped at 2: mergeVisionResults only joins up to two scene captions anyway, so
+// a third generation adds cost for output that is largely discarded.
+export const MAX_VLM_FRAMES = 2;
 
 // Two frames whose normalized CLIP vectors are at least this similar are treated
 // as the same shot and analyzed once. High enough that genuine scene/text
