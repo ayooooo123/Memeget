@@ -106,6 +106,20 @@ const GridCell = React.memo(function GridCell({
   onPress: (it: Item) => void;
   onLongPress: (it: Item) => void;
 }) {
+  const src = thumbSource(item);
+  // Track a render failure for THIS source so a tile the image view can't decode
+  // (an "mp4 gif" whose bytes wear a .gif name and land as kind 'image', a codec
+  // expo-image refuses, a stale/missing poster file) falls back to the labeled
+  // stub instead of a permanent blank square. Reset whenever the source changes
+  // so a poster landing later (patched in by id) is retried, not stuck on the
+  // earlier failure.
+  const [renderFailed, setRenderFailed] = useState(false);
+  useEffect(() => setRenderFailed(false), [src]);
+  // A video with no poster yet goes straight to the stub (asking the image view
+  // to decode the video hits the same retriever that already refused it). Any
+  // other tile only shows the stub once its image has actually failed to render.
+  const showStub = (item.kind === 'video' && !item.thumbUri) || renderFailed;
+
   return (
     <PressableScale
       scaleTo={0.94}
@@ -113,23 +127,22 @@ const GridCell = React.memo(function GridCell({
       onLongPress={() => onLongPress(item)}
       style={{ width: size, height: size }}
     >
-      {item.kind === 'video' && !item.thumbUri ? (
-        // No poster (backfill hasn't reached it, or every decoder refused the
-        // file): show a deliberate filmstrip stub with the filename instead of
-        // asking the image view to decode the video — it goes through the same
-        // retriever that already failed, so the tile would just render blank.
+      {showStub ? (
         <View style={[styles.thumb, styles.videoStub]}>
-          <Text style={styles.videoStubGlyph}>🎞</Text>
+          <Text style={styles.videoStubGlyph}>{item.kind === 'video' ? '🎞' : '🖼'}</Text>
           <Text style={styles.videoStubName} numberOfLines={2}>
             {item.name}
           </Text>
         </View>
       ) : (
         <Image
-          source={{ uri: thumbSource(item) }}
+          source={{ uri: src }}
           style={styles.thumb}
           contentFit="cover"
           transition={150}
+          // A tile that can't be decoded (mp4-as-gif, unsupported codec, missing
+          // poster) drops to the stub above instead of rendering blank.
+          onError={() => setRenderFailed(true)}
           // Reuse the view and release the previous bitmap when a cell is
           // recycled (e.g. when retagAll hands the list a fresh array).
           recyclingKey={String(item.id)}
