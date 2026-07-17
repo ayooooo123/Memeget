@@ -67,11 +67,13 @@ import type { VisionResult } from './visionCore';
 import type { Tag } from './types';
 
 // Confidence in how a label was matched, highest first:
+//   manual   — the user typed it (e.g. multi-select bulk tag); never overridden
 //   ocr      — text literally in the image (watermark/caption)
 //   exemplar — the user's own ground truth, taught by example
 //   vision   — the VLM's (Gemma) open-vocabulary read of the image
 //   prompt   — CLIP zero-shot guess against the fixed label vocabulary
 const TAG_RANK: Record<NonNullable<Tag['source']>, number> = {
+  manual: 5,
   ocr: 4,
   exemplar: 3,
   vision: 2,
@@ -768,10 +770,11 @@ export async function retagAll(
     }
     const visual = mergeClassified(prompts.tags, classifyExemplars(vec, know.exemplarHeads, know.mean));
     const base = mergeTags(visual, ocrTags(row.ocrText));
-    // Preserve any VLM tags already on the meme — re-tagging applies new
-    // taught knowledge, it shouldn't erase the vision pass's work.
-    const visionTags = row.tags.filter((t) => t.source === 'vision');
-    const merged = dedupeRankTags([...base, ...visionTags], 6);
+    // Preserve any VLM tags and user-applied (manual) tags already on the meme —
+    // re-tagging applies new taught knowledge, it shouldn't erase the vision
+    // pass's work or a tag the user explicitly added.
+    const kept = row.tags.filter((t) => t.source === 'vision' || t.source === 'manual');
+    const merged = dedupeRankTags([...base, ...kept], 6);
     // Likewise keep the vision search terms (subjects/text/caption keywords)
     // that already live in extra_terms — union them with the fresh assoc terms.
     const extraTerms = unionTerms(extraTermsFor(merged, know.assoc), row.extraTerms);
