@@ -16,7 +16,7 @@ No accounts. No servers. No uploads.
 | Meme format / character / emotion tags | **Zero-shot classification** against a curated prompt library (`src/memeLabels.ts`) — Pepe, Wojak, Doomer, Gigachad, Drake format, This Is Fine, etc. This is the editable "knowledge" layer. |
 | Quick filters | A slim chip row under the search box: tap **▦ Images / ▶ Videos** to narrow by media type, or tap a known meme tag (the formats/characters actually present in your library, plus your taught labels) to filter without typing. Filters apply to both browse and search. |
 | Words in the meme | On-device **OCR** ([`expo-text-extractor`](https://github.com/pchalupa/expo-text-extractor) → ML Kit on Android). |
-| Video | A keyframe is extracted (`expo-video-thumbnails`) and indexed like an image. |
+| Video | Multiple frames are sampled across the clip (`expo-video-thumbnails`), visually-identical frames collapsed, and each distinct moment analyzed — the primary embeddings mean-pooled into one "gist" vector, OCR text unioned, and tags merged. So a caption or character that only appears partway through is still found. The heavier VLM caption pass describes each distinct scene (stopping once frames stop changing) and folds them together. |
 | Words *said* in the meme | Opt-in **audio analysis** (Settings): a native decoder (MediaCodec) pulls each video's audio track as 16 kHz PCM and on-device **Whisper** (via the same ExecuTorch runtime) transcribes it. The transcript shows in the viewer and is searchable — find a clip by the line you remember hearing. |
 | Similar memes | Open any meme → **More like this**: the library ranked by stored visual vectors. By default this uses CLIP cosine similarity; if a custom DINOv2 visual model is configured, DINO vectors are stored/backfilled and used for this flow. Tap a thumbnail to hop to it — great for finding the other variants of a template. |
 | Bulk actions | **Long-press** a thumbnail to enter selection mode, tap to add/remove memes (or **All**), then act on the whole set from the bottom bar: **Tag** them all with one label at once, or **Delete** them together. A bulk tag is a first-class user tag — it's searchable and survives re-tagging. |
@@ -183,7 +183,6 @@ weights — editable and on-device:
   MobileCLIP-S2 migration, and the DB/search path has a DINOv2 visual-similarity
   slot that currently falls back to CLIP until a compatible export exists. See
   `docs/embedding-roadmap.md`.
-- Multi-frame video sampling (currently one keyframe).
 - Recursive folder walking.
 - Music *recognition* (Shazam-style fingerprinting needs an on-device fingerprint
   DB — deferred; speech transcription shipped, see Audio analysis above).
