@@ -134,25 +134,167 @@ def _quantize_dynamic_int8(module: torch.nn.Module, example_inputs) -> torch.nn.
     return gm
 
 
+def _prepare_quantizer(is_dynamic: bool):
+    """Shared PT2E setup: force the submodule import torchao annotates against,
+    tolerate the torch.ao<->torchao layout shuffle, and return an XNNPACK
+    per-channel quantizer (dynamic for transformer/linear towers, static —
+    calibrated — for conv-heavy ones like FastViT)."""
+    try:
+        import torch.ao.quantization.quantizer.quantizer  # noqa: F401
+    except ImportError:
+        pass
+    try:
+        from torchao.quantization.pt2e.quantize_pt2e import convert_pt2e, prepare_pt2e
+    except ImportError:
+        from torch.ao.quantization.quantize_pt2e import convert_pt2e, prepare_pt2e
+    try:
+        from executorch.backends.xnnpack.quantizer.xnnpack_quantizer import (
+            XNNPACKQuantizer,
+            get_symmetric_quantization_config,
+        )
+    except ImportError:  # older executorch layout
+        from torch.ao.quantization.quantizer.xnnpack_quantizer import (
+            XNNPACKQuantizer,
+            get_symmetric_quantization_config,
+        )
+    quantizer = XNNPACKQuantizer()
+    quantizer.set_global(
+        get_symmetric_quantization_config(is_per_channel=True, is_dynamic=is_dynamic)
+    )
+    return quantizer, prepare_pt2e, convert_pt2e
+
+
+def _quantize_static_int8(module, example_inputs, calib_inputs) -> torch.nn.Module:
+    """Static per-channel int8: BOTH weights and activations are int8, with
+    activation ranges observed over real calibration images. Unlike dynamic
+    quant (which broke FastViT — activations stay fp and the conv stack drifts to
+    cos 0.34), static calibrates the conv activations, which is the standard way
+    to quantize a conv backbone without wrecking it. Whether it clears the gate
+    is exactly what the caller checks — this only builds the candidate."""
+    quantizer, prepare_pt2e, convert_pt2e = _prepare_quantizer(is_dynamic=False)
+    try:
+        gm = torch.export.export_for_training(module, example_inputs).module()
+    except AttributeError:
+        gm = torch.export.export(module, example_inputs).module()
+    gm = prepare_pt2e(gm, quantizer)
+    with torch.no_grad():
+        for ci in calib_inputs:  # observe activation ranges over real images
+            gm(*ci)
+    return convert_pt2e(gm)
+
+
+def _cos_vs_fp32(reference: torch.nn.Module, candidate: torch.nn.Module, example_inputs) -> float:
+    with torch.no_grad():
+        ref = reference(*example_inputs).flatten()
+        cand = candidate(*example_inputs).flatten()
+    return torch.nn.functional.cosine_similarity(ref, cand, dim=0).item()
+
+
+def _lower_to_pte(target: torch.nn.Module, example_inputs, out_path: pathlib.Path) -> None:
+    from executorch.backends.xnnpack.partition.xnnpack_partitioner import XnnpackPartitioner
+    from executorch.exir import to_edge_transform_and_lower
+
+    with torch.no_grad():
+        ep = torch.export.export(target, example_inputs)
+    ep = _decompose_batch_norms(ep)
+    prog = to_edge_transform_and_lower(ep, partitioner=[XnnpackPartitioner()]).to_executorch()
+    out_path.write_bytes(prog.buffer)
+    print(f"wrote {out_path} ({out_path.stat().st_size / 1e6:.1f} MB)")
+
+
+def export_int8_if_good(
+    module: torch.nn.Module,
+    example_inputs,
+    out_path: pathlib.Path,
+    *,
+    mode: str,  # 'static' (calibrated) or 'dynamic'
+    calib_inputs=None,
+    threshold: float = 0.98,
+) -> float | None:
+    """Build an int8 .pte and ship it ONLY if it stays within `threshold` cosine
+    of the fp32 module. A quantization that drifts (or fails to build at all) is
+    logged and skipped — the fp32 export the app already uses is untouched — so
+    this can never ship a quality regression, only add a faster model when one
+    genuinely survives. Returns the cosine on success, else None."""
+    module.eval()
+    try:
+        if mode == "static":
+            qgm = _quantize_static_int8(module, example_inputs, calib_inputs or [example_inputs])
+        else:
+            qgm = _quantize_dynamic_int8(module, example_inputs)
+        cos = _cos_vs_fp32(module, qgm, example_inputs)
+    except Exception as e:  # noqa: BLE001 — any failure just means "no int8 this run"
+        print(f"SKIP {out_path.name}: int8 {mode} build failed ({type(e).__name__}: {e})")
+        return None
+    if cos < threshold:
+        print(
+            f"SKIP {out_path.name}: int8 {mode} cos vs fp32 = {cos:.4f} < {threshold} "
+            f"— keeping fp32 only (no quality regression shipped)"
+        )
+        return None
+    try:
+        _lower_to_pte(qgm, example_inputs, out_path)
+    except Exception as e:  # noqa: BLE001
+        print(f"SKIP {out_path.name}: int8 {mode} lower failed ({type(e).__name__}: {e})")
+        return None
+    print(f"int8 {mode} PASSED gate for {out_path.name}: cos vs fp32 = {cos:.4f}")
+    return cos
+
+
+def calibration_images(size: int, n: int = 16):
+    """A small, network-free set of real natural images (scikit-image's bundled
+    photos) as [1,3,size,size] tensors in [0,1] — the pixel contract the towers'
+    baked normalization expects. Real images give static quant meaningful
+    activation ranges; if skimage isn't present we fall back to varied synthetic
+    inputs so export never hard-depends on it (quality just suffers, and the gate
+    will catch it)."""
+    inputs = []
+    try:
+        import numpy as np
+        from skimage import data
+        from skimage.transform import resize
+
+        names = [
+            "astronaut", "coffee", "chelsea", "camera", "rocket", "cat",
+            "coins", "text", "hubble_deep_field", "logo", "clock", "moon",
+        ]
+        for name in names:
+            fn = getattr(data, name, None)
+            if fn is None:
+                continue
+            try:
+                arr = np.asarray(fn(), dtype="float32")
+            except Exception:
+                continue
+            if arr.ndim == 2:
+                arr = np.stack([arr] * 3, axis=-1)
+            if arr.shape[-1] == 4:
+                arr = arr[..., :3]
+            arr = resize(arr, (size, size), preserve_range=True, anti_aliasing=True).astype("float32")
+            if float(arr.max()) > 1.5:
+                arr = arr / 255.0
+            t = torch.from_numpy(arr).permute(2, 0, 1).unsqueeze(0).contiguous().clamp(0, 1)
+            inputs.append((t,))
+    except Exception as e:  # noqa: BLE001
+        print(f"NOTE: skimage calibration set unavailable ({e}); using synthetic inputs")
+    if not inputs:
+        inputs = [(torch.rand(1, 3, size, size),) for _ in range(n)]
+    return inputs[:n]
+
+
 def export_pte(
     module: torch.nn.Module,
     example_inputs,
     out_path: pathlib.Path,
     quantize: bool = False,
 ) -> None:
-    from executorch.backends.xnnpack.partition.xnnpack_partitioner import XnnpackPartitioner
-    from executorch.exir import to_edge_transform_and_lower
-
     module.eval()
-    with torch.no_grad():
-        target = _quantize_dynamic_int8(module, example_inputs) if quantize else module
-        ep = torch.export.export(target, example_inputs)
-
-    ep = _decompose_batch_norms(ep)
-
-    prog = to_edge_transform_and_lower(ep, partitioner=[XnnpackPartitioner()]).to_executorch()
-    out_path.write_bytes(prog.buffer)
-    print(f"wrote {out_path} ({out_path.stat().st_size / 1e6:.1f} MB)")
+    if quantize:
+        with torch.no_grad():
+            target = _quantize_dynamic_int8(module, example_inputs)
+        _lower_to_pte(target, example_inputs, out_path)
+    else:
+        _lower_to_pte(module, example_inputs, out_path)
 
 
 def verify_pte(
@@ -234,10 +376,21 @@ def main() -> None:
     image_path = args.out_dir / "mobileclip_s2_image_xnnpack_fp32.pte"
     export_pte(image_tower, image_inputs, image_path)
     verify_pte(image_path, image_inputs, EMBED_DIM, reference=image_tower)
-    # NO int8 image tower: the eager quantization gate measured cos 0.34 vs
-    # fp32 — reparameterized FastViT does not survive dynamic int8. It ships
-    # fp32 (the smallest of the three files anyway); a static-quant export with
-    # real calibration data is the future path if its size ever matters.
+    # int8 image tower — STATIC/calibrated this time. Dynamic int8 measured cos
+    # 0.34 (reparameterized FastViT convs drift when only weights are quantized);
+    # static observes conv-activation ranges over real images, the standard way
+    # to quantize a conv backbone. Gated at cos ≥ 0.98 vs fp32 and written ONLY
+    # if it passes — a miss just leaves the fp32 tower the app already uses.
+    image_int8_path = args.out_dir / "mobileclip_s2_image_xnnpack_int8.pte"
+    export_int8_if_good(
+        image_tower,
+        image_inputs,
+        image_int8_path,
+        mode="static",
+        calib_inputs=calibration_images(IMAGE_SIZE),
+    )
+    if image_int8_path.exists():
+        verify_pte(image_int8_path, image_inputs, EMBED_DIM, reference=image_tower)
 
     ids = torch.zeros(1, CONTEXT_LEN, dtype=torch.long)
     ids[0, 0] = 49406  # BOT
@@ -248,11 +401,12 @@ def main() -> None:
     text_path = args.out_dir / "mobileclip_s2_text_xnnpack_fp32.pte"
     export_pte(text_tower, text_inputs, text_path)
     verify_pte(text_path, text_inputs, EMBED_DIM, reference=text_tower)
-    # int8 is PARKED, not deleted: export_pte(..., quantize=True) works code-
-    # wise, but nine CI runs against executorch 1.0's quantization stack hit
-    # five distinct failure modes — including silently WRONG quantization
-    # (cos 0.33–0.43 vs fp32) that only the eager gate caught. Re-attempt when
-    # a coherent executorch/torch/torchao set demonstrably passes the gate.
+    # int8 text tower — DYNAMIC (a transformer, which quantizes cleanly this way,
+    # unlike the conv image tower). Same cos ≥ 0.98 gate; ships only on a pass.
+    text_int8_path = args.out_dir / "mobileclip_s2_text_xnnpack_int8.pte"
+    export_int8_if_good(text_tower, text_inputs, text_int8_path, mode="dynamic")
+    if text_int8_path.exists():
+        verify_pte(text_int8_path, text_inputs, EMBED_DIM, reference=text_tower)
 
     write_tokenizer(args.out_dir / "mobileclip_s2_tokenizer.json")
 
