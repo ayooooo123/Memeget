@@ -226,6 +226,65 @@ async function materializeFrames(
 // Visually-identical frames are collapsed first (dedupeFrames) so a static clip
 // costs one classify, not `maxFrames`. A single image flows through unchanged
 // (dedupe/mean-pool of one frame is a no-op, and its embed∥OCR overlap is kept).
+// ---- fast-pass telemetry (per-stage timing, for tuning) ---------------------
+// The index loop overlaps stages across files, so a stopwatch on the whole run
+// can't say WHERE the time goes. These per-stage rolling means can: they show
+// whether a slow index is embed-bound (the model), transcode/copy-bound (I/O),
+// or OCR-bound — which is the difference between "quantize the encoder" and
+// "stop re-decoding the image". Surfaced read-only in Settings diagnostics.
+export type IndexStage = 'copy' | 'transcode' | 'embed' | 'ocr' | 'classify' | 'store';
+const perfTelem: Record<IndexStage, { total: number; count: number }> = {
+  copy: { total: 0, count: 0 },
+  transcode: { total: 0, count: 0 },
+  embed: { total: 0, count: 0 },
+  ocr: { total: 0, count: 0 },
+  classify: { total: 0, count: 0 },
+  store: { total: 0, count: 0 },
+};
+function recordStage(stage: IndexStage, ms: number): void {
+  const t = perfTelem[stage];
+  // Decay the window so the average tracks recent files (a model swap, a run of
+  // huge images) instead of averaging over the whole app lifetime.
+  if (t.count >= 50) {
+    t.total *= 0.5;
+    t.count *= 0.5;
+  }
+  t.total += ms;
+  t.count += 1;
+}
+// Time an awaited stage and fold it into the rolling mean. Returns the value so
+// callers stay one-liners: `const x = await timed('embed', () => f())`.
+async function timed<T>(stage: IndexStage, fn: () => Promise<T>): Promise<T> {
+  const start = Date.now();
+  try {
+    return await fn();
+  } finally {
+    recordStage(stage, Date.now() - start);
+  }
+}
+
+export interface IndexPerf {
+  copyMs: number;
+  transcodeMs: number;
+  embedMs: number;
+  ocrMs: number;
+  classifyMs: number;
+  storeMs: number;
+  samples: number; // embed count — the per-file unit
+}
+export function getIndexPerf(): IndexPerf {
+  const avg = (s: IndexStage) => (perfTelem[s].count ? perfTelem[s].total / perfTelem[s].count : 0);
+  return {
+    copyMs: avg('copy'),
+    transcodeMs: avg('transcode'),
+    embedMs: avg('embed'),
+    ocrMs: avg('ocr'),
+    classifyMs: avg('classify'),
+    storeMs: avg('store'),
+    samples: Math.round(perfTelem.embed.count),
+  };
+}
+
 async function analyzeFrames(
   api: EmbeddingsApi,
   jpegs: string[],
@@ -237,9 +296,15 @@ async function analyzeFrames(
     // on the same frame — run concurrently so the shorter hides behind the
     // longer. Frames run sequentially so only one embed is ever in flight,
     // keeping peak memory flat (matching the pipeline's one-per-stage design).
-    const [embedding, ocrText] = await Promise.all([api.embedImage(jpeg), ocr(jpeg)]);
+    // Each is timed independently (they overlap) so the telemetry shows which is
+    // the real pole per frame.
+    const [embedding, ocrText] = await Promise.all([
+      timed('embed', () => api.embedImage(jpeg)),
+      timed('ocr', () => ocr(jpeg)),
+    ]);
     frames.push({ embedding, ocrText });
   }
+  const start = Date.now();
   const reps = dedupeFrames(frames);
   const embedding = meanPoolNormalized(reps.map((r) => r.embedding));
   const ocrText = unionOcrText(reps.map((r) => r.ocrText));
@@ -247,6 +312,7 @@ async function analyzeFrames(
     classifyImage(r.embedding, know.labelVecs, know.exemplarHeads, know.mean, know.negativeVecs)
   );
   const tags = mergeTags(flattenFrameTags(perFrame), ocrTags(ocrText));
+  recordStage('classify', Date.now() - start);
   return { embedding, ocrText, tags };
 }
 
@@ -612,7 +678,25 @@ async function prepareFile(file: SafFile, idx: number, maxFrames = 1): Promise<P
     // falls back to the index time so a row is never left unsorted.
     const modifiedAt = getModifiedTime(file.uri);
 
-    const work = await copyToCache(file, idx);
+    // Images: transcode straight from the SAF content:// uri, skipping the
+    // full-file copy the video path still needs. expo-image-manipulator reads
+    // content:// directly on Android, so the copy was pure redundant I/O — a
+    // multi-MB write + read per image. If a provider rejects the uri we fall
+    // through to the copy-first path below, so this only ever removes wasted
+    // work; it never breaks a file that used to index.
+    if (file.kind === 'image') {
+      stage = 'transcode';
+      try {
+        const jpeg = await timed('transcode', () => toJpeg(file.uri));
+        temp.push(jpeg);
+        return { ok: true, file, modifiedAt, jpegs: [jpeg], temp };
+      } catch {
+        // Provider won't hand the bytes to the manipulator directly — copy first.
+      }
+    }
+
+    stage = 'copy';
+    const work = await timed('copy', () => copyToCache(file, idx));
     temp.push(work);
 
     stage = file.kind === 'video' ? 'thumbnail' : 'transcode';
@@ -621,7 +705,7 @@ async function prepareFile(file: SafFile, idx: number, maxFrames = 1): Promise<P
     stage = 'transcode';
     const jpegs: string[] = [];
     for (const frame of frames) {
-      const jpeg = await toJpeg(frame);
+      const jpeg = await timed('transcode', () => toJpeg(frame));
       temp.push(jpeg);
       jpegs.push(jpeg);
     }
@@ -660,16 +744,18 @@ async function finishFile(api: EmbeddingsApi, prep: Prepared, know: Knowledge): 
     const { embedding, ocrText, tags } = await analyzeFrames(api, prep.jpegs, know);
 
     stage = 'store';
-    await insertMeme({
-      uri: prep.file.uri,
-      name: prep.file.name,
-      kind: prep.file.kind,
-      embedding,
-      ocrText,
-      tags,
-      extraTerms: extraTermsFor(tags, know.assoc),
-      modifiedAt: prep.modifiedAt,
-    });
+    await timed('store', () =>
+      insertMeme({
+        uri: prep.file.uri,
+        name: prep.file.name,
+        kind: prep.file.kind,
+        embedding,
+        ocrText,
+        tags,
+        extraTerms: extraTermsFor(tags, know.assoc),
+        modifiedAt: prep.modifiedAt,
+      })
+    );
     return 'added';
   } catch (e) {
     const reason = String((e as Error)?.message ?? e).slice(0, 300);
