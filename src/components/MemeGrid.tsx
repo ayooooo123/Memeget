@@ -7,7 +7,6 @@ import {
   FlatList,
   Keyboard,
   Modal,
-  PanResponder,
   Platform,
   Pressable,
   ScrollView,
@@ -30,6 +29,8 @@ import {
   getLibraryTagLabels,
   getMemeEmbedding,
   getSimilarMemes,
+  requeueMemeThumb,
+  requeueMemeVision,
 } from '../db';
 import { emitLibraryChanged } from '../events';
 import { scoreExemplar } from '../learnCore';
@@ -646,6 +647,41 @@ export const MemeGrid = React.memo(function MemeGrid({
     );
   };
 
+  // Re-run the on-device vision model on just this meme: requeue it and nudge
+  // the library so the describe loop (or the demand-loaded VLM) picks it up. The
+  // caption/tags refresh in place once it finishes; nothing to await here.
+  const onRecaption = async () => {
+    if (!selected || busy) return;
+    setBusy(true);
+    try {
+      await requeueMemeVision(selected.id);
+      emitLibraryChanged();
+      success();
+      showToast('Re-captioning queued — the description refreshes shortly', 'success');
+    } catch (e) {
+      showToast(`Could not re-caption: ${String(e)}`, 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Regenerate a video's grid poster: clear it and wake the poster loop. Only
+  // offered for videos (images are their own thumbnail).
+  const onRethumb = async () => {
+    if (!selected || busy) return;
+    setBusy(true);
+    try {
+      await requeueMemeThumb(selected.id);
+      emitLibraryChanged();
+      success();
+      showToast('Poster refresh queued — the thumbnail regenerates shortly', 'success');
+    } catch (e) {
+      showToast(`Could not refresh poster: ${String(e)}`, 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
   // Backdrop / back button on the teach modal. During the confirm step this is
   // a "skip": the first exemplar is already saved, so the deferred apply must
   // still run — only the extra picks are dropped.
@@ -947,6 +983,8 @@ export const MemeGrid = React.memo(function MemeGrid({
         onCopy={onCopy}
         onCopyText={onCopyText}
         onDelete={onDelete}
+        onRecaption={onRecaption}
+        onRethumb={onRethumb}
         onTeach={openTeach}
         onConfirmTag={confirmTag}
         onShowConfidence={computeMatchInfo}
@@ -1163,7 +1201,8 @@ export const MemeGrid = React.memo(function MemeGrid({
   );
 });
 
-// Full-width bottom sheet viewer with a drag-to-dismiss handle.
+// Centered popup viewer. Tapping the backdrop (anywhere outside the card) or the
+// ✕ returns to the library.
 function ViewerSheet({
   item,
   busy,
@@ -1174,6 +1213,8 @@ function ViewerSheet({
   onCopy,
   onCopyText,
   onDelete,
+  onRecaption,
+  onRethumb,
   onTeach,
   onConfirmTag,
   onShowConfidence,
@@ -1189,6 +1230,9 @@ function ViewerSheet({
   onCopy: () => void;
   onCopyText: () => void;
   onDelete: () => void;
+  // Re-run the vision model / regenerate the poster for just this meme.
+  onRecaption: () => void;
+  onRethumb: () => void;
   onTeach: (positive: boolean, preset?: string) => void;
   // One-tap "this tag is right" — saves a positive exemplar for the open meme.
   onConfirmTag: (label: string) => void;
@@ -1197,8 +1241,6 @@ function ViewerSheet({
   // Tap a "More like this" thumbnail to view that meme in this sheet instead.
   onSelectItem?: (hit: SearchHit) => void;
 }) {
-  const drag = useConst(() => new Animated.Value(0));
-
   // Visually similar memes for the open item, ranked by CLIP cosine against its
   // stored embedding. Fetched per item (cleared first so a stale strip never
   // shows against the wrong meme); the stale flag drops a slow fetch that
@@ -1223,30 +1265,6 @@ function ViewerSheet({
     };
   }, [itemId, itemPending]);
 
-  // Drag-to-dismiss on the grab area only, so scrolling the metadata or
-  // pinch-looking at the image never accidentally closes the sheet. Lazy so the
-  // responder is built once instead of re-created on every render.
-  const pan = useConst(() =>
-    PanResponder.create({
-      onMoveShouldSetPanResponder: (_e, g) => g.dy > 6 && Math.abs(g.dy) > Math.abs(g.dx),
-      onPanResponderMove: (_e, g) => drag.setValue(Math.max(0, g.dy)),
-      onPanResponderRelease: (_e, g) => {
-        if (g.dy > 110 || g.vy > 1.2) {
-          Animated.timing(drag, { toValue: 600, duration: 160, useNativeDriver: true }).start(() => {
-            drag.setValue(0);
-            onClose();
-          });
-        } else {
-          Animated.spring(drag, { toValue: 0, useNativeDriver: true, speed: 30, bounciness: 4 }).start();
-        }
-      },
-    })
-  );
-
-  useEffect(() => {
-    if (item) drag.setValue(0);
-  }, [item, drag]);
-
   // Long-press verdict on a tag chip: promote the model's guess to a taught
   // positive example, or mark it wrong. Either way this meme stops being a
   // guess and becomes the user's ground truth.
@@ -1266,18 +1284,19 @@ function ViewerSheet({
     <Modal
       visible={!!item}
       transparent
-      animationType="slide"
+      animationType="fade"
       statusBarTranslucent
       onRequestClose={onClose}
     >
       <View style={styles.viewerRoot}>
-        {/* Backdrop sits BEHIND the sheet: only taps that land outside the
-            sheet reach it, so scrolling/teaching/selecting never dismisses. */}
+        {/* Backdrop fills the screen behind the popup: a tap anywhere outside
+            the card closes the viewer and returns to the library. Taps inside
+            the card don't reach it, so scrolling/teaching/selecting never
+            dismiss. */}
         <Pressable style={StyleSheet.absoluteFill} onPress={onClose} />
         {item && (
-          <Animated.View style={[styles.sheet, { transform: [{ translateY: drag }] }]}>
-            <View {...pan.panHandlers} style={styles.sheetHeader}>
-              <View style={styles.grabber} />
+          <View style={styles.sheet}>
+            <View style={styles.sheetHeader}>
               <View style={styles.sheetTitleRow}>
                 <Text style={styles.sheetTitle} numberOfLines={1} selectable>
                   {item.name}
@@ -1303,9 +1322,17 @@ function ViewerSheet({
               />
             )}
 
+            {/* Per-meme actions. Each meme gets its own buttons to share, copy,
+                tag it, re-run the on-device caption/tags, regenerate a video
+                poster, copy its text, or delete it. */}
             <View style={styles.actionBar}>
               <ActionButton glyph="⤴" label={busy ? '…' : 'Share'} onPress={onShare} disabled={busy} />
               <ActionButton glyph="⧉" label="Copy" onPress={onCopy} disabled={busy} />
+              <ActionButton glyph="🏷" label="Tag" onPress={() => onTeach(true)} disabled={busy} />
+              <ActionButton glyph="✨" label="Caption" onPress={onRecaption} disabled={busy} />
+              {item.kind === 'video' && (
+                <ActionButton glyph="🖼" label="Poster" onPress={onRethumb} disabled={busy} />
+              )}
               {!!item.ocrText && <ActionButton glyph="🆎" label="Text" onPress={onCopyText} />}
               <ActionButton glyph="🗑" label="Delete" danger onPress={onDelete} disabled={busy} />
             </View>
@@ -1443,7 +1470,7 @@ function ViewerSheet({
                 <Text style={styles.mutedSmall}>No taught labels yet.</Text>
               )}
             </ScrollView>
-          </Animated.View>
+          </View>
         )}
       </View>
     </Modal>
@@ -1608,18 +1635,27 @@ const styles = StyleSheet.create({
   bulkDeleteBtn: { backgroundColor: colors.dangerDim, borderWidth: 1, borderColor: colors.danger },
   bulkDeleteText: { color: colors.danger, fontSize: 13, fontWeight: '800' },
 
-  viewerRoot: { flex: 1, backgroundColor: colors.overlay, justifyContent: 'flex-end' },
-  sheet: {
-    backgroundColor: colors.surface,
-    borderTopLeftRadius: radius.xl,
-    borderTopRightRadius: radius.xl,
-    overflow: 'hidden',
-    maxHeight: '94%',
-    borderWidth: 1,
-    borderBottomWidth: 0,
-    borderColor: colors.borderLight,
+  viewerRoot: {
+    flex: 1,
+    backgroundColor: colors.overlay,
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: space.lg,
   },
-  sheetHeader: { paddingTop: 8, paddingBottom: 4 },
+  // Centered popup card (was a bottom sheet): rounded on every corner, capped in
+  // both dimensions, floating over the dimmed library.
+  sheet: {
+    width: '100%',
+    maxWidth: 480,
+    backgroundColor: colors.surface,
+    borderRadius: radius.xl,
+    overflow: 'hidden',
+    maxHeight: '88%',
+    borderWidth: 1,
+    borderColor: colors.borderLight,
+    ...shadow.float,
+  },
+  sheetHeader: { paddingTop: 12, paddingBottom: 4 },
   grabber: {
     alignSelf: 'center',
     width: 38,
@@ -1649,7 +1685,9 @@ const styles = StyleSheet.create({
 
   actionBar: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
     justifyContent: 'space-evenly',
+    rowGap: space.md,
     paddingVertical: space.md,
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: colors.border,

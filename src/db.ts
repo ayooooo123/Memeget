@@ -649,6 +649,21 @@ export async function setMemeVision(
   invalidateSearchIndex(); // caption + caption vector + tags all feed search
 }
 
+// Requeue one meme for description: flip vision_state back to 'pending' and drop
+// its vision-derived output (caption + caption vector) so the background enrich
+// loop — or a manual burst — runs the model on it again. The per-meme "re-caption"
+// button in the viewer. Non-vision tags (CLIP/OCR/exemplar) are kept; enrichOne
+// re-merges vision tags on top of them. Dropping vision_state to 'pending' also
+// shrinks the described-count the twin cache is keyed on, so it self-heals.
+export async function requeueMemeVision(id: number): Promise<void> {
+  const db = await getDb();
+  await db.runAsync(
+    "UPDATE memes SET vision_state = 'pending', caption = '', caption_embedding = NULL WHERE id = ?",
+    id
+  );
+  invalidateSearchIndex(); // the stale caption + its vector leave the haystack now
+}
+
 export interface MemeNeedingCaptionEmbeddingRow {
   id: number;
   caption: string;
@@ -766,6 +781,15 @@ export async function getVideosNeedingThumb(limit = 10): Promise<
 export async function setMemeThumb(id: number, thumbUri: string): Promise<void> {
   const db = await getDb();
   await db.runAsync('UPDATE memes SET thumb_uri = ? WHERE id = ?', thumbUri, id);
+}
+
+// Requeue one video for poster extraction: clear its thumb_uri (also lifting any
+// THUMB_FAILED stamp) so it matches NEEDS_THUMB_WHERE again and the poster loop
+// regenerates it. The per-meme "refresh poster" button. The old poster file, if
+// any, is reclaimed by the orphan sweep (getAllThumbUris no longer lists it).
+export async function requeueMemeThumb(id: number): Promise<void> {
+  const db = await getDb();
+  await db.runAsync("UPDATE memes SET thumb_uri = '' WHERE id = ?", id);
 }
 
 // Poster coverage for the Settings diagnostics card: how many poster-needing
