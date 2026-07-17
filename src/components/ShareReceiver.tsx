@@ -8,6 +8,19 @@ import { emitLibraryChanged } from '../events';
 import { extractUrl, resolveSharedLink } from '../linkResolver';
 import { colors, radius, shadow, TABBAR_CLEARANCE } from '../theme';
 import { deleteCache, type SafFile } from '../saf';
+import { importMemesFromZip } from '../zipImport';
+
+// A shared .zip archive: matched by a zip content type, or an octet-stream/
+// unknown type whose filename still ends in .zip (file managers vary). We pull
+// every compatible meme out of it and then discard the archive.
+const isZipShare = (f: ShareIntentFile): boolean =>
+  /^application\/(zip|x-zip-compressed|x-zip)$/i.test(f.mimeType ?? '') ||
+  /\.zip$/i.test(f.fileName ?? '');
+
+// Share-intent file paths arrive as bare filesystem paths on some providers;
+// FileSystem reads/deletes need a scheme.
+const toUri = (p: string): string =>
+  p.startsWith('file://') || p.startsWith('content://') ? p : `file://${p}`;
 
 type Status =
   | { kind: 'importing'; msg: string }
@@ -47,12 +60,17 @@ export function ShareReceiver() {
   //     ONE time the app touches the network, and only because you handed it a
   //     URL — nothing is uploaded.
   useEffect(() => {
-    const files = (shareIntent?.files ?? []).filter((f: ShareIntentFile) =>
-      /^(image|video)\//.test(f.mimeType)
-    );
-    // Only treat the share as a link if no media file came with it.
-    const sharedUrl = files.length === 0 ? extractUrl(shareIntent?.webUrl, shareIntent?.text) : null;
-    if (!hasShareIntent || (files.length === 0 && !sharedUrl)) return;
+    const allFiles = shareIntent?.files ?? [];
+    const files = allFiles.filter((f: ShareIntentFile) => /^(image|video)\//.test(f.mimeType));
+    // A shared archive is imported in bulk: every compatible meme inside it is
+    // extracted, then the archive is thrown away.
+    const zipFiles = allFiles.filter(isZipShare);
+    // Only treat the share as a link if no media file / archive came with it.
+    const sharedUrl =
+      files.length === 0 && zipFiles.length === 0
+        ? extractUrl(shareIntent?.webUrl, shareIntent?.text)
+        : null;
+    if (!hasShareIntent || (files.length === 0 && zipFiles.length === 0 && !sharedUrl)) return;
     if (savingRef.current) return;
 
     savingRef.current = true;
@@ -94,6 +112,58 @@ export function ShareReceiver() {
             // wrote a permanent copy into the linked folder.
             await deleteCache(media.path);
           }
+        } else if (zipFiles.length > 0) {
+          // Zip path: unpack every compatible meme into the linked folder,
+          // skipping duplicates, then discard the shared archive. Extraction
+          // saves pending rows and hands them to the same background indexer as
+          // any other share; the copies in the folder are what persist.
+          setStatus({ kind: 'importing', msg: 'Reading the shared zip…' });
+          let imported = 0;
+          let duplicates = 0;
+          let unsupported = 0;
+          let errors = 0;
+          let folderName = '';
+          const savedAll: SafFile[] = [];
+          for (const zf of zipFiles) {
+            const zipUri = toUri(zf.path);
+            try {
+              const res = await importMemesFromZip(zipUri, {
+                zipName: zf.fileName,
+                onProgress: (done, total, phase) =>
+                  setStatus({
+                    kind: 'importing',
+                    msg:
+                      phase === 'reading'
+                        ? 'Reading the shared zip…'
+                        : `Importing ${done}/${total || '…'} from zip…`,
+                  }),
+              });
+              imported += res.imported;
+              duplicates += res.duplicates;
+              unsupported += res.unsupported;
+              errors += res.errors;
+              folderName = res.folderName;
+              savedAll.push(...res.saved);
+            } finally {
+              // Discard the shared archive — the memes now live in the folder.
+              await deleteCache(zipUri);
+            }
+          }
+          if (savedAll.length > 0) {
+            queueRef.current.push(...savedAll);
+            setTick((t) => t + 1);
+          }
+          emitLibraryChanged();
+          const extras: string[] = [];
+          if (duplicates > 0) extras.push(`${duplicates} dup${duplicates === 1 ? '' : 's'} skipped`);
+          if (unsupported > 0) extras.push(`${unsupported} unsupported`);
+          if (errors > 0) extras.push(`${errors} failed`);
+          const note = extras.length ? ` (${extras.join(' · ')})` : '';
+          const where = folderName ? ` to “${folderName}”` : '';
+          setStatus({
+            kind: 'done',
+            msg: `✓ Imported ${imported} meme${imported === 1 ? '' : 's'} from zip${where} — indexing in background${note}`,
+          });
         } else {
           // File path: copy each shared image/video into the linked folder.
           const total = files.length;
