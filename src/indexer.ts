@@ -1061,10 +1061,34 @@ function findTwin(m: MemeNeedingVisionRow, twins: TwinRec[]): TwinRec | null {
 }
 
 // ---- telemetry (per-stage timing, for tuning) -------------------------------
-const telem = { described: 0, deduped: 0, failed: 0, durations: [] as number[] };
+const telem = {
+  described: 0,
+  deduped: 0,
+  failed: 0,
+  durations: [] as number[],
+  promptTokens: [] as number[], // prefill size per caption (prompt + image tokens)
+  genTokens: [] as number[], // decoded tokens per caption
+};
 function recordDuration(ms: number) {
   telem.durations.push(ms);
   if (telem.durations.length > 30) telem.durations.shift();
+}
+// Record the prefill/decode token split for one caption. This is the number
+// that decides where captioning time actually goes: a big prompt-token count
+// with few generated tokens means prefill-bound (the fixed cataloging prompt +
+// image tokens re-processed every meme — where a prompt trim or a native
+// prefix-KV cache would pay off); a big generated count means decode-bound
+// (where the early-stop we already ship is the lever). react-native-executorch
+// resets the KV every generate(), so the prefix is genuinely re-paid each meme.
+export function recordVisionTokens(promptTokens: number, genTokens: number) {
+  if (promptTokens > 0) {
+    telem.promptTokens.push(promptTokens);
+    if (telem.promptTokens.length > 30) telem.promptTokens.shift();
+  }
+  if (genTokens > 0) {
+    telem.genTokens.push(genTokens);
+    if (telem.genTokens.length > 30) telem.genTokens.shift();
+  }
 }
 
 export interface VisionTelemetry {
@@ -1072,11 +1096,19 @@ export interface VisionTelemetry {
   deduped: number;
   failed: number;
   avgMs: number; // mean model time over the last ~30 described memes
+  avgPromptTokens: number; // mean prefill tokens (prompt + image) per caption
+  avgGenTokens: number; // mean decoded tokens per caption
 }
 export function getVisionTelemetry(): VisionTelemetry {
-  const d = telem.durations;
-  const avgMs = d.length ? d.reduce((a, b) => a + b, 0) / d.length : 0;
-  return { described: telem.described, deduped: telem.deduped, failed: telem.failed, avgMs };
+  const mean = (a: number[]) => (a.length ? a.reduce((x, y) => x + y, 0) / a.length : 0);
+  return {
+    described: telem.described,
+    deduped: telem.deduped,
+    failed: telem.failed,
+    avgMs: mean(telem.durations),
+    avgPromptTokens: mean(telem.promptTokens),
+    avgGenTokens: mean(telem.genTokens),
+  };
 }
 
 // Build searchable terms from merged tags + the model's free text.
