@@ -34,6 +34,7 @@ import {
 import { emitLibraryChanged } from '../events';
 import { scoreExemplar } from '../learnCore';
 import { buildExemplarHeads, noteInteractive, type ExemplarModel } from '../indexer';
+import { noteCodecInteractive } from '../interactive';
 import { success, tap, thud, warn } from '../haptics';
 import { copyFileToClipboard } from '../../modules/memeget-bg';
 import { deleteFile, materialize, readImageBase64, readVideoFrameBase64, videoMimeFor } from '../saf';
@@ -183,6 +184,7 @@ export const MemeGrid = React.memo(function MemeGrid({
   onSearchLabel,
   emptyState,
   scrollToTopSignal,
+  onScrollActiveChange,
 }: {
   items: Item[];
   header?: React.ReactElement;
@@ -203,6 +205,9 @@ export const MemeGrid = React.memo(function MemeGrid({
   // the list back to the top so fresh results are visible immediately instead
   // of stranding the user wherever they'd scrolled to while browsing.
   scrollToTopSignal?: number;
+  // Called with true when a drag/fling begins and false when scrolling settles,
+  // so the parent can hold refreshes and stamp interactivity during a scroll.
+  onScrollActiveChange?: (active: boolean) => void;
 }) {
   const [selected, setSelected] = useState<Item | null>(null);
   // Multi-select: long-press a cell to enter selection mode, tap to toggle, then
@@ -296,6 +301,40 @@ export const MemeGrid = React.memo(function MemeGrid({
     listRef.current?.scrollToOffset({ offset: 0, animated: true });
   }, []);
 
+  // Report scroll activity to the parent, momentum-aware so a drag→fling handoff
+  // doesn't flap "settled" for a frame between the finger lifting and momentum
+  // starting. Deactivation is deferred a beat; a momentum-begin within that beat
+  // cancels it, so we stay "active" continuously from first touch to full stop.
+  const scrollSettleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const setScrollActive = useCallback(
+    (active: boolean) => {
+      if (active) {
+        if (scrollSettleTimer.current) {
+          clearTimeout(scrollSettleTimer.current);
+          scrollSettleTimer.current = null;
+        }
+        onScrollActiveChange?.(true);
+      } else {
+        if (scrollSettleTimer.current) clearTimeout(scrollSettleTimer.current);
+        scrollSettleTimer.current = setTimeout(() => {
+          scrollSettleTimer.current = null;
+          onScrollActiveChange?.(false);
+        }, 150);
+      }
+    },
+    [onScrollActiveChange]
+  );
+  const onScrollBeginDrag = useCallback(() => setScrollActive(true), [setScrollActive]);
+  const onScrollEndDrag = useCallback(() => setScrollActive(false), [setScrollActive]);
+  const onMomentumScrollBegin = useCallback(() => setScrollActive(true), [setScrollActive]);
+  const onMomentumScrollEnd = useCallback(() => setScrollActive(false), [setScrollActive]);
+  useEffect(
+    () => () => {
+      if (scrollSettleTimer.current) clearTimeout(scrollSettleTimer.current);
+    },
+    []
+  );
+
   // Stable across renders so the memoized GridCells aren't all re-rendered
   // every time unrelated grid state changes (opening the viewer, toggling
   // `loadingMore` during pagination, teaching). An unstable onPress here was
@@ -306,6 +345,9 @@ export const MemeGrid = React.memo(function MemeGrid({
     // The viewer is interactive foreground work: stand the background loops
     // down (they hold hardware codecs the video preview / frame-copy need).
     noteInteractive();
+    // Opening a video contends for the hardware decoder the poster backfill
+    // uses — stamp the short codec window so it briefly yields the decoder.
+    if (it.kind === 'video') noteCodecInteractive();
     setSelected(it);
   }, []);
 
@@ -520,6 +562,7 @@ export const MemeGrid = React.memo(function MemeGrid({
     // Frame extraction needs a hardware decoder; make the background loops
     // yield theirs before we try (retries inside cover the in-flight one).
     noteInteractive();
+    if (isVideo) noteCodecInteractive(); // free the poster loop's decoder now
     setBusy(true);
     try {
       if (isVideo) {
@@ -793,6 +836,10 @@ export const MemeGrid = React.memo(function MemeGrid({
         keyboardDismissMode="on-drag"
         onScroll={onScroll}
         scrollEventThrottle={64}
+        onScrollBeginDrag={onScrollBeginDrag}
+        onScrollEndDrag={onScrollEndDrag}
+        onMomentumScrollBegin={onMomentumScrollBegin}
+        onMomentumScrollEnd={onMomentumScrollEnd}
         onEndReached={onEndReached}
         onEndReachedThreshold={0.6}
         // Memory is already bounded by `windowSize`: FlatList only keeps that

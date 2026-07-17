@@ -1,6 +1,9 @@
 import {
+  CODEC_INTERACTIVE_WINDOW_MS,
   INTERACTIVE_WINDOW_MS,
+  codecInteractiveActive,
   interactiveActive,
+  noteCodecInteractive,
   noteInteractive,
   yieldToSearch,
 } from './interactive';
@@ -31,6 +34,37 @@ describe('interactive window', () => {
     expect(interactiveActive()).toBe(true);
 
     jest.advanceTimersByTime(2);
+    expect(interactiveActive()).toBe(false);
+  });
+});
+
+describe('codec interactive window', () => {
+  it('is shorter than the main interactive window', () => {
+    expect(CODEC_INTERACTIVE_WINDOW_MS).toBeLessThan(INTERACTIVE_WINDOW_MS);
+  });
+
+  it('activates on a codec stamp and expires after its own (shorter) window', () => {
+    noteCodecInteractive();
+    expect(codecInteractiveActive()).toBe(true);
+
+    jest.advanceTimersByTime(CODEC_INTERACTIVE_WINDOW_MS - 1);
+    expect(codecInteractiveActive()).toBe(true);
+
+    jest.advanceTimersByTime(2);
+    expect(codecInteractiveActive()).toBe(false);
+  });
+
+  it('is independent of the main interactive window', () => {
+    // A search stamps only the main window, not the codec one.
+    noteInteractive();
+    expect(interactiveActive()).toBe(true);
+    expect(codecInteractiveActive()).toBe(false);
+
+    // A codec gesture stamps only the codec window.
+    anchor += 10 * INTERACTIVE_WINDOW_MS;
+    jest.setSystemTime(anchor);
+    noteCodecInteractive();
+    expect(codecInteractiveActive()).toBe(true);
     expect(interactiveActive()).toBe(false);
   });
 });

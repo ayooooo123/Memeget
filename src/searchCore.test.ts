@@ -1,6 +1,12 @@
-import { hybridSearchScore } from './searchCore';
+import { hybridSearchScore, scoreEntry } from './searchCore';
 
 const v = (...xs: number[]) => Float32Array.from(xs);
+
+const entry = (
+  imageVec: Float32Array,
+  captionVec: Float32Array | null,
+  searchText = ''
+) => ({ imageVec, captionVec, searchText });
 
 describe('hybridSearchScore', () => {
   it('keeps the plain image score when a meme has no caption vector yet', () => {
@@ -47,5 +53,48 @@ describe('hybridSearchScore', () => {
     const unrelated = hybridSearchScore(query, unrelatedImage, unrelatedCaption);
 
     expect(relevant).toBeGreaterThan(unrelated);
+  });
+});
+
+describe('scoreEntry', () => {
+  it('equals the hybrid dense score when there are no query terms', () => {
+    const query = v(1, 0);
+    const image = v(0.3, 0.95);
+    const caption = v(0.9, 0.44);
+    expect(scoreEntry(query, [], entry(image, caption, 'anything at all'))).toBeCloseTo(
+      hybridSearchScore(query, image, caption)
+    );
+  });
+
+  it('adds a partial lexical boost for some-but-not-all term matches', () => {
+    const query = v(0, 1);
+    const image = v(0, 1); // dense score 1.0
+    const e = entry(image, null, 'gigachad flexing');
+    // 1 of 2 terms present → +0.35 * 0.5, no all-match boost.
+    expect(scoreEntry(query, ['gigachad', 'wojak'], e)).toBeCloseTo(1 + 0.35 * 0.5);
+  });
+
+  it('adds the decisive all-terms boost when every term is present', () => {
+    const query = v(0, 1);
+    const image = v(0, 1);
+    const e = entry(image, null, 'distracted boyfriend meme');
+    // both terms present → +0.35 (full lexical) +0.6 (all-match).
+    expect(scoreEntry(query, ['distracted', 'boyfriend'], e)).toBeCloseTo(1 + 0.35 + 0.6);
+  });
+
+  it('scores by lexical alone in null-query (lexical-only) mode', () => {
+    const e = entry(v(1, 0), v(1, 0), 'crying wojak');
+    // No dense channel; both terms hit → 0.35 + 0.6.
+    expect(scoreEntry(null, ['crying', 'wojak'], e)).toBeCloseTo(0.35 + 0.6);
+    // No terms hit → 0.
+    expect(scoreEntry(null, ['gigachad'], e)).toBeCloseTo(0);
+  });
+
+  it('matches lowercased query terms case-as-stored via includes', () => {
+    // Haystack is stored raw; the caller lowercases the query. A capitalized
+    // stored word is therefore not matched by a lowercase term — preserving the
+    // exact pre-cache behavior.
+    const e = entry(v(0, 1), null, 'Gigachad');
+    expect(scoreEntry(null, ['gigachad'], e)).toBeCloseTo(0);
   });
 });

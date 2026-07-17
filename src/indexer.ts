@@ -51,8 +51,9 @@ import {
   type MemeNeedingVisionRow,
 } from './db';
 import { extractVideoFrame } from '../modules/memeget-bg';
+import type { ThumbPatch } from './events';
 import { acquireKeepAlive } from './keepAlive';
-import { interactiveActive, yieldToSearch } from './interactive';
+import { codecInteractiveActive, interactiveActive, yieldToSearch } from './interactive';
 import { ASSOCIATIONS, MEME_LABELS, NEGATIVE_ANCHORS, ocrTags } from './memeLabels';
 import {
   copyToCache,
@@ -1176,6 +1177,12 @@ export async function backfillCaptionEmbeddings(
 ): Promise<number> {
   const rows = await getMemesNeedingCaptionEmbedding(opts.limit ?? 25);
   for (let i = 0; i < rows.length; i++) {
+    // This backfill calls the SAME text-embed model a live search waits on, so a
+    // batch of 20 run back-to-back would starve the query's own embed until the
+    // batch drained. Stand down between items while the user is searching so
+    // their vector lands and results upgrade past lexical-only — same per-item
+    // yield the describe/transcribe bursts use.
+    await yieldToSearch();
     const row = rows[i];
     const text = captionSearchText(row.caption, row.tags, row.extraTerms);
     if (text) await setMemeCaptionEmbedding(row.id, await api.embedText(text));
@@ -1405,23 +1412,37 @@ export function clearThumbSkips(): void {
 }
 
 const THUMB_POOL = 3;
+// `fetched` = rows attempted this batch (0 = queue drained, the loop's stop
+// signal). `patches` = only the rows that got a REAL poster this batch, so the
+// caller can patch those tiles in place by id instead of re-fetching the whole
+// library span — timeouts and THUMB_FAILED stamps produce no patch (nothing new
+// for the grid to show).
 export async function backfillVideoThumbs(
   opts: { limit?: number } = {}
-): Promise<number> {
+): Promise<{ fetched: number; patches: ThumbPatch[] }> {
   const rows = await nextThumbRows(opts.limit ?? 24);
+  const patches: ThumbPatch[] = [];
   let next = 0;
   const worker = async () => {
-    while (!indexingActive()) {
+    // Stop grabbing the decoder the moment indexing needs the device OR the user
+    // opens/copies a video (codec window) — the unprocessed rows are picked up on
+    // the next batch once the window passes.
+    while (!indexingActive() && !codecInteractiveActive()) {
       const i = next++;
       if (i >= rows.length) return;
       const row = rows[i];
       const result = await extractPosterAnyway(row, i).catch(() => null);
       if (result === 'timeout') thumbSkip.set(row.id, Date.now() + THUMB_SKIP_RETRY_MS);
-      else await setMemeThumb(row.id, result ?? THUMB_FAILED).catch(() => {});
+      else {
+        await setMemeThumb(row.id, result ?? THUMB_FAILED).catch(() => {});
+        // A successful extraction is the only thing the grid needs to repaint;
+        // JS is single-threaded so this push across workers is race-free.
+        if (result) patches.push({ id: row.id, thumbUri: result });
+      }
     }
   };
   await Promise.all(Array.from({ length: Math.min(THUMB_POOL, rows.length) }, worker));
-  return rows.length;
+  return { fetched: rows.length, patches };
 }
 
 // Bounded session for an OS-scheduled background run: describe up to `maxItems`
