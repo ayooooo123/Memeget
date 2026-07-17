@@ -22,15 +22,24 @@ import * as Clipboard from 'expo-clipboard';
 import * as Sharing from 'expo-sharing';
 import { useVideoPlayer, VideoView } from 'expo-video';
 
-import { addExemplar, deleteMeme, getLabels, getMemeEmbedding, getSimilarMemes } from '../db';
+import {
+  addExemplar,
+  bulkUpdateMemeTags,
+  deleteMeme,
+  getLabels,
+  getLibraryTagLabels,
+  getMemeEmbedding,
+  getSimilarMemes,
+} from '../db';
+import { emitLibraryChanged } from '../events';
 import { scoreExemplar } from '../learnCore';
 import { buildExemplarHeads, noteInteractive, type ExemplarModel } from '../indexer';
-import { success, tap, warn } from '../haptics';
+import { success, tap, thud, warn } from '../haptics';
 import { copyFileToClipboard } from '../../modules/memeget-bg';
 import { deleteFile, materialize, readImageBase64, readVideoFrameBase64, videoMimeFor } from '../saf';
 import { colors, radius, shadow, space, TABBAR_CLEARANCE } from '../theme';
 import { useConst } from '../reactUtils';
-import type { MemeRecord, SearchHit } from '../types';
+import type { MemeRecord, SearchHit, Tag } from '../types';
 
 import { showToast } from './Toast';
 import { Chip, PressableScale } from './ui';
@@ -84,14 +93,25 @@ function useKeyboardHeight(): number {
 const GridCell = React.memo(function GridCell({
   item,
   size,
+  selectionMode,
+  selected,
   onPress,
+  onLongPress,
 }: {
   item: Item;
   size: number;
+  selectionMode: boolean;
+  selected: boolean;
   onPress: (it: Item) => void;
+  onLongPress: (it: Item) => void;
 }) {
   return (
-    <PressableScale scaleTo={0.94} onPress={() => onPress(item)} style={{ width: size, height: size }}>
+    <PressableScale
+      scaleTo={0.94}
+      onPress={() => onPress(item)}
+      onLongPress={() => onLongPress(item)}
+      style={{ width: size, height: size }}
+    >
       {item.kind === 'video' && !item.thumbUri ? (
         // No poster (backfill hasn't reached it, or every decoder refused the
         // file): show a deliberate filmstrip stub with the filename instead of
@@ -136,6 +156,14 @@ const GridCell = React.memo(function GridCell({
           <ActivityIndicator color="#fff" size="small" />
         </View>
       )}
+      {selectionMode && (
+        <>
+          {selected && <View style={styles.selOverlay} pointerEvents="none" />}
+          <View style={[styles.selCircle, selected && styles.selCircleOn]} pointerEvents="none">
+            {selected && <Text style={styles.selCheck}>✓</Text>}
+          </View>
+        </>
+      )}
     </PressableScale>
   );
 });
@@ -177,6 +205,19 @@ export const MemeGrid = React.memo(function MemeGrid({
   scrollToTopSignal?: number;
 }) {
   const [selected, setSelected] = useState<Item | null>(null);
+  // Multi-select: long-press a cell to enter selection mode, tap to toggle, then
+  // apply a bulk action (tag / delete) to the whole set. Kept in the grid (not
+  // lifted to the screen) so the bar and cell overlays live next to the list.
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  const [bulkTagging, setBulkTagging] = useState(false);
+  const [bulkLabelInput, setBulkLabelInput] = useState('');
+  const [bulkLabels, setBulkLabels] = useState<string[]>([]);
+  const [bulkBusy, setBulkBusy] = useState(false);
+  // Read the latest selection mode from the tap/long-press handlers without
+  // giving them a new identity each toggle (which would bust GridCell's memo).
+  const selectionModeRef = useRef(false);
+  selectionModeRef.current = selectionMode;
   const [teaching, setTeaching] = useState(false);
   const [labelInput, setLabelInput] = useState('');
   const [assocInput, setAssocInput] = useState('');
@@ -268,13 +309,156 @@ export const MemeGrid = React.memo(function MemeGrid({
     setSelected(it);
   }, []);
 
-  // Likewise kept stable so they don't bust GridCell's React.memo on every
-  // render. renderItem only depends on the constant cell `size` and openViewer.
+  const toggleSelect = useCallback((it: Item) => {
+    tap();
+    setSelectedIds((cur) => {
+      const next = new Set(cur);
+      if (next.has(it.id)) next.delete(it.id);
+      else next.add(it.id);
+      return next;
+    });
+  }, []);
+
+  const enterSelection = useCallback((it: Item) => {
+    thud();
+    setSelectionMode(true);
+    setSelectedIds(new Set([it.id]));
+  }, []);
+
+  const exitSelection = useCallback(() => {
+    setSelectionMode(false);
+    setSelectedIds(new Set());
+  }, []);
+
+  // Stable across renders (they read selectionMode via the ref), so toggling a
+  // cell doesn't re-create the handlers and re-render every thumbnail. A tap
+  // opens the viewer normally, or toggles the cell when selecting; a long-press
+  // enters selection mode (or toggles once already in it).
+  const handlePress = useCallback(
+    (it: Item) => {
+      if (selectionModeRef.current) toggleSelect(it);
+      else openViewer(it);
+    },
+    [toggleSelect, openViewer]
+  );
+  const handleLongPress = useCallback(
+    (it: Item) => {
+      if (selectionModeRef.current) toggleSelect(it);
+      else enterSelection(it);
+    },
+    [toggleSelect, enterSelection]
+  );
+
+  // renderItem depends on selectedIds/selectionMode so cells reflect selection.
+  // GridCell is memoized on a plain `selected` boolean, so only the cell whose
+  // boolean actually changed re-renders on a toggle — the rest short-circuit.
   const keyExtractor = useCallback((it: Item) => String(it.id), []);
   const renderItem = useCallback(
-    ({ item }: { item: Item }) => <GridCell item={item} size={size} onPress={openViewer} />,
-    [size, openViewer]
+    ({ item }: { item: Item }) => (
+      <GridCell
+        item={item}
+        size={size}
+        selectionMode={selectionMode}
+        selected={selectedIds.has(item.id)}
+        onPress={handlePress}
+        onLongPress={handleLongPress}
+      />
+    ),
+    [size, selectionMode, selectedIds, handlePress, handleLongPress]
   );
+
+  const allSelected = items.length > 0 && selectedIds.size >= items.length;
+  const toggleSelectAll = useCallback(() => {
+    tap();
+    setSelectedIds((cur) => (cur.size >= items.length ? new Set() : new Set(items.map((it) => it.id))));
+  }, [items]);
+
+  const openBulkTag = () => {
+    if (selectedIds.size === 0) return;
+    tap();
+    setBulkLabelInput('');
+    setBulkTagging(true);
+    getLibraryTagLabels(40)
+      .then(setBulkLabels)
+      .catch(() => setBulkLabels([]));
+  };
+
+  // Append the label to a meme's extra_terms (deduped) so the new tag is also
+  // reachable by text search, not just visible as a chip.
+  const termsWithLabel = (extraTerms: string, label: string): string => {
+    const set = new Set(extraTerms.split(/\s+/).filter(Boolean));
+    for (const w of label.toLowerCase().split(/\s+/)) if (w) set.add(w);
+    return [...set].join(' ');
+  };
+
+  const applyBulkTag = async () => {
+    const label = bulkLabelInput.trim();
+    if (!label || selectedIds.size === 0 || bulkBusy) return;
+    setBulkBusy(true);
+    try {
+      const lower = label.toLowerCase();
+      const updates = items
+        .filter((it) => selectedIds.has(it.id))
+        .map((it) => {
+          const already = it.tags.some((t) => t.label.toLowerCase() === lower);
+          const tags: Tag[] = already
+            ? it.tags
+            : [...it.tags, { label, category: 'user', score: 1, source: 'manual' as const }];
+          return {
+            id: it.id,
+            tags,
+            extraTerms: already ? it.extraTerms : termsWithLabel(it.extraTerms, label),
+          };
+        });
+      await bulkUpdateMemeTags(updates);
+      emitLibraryChanged();
+      setBulkTagging(false);
+      exitSelection();
+      success();
+      showToast(`Tagged ${updates.length} meme${updates.length === 1 ? '' : 's'} “${label}”`, 'success');
+    } catch (e) {
+      showToast(`Could not tag: ${String(e)}`, 'error');
+    } finally {
+      setBulkBusy(false);
+    }
+  };
+
+  const bulkDelete = () => {
+    if (selectedIds.size === 0 || bulkBusy) return;
+    const targets = items.filter((it) => selectedIds.has(it.id));
+    if (targets.length === 0) return;
+    warn();
+    Alert.alert(
+      `Delete ${targets.length} meme${targets.length === 1 ? '' : 's'}?`,
+      `This removes them from your library and deletes the files from their folders. This can’t be undone.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            setBulkBusy(true);
+            let done = 0;
+            try {
+              for (const it of targets) {
+                await deleteMeme(it.id);
+                await deleteFile(it.uri).catch(() => {}); // best-effort; DB row is gone regardless
+                onDeleted?.(it.id);
+                done += 1;
+              }
+              success();
+              showToast(`Deleted ${done} meme${done === 1 ? '' : 's'}`, 'info');
+            } catch (e) {
+              showToast(`Deleted ${done} of ${targets.length}; ${String(e)}`, 'error');
+            } finally {
+              setBulkBusy(false);
+              exitSelection();
+            }
+          },
+        },
+      ]
+    );
+  };
 
   // The taught-label confidence readout is a debug aid that trains a logistic
   // head per label over a 500-vector background — hundreds of ms+ of synchronous
@@ -627,30 +811,70 @@ export const MemeGrid = React.memo(function MemeGrid({
         renderItem={renderItem}
       />
 
-      {/* Floating back-to-top button. pointerEvents flips with visibility so a
-          fully faded-out button can never swallow taps meant for the grid. */}
-      <Animated.View
-        pointerEvents={showTopBtn ? 'auto' : 'none'}
-        style={[
-          styles.topFabWrap,
-          {
-            opacity: fabAnim,
-            transform: [
-              { scale: fabAnim.interpolate({ inputRange: [0, 1], outputRange: [0.8, 1] }) },
-            ],
-          },
-        ]}
-      >
-        <PressableScale
-          scaleTo={0.88}
-          onPress={scrollToTop}
-          style={styles.topFab}
-          accessibilityRole="button"
-          accessibilityLabel="Back to top"
+      {/* Floating back-to-top button. Hidden while selecting so it doesn't
+          collide with the bulk-action bar. pointerEvents flips with visibility
+          so a fully faded-out button can never swallow taps meant for the grid. */}
+      {!selectionMode && (
+        <Animated.View
+          pointerEvents={showTopBtn ? 'auto' : 'none'}
+          style={[
+            styles.topFabWrap,
+            {
+              opacity: fabAnim,
+              transform: [
+                { scale: fabAnim.interpolate({ inputRange: [0, 1], outputRange: [0.8, 1] }) },
+              ],
+            },
+          ]}
         >
-          <Text style={styles.topFabIcon}>↑</Text>
-        </PressableScale>
-      </Animated.View>
+          <PressableScale
+            scaleTo={0.88}
+            onPress={scrollToTop}
+            style={styles.topFab}
+            accessibilityRole="button"
+            accessibilityLabel="Back to top"
+          >
+            <Text style={styles.topFabIcon}>↑</Text>
+          </PressableScale>
+        </Animated.View>
+      )}
+
+      {/* Bulk-action bar — shown while selecting. Cancel · count · select-all on
+          the left; the actions (tag, delete) on the right. */}
+      {selectionMode && (
+        <View style={styles.bulkBar}>
+          <PressableScale
+            scaleTo={0.9}
+            onPress={exitSelection}
+            style={styles.bulkClose}
+            accessibilityRole="button"
+            accessibilityLabel="Cancel selection"
+          >
+            <Text style={styles.bulkCloseIcon}>✕</Text>
+          </PressableScale>
+          <Text style={styles.bulkCount}>{selectedIds.size}</Text>
+          <PressableScale scaleTo={0.92} onPress={toggleSelectAll} style={styles.bulkAll}>
+            <Text style={styles.bulkAllText}>{allSelected ? 'None' : 'All'}</Text>
+          </PressableScale>
+          <View style={styles.bulkSpacer} />
+          <PressableScale
+            scaleTo={0.92}
+            onPress={openBulkTag}
+            style={[styles.bulkAction, styles.bulkTagBtn]}
+            disabled={selectedIds.size === 0 || bulkBusy}
+          >
+            <Text style={styles.bulkTagText}>🏷 Tag</Text>
+          </PressableScale>
+          <PressableScale
+            scaleTo={0.92}
+            onPress={bulkDelete}
+            style={[styles.bulkAction, styles.bulkDeleteBtn]}
+            disabled={selectedIds.size === 0 || bulkBusy}
+          >
+            <Text style={styles.bulkDeleteText}>🗑 Delete</Text>
+          </PressableScale>
+        </View>
+      )}
       </View>
 
       <ViewerSheet
@@ -816,6 +1040,63 @@ export const MemeGrid = React.memo(function MemeGrid({
             </View>
           </View>
           )}
+        </View>
+      </Modal>
+
+      {/* Bulk-tag sheet — applies one tag to every selected meme at once. */}
+      <Modal
+        visible={bulkTagging}
+        transparent
+        animationType="slide"
+        statusBarTranslucent
+        onRequestClose={() => setBulkTagging(false)}
+      >
+        <View style={[styles.teachRoot, { paddingBottom: kbHeight }]}>
+          <Pressable style={StyleSheet.absoluteFill} onPress={() => setBulkTagging(false)} />
+          <View style={styles.teachSheet}>
+            <View style={styles.grabber} />
+            <Text style={styles.sheetHeading}>
+              Tag {selectedIds.size} meme{selectedIds.size === 1 ? '' : 's'}
+            </Text>
+            <Text style={styles.teachHint}>
+              Adds this tag to every selected meme. It sticks through re-tagging and is searchable.
+            </Text>
+            <TextInput
+              style={styles.input}
+              value={bulkLabelInput}
+              onChangeText={setBulkLabelInput}
+              placeholder="Tag, e.g. reaction"
+              placeholderTextColor={colors.muted}
+              autoFocus
+            />
+            {bulkLabels.length > 0 && (
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                contentContainerStyle={styles.suggestRow}
+                keyboardShouldPersistTaps="handled"
+              >
+                {bulkLabels.map((l) => (
+                  <Chip key={l} label={l} active={bulkLabelInput.trim() === l} onPress={() => setBulkLabelInput(l)} />
+                ))}
+              </ScrollView>
+            )}
+            <View style={styles.teachActions}>
+              <PressableScale
+                style={[styles.teachAction, styles.teachCancel]}
+                onPress={() => setBulkTagging(false)}
+              >
+                <Text style={styles.teachCancelText}>Cancel</Text>
+              </PressableScale>
+              <PressableScale
+                style={[styles.teachAction, styles.teachSave]}
+                onPress={applyBulkTag}
+                disabled={!bulkLabelInput.trim() || bulkBusy}
+              >
+                <Text style={styles.teachSaveText}>{bulkBusy ? 'Tagging…' : 'Add tag'}</Text>
+              </PressableScale>
+            </View>
+          </View>
         </View>
       </Modal>
     </>
@@ -1204,6 +1485,68 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(0,0,0,0.35)',
     borderRadius: radius.sm,
   },
+  selOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    borderRadius: radius.sm,
+    borderWidth: 2,
+    borderColor: colors.volt,
+    backgroundColor: 'rgba(0,0,0,0.28)',
+  },
+  selCircle: {
+    position: 'absolute',
+    top: 6,
+    left: 6,
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    borderWidth: 2,
+    borderColor: '#fff',
+    backgroundColor: 'rgba(0,0,0,0.4)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  selCircleOn: { backgroundColor: colors.volt, borderColor: colors.volt },
+  selCheck: { color: colors.onVolt, fontSize: 13, fontWeight: '900' },
+
+  bulkBar: {
+    position: 'absolute',
+    left: space.md,
+    right: space.md,
+    bottom: TABBAR_CLEARANCE + 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: space.sm,
+    backgroundColor: colors.surface3,
+    borderWidth: 1,
+    borderColor: colors.borderLight,
+    borderRadius: radius.pill,
+    paddingLeft: 10,
+    paddingRight: 8,
+    paddingVertical: 8,
+    ...shadow.float,
+  },
+  bulkClose: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    backgroundColor: colors.surface2,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  bulkCloseIcon: { color: colors.text, fontSize: 13, fontWeight: '800' },
+  bulkCount: { color: colors.text, fontSize: 14, fontWeight: '800', minWidth: 18, textAlign: 'center' },
+  bulkAll: { paddingHorizontal: 8, paddingVertical: 6 },
+  bulkAllText: { color: colors.volt, fontSize: 13, fontWeight: '700' },
+  bulkSpacer: { flex: 1 },
+  bulkAction: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: radius.pill },
+  bulkTagBtn: { backgroundColor: colors.volt },
+  bulkTagText: { color: colors.onVolt, fontSize: 13, fontWeight: '800' },
+  bulkDeleteBtn: { backgroundColor: colors.dangerDim, borderWidth: 1, borderColor: colors.danger },
+  bulkDeleteText: { color: colors.danger, fontSize: 13, fontWeight: '800' },
 
   viewerRoot: { flex: 1, backgroundColor: colors.overlay, justifyContent: 'flex-end' },
   sheet: {
