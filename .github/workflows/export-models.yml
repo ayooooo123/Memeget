@@ -65,17 +65,20 @@ jobs:
           PIP_NO_CACHE_DIR: '1'
         run: |
           python -m pip install --upgrade pip
-          # Pin torch to the 2.9 line: executorch 1.0's stock torchao targets
-          # it, and letting the resolver drift to a newer torch produced either
-          # broken imports (run #5) or — worse — silently WRONG quantization
-          # that only the cosine gate caught (runs #6/#7: cos 0.33–0.43 where
-          # a healthy dynamic-int8 transformer scores ≥0.99). One coherent
-          # wheel set, no piecemeal upgrades.
-          pip install "executorch==${ET_VERSION}" "torch==2.9.*" --extra-index-url https://download.pytorch.org/whl/cpu
-          # scikit-image ships a handful of real photos used as the static-quant
-          # calibration set (no network needed); export falls back to synthetic
-          # inputs if it's missing, so this is a quality aid, not a hard dep.
-          pip install open_clip_torch timm transformers tokenizers scikit-image --extra-index-url https://download.pytorch.org/whl/cpu
+          # ONE resolve for the whole toolchain with torch pinned. Splitting it
+          # (executorch+torch first, model libs second) let the second install
+          # silently upgrade torch to 2.13 while torchao stayed at executorch
+          # 1.0's 0.14 — and torchao 0.14 references torch.ao.quantization.quantizer,
+          # which torch 2.13 removed, so the PT2E quant imports blew up
+          # (`module 'torch.ao.quantization' has no attribute 'quantizer'`) while
+          # fp32 export survived. Resolving everything together with torch held at
+          # 2.9 keeps torch+torchao+executorch the coherent set ExecuTorch 1.0's
+          # quantization docs assume. scikit-image supplies the static-quant
+          # calibration photos (export falls back to synthetic if it's absent).
+          pip install \
+            "executorch==${ET_VERSION}" "torch==2.9.*" \
+            open_clip_torch timm transformers tokenizers scikit-image \
+            --extra-index-url https://download.pytorch.org/whl/cpu
           echo '--- resolved versions ---'
           pip freeze | grep -iE '^(torch|torchao|executorch|open-clip|timm|transformers|tokenizers)' || true
 
