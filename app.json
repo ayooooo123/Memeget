@@ -34,7 +34,15 @@
       "expo-video",
       "./plugins/withFixedDebugKeystore",
       "expo-task-manager",
-      "expo-background-task"
+      "expo-background-task",
+      [
+        "expo-sqlite",
+        {
+          "android": {
+            "withSQLiteVecExtension": true
+          }
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": false

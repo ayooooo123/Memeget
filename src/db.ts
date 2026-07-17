@@ -12,11 +12,55 @@ import { selectPairVectors, type VisualSimilarityRecord } from './visualSearch';
 
 let dbPromise: Promise<SQLite.SQLiteDatabase> | null = null;
 
+// Whether the bundled sqlite-vec extension loaded AND its scalar cosine is
+// callable. Everything that uses it degrades gracefully to the JS brute-force
+// path when this is false — the extension is a speedup, never a requirement, so
+// a build without it (plugin not enabled, a platform without the .so) still
+// works identically, just slower on very large libraries.
+let vecReady = false;
+export function sqliteVecReady(): boolean {
+  return vecReady;
+}
+
 function getDb(): Promise<SQLite.SQLiteDatabase> {
   if (!dbPromise) {
-    dbPromise = SQLite.openDatabaseAsync('memeget.db');
+    dbPromise = (async () => {
+      const db = await SQLite.openDatabaseAsync('memeget.db');
+      await tryLoadVecExtension(db);
+      return db;
+    })();
   }
   return dbPromise;
+}
+
+// Best-effort one-time load of the bundled sqlite-vec extension. Enabled at
+// build time via the expo-sqlite config plugin (`withSQLiteVecExtension`, see
+// app.json); absent otherwise. We probe the scalar function after loading so a
+// half-configured build is treated as "no vec" rather than crashing the first
+// similarity query.
+async function tryLoadVecExtension(db: SQLite.SQLiteDatabase): Promise<void> {
+  try {
+    const bundled = (SQLite as unknown as {
+      bundledExtensions?: Record<string, { libPath: string; entryPoint?: string }>;
+    }).bundledExtensions;
+    const ext = bundled?.['sqlite-vec'];
+    if (!ext) return;
+    const loadable = db as unknown as {
+      loadExtensionAsync?: (libPath: string, entryPoint?: string) => Promise<void>;
+    };
+    if (typeof loadable.loadExtensionAsync !== 'function') return;
+    await loadable.loadExtensionAsync(ext.libPath, ext.entryPoint);
+    // Probe: the extension is only "ready" if the scalar cosine actually runs.
+    await db.getFirstAsync(
+      'SELECT vec_distance_cosine(vec_f32(?), vec_f32(?)) AS d',
+      vecToBlob([1, 0]),
+      vecToBlob([1, 0])
+    );
+    vecReady = true;
+  } catch {
+    // Extension unavailable or unusable — stay on the JS brute-force path.
+    vecReady = false;
+  }
 }
 
 export async function initDb(): Promise<void> {
@@ -1167,6 +1211,16 @@ export async function getSimilarMemes(id: number, limit = 12): Promise<SearchHit
     visualModel: source.visual_model ?? '',
   };
   if (target.imageEmbedding.length === 0) return [];
+
+  // Native fast path: sqlite-vec computes the per-pair cosine in C (SIMD) over
+  // the stored blobs, so the whole O(N) ranking never enters JS — a real win for
+  // "More like this" on a large library. Falls through to the JS scan below if
+  // the extension isn't loaded or the native query errors for any reason.
+  if (vecReady) {
+    const hits = await getSimilarMemesVec(db, id, target, limit).catch(() => null);
+    if (hits) return hits;
+  }
+
   const rows = await db.getAllAsync<MemeRow>(
     'SELECT * FROM memes WHERE pending = 0 AND id != ?',
     id
@@ -1190,6 +1244,65 @@ export async function getSimilarMemes(id: number, limit = 12): Promise<SearchHit
   }
 
   return materializeHits(scored, limit);
+}
+
+// sqlite-vec ranking for getSimilarMemes. The CASE reproduces selectPairVectors
+// exactly: the DINO (visual) space is used for a pair only when BOTH the target
+// (the bound flag) AND the candidate row carry an active-model visual vector;
+// otherwise the primary image space. Vectors are normalized, so cosine distance
+// ascending == cosine similarity descending == the JS `dot` ranking. Empty
+// (degraded) embeddings are excluded — they'd score 0 and never reach the top-N.
+async function getSimilarMemesVec(
+  db: SQLite.SQLiteDatabase,
+  id: number,
+  target: VisualSimilarityRecord,
+  limit: number
+): Promise<SearchHit[]> {
+  const targetHasDino =
+    VISUAL_EMBEDDING_MODEL.available &&
+    !!target.visualEmbedding &&
+    target.visualEmbedding.length > 0 &&
+    target.visualModel === VISUAL_EMBEDDING_MODEL.id;
+  const clipQ = vecToBlob(Array.from(target.imageEmbedding));
+  // When the target has no DINO vector the DINO branch is never taken, so this
+  // bind is unused — reuse clipQ as a harmless placeholder rather than null.
+  const dinoQ = targetHasDino ? vecToBlob(Array.from(target.visualEmbedding!)) : clipQ;
+
+  const ranked = await db.getAllAsync<{ id: number; d: number }>(
+    `SELECT id,
+        CASE WHEN ? AND visual_embedding IS NOT NULL AND length(visual_embedding) > 0 AND visual_model = ?
+             THEN vec_distance_cosine(vec_f32(visual_embedding), vec_f32(?))
+             ELSE vec_distance_cosine(vec_f32(embedding), vec_f32(?))
+        END AS d
+     FROM memes
+     WHERE pending = 0 AND id != ? AND length(embedding) > 0
+     ORDER BY d ASC
+     LIMIT ?`,
+    targetHasDino ? 1 : 0,
+    VISUAL_EMBEDDING_MODEL.id,
+    dinoQ,
+    clipQ,
+    id,
+    limit
+  );
+  if (ranked.length === 0) return [];
+
+  // Fetch the winning rows in one query, then restore the ranked order (SQL
+  // `IN (...)` doesn't preserve it) and carry the cosine through as the score.
+  const ids = ranked.map((r) => r.id);
+  const rows = await db.getAllAsync<MemeRow>(
+    `SELECT * FROM memes WHERE id IN (${ids.map(() => '?').join(',')})`,
+    ...ids
+  );
+  const byId = new Map(rows.map((r) => [r.id, r]));
+  return ranked
+    .map(({ id: rid, d }) => {
+      const row = byId.get(rid);
+      if (!row) return null;
+      const { embedding, ...record } = rowToRecord(row);
+      return { ...record, score: 1 - d } as SearchHit;
+    })
+    .filter((h): h is SearchHit => h !== null);
 }
 
 export async function clearIndex(): Promise<void> {
