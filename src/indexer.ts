@@ -52,6 +52,7 @@ import {
 } from './db';
 import { extractVideoFrame } from '../modules/memeget-bg';
 import { acquireKeepAlive } from './keepAlive';
+import { interactiveActive, yieldToSearch } from './interactive';
 import { ASSOCIATIONS, MEME_LABELS, NEGATIVE_ANCHORS, ocrTags } from './memeLabels';
 import {
   copyToCache,
@@ -280,17 +281,15 @@ async function withHeavyPass<T>(fn: () => Promise<T>, label = 'Indexing your lib
 }
 
 // Interactive work (a live search) also outranks idle loops: a text embed
-// stuck behind a DINO batch or a queued describe is what made search feel
-// dead while "AI description stuff" ran. Searches stamp this; the stand-down
-// window covers the debounce + embed + scan.
-const INTERACTIVE_WINDOW_MS = 8_000;
-let lastInteractive = 0;
-export function noteInteractive(): void {
-  lastInteractive = Date.now();
-}
+// stuck behind a DINO batch or a queued describe is what made search feel dead
+// while "AI description stuff" ran. The interactive window lives in its own
+// dependency-free module (src/interactive.ts) so the describe/transcribe/embed
+// loops can all share it; re-exported here for the existing callers that import
+// it from the indexer.
+export { noteInteractive, interactiveActive, yieldToSearch } from './interactive';
 
 export function heavyPassActive(): boolean {
-  return heavyPasses > 0 || Date.now() - lastInteractive < INTERACTIVE_WINDOW_MS;
+  return heavyPasses > 0 || interactiveActive();
 }
 
 // Narrower gate for light idle work (the poster backfill): yield to indexing/
@@ -1138,6 +1137,12 @@ export async function enrichLibrary(
   let deduped = 0;
   let failed = 0;
   for (let i = 0; i < queue.length; i++) {
+    if (opts.shouldCancel?.()) break;
+    // Let a live search through: this burst runs generations back-to-back, and
+    // without a break between them the query's text embed never reaches the
+    // accelerator until the whole queue drains. Stand down while the user is
+    // searching so their vector lands and results upgrade past lexical-only.
+    await yieldToSearch(opts.shouldCancel);
     if (opts.shouldCancel?.()) break;
     opts.onProgress?.({ done: i, total, current: queue[i].name });
     const r = await enrichOne(vision, queue[i], assoc, twins);

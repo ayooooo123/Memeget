@@ -19,6 +19,7 @@ import {
   type MemeNeedingAudioRow,
 } from './db';
 import { emitLibraryChanged } from './events';
+import { yieldToSearch } from './interactive';
 import { acquireKeepAlive } from './keepAlive';
 import { audioNativeAvailable, extractAudio } from '../modules/memeget-bg';
 import { deleteCache, materialize } from './saf';
@@ -151,6 +152,12 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
       const total = queue.length;
       const result: TranscribeResult = { transcribed: 0, silent: 0, failed: 0 };
       for (let i = 0; i < queue.length; i++) {
+        if (opts.shouldCancel?.() || !readyRef.current) break;
+        // Whisper shares the accelerator with the CLIP text embed a search
+        // needs; a full transcription pass runs generations back-to-back, so
+        // stand down between clips while the user is searching and let their
+        // query vector land instead of starving behind the whole queue.
+        await yieldToSearch(opts.shouldCancel);
         if (opts.shouldCancel?.() || !readyRef.current) break;
         opts.onProgress?.({ done: i, total, current: queue[i].name });
         const r = await transcribeOne(
