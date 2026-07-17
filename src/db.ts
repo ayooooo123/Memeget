@@ -741,23 +741,24 @@ export async function countMemesNeedingVisualEmbedding(
   return row?.c ?? 0;
 }
 
-// Rows whose grid poster hasn't been extracted yet: every video, plus
-// .gif-named IMAGE rows the pipeline couldn't process (no embedding) — those
-// are almost always mp4 bytes wearing a .gif name ("Tenor gifs"), which the
-// image decoder can't render but the video decode path posters fine. Excludes
-// THUMB_FAILED stamps (same never-re-serve reasoning as the visual backfill)
-// and pending placeholders (indexing finishes those first).
-const NEEDS_THUMB_WHERE = `pending = 0 AND thumb_uri = '' AND (
-  kind = 'video'
-  OR (kind = 'image' AND lower(name) LIKE '%.gif' AND (embedding IS NULL OR length(embedding) = 0))
-)`;
+// Rows whose grid thumbnail hasn't been generated yet: every video (which needs
+// a decoded poster frame), AND every image. Images used to render straight off
+// the full-resolution original in the grid — a multi-megapixel JPEG/PNG decoded
+// down to a ~130px cell, re-decoded off disk every time a memory-cached bitmap
+// was evicted on scroll. That full-res decode is the "thumbnails are slow" jank.
+// Now each image also gets a small persisted thumb (indexer.ts) the grid loads
+// instead of the original. mp4-as-gif files land here as kind 'image' too; the
+// backfill tries the image path first and falls back to the video decoder for
+// them. Excludes THUMB_FAILED stamps (same never-re-serve reasoning as the
+// visual backfill) and pending placeholders (indexing finishes those first).
+const NEEDS_THUMB_WHERE = `pending = 0 AND thumb_uri = '' AND kind IN ('video', 'image')`;
 
 export async function getVideosNeedingThumb(limit = 10): Promise<
-  { id: number; uri: string; name: string }[]
+  { id: number; uri: string; name: string; kind: 'image' | 'video' }[]
 > {
   const db = await getDb();
-  return db.getAllAsync<{ id: number; uri: string; name: string }>(
-    `SELECT id, uri, name FROM memes WHERE ${NEEDS_THUMB_WHERE} ORDER BY modified_at DESC, id DESC LIMIT ?`,
+  return db.getAllAsync<{ id: number; uri: string; name: string; kind: 'image' | 'video' }>(
+    `SELECT id, uri, name, kind FROM memes WHERE ${NEEDS_THUMB_WHERE} ORDER BY modified_at DESC, id DESC LIMIT ?`,
     limit
   );
 }
