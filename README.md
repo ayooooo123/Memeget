@@ -22,21 +22,24 @@ No accounts. No servers. No uploads.
 | Bulk actions | **Long-press** a thumbnail to enter selection mode, tap to add/remove memes (or **All**), then act on the whole set from the bottom bar: **Tag** them all with one label at once, or **Delete** them together. A bulk tag is a first-class user tag — it's searchable and survives re-tagging. |
 | Index storage | `expo-sqlite`; image and caption embeddings stored as float32 blobs, brute-force cosine search. |
 | Folder access | Android **Storage Access Framework** — per-folder permission, no broad media access. |
-| Save from a link | Share an **X/Twitter**, **Tenor**, or any social-post URL into Memeget and it resolves the underlying media (tweet-syndication for X, Open Graph `og:video`/`og:image` for everything else), downloads it into your linked folder, and indexes it like a normal share — no manual download + re-import. |
+| Save from a link | Share an **X/Twitter**, **Tenor**, **memedepot**, or any social-post URL into Memeget and it resolves the underlying media (tweet-syndication for X, Open Graph `og:video`/`og:image` — with an embedded-media fallback — for everything else), downloads it into your linked folder, and indexes it like a normal share — no manual download + re-import. |
 
 ## Saving from a shared link
 
 Besides sharing image/video *files*, you can share a **link** to a post and let
 Memeget fetch the meme for you:
 
-- In X, Tenor, your browser, Reddit, etc., tap **Share → Memeget** (or copy the
-  link and share it). The URL doesn't have to be bare — "caption text https://…"
-  works; the first URL is used.
+- In X, Tenor, [memedepot](https://memedepot.com/), your browser, Reddit, etc.,
+  tap **Share → Memeget** (or copy the link and share it). The URL doesn't have
+  to be bare — "caption text https://…" works; the first URL is used.
 - Memeget figures out the actual media: for `x.com`/`twitter.com` it reads X's
   public tweet-syndication endpoint (no login) and picks the highest-quality
-  video variant, or the full-res photo; for Tenor and anything else it scrapes
-  the page's Open Graph / Twitter-card tags (`og:video`, then `og:image`). A URL
-  that already points straight at a `.mp4`/`.gif`/`.jpg`… is downloaded directly.
+  video variant, or the full-res photo; for Tenor, memedepot, and anything else
+  it scrapes the page's Open Graph / Twitter-card tags (`og:video`, then
+  `og:image`), and — for JS-rendered galleries that emit no such tags — falls
+  back to an inline `<video>`/`<source>` element or a direct media URL embedded
+  in the page. A URL that already points straight at a `.mp4`/`.gif`/`.jpg`… is
+  downloaded directly.
 - It then drops the file into your first linked folder and hands it to the same
   background indexer as any other share — so it picks up CLIP/OCR/VLM tags
   automatically and shows up in search.
