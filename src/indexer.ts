@@ -51,7 +51,7 @@ import {
   type MemeNeedingVisualEmbeddingRow,
   type MemeNeedingVisionRow,
 } from './db';
-import { extractVideoFrame } from '../modules/memeget-bg';
+import { extractVideoFrame, extractVideoFramePlayer } from '../modules/memeget-bg';
 import type { ThumbPatch } from './events';
 import { acquireKeepAlive } from './keepAlive';
 import { codecInteractiveActive, interactiveActive, yieldToSearch } from './interactive';
@@ -1377,16 +1377,19 @@ const errText = (e: unknown): string => {
   return s.trim().slice(0, 120);
 };
 
-// One video's poster, tried three ways:
+// One video's poster, tried four ways:
 //  1. our own MediaCodec decoder (native) in AUTO mode — the player's decode
 //     path, duration-aware and near-black-frame-rejecting (a fixed t=1s
 //     poster landed on fade-from-black intros), and it reads "mp4 gif" style
 //     streams MMR flatly refuses. The primary path.
 //  2. MediaMetadataRetriever straight off the SAF uri (no copy)
 //  3. MediaMetadataRetriever on a real local copy (provider/container quirks)
+//  4. ExoPlayer's (media3) frame extractor — its own container parsers read a
+//     few streams the platform demuxers in 1–3 reject; the last resort for a
+//     clip that plays in the viewer but no platform decoder will poster.
 // Returns the persisted path, 'timeout' (transient — retry next session), or
 // null (genuinely undecodable — stamp THUMB_FAILED). A final failure logs all
-// three per-path reasons to the diagnostics list: extraction failures happen
+// four per-path reasons to the diagnostics list: extraction failures happen
 // on a device we can't attach to, and "which path said what" is the only way
 // to tell a missing codec from a broken file from a permission problem.
 async function extractPosterAnyway(
@@ -1459,6 +1462,30 @@ async function extractPosterAnyway(
   } catch (e) {
     timedOut ||= isTimeout(e);
     errs.push(`copy: ${errText(e)}`);
+  }
+
+  // Last resort: ExoPlayer's own decode pipeline (media3), which parses a few
+  // containers the platform demuxers above reject. If the clip plays in the
+  // viewer, this posters it; if this fails too, the file is genuinely
+  // undecodable (a corrupt/truncated download) and the stub is the final state.
+  try {
+    const frame = await withTimeout(extractVideoFramePlayer(row.uri, -1), THUMB_FALLBACK_TIMEOUT_MS);
+    if (frame) {
+      try {
+        const jpeg = await toJpeg(frame);
+        try {
+          return await persistThumb(jpeg);
+        } finally {
+          await deleteCache(jpeg);
+        }
+      } finally {
+        await deleteCache(frame);
+      }
+    }
+    errs.push('player: native module not built in');
+  } catch (e) {
+    timedOut ||= isTimeout(e);
+    errs.push(`player: ${errText(e)}`);
   }
 
   if (timedOut) return 'timeout';

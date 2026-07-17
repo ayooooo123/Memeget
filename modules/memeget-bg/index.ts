@@ -27,6 +27,7 @@ interface MemegetBgNative {
   getModifiedTime(uri: string): number | null;
   extractAudio(source: string, maxSeconds: number): Promise<ExtractedAudio | null>;
   extractVideoFrame(source: string, seconds: number): Promise<string | null>;
+  extractVideoFramePlayer(source: string, seconds: number): Promise<string | null>;
   copyFileToClipboard(uri: string, name: string, mimeType: string): Promise<void>;
 }
 
@@ -114,6 +115,22 @@ export async function extractAudio(
 export async function extractVideoFrame(source: string, seconds: number): Promise<string | null> {
   if (!native || typeof native.extractVideoFrame !== 'function') return null;
   const p = await native.extractVideoFrame(source, seconds);
+  return typeof p === 'string' && p ? p : null;
+}
+
+// Last-resort poster path: the same frame grab, but through ExoPlayer's (media3)
+// decode pipeline, whose own container parsers read some streams the platform
+// MediaExtractor/MediaMetadataRetriever reject ("no video track", "Could not
+// generate thumbnail"). If a clip plays in the viewer but no platform decoder
+// can poster it, this can. Resolves null when the native module (or the media3
+// frame extractor) isn't present; REJECTS with a reason on a real decode
+// failure so the caller can record why.
+export async function extractVideoFramePlayer(
+  source: string,
+  seconds: number
+): Promise<string | null> {
+  if (!native || typeof native.extractVideoFramePlayer !== 'function') return null;
+  const p = await native.extractVideoFramePlayer(source, seconds);
   return typeof p === 'string' && p ? p : null;
 }
 
