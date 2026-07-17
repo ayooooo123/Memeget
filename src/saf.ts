@@ -111,11 +111,50 @@ export function getModifiedTime(uri: string): number | null {
 
 // Copy a SAF file into the cache directory and return a file:// path the native
 // modules can read. Caller is responsible for deleting it afterwards.
+//
+// The name must be unique PER CALL, not per queue index: the index pipeline,
+// the DINO backfill, and the VLM enrichment loop can all be materializing
+// frames concurrently, and an index-keyed name let two passes silently clobber
+// (and then delete) each other's temp files mid-read. The sweep prefix
+// ('meme_work_') still matches for stale-cache cleanup.
+let workSeq = 0;
 export async function copyToCache(file: SafFile, index: number): Promise<string> {
   const ext = extOf(file.name) || (file.kind === 'video' ? 'mp4' : 'jpg');
-  const dest = `${FileSystem.cacheDirectory}meme_work_${index}.${ext}`;
+  const dest = `${FileSystem.cacheDirectory}meme_work_${++workSeq}_${index}.${ext}`;
   await FileSystem.copyAsync({ from: file.uri, to: dest });
   return dest;
+}
+
+// Persisted video posters live in the DOCUMENTS dir, not the cache: the OS may
+// purge the cache at will (and our own launch sweep does), but a poster must
+// survive as long as its meme row references it. Small jpegs, one per video.
+const THUMBS_DIR = `${FileSystem.documentDirectory}thumbs/`;
+let thumbSeq = 0;
+
+// Copy an extracted poster jpeg into permanent storage and return its path
+// (what gets stored in the meme row's thumb_uri).
+export async function persistThumb(srcJpeg: string): Promise<string> {
+  await FileSystem.makeDirectoryAsync(THUMBS_DIR, { intermediates: true }).catch(() => {});
+  const dest = `${THUMBS_DIR}thumb_${Date.now()}_${++thumbSeq}.jpg`;
+  await FileSystem.copyAsync({ from: srcJpeg, to: dest });
+  return dest;
+}
+
+// Delete posters no longer referenced by any meme row (deleted memes, cleared
+// index). Best-effort; runs after an index pass, when the reference set is
+// fresh. Returns how many it removed.
+export async function sweepOrphanThumbs(keep: Set<string>): Promise<number> {
+  try {
+    const entries = await FileSystem.readDirectoryAsync(THUMBS_DIR);
+    const stale = entries.filter((name) => !keep.has(THUMBS_DIR + name));
+    await Promise.all(
+      stale.map((name) => FileSystem.deleteAsync(THUMBS_DIR + name, { idempotent: true }).catch(() => {}))
+    );
+    return stale.length;
+  } catch {
+    // dir doesn't exist yet, or listing failed — nothing to reclaim
+    return 0;
+  }
 }
 
 // Copy any SAF/content:// uri into the cache as a stable file:// path so native
@@ -154,11 +193,31 @@ export async function readVideoFrameBase64(uri: string, name: string): Promise<s
   const file = await materialize(uri, name);
   let thumb: string | null = null;
   try {
-    const { uri: t } = await VideoThumbnails.getThumbnailAsync(file, { time: 1000 });
-    thumb = t;
-    return await FileSystem.readAsStringAsync(t, {
-      encoding: FileSystem.EncodingType.Base64,
-    });
+    // Retried: Android caps concurrent codec instances, and by the time the
+    // user hits Copy the viewer's own player holds one and the background
+    // loops (DINO backfill, describes) may hold others — the first attempt can
+    // fail purely from contention. Later attempts run after the interactive
+    // stand-down has let those loops yield. t=0 also covers sub-second clips
+    // where seeking to 1000ms has nothing to decode.
+    const attempts = [
+      { time: 1000, delayMs: 0 },
+      { time: 0, delayMs: 400 },
+      { time: 0, delayMs: 1500 },
+    ];
+    let lastErr: unknown = null;
+    for (const a of attempts) {
+      if (a.delayMs) await new Promise<void>((resolve) => setTimeout(resolve, a.delayMs));
+      try {
+        const { uri: t } = await VideoThumbnails.getThumbnailAsync(file, { time: a.time });
+        thumb = t;
+        return await FileSystem.readAsStringAsync(t, {
+          encoding: FileSystem.EncodingType.Base64,
+        });
+      } catch (e) {
+        lastErr = e;
+      }
+    }
+    throw lastErr;
   } finally {
     await FileSystem.deleteAsync(file, { idempotent: true }).catch(() => {});
     if (thumb) await FileSystem.deleteAsync(thumb, { idempotent: true }).catch(() => {});

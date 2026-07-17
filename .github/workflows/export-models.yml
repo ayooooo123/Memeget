@@ -1,0 +1,117 @@
+name: Export embedding models
+
+# Exports MobileCLIP-S2 (image+text) and DINOv2-base to ExecuTorch .pte and
+# publishes them as assets on the fixed "models-v1" release. The APK workflow
+# points the app's EXPO_PUBLIC_MEMEGET_* model sources at these assets; the app
+# downloads them once on first launch, same as every other model it uses.
+#
+# Runs in CI because the models must be pulled from Hugging Face and exported
+# with a real PyTorch/ExecuTorch toolchain. Verification (load each .pte with
+# the ExecuTorch python runtime and check output shapes) happens before
+# anything is published.
+
+on:
+  push:
+    branches:
+      - claude/gemma-local-vl-model-7viqpi
+      - main
+    paths:
+      - 'tools/model-export/**'
+      - '.github/workflows/export-models.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: export-models
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+env:
+  # ExecuTorch python package used for export. The .pte flatbuffer schema is
+  # versioned; if the app fails to LOAD these models on-device (a load-time
+  # "program/version" style error, not a download error), the runtime bundled
+  # in react-native-executorch is older than this exporter — drop this pin
+  # (e.g. to 0.7.0) and re-run.
+  ET_VERSION: '1.0.0'
+  MODELS_TAG: models-v1
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # The default PyPI torch is the CUDA build (~5 GB of nvidia wheels) and
+      # run #2 filled the runner's disk installing it. Reclaim the runner's
+      # preinstalled bloat and pull CPU-only torch wheels instead — the +cpu
+      # local tag outranks the plain version, so the extra index wins the
+      # resolve while still honoring executorch's torch pin.
+      - name: Free runner disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Install export toolchain
+        env:
+          PIP_NO_CACHE_DIR: '1'
+        run: |
+          python -m pip install --upgrade pip
+          # Pin torch to the 2.9 line: executorch 1.0's stock torchao targets
+          # it, and letting the resolver drift to a newer torch produced either
+          # broken imports (run #5) or — worse — silently WRONG quantization
+          # that only the cosine gate caught (runs #6/#7: cos 0.33–0.43 where
+          # a healthy dynamic-int8 transformer scores ≥0.99). One coherent
+          # wheel set, no piecemeal upgrades.
+          pip install "executorch==${ET_VERSION}" "torch==2.9.*" --extra-index-url https://download.pytorch.org/whl/cpu
+          pip install open_clip_torch timm transformers tokenizers --extra-index-url https://download.pytorch.org/whl/cpu
+          echo '--- resolved versions ---'
+          pip freeze | grep -iE '^(torch|torchao|executorch|open-clip|timm|transformers|tokenizers)' || true
+
+      - name: Export MobileCLIP-S2 (image + text + tokenizer)
+        working-directory: tools/model-export
+        run: python export_mobileclip_s2.py --out-dir ../../dist
+
+      - name: Export DINOv2-base
+        working-directory: tools/model-export
+        run: python export_dinov2.py --out-dir ../../dist
+
+      - name: Checksums
+        working-directory: dist
+        run: |
+          sha256sum * | tee SHA256SUMS
+          ls -lh
+
+      - name: Publish to models release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.MODELS_TAG }}
+          name: Embedding models (${{ env.MODELS_TAG }})
+          prerelease: true
+          make_latest: false
+          body: |
+            ExecuTorch exports for Memeget's custom embedding models, built by
+            `.github/workflows/export-models.yml` from commit `${{ github.sha }}`
+            with `executorch==${{ env.ET_VERSION }}`.
+
+            | asset | role | input | output |
+            |---|---|---|---|
+            | `mobileclip_s2_image_xnnpack_fp32.pte` | primary image tower | [1,3,256,256] f32 0..1 | [1,512] |
+            | `mobileclip_s2_text_xnnpack_fp32.pte` | primary text tower | [1,77] i64 ids + mask | [1,512] |
+            | `mobileclip_s2_tokenizer.json` | CLIP BPE tokenizer (pad/trunc 77) | — | — |
+            | `dinov2_base_xnnpack_fp32.pte` | visual-similarity tower | [1,3,224,224] f32 0..1 | [1,768] |
+
+            Normalization is baked into each graph; the app L2-normalizes outputs.
+          files: |
+            dist/mobileclip_s2_image_xnnpack_fp32.pte
+            dist/mobileclip_s2_text_xnnpack_fp32.pte
+            dist/mobileclip_s2_tokenizer.json
+            dist/dinov2_base_xnnpack_fp32.pte
+            dist/SHA256SUMS

@@ -1,11 +1,18 @@
-# On-device meme understanding (LFM2.5-VL)
+# On-device meme understanding (Gemma 4 E2B)
 
-Memeget describes memes with **LFM2.5-VL**, Liquid AI's vision-language model,
-running fully on-device through the **same `react-native-executorch` runtime**
-that already powers CLIP. CLIP stays the fast embedding / similarity /
+Memeget describes memes with **Gemma 4 E2B (multimodal)**, Google's on-device
+vision-language model, running fully on-device through the **same
+`react-native-executorch` runtime** that already powers CLIP (on Android it runs
+on the Vulkan GPU backend). CLIP stays the fast embedding / similarity /
 teach-by-example backbone; the VLM is an **enrichment pass** that adds a human
 caption, the literal text, and open-vocabulary tags that CLIP's fixed 97-label
 vocabulary can't produce. Nothing leaves the device.
+
+**Quality tiers** (Settings → AI descriptions → Model): `max` (the default) is
+Gemma 4 E2B — the sharper captions/tags and far better meme-culture knowledge;
+`fast` keeps the previous **LFM2.5-VL 450M** for weaker devices or grinding
+through a huge backlog quickly. Everything below applies to both — they share
+the prompt, parser, pacing, and background machinery.
 
 ## Architecture
 
@@ -36,8 +43,9 @@ background task needs.
 
 ## Efficiency choices
 
-- **512px frames** — LFM2-VL tiles inputs over 512; capping keeps most memes to a
-  single tile, and prefill (the dominant caption cost) scales with tiles.
+- **512px frames** — both models resample to their vision encoder's working
+  resolution anyway (Gemma to a fixed square, LFM by tiling over 512); capping
+  keeps decode/transcode — and, for LFM, prefill — bounded.
 - **OCR hint** — ML Kit's already-extracted text is fed into the prompt so the
   small model doesn't re-read small text; this is what makes the 512 downscale
   safe for text-heavy memes.

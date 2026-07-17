@@ -23,8 +23,8 @@ import {
   getRecentMemes,
   searchByVector,
 } from '../db';
-import { runIndex, retagAll, type IndexProgress } from '../indexer';
-import { onLibraryChanged } from '../events';
+import { noteInteractive, runIndex, retagAll, type IndexProgress } from '../indexer';
+import { emitLibraryChanged, onLibraryChanged } from '../events';
 import { success, tap, thud } from '../haptics';
 import { pickFolder } from '../saf';
 import { colors, radius, space, type } from '../theme';
@@ -47,6 +47,10 @@ function sameRecord(a: MemeRecord, b: MemeRecord): boolean {
     a.name === b.name &&
     a.kind === b.kind &&
     a.pending === b.pending &&
+    // The poster backfill updates ONLY this field — omitting it here kept the
+    // stale object alive, so freshly extracted posters never appeared until an
+    // app restart even though the DB said they were done.
+    a.thumbUri === b.thumbUri &&
     a.visionState === b.visionState &&
     a.caption === b.caption &&
     a.transcript === b.transcript &&
@@ -196,22 +200,43 @@ export function LibraryScreen() {
         return;
       }
       if (!emb.ready) return;
+      // Tell the idle loops (DINO backfill, paced describes) to stand down —
+      // they were starving the text embed this search needs.
+      noteInteractive();
       setSearching(true);
       setScrollToTopSignal((n) => n + 1);
+      // The scan aborts itself the moment a newer keystroke supersedes this
+      // query (returns null), so stale full scans don't pile up on the JS
+      // thread behind the latest one.
+      const stale = () => queryRef.current.trim() !== q;
       try {
-        const vec = await emb.embedText(q);
-        // The scan aborts itself the moment a newer keystroke supersedes this
-        // query (returns null), so stale full scans don't pile up on the JS
-        // thread behind the latest one.
-        const stale = () => queryRef.current.trim() !== q;
+        // The text embed competes for CPU with whatever generation is already
+        // in flight. If it takes noticeably long, serve lexical-only results
+        // (OCR/tags/captions/filenames) immediately, then upgrade to the full
+        // hybrid ranking when the vector lands.
+        const vecPromise = emb.embedText(q);
+        const TIMED_OUT = Symbol('embed-timeout');
+        const first = await Promise.race([
+          vecPromise,
+          new Promise<typeof TIMED_OUT>((r) => setTimeout(() => r(TIMED_OUT), 1_200)),
+        ]);
+        if (first === TIMED_OUT) {
+          const quick = await searchByVector(null, q, 80, kindArg(), stale);
+          if (quick !== null && !stale()) setResults(quick);
+        }
+        const vec = await vecPromise;
+        if (stale()) return;
         const hits = await searchByVector(vec, q, 80, kindArg(), stale);
         // Embedding + brute-force search are async and on-device, so they can
         // resolve long after the box was cleared or retyped. If the current
         // query no longer matches what we searched for, drop these results —
         // otherwise we'd clobber browse mode back into "N results for ''", or
         // let a slow earlier search overwrite a newer one.
-        if (hits === null || queryRef.current.trim() !== q) return;
+        if (hits === null || stale()) return;
         setResults(hits);
+      } catch {
+        // Embed failed (model unloading, OOM) — keep whatever lexical results
+        // are already showing rather than blanking the grid.
       } finally {
         // Only clear the spinner if this is still the active search; a superseded
         // run bailing out shouldn't yank the indicator from the live one.
@@ -300,10 +325,27 @@ export function LibraryScreen() {
         onProgress: setProgress,
         shouldCancel: () => cancelRef.current,
       });
+      // Old-space taught examples were re-based during the index; apply them.
+      // Keep the progress card honest (this pass used to run in silence after
+      // the bar filled, which read as a hang) and let Stop cancel it.
+      if (res.migratedExemplars > 0 && embApi.ready) {
+        setProgress({
+          processed: 1,
+          total: 1,
+          added: res.added,
+          current: 'applying migrated tags to the library…',
+        });
+        await retagAll(embApi, { shouldCancel: () => cancelRef.current });
+      }
       await refresh();
+      // Tell the other providers (notably the demand-loaded VLM, which summons
+      // itself when pending describe work appears) that the library changed.
+      emitLibraryChanged();
       success();
       const errNote = res.errors > 0 ? ` · ${res.errors} failed` : '';
-      showToast(`Indexed ${res.added} new · ${res.skipped} already known${errNote}`, 'success');
+      const migNote =
+        res.migratedExemplars > 0 ? ` · ${res.migratedExemplars} taught examples migrated` : '';
+      showToast(`Indexed ${res.added} new · ${res.skipped} already known${errNote}${migNote}`, 'success');
     } catch (e) {
       showToast(`Indexing failed: ${String(e)}`, 'error');
     } finally {

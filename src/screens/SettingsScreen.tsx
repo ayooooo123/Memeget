@@ -14,6 +14,7 @@ import {
   countAudioFailed,
   countMemes,
   countMemesDescribed,
+  countStaleExemplars,
   countMemesNeedingAudio,
   countMemesNeedingVision,
   countMemesTranscribed,
@@ -23,10 +24,14 @@ import {
   getFolders,
   getImportedPacks,
   getIndexErrors,
+  getIndexModelMismatch,
+  getPosterStats,
   getTaughtLabelStats,
   importExemplars,
+  migrateStaleExemplars,
   removeFolder,
   resetAudioFailures,
+  resetFailedThumbs,
   resetVisionState,
   type ImportedPack,
   type IndexError,
@@ -34,7 +39,14 @@ import {
 } from '../db';
 import { emitLibraryChanged } from '../events';
 import { success, warn } from '../haptics';
-import { getVisionTelemetry, retagAll, type VisionTelemetry } from '../indexer';
+import { acquireKeepAlive } from '../keepAlive';
+import {
+  backfillVideoThumbs,
+  clearThumbSkips,
+  getVisionTelemetry,
+  retagAll,
+  type VisionTelemetry,
+} from '../indexer';
 import { MEME_LABELS } from '../memeLabels';
 import { buildPack, parsePack, serializePack } from '../teachingPack';
 import { colors, radius, space, TABBAR_CLEARANCE } from '../theme';
@@ -62,12 +74,22 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
   const [audioFailed, setAudioFailed] = useState(0);
   const [transcribing, setTranscribing] = useState<{ done: number; total: number } | null>(null);
   const transcribeCancel = useRef(false);
+  const [modelMismatch, setModelMismatch] = useState<{ stored: string; current: string } | null>(
+    null
+  );
+  const [staleExemplars, setStaleExemplars] = useState(0);
+  const [migrating, setMigrating] = useState(false);
+  const [posterStats, setPosterStats] = useState({ total: 0, done: 0, failed: 0, missing: 0 });
+  const [retryingPosters, setRetryingPosters] = useState(false);
 
   const refresh = useCallback(async () => {
     setFolders(await getFolders());
     setCount(await countMemes());
+    setModelMismatch(await getIndexModelMismatch().catch(() => null));
+    setStaleExemplars(await countStaleExemplars().catch(() => 0));
     setTaughtStats(await getTaughtLabelStats().catch(() => []));
     setImportedPacks(await getImportedPacks().catch(() => []));
+    setPosterStats(await getPosterStats().catch(() => ({ total: 0, done: 0, failed: 0, missing: 0 })));
     setErrors(await getIndexErrors());
     setDescribed(await countMemesDescribed());
     setPending(await countMemesNeedingVision());
@@ -83,6 +105,37 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
     if (active) refresh();
   }, [active, refresh]);
 
+  // Clear the undecodable stamps and run the poster backfill in the foreground
+  // with feedback — the idle loop would get there too, but silently, and after
+  // several silent failures what the user needs is to SEE it finish (or see
+  // the per-file reasons land in the indexing-errors list right below).
+  const onRetryPosters = useCallback(async () => {
+    if (retryingPosters) return;
+    setRetryingPosters(true);
+    const release = acquireKeepAlive('Extracting video previews');
+    try {
+      const n = await resetFailedThumbs();
+      clearThumbSkips();
+      showToast(`Retrying posters for ${n} videos…`, 'info');
+      while ((await backfillVideoThumbs({ limit: 24 }).catch(() => 0)) > 0) {
+        setPosterStats(await getPosterStats().catch(() => ({ total: 0, done: 0, failed: 0, missing: 0 })));
+      }
+      emitLibraryChanged();
+      const stats = await getPosterStats();
+      setPosterStats(stats);
+      setErrors(await getIndexErrors());
+      if (stats.failed > 0) {
+        showToast(`${stats.failed} still failed — see “Indexing errors” for why`, 'error');
+        setShowErrors(true);
+      } else {
+        showToast('Video posters rebuilt', 'success');
+      }
+    } finally {
+      release();
+      setRetryingPosters(false);
+    }
+  }, [retryingPosters]);
+
   const onRetag = useCallback(async () => {
     if (!emb.ready) {
       showToast('Model still loading — try again shortly', 'info');
@@ -95,7 +148,7 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
       });
       success();
       emitLibraryChanged(); // tags changed under the Library's feet
-      showToast(`Re-tagged ${res.updated} memes with current knowledge`, 'success');
+      showToast(`Re-tag done — ${res.updated} meme${res.updated === 1 ? '' : 's'} changed`, 'success');
     } catch (e) {
       showToast(`Re-tag failed: ${String(e)}`, 'error');
     } finally {
@@ -273,9 +326,11 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
   );
 
   const onRunEnrich = useCallback(async () => {
+    if (!vision.enabled) return;
+    // The model is demand-loaded; this tap may be what summons it.
+    // runEnrichment waits for the load internally.
     if (!vision.ready) {
-      showToast('Vision model still loading — try again shortly', 'info');
-      return;
+      showToast('Loading the vision model — the first describe after a cold start takes a bit', 'info');
     }
     enrichCancel.current = false;
     setEnriching({ done: 0, total: 0 });
@@ -352,12 +407,42 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
         .then(refresh)
         .catch(() => {});
       showToast(
-        `Switched to ${q === 'max' ? 'Max · 1.6B' : 'Fast · 450M'} — re-run Describe to apply`,
+        `Switched to ${q === 'max' ? 'Best · Gemma E2B' : 'Fast · LFM 450M'} — re-run Describe to apply`,
         'info'
       );
     },
     [vision, refresh]
   );
+
+  // Re-base old-space taught examples onto the current index (see
+  // migrateStaleExemplars), then re-tag so the labels actually reappear.
+  const onMigrateExemplars = useCallback(async () => {
+    if (migrating) return;
+    setMigrating(true);
+    try {
+      const { migrated, unmigratable } = await migrateStaleExemplars();
+      if (migrated > 0 && emb.ready) {
+        await retagAll(emb);
+        emitLibraryChanged(); // tags changed under the Library's feet
+      }
+      await refresh();
+      success();
+      const packNote =
+        unmigratable > 0
+          ? ` · ${unmigratable} pack example${unmigratable === 1 ? '' : 's'} need a re-exported pack`
+          : '';
+      showToast(
+        migrated > 0
+          ? `Migrated ${migrated} taught example${migrated === 1 ? '' : 's'}${packNote}`
+          : `Nothing migrated — index the library first${packNote}`,
+        migrated > 0 ? 'success' : 'info'
+      );
+    } catch (e) {
+      showToast(`Migration failed: ${String(e)}`, 'error');
+    } finally {
+      setMigrating(false);
+    }
+  }, [migrating, emb, refresh]);
 
   const onClear = useCallback(() => {
     warn();
@@ -387,14 +472,16 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
       ? 'Ready'
       : `Loading ${Math.round((emb.progress || 0) * 100)}%`;
 
-  const visionTone = vision.error ? 'bad' : vision.ready ? 'good' : 'busy';
+  const visionTone = vision.error ? 'bad' : vision.ready || vision.modelIdle ? 'good' : 'busy';
   const visionLabel = vision.error
     ? 'Error'
     : !vision.enabled
       ? 'Off'
       : vision.ready
         ? 'Ready'
-        : `Loading ${Math.round((vision.progress || 0) * 100)}%`;
+        : vision.modelIdle
+          ? 'On demand' // loads only when there's something to describe
+          : `Loading ${Math.round((vision.progress || 0) * 100)}%`;
   const describedTotal = described + pending;
 
   const audioTone = audio.error ? 'bad' : audio.ready ? 'good' : 'busy';
@@ -412,11 +499,35 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
       <Text style={styles.title}>Settings</Text>
 
       <Section glyph="✦" title="On-device model" tint={colors.volt}>
-        <Row label="CLIP (image + text)">
+        <Row label={`${emb.primaryLabel} (image + text)`}>
           <StatusDot tone={modelTone} label={modelLabel} />
         </Row>
+        {emb.visualModel.available && (
+          <Row label={`${emb.visualModel.label} (visual similarity)`}>
+            <StatusDot
+              tone={emb.visualError ? 'bad' : emb.visualReady || !emb.visualWanted ? 'good' : 'busy'}
+              label={
+                emb.visualError
+                  ? 'Error'
+                  : emb.visualReady
+                    ? 'Ready'
+                    : !emb.visualWanted
+                      ? 'On demand' // deliberately unloaded until its backfill has work
+                      : `Loading ${Math.round((emb.visualProgress || 0) * 100)}%`
+              }
+            />
+          </Row>
+        )}
         {!emb.ready && !emb.error && <ProgressBar value={emb.progress || 0} />}
         {!!emb.error && <Text style={styles.errText}>{emb.error}</Text>}
+        {!!emb.visualError && <Text style={styles.errText}>{emb.visualError}</Text>}
+        {modelMismatch && (
+          <Text style={styles.errText}>
+            ⚠ Index/model mismatch: the index was built with {modelMismatch.stored}, but this build
+            runs {modelMismatch.current}. Search and taught labels are unreliable until you Clear
+            index (below), re-Index, and re-teach or re-import your labels.
+          </Text>
+        )}
         <Text style={styles.note}>
           Runs fully on your device via ExecuTorch. The model binary downloads once on first launch,
           then everything — indexing and search — happens offline with no network calls.
@@ -424,10 +535,10 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
       </Section>
 
       <Section glyph="👁" title="AI descriptions" tint={colors.volt}>
-        <Row label="LFM2-VL (vision-language)">
+        <Row label="Gemma 4 (vision-language)">
           <StatusDot tone={visionTone} label={visionLabel} />
         </Row>
-        {vision.enabled && !vision.ready && !vision.error && (
+        {vision.enabled && !vision.ready && !vision.modelIdle && !vision.error && (
           <ProgressBar value={vision.progress || 0} />
         )}
         {!!vision.error && <Text style={styles.errText}>{vision.error}</Text>}
@@ -450,17 +561,17 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
 
         {vision.enabled && (
           <>
-            <Text style={[styles.note, { marginTop: 2 }]}>Model size</Text>
+            <Text style={[styles.note, { marginTop: 2 }]}>Model</Text>
             <View style={styles.qualityRow}>
               <Chip
-                label="Fast · 450M"
-                active={vision.quality === 'fast'}
-                onPress={() => onSwitchQuality('fast')}
-              />
-              <Chip
-                label="Max · 1.6B"
+                label="Best · Gemma E2B"
                 active={vision.quality === 'max'}
                 onPress={() => onSwitchQuality('max')}
+              />
+              <Chip
+                label="Fast · LFM 450M"
+                active={vision.quality === 'fast'}
+                onPress={() => onSwitchQuality('fast')}
               />
             </View>
 
@@ -486,9 +597,13 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
             ) : pending > 0 ? (
               <Button
                 small
-                label={`Describe ${pending} meme${pending === 1 ? '' : 's'}`}
+                label={
+                  vision.ready
+                    ? `Describe ${pending} meme${pending === 1 ? '' : 's'}`
+                    : `Describe ${pending} meme${pending === 1 ? '' : 's'} (loads model)`
+                }
                 onPress={onRunEnrich}
-                disabled={!vision.ready}
+                disabled={!vision.enabled}
               />
             ) : (
               <Text style={styles.note}>
@@ -649,6 +764,22 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
       <Section glyph="▦" title="Index" tint={colors.accent}>
         <Row label="Indexed memes" value={String(count)} />
         <Row label="Known meme formats" value={String(MEME_LABELS.length)} />
+        {posterStats.total > 0 && (
+          <Row
+            label="Video posters"
+            value={`${posterStats.done}/${posterStats.total}${posterStats.failed ? ` · ${posterStats.failed} failed` : ''}${posterStats.missing ? ` · ${posterStats.missing} queued` : ''}`}
+            valueTint={posterStats.failed > 0 ? colors.danger : undefined}
+          />
+        )}
+        {posterStats.failed > 0 && (
+          <Button
+            small
+            variant="secondary"
+            label={retryingPosters ? 'Retrying…' : `Retry ${posterStats.failed} failed posters`}
+            onPress={onRetryPosters}
+            disabled={retryingPosters}
+          />
+        )}
         {errors.length > 0 && (
           <Pressable onPress={() => setShowErrors((s) => !s)}>
             <Row label="Indexing errors" value={`${errors.length} ${showErrors ? '▴' : '▾'}`} valueTint={colors.danger} />
@@ -670,7 +801,9 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
                 <Text style={styles.errName} numberOfLines={1}>
                   {e.name}
                 </Text>
-                <Text style={styles.errReason} numberOfLines={2}>
+                {/* Poster failures pack three per-path reasons into one row —
+                    give them room; they're the only debugging signal we get. */}
+                <Text style={styles.errReason} numberOfLines={4}>
                   [{e.stage}] {e.reason}
                 </Text>
               </View>
@@ -686,6 +819,23 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
           value={String(taughtStats.length)}
           valueTint={colors.good}
         />
+        {staleExemplars > 0 && (
+          <>
+            <Text style={styles.errText}>
+              {staleExemplars} taught example{staleExemplars === 1 ? '' : 's'} from a previous
+              embedding model {staleExemplars === 1 ? 'is' : 'are'} hidden — they aren't deleted,
+              but their vectors don't work in the current model's space. Your own examples can be
+              migrated automatically from their source memes (index the library first if you
+              haven't); pack-imported ones need a pack made with the current model.
+            </Text>
+            <Button
+              small
+              label={migrating ? 'Migrating…' : 'Migrate taught examples'}
+              onPress={onMigrateExemplars}
+              disabled={migrating || !emb.ready}
+            />
+          </>
+        )}
         {taughtStats.length === 0 ? (
           <Text style={styles.note}>
             Open any meme and use “This IS a…” to teach a new character or format by example (e.g.

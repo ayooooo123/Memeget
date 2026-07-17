@@ -1,14 +1,17 @@
 import * as VideoThumbnails from 'expo-video-thumbnails';
 import { manipulateAsync, SaveFormat } from 'expo-image-manipulator';
 
+import type { EmbeddingsApi } from './embeddings';
 import {
+  classifyExemplars,
   classifyImage,
+  classifyPrompts,
   createYielder,
-  trainHead,
-  type EmbeddingsApi,
+  mergeClassified,
+  trainLabelModel,
   type LabelHead,
   type LabelVec,
-} from './embeddings';
+} from './learnCore';
 import {
   addIndexError,
   bulkUpdateMemeTags,
@@ -16,31 +19,57 @@ import {
   countMemesDescribed,
   dot,
   getAllMemeEmbeddings,
+  getAllThumbUris,
   getDescribedVisionRecords,
   getEmbeddingSample,
   getExemplars,
   getFolders,
+  getIndexedUris,
+  getKnowledgeVersion,
   getLabelVectors,
+  getMemesNeedingCaptionEmbedding,
+  getMemesNeedingVisualEmbedding,
   getMemesNeedingVision,
+  getPendingMemes,
+  getPendingUris,
+  getVideosNeedingThumb,
   insertMeme,
   insertPendingMeme,
   markVisionFailed,
-  memeExists,
+  markVisualEmbeddingFailed,
+  migrateStaleExemplars,
   putLabelVector,
+  setMemeCaptionEmbedding,
+  setMemeThumb,
+  setMemeVisualEmbedding,
   setMemeVision,
+  stampIndexModel,
+  THUMB_FAILED,
   updateMemeTags,
   type DescribedVisionRow,
+  type MemeNeedingVisualEmbeddingRow,
   type MemeNeedingVisionRow,
 } from './db';
+import { extractVideoFrame } from '../modules/memeget-bg';
+import { acquireKeepAlive } from './keepAlive';
 import { ASSOCIATIONS, MEME_LABELS, NEGATIVE_ANCHORS, ocrTags } from './memeLabels';
-import { copyToCache, deleteCache, getModifiedTime, listMedia, saveToFolder, type SafFile } from './saf';
+import {
+  copyToCache,
+  deleteCache,
+  getModifiedTime,
+  listMedia,
+  persistThumb,
+  saveToFolder,
+  sweepOrphanThumbs,
+  type SafFile,
+} from './saf';
 import type { VisionResult } from './visionCore';
 import type { Tag } from './types';
 
 // Confidence in how a label was matched, highest first:
 //   ocr      — text literally in the image (watermark/caption)
 //   exemplar — the user's own ground truth, taught by example
-//   vision   — LFM2-VL's open-vocabulary read of the image
+//   vision   — the VLM's (Gemma) open-vocabulary read of the image
 //   prompt   — CLIP zero-shot guess against the fixed label vocabulary
 const TAG_RANK: Record<NonNullable<Tag['source']>, number> = {
   ocr: 4,
@@ -64,7 +93,7 @@ function dedupeRankTags(tags: Tag[], cap = 6): Tag[] {
 }
 
 // Fast-pass merge: CLIP/exemplar visual tags + OCR-derived tags. Kept tight (4)
-// because the slower LFM2-VL pass adds richer tags later.
+// because the slower VLM pass adds richer tags later.
 function mergeTags(visual: Tag[], fromOcr: Tag[]): Tag[] {
   return dedupeRankTags([...visual, ...fromOcr], 4);
 }
@@ -98,10 +127,11 @@ async function ocr(uri: string): Promise<string> {
   }
 }
 
-// Width fed to the VLM. LFM2-VL processes up to 512px natively and tiles
-// anything larger — every extra tile is more vision tokens and a proportionally
-// longer prefill, the dominant cost of a caption. Capping at 512 keeps most
-// memes to a single tile (the ML Kit OCR hint covers any small text we'd lose).
+// Width fed to the VLM. Both supported models resample the input to their
+// vision encoder's working resolution anyway (Gemma to a fixed square, LFM by
+// tiling over 512), so feeding more pixels only inflates decode/transcode cost —
+// and for LFM, prefill time, the dominant cost of a caption. Capping at 512
+// keeps that bounded (the ML Kit OCR hint covers any small text we'd lose).
 const VLM_FRAME_WIDTH = 512;
 
 // Turn a library item (image or video) into a local JPEG path the models can
@@ -138,6 +168,48 @@ async function buildAssociations(): Promise<Map<string, string[]>> {
   return assoc;
 }
 
+// Coordination with the idle-time backfills: while any heavy pass runs
+// (indexing, re-tagging), the DINO/caption backfill loops must stand down —
+// fp32 DINOv2 running flat-out saturates the CPU and starves everything else,
+// which is what made a fresh index sit on "Preparing to index…" for minutes.
+// Heavy passes also hold the keep-alive foreground service: a multi-minute
+// index must keep running when the user switches apps or the screen sleeps,
+// not silently freeze until they come back.
+let heavyPasses = 0;
+async function withHeavyPass<T>(fn: () => Promise<T>, label = 'Indexing your library'): Promise<T> {
+  heavyPasses++;
+  const release = acquireKeepAlive(label);
+  try {
+    return await fn();
+  } finally {
+    heavyPasses--;
+    release();
+  }
+}
+
+// Interactive work (a live search) also outranks idle loops: a text embed
+// stuck behind a DINO batch or a queued describe is what made search feel
+// dead while "AI description stuff" ran. Searches stamp this; the stand-down
+// window covers the debounce + embed + scan.
+const INTERACTIVE_WINDOW_MS = 8_000;
+let lastInteractive = 0;
+export function noteInteractive(): void {
+  lastInteractive = Date.now();
+}
+
+export function heavyPassActive(): boolean {
+  return heavyPasses > 0 || Date.now() - lastInteractive < INTERACTIVE_WINDOW_MS;
+}
+
+// Narrower gate for light idle work (the poster backfill): yield to indexing/
+// re-tagging, but NOT to the interactive window. Posters are what the user is
+// actively watching for — gating them on "the user touched the app in the
+// last 8s" froze the backfill for exactly as long as anyone sat there waiting
+// for tiles to fill in.
+export function indexingActive(): boolean {
+  return heavyPasses > 0;
+}
+
 export interface IndexProgress {
   processed: number;
   total: number;
@@ -149,6 +221,9 @@ export interface IndexResult {
   added: number;
   skipped: number;
   errors: number;
+  // Old-space taught examples automatically re-based onto the fresh index
+  // (see migrateStaleExemplars) — when > 0 the caller should re-tag.
+  migratedExemplars: number;
 }
 
 // Everything needed to tag an image: zero-shot text labels, taught exemplars,
@@ -166,12 +241,29 @@ export interface ExemplarModel {
   mean: Float32Array | null;
 }
 
+// Trained heads are cached across knowledge builds: most builds (indexing a
+// shared meme, a background enrichment tick, opening the teach sheet) happen
+// when nothing was taught in between, and retraining every head was their
+// dominant cost. The version stamp changes on any exemplar add/remove and as
+// the library grows (which shifts the training background), so a stale model is
+// never served.
+let headsCache: { version: string; model: ExemplarModel } | null = null;
+
 // Train a logistic-regression head for every taught label from the exemplars in
 // the DB, using a random sample of the library as the negative background. Pure
 // vector math (no CLIP/api), so it can also be called standalone (e.g. the
 // detail-view debug readout). Returns the per-label heads plus the library mean
 // used to center vectors at inference time.
 export async function buildExemplarHeads(): Promise<ExemplarModel> {
+  const version = await getKnowledgeVersion();
+  if (headsCache && headsCache.version === version) return headsCache.model;
+
+  const model = await trainExemplarHeads();
+  headsCache = { version, model };
+  return model;
+}
+
+async function trainExemplarHeads(): Promise<ExemplarModel> {
   const exemplars = await getExemplars();
   if (exemplars.length === 0) return { heads: [], mean: null };
 
@@ -194,57 +286,104 @@ export async function buildExemplarHeads(): Promise<ExemplarModel> {
     return out;
   };
 
-  const background = sample.map(center);
+  const backgroundCentered = sample.map(center);
 
   // Group taught examples by label, split into positive ("is a <label>") and
-  // explicit negative ("is NOT a <label>") sets.
-  const byLabel = new Map<string, { category: string; pos: number[][]; neg: number[][] }>();
+  // explicit negative ("is NOT a <label>") sets — keeping both the raw vectors
+  // (for background cleaning + the kNN pathway) and the centered ones (for the
+  // logistic head).
+  interface Group {
+    category: string;
+    posRaw: number[][];
+    posCentered: number[][];
+    negRaw: number[][];
+    negCentered: number[][];
+  }
+  const byLabel = new Map<string, Group>();
   for (const e of exemplars) {
-    const g = byLabel.get(e.label) ?? { category: e.category, pos: [], neg: [] };
-    (e.positive ? g.pos : g.neg).push(center(e.vector));
+    const g =
+      byLabel.get(e.label) ??
+      { category: e.category, posRaw: [], posCentered: [], negRaw: [], negCentered: [] };
+    if (e.positive) {
+      g.posRaw.push(e.vector);
+      g.posCentered.push(center(e.vector));
+    } else {
+      g.negRaw.push(e.vector);
+      g.negCentered.push(center(e.vector));
+    }
     byLabel.set(e.label, g);
   }
 
-  // A handful of explicit "not this" corrections would be drowned out by ~500
-  // background samples, so replicate each so it carries real weight (~1 copy per
-  // 25 background items) — one correction visibly moves the boundary.
-  const negBoost = Math.max(1, Math.round(background.length / 25));
-
   const heads: LabelHead[] = [];
   for (const [label, g] of byLabel) {
-    if (g.pos.length === 0) continue; // need at least one positive to train
-    // Negatives = random background + every other label's positives (they're
-    // definitionally not this label) + this label's oversampled corrections.
-    const otherPos: number[][] = [];
-    for (const [l2, g2] of byLabel) if (l2 !== label) otherPos.push(...g2.pos);
-    const corrections: number[][] = [];
-    for (const n of g.neg) for (let k = 0; k < negBoost; k++) corrections.push(n);
-    // trainHead yields internally, so awaiting it keeps the UI alive even when
-    // many labels have been taught (one full train each, back to back).
-    heads.push(await trainHead(label, g.category, g.pos, [...background, ...otherPos, ...corrections]));
+    if (g.posRaw.length === 0) continue; // need at least one positive to train
+    const otherPosRaw: number[][] = [];
+    const otherPosCentered: number[][] = [];
+    for (const [l2, g2] of byLabel) {
+      if (l2 === label) continue;
+      otherPosRaw.push(...g2.posRaw);
+      otherPosCentered.push(...g2.posCentered);
+    }
+    // trainLabelModel yields internally, so awaiting it keeps the UI alive even
+    // when many labels have been taught (one full train each, back to back).
+    heads.push(
+      await trainLabelModel({
+        label,
+        category: g.category,
+        posRaw: g.posRaw,
+        posCentered: g.posCentered,
+        negRaw: g.negRaw,
+        negCentered: g.negCentered,
+        backgroundRaw: sample,
+        backgroundCentered,
+        otherPosRaw,
+        otherPosCentered,
+      })
+    );
   }
   return { heads, mean };
 }
 
 // Compute (and cache) CLIP text vectors for every curated label + negative
 // anchor, then load taught exemplars and build the association lookup.
-export async function buildKnowledge(api: EmbeddingsApi): Promise<Knowledge> {
-  const cache = await getLabelVectors();
+// `onStatus` streams what the slow parts are actually doing — a silent
+// buildKnowledge is what made "Indexing 0/…" read as a hang: vocabulary
+// re-embeds only happen after a model change, but retraining the taught-label
+// heads happens whenever the teach state changed, and with many taught labels
+// that's real minutes of on-device math.
+export async function buildKnowledge(
+  api: EmbeddingsApi,
+  onStatus?: (s: string) => void
+): Promise<Knowledge> {
+  const modelId = api.primaryModel.id;
+  const cache = await getLabelVectors(modelId);
 
-  for (const def of MEME_LABELS) {
-    if (!cache.has(def.label)) {
-      const vec = await api.embedText(def.prompt);
-      await putLabelVector(def.label, vec);
-      cache.set(def.label, Float32Array.from(vec));
+  const missingLabels = MEME_LABELS.filter((d) => !cache.has(d.label));
+  const missingAnchors = NEGATIVE_ANCHORS.map((_, i) => i).filter(
+    (i) => !cache.has(`${NEG_PREFIX}${i}`)
+  );
+  const vocabTotal = missingLabels.length + missingAnchors.length;
+  let vocabDone = 0;
+  const noteVocab = () => {
+    vocabDone++;
+    if (vocabDone % 10 === 0 || vocabDone === vocabTotal) {
+      onStatus?.(`embedding label vocabulary ${vocabDone}/${vocabTotal} (model changed)…`);
     }
+  };
+  if (vocabTotal > 0) onStatus?.(`embedding label vocabulary 0/${vocabTotal} (model changed)…`);
+
+  for (const def of missingLabels) {
+    const vec = await api.embedText(def.prompt);
+    await putLabelVector(def.label, vec, modelId);
+    cache.set(def.label, Float32Array.from(vec));
+    noteVocab();
   }
-  for (let i = 0; i < NEGATIVE_ANCHORS.length; i++) {
+  for (const i of missingAnchors) {
     const key = `${NEG_PREFIX}${i}`;
-    if (!cache.has(key)) {
-      const vec = await api.embedText(NEGATIVE_ANCHORS[i]);
-      await putLabelVector(key, vec);
-      cache.set(key, Float32Array.from(vec));
-    }
+    const vec = await api.embedText(NEGATIVE_ANCHORS[i]);
+    await putLabelVector(key, vec, modelId);
+    cache.set(key, Float32Array.from(vec));
+    noteVocab();
   }
 
   const labelVecs: LabelVec[] = MEME_LABELS.filter((d) => cache.has(d.label)).map((d) => ({
@@ -255,7 +394,9 @@ export async function buildKnowledge(api: EmbeddingsApi): Promise<Knowledge> {
   const negativeVecs = NEGATIVE_ANCHORS.map((_, i) => cache.get(`${NEG_PREFIX}${i}`)!).filter(Boolean);
 
   const exemplars = await getExemplars();
+  onStatus?.('training taught labels…');
   const { heads: exemplarHeads, mean } = await buildExemplarHeads();
+  onStatus?.('');
 
   // Association lookup: curated terms + any added with an exemplar.
   const assoc = new Map<string, string[]>(Object.entries(ASSOCIATIONS));
@@ -284,7 +425,15 @@ export async function runIndex(
   api: EmbeddingsApi,
   opts: { onProgress?: (p: IndexProgress) => void; shouldCancel?: () => boolean } = {}
 ): Promise<IndexResult> {
-  const know = await buildKnowledge(api);
+  return withHeavyPass(async () => {
+  // Give the progress card something honest to show right away, then stream
+  // buildKnowledge's real phases through it — a static "warming up" line over
+  // minutes of head-retraining read as a hang (and wrongly blamed a "model
+  // change" on every single run).
+  const status = (s: string) =>
+    opts.onProgress?.({ processed: 0, total: 0, added: 0, current: s || 'preparing to index…' });
+  status('preparing to index…');
+  const know = await buildKnowledge(api, status);
   await clearIndexErrors();
 
   const folders = await getFolders();
@@ -298,39 +447,70 @@ export async function runIndex(
     }
   }
 
-  let added = 0;
+  // Skip everything already indexed with one query + hash lookups instead of a
+  // per-file memeExists() round-trip — re-running Index over a mostly-indexed
+  // library now costs one SELECT, not thousands.
+  const known = await getIndexedUris();
+  const queue: SafFile[] = [];
   let skipped = 0;
-  let errors = 0;
-  const total = allFiles.length;
+  for (const f of allFiles) {
+    if (known.has(f.uri)) skipped++;
+    else queue.push(f);
+  }
 
-  for (let i = 0; i < allFiles.length; i++) {
-    if (opts.shouldCancel?.()) break;
-    const file = allFiles[i];
-    opts.onProgress?.({ processed: i, total, added, current: file.name });
-    const r = await processFile(api, file, know, i);
-    if (r === 'added') added++;
-    else if (r === 'skipped') skipped++;
-    else errors++;
+  // Stuck share-imports jump the queue: pending placeholder rows sort to the
+  // very top of the library showing eternal spinners, so an index run should
+  // replace them with real rows in its first seconds, not after grinding
+  // through however many other new files the folder scan found.
+  const pendingUris = await getPendingUris().catch(() => new Set<string>());
+  if (pendingUris.size > 0) {
+    queue.sort((a, b) => Number(pendingUris.has(b.uri)) - Number(pendingUris.has(a.uri)));
+  }
+
+  // Record which primary space this index is being built in, so a later model
+  // swap is detected instead of silently searched across spaces.
+  await stampIndexModel().catch(() => {});
+
+  const total = allFiles.length;
+  const { added, errors } = await indexQueue(api, queue, know, {
+    shouldCancel: opts.shouldCancel,
+    onFile: (i, file, addedSoFar) =>
+      opts.onProgress?.({ processed: skipped + i, total, added: addedSoFar, current: file.name }),
+  });
+
+  // The library is now (re)indexed in the active primary space, which is the
+  // one moment old-space taught examples can be re-based automatically from
+  // their source memes' fresh embeddings. Cheap no-op when nothing is stale.
+  // Say so on the card — post-bar silence reads as a hang.
+  opts.onProgress?.({ processed: total, total, added, current: 'migrating taught examples…' });
+  const { migrated } = await migrateStaleExemplars().catch(() => ({ migrated: 0 }));
+
+  // Reclaim posters whose meme rows are gone (deleted memes, a cleared+rebuilt
+  // index). Cheap set-difference over one small directory.
+  try {
+    await sweepOrphanThumbs(await getAllThumbUris());
+  } catch {
+    // best-effort; orphans get another chance next index
   }
 
   opts.onProgress?.({ processed: total, total, added, current: '' });
-  return { added, skipped, errors };
+  return { added, skipped, errors, migratedExemplars: migrated };
+  });
 }
 
-// Full per-file pipeline: copy → (thumbnail) → transcode → embed → OCR →
-// classify → store. Logs failures to the index-error table and cleans up temp
-// files. Shared by the folder scan (runIndex) and the share-target importer.
-async function processFile(
-  api: EmbeddingsApi,
-  file: SafFile,
-  know: Knowledge,
-  idx: number
-): Promise<'added' | 'skipped' | 'error'> {
+// Result of stage 1 (prepare). A failed prepare still carries its temp files so
+// stage 2 can clean up and log the error with the right stage name.
+type Prepared =
+  | { ok: true; file: SafFile; modifiedAt: number | null; jpeg: string; temp: string[] }
+  | { ok: false; file: SafFile; stage: string; reason: string; temp: string[] };
+
+// Stage 1 of the per-file pipeline: copy out of SAF → (video keyframe) → JPEG
+// transcode. Pure native I/O + codecs, no model involvement — which is what
+// lets the NEXT file's stage 1 run while the current file sits in the model.
+async function prepareFile(file: SafFile, idx: number): Promise<Prepared> {
   let stage = 'copy';
   const temp: string[] = [];
   try {
-    if (await memeExists(file.uri)) return 'skipped';
-
     // Read the file's own last-modified time so the library can sort by when the
     // meme was actually added, not by when this scan reached it. It's a
     // best-effort read (null on providers that don't report it) — insertMeme
@@ -351,10 +531,36 @@ async function processFile(
     stage = 'transcode';
     const jpeg = await toJpeg(frame);
     temp.push(jpeg);
+    return { ok: true, file, modifiedAt, jpeg, temp };
+  } catch (e) {
+    return { ok: false, file, stage, reason: String((e as Error)?.message ?? e).slice(0, 300), temp };
+  }
+}
 
-    stage = 'embed';
-    const embedding = await api.embedImage(jpeg);
-    const ocrText = await ocr(jpeg);
+// Stage 2: embed + OCR → classify → store. Logs failures to the index-error
+// table and cleans up the prepare stage's temp files. Posters are deliberately
+// NOT stamped here: the embed frame is a fixed t=1s grab that lands on
+// fade-from-black intros, so every poster instead flows through the backfill's
+// luma-checked native extractor (the poster loop wakes on the library-changed
+// events indexing emits, so tiles fill within seconds of a row landing).
+async function finishFile(api: EmbeddingsApi, prep: Prepared, know: Knowledge): Promise<'added' | 'error'> {
+  let stage = 'embed';
+  try {
+    if (!prep.ok) {
+      stage = prep.stage;
+      throw new Error(prep.reason);
+    }
+
+    // Primary embed (ExecuTorch) and OCR (ML Kit) are independent native calls
+    // on the same JPEG — running them concurrently hides the shorter one.
+    //
+    // The DINO visual embed is deliberately NOT here: fp32 DINOv2-base costs a
+    // multiple of the primary embed per frame, and putting it in the indexing
+    // hot path made a fresh index crawl. The idle-time backfill loop
+    // (backfillVisualEmbeddings) owns visual vectors instead — the library is
+    // browsable/searchable immediately and "More like this" upgrades to DINO
+    // as the backfill catches up.
+    const [embedding, ocrText] = await Promise.all([api.embedImage(prep.jpeg), ocr(prep.jpeg)]);
     const tags = mergeTags(
       classifyImage(embedding, know.labelVecs, know.exemplarHeads, know.mean, know.negativeVecs),
       ocrTags(ocrText)
@@ -362,23 +568,73 @@ async function processFile(
 
     stage = 'store';
     await insertMeme({
-      uri: file.uri,
-      name: file.name,
-      kind: file.kind,
+      uri: prep.file.uri,
+      name: prep.file.name,
+      kind: prep.file.kind,
       embedding,
       ocrText,
       tags,
       extraTerms: extraTermsFor(tags, know.assoc),
-      modifiedAt,
+      modifiedAt: prep.modifiedAt,
     });
     return 'added';
   } catch (e) {
     const reason = String((e as Error)?.message ?? e).slice(0, 300);
-    await addIndexError({ name: file.name, kind: file.kind, stage, reason }).catch(() => {});
+    await addIndexError({ name: prep.file.name, kind: prep.file.kind, stage, reason }).catch(() => {});
+    // A file the pipeline can't process (e.g. an animated GIF the transcoder
+    // rejects) used to stay a pending placeholder forever — a spinner in the
+    // grid on every launch. Store it as a degraded row instead: visible,
+    // findable by filename, and permanently skipped by every model pass. The
+    // error stays in the Settings diagnostics list.
+    await insertMeme({
+      uri: prep.file.uri,
+      name: prep.file.name,
+      kind: prep.file.kind,
+      embedding: [],
+      ocrText: '',
+      tags: [],
+      extraTerms: '',
+      modifiedAt: prep.ok ? prep.modifiedAt : null,
+      degraded: true,
+    }).catch(() => {});
     return 'error';
   } finally {
-    for (const t of temp) await deleteCache(t);
+    for (const t of prep.temp) await deleteCache(t);
   }
+}
+
+// Pipelined core shared by the folder scan and the share importer: while file N
+// is being embedded/OCR'd (ExecuTorch + ML Kit), file N+1 is already being
+// copied/thumbnailed/transcoded (I/O + codecs). The stages run in different
+// native pools, so overlapping them hides most of the prepare cost; JS only
+// coordinates. One file is in each stage at a time, so peak memory stays flat.
+async function indexQueue(
+  api: EmbeddingsApi,
+  queue: SafFile[],
+  know: Knowledge,
+  opts: {
+    shouldCancel?: () => boolean;
+    onFile?: (index: number, file: SafFile, addedSoFar: number) => void;
+  }
+): Promise<{ added: number; errors: number }> {
+  let added = 0;
+  let errors = 0;
+  let next: Promise<Prepared> | null = queue.length ? prepareFile(queue[0], 0) : null;
+  for (let i = 0; i < queue.length; i++) {
+    const prep = await next!;
+    if (opts.shouldCancel?.()) {
+      for (const t of prep.temp) await deleteCache(t);
+      break;
+    }
+    // Kick off the next file's prepare BEFORE finishing this one — this is the
+    // overlap that makes the pipeline worth having.
+    next = i + 1 < queue.length ? prepareFile(queue[i + 1], i + 1) : null;
+    opts.onFile?.(i, queue[i], added);
+    const r = await finishFile(api, prep, know);
+    if (r === 'added') added++;
+    else errors++;
+  }
+  return { added, errors };
 }
 
 // Phase 1 of accepting a shared meme: copy each file into the first linked
@@ -431,22 +687,48 @@ export async function indexSavedFiles(
   opts: { onProgress?: (done: number, total: number) => void } = {}
 ): Promise<{ added: number; errors: number }> {
   if (saved.length === 0) return { added: 0, errors: 0 };
-  const know = await buildKnowledge(api);
+  return withHeavyPass(async () => {
+    const know = await buildKnowledge(api);
+    await stampIndexModel().catch(() => {});
+    const { added, errors } = await indexQueue(api, saved, know, {
+      onFile: (i) => opts.onProgress?.(i, saved.length),
+    });
+    opts.onProgress?.(saved.length, saved.length);
+    return { added, errors };
+  });
+}
 
-  let added = 0;
-  let errors = 0;
-  for (let i = 0; i < saved.length; i++) {
-    opts.onProgress?.(i, saved.length);
-    const r = await processFile(api, saved[i], know, i);
-    if (r === 'error') errors++;
-    else added++;
-  }
-  opts.onProgress?.(saved.length, saved.length);
-  return { added, errors };
+// Recovery sweep for share-imports whose at-share-time index never finished
+// (model still loading, app killed mid-import): their placeholder rows sit at
+// the top of the library as eternal spinner tiles, and nothing retried them
+// without the user manually running Index. Re-indexes exactly those files.
+// insertMeme replaces the placeholder by uri; a file that has since vanished
+// from the folder degrades its row instead, so the sweep always terminates.
+export async function indexPendingMemes(
+  api: EmbeddingsApi
+): Promise<{ added: number; errors: number }> {
+  const rows = await getPendingMemes();
+  if (rows.length === 0) return { added: 0, errors: 0 };
+  return indexSavedFiles(
+    api,
+    rows.map((r) => ({ uri: r.uri, name: r.name, kind: r.kind as SafFile['kind'] }))
+  );
 }
 
 export interface RetagResult {
-  updated: number;
+  updated: number; // rows whose tags/terms actually changed (unchanged rows are skipped)
+}
+
+// Zero-shot prompt tags are a pure function of (embedding, curated labels) —
+// teaching can never change them — so they're cached per meme across re-tags
+// and only the taught heads are re-scored each pass. That drops the per-teach
+// cost from "library × ~100 label vectors" to "library × taught heads". The
+// signature guards against a row being re-indexed (new embedding for the same
+// id) or an id being reused after a clear.
+const promptTagCache = new Map<number, { sig: number; tags: Tag[] }>();
+function embSig(e: Float32Array): number {
+  const n = e.length;
+  return n ? n + e[0] + e[n >> 1] * 3 + e[n - 1] * 7 : 0;
 }
 
 // Re-run tagging over every already-indexed meme using current knowledge
@@ -454,8 +736,9 @@ export interface RetagResult {
 // no image re-embedding — only cheap vector math.
 export async function retagAll(
   api: EmbeddingsApi,
-  opts: { onProgress?: (done: number, total: number) => void } = {}
+  opts: { onProgress?: (done: number, total: number) => void; shouldCancel?: () => boolean } = {}
 ): Promise<RetagResult> {
+  return withHeavyPass(async () => {
   const know = await buildKnowledge(api);
   const rows = await getAllMemeEmbeddings();
 
@@ -467,20 +750,36 @@ export async function retagAll(
   const updates: { id: number; tags: Tag[]; extraTerms: string }[] = [];
   const tick = createYielder();
   for (let i = 0; i < rows.length; i++) {
+    // Cancellable (the Stop button reaches this now): rows classified so far
+    // are still written below, so a stopped re-tag makes partial progress.
+    if (opts.shouldCancel?.()) break;
     const row = rows[i];
+    // Degraded rows (files the pipeline couldn't process) have no embedding.
+    if (row.embedding.length === 0) {
+      opts.onProgress?.(i + 1, rows.length);
+      continue;
+    }
     const vec = Array.from(row.embedding);
-    const base = mergeTags(
-      classifyImage(vec, know.labelVecs, know.exemplarHeads, know.mean, know.negativeVecs),
-      ocrTags(row.ocrText)
-    );
-    // Preserve any LFM2-VL tags already on the meme — re-tagging applies new
+    const sig = embSig(row.embedding);
+    let prompts = promptTagCache.get(row.id);
+    if (!prompts || prompts.sig !== sig) {
+      prompts = { sig, tags: classifyPrompts(vec, know.labelVecs, know.negativeVecs) };
+      promptTagCache.set(row.id, prompts);
+    }
+    const visual = mergeClassified(prompts.tags, classifyExemplars(vec, know.exemplarHeads, know.mean));
+    const base = mergeTags(visual, ocrTags(row.ocrText));
+    // Preserve any VLM tags already on the meme — re-tagging applies new
     // taught knowledge, it shouldn't erase the vision pass's work.
     const visionTags = row.tags.filter((t) => t.source === 'vision');
     const merged = dedupeRankTags([...base, ...visionTags], 6);
     // Likewise keep the vision search terms (subjects/text/caption keywords)
     // that already live in extra_terms — union them with the fresh assoc terms.
     const extraTerms = unionTerms(extraTermsFor(merged, know.assoc), row.extraTerms);
-    updates.push({ id: row.id, tags: merged, extraTerms });
+    // Write only what moved: on a typical teach a handful of memes change, so
+    // the transaction shrinks from "whole library" to "what the teach touched".
+    if (extraTerms !== row.extraTerms || JSON.stringify(merged) !== row.rawTags) {
+      updates.push({ id: row.id, tags: merged, extraTerms });
+    }
     opts.onProgress?.(i + 1, rows.length);
     await tick();
   }
@@ -488,6 +787,7 @@ export async function retagAll(
   // Single transaction for all the writes — fast even on a big library.
   await bulkUpdateMemeTags(updates);
   return { updated: updates.length };
+  });
 }
 
 // Merge two whitespace-separated term strings into a de-duplicated bag.
@@ -500,7 +800,7 @@ function unionTerms(a: string, b: string): string {
   return [...set].join(' ');
 }
 
-// ---- LFM2-VL enrichment pass -------------------------------------------------
+// ---- VLM enrichment pass (Gemma 4 / LFM2.5-VL) --------------------------------
 
 export interface EnrichProgress {
   done: number;
@@ -521,10 +821,12 @@ export interface EnrichResult {
 export interface VisionEnricher {
   ready: boolean;
   describe: (jpegPath: string, ocrHint?: string) => Promise<VisionResult | null>;
+  embedText?: (text: string) => Promise<number[]>;
 }
 
 interface VisionPayload {
   caption: string;
+  captionEmbedding: number[] | null;
   tags: Tag[];
   extraTerms: string;
 }
@@ -601,6 +903,13 @@ function visionExtraTerms(merged: Tag[], assoc: Map<string, string[]>, res: Visi
   return `${extraTermsFor(merged, assoc)} ${extra}`.replace(/\s+/g, ' ').trim();
 }
 
+function captionSearchText(caption: string, tags: Tag[], extraTerms: string): string {
+  return [caption, tags.map((t) => t.label).join(' '), extraTerms]
+    .join(' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 // Run the model on one meme and persist. Returns the saved payload (to seed the
 // twin index) or a terminal status. Re-derives the frame each time so memory
 // stays flat across a whole library; times the call for telemetry.
@@ -619,7 +928,7 @@ async function describeAndSave(
     const res = await vision.describe(frame.jpeg, m.ocrText);
     if (!res) return { status: 'unready' }; // model went unready; leave pending
 
-    // LFM's open-vocabulary tags join the existing CLIP/OCR/exemplar tags,
+    // The VLM's open-vocabulary tags join the existing CLIP/OCR/exemplar tags,
     // ranked between them (above CLIP guesses, below the user's truth).
     const visionTags: Tag[] = res.tags.map((label) => ({
       label,
@@ -629,10 +938,13 @@ async function describeAndSave(
     }));
     const merged = dedupeRankTags([...m.tags, ...visionTags], 6);
     const extraTerms = visionExtraTerms(merged, assoc, res);
+    const captionEmbedding = vision.embedText
+      ? await vision.embedText(captionSearchText(res.caption, merged, extraTerms))
+      : null;
 
-    await setMemeVision(m.id, { caption: res.caption, tags: merged, extraTerms });
+    await setMemeVision(m.id, { caption: res.caption, captionEmbedding, tags: merged, extraTerms });
     recordDuration(Date.now() - started);
-    return { status: 'done', payload: { caption: res.caption, tags: merged, extraTerms } };
+    return { status: 'done', payload: { caption: res.caption, captionEmbedding, tags: merged, extraTerms } };
   } catch {
     await markVisionFailed(m.id).catch(() => {});
     return { status: 'failed' };
@@ -656,8 +968,24 @@ async function enrichOne(
     const visionTags = twin.tags.filter((t) => t.source === 'vision');
     const merged = dedupeRankTags([...m.tags, ...visionTags], 6);
     const extraTerms = `${extraTermsFor(merged, assoc)} ${twin.extraTerms}`.replace(/\s+/g, ' ').trim();
-    await setMemeVision(m.id, { caption: twin.caption, tags: merged, extraTerms });
-    pushTwin({ embedding: m.embedding, ocrText: m.ocrText, caption: twin.caption, tags: merged, extraTerms });
+    const captionEmbedding =
+      twin.captionEmbedding ??
+      (vision.embedText ? await vision.embedText(captionSearchText(twin.caption, merged, extraTerms)) : null);
+    const captionEmbeddingArray = captionEmbedding ? Array.from(captionEmbedding) : null;
+    await setMemeVision(m.id, {
+      caption: twin.caption,
+      captionEmbedding: captionEmbeddingArray,
+      tags: merged,
+      extraTerms,
+    });
+    pushTwin({
+      embedding: m.embedding,
+      ocrText: m.ocrText,
+      caption: twin.caption,
+      captionEmbedding: captionEmbeddingArray ? Float32Array.from(captionEmbeddingArray) : null,
+      tags: merged,
+      extraTerms,
+    });
     telem.deduped += 1;
     return 'deduped';
   }
@@ -669,6 +997,9 @@ async function enrichOne(
       embedding: m.embedding,
       ocrText: m.ocrText,
       caption: r.payload.caption,
+      captionEmbedding: r.payload.captionEmbedding
+        ? Float32Array.from(r.payload.captionEmbedding)
+        : null,
       tags: r.payload.tags,
       extraTerms: r.payload.extraTerms,
     });
@@ -725,6 +1056,260 @@ export async function enrichNextMeme(
   const twins = await getTwinIndex();
   const r = await enrichOne(vision, queue[0], assoc, twins);
   return r === 'unready' ? 'empty' : r;
+}
+
+export async function backfillCaptionEmbeddings(
+  api: Pick<EmbeddingsApi, 'embedText'>,
+  opts: { limit?: number; onProgress?: (done: number, total: number) => void } = {}
+): Promise<number> {
+  const rows = await getMemesNeedingCaptionEmbedding(opts.limit ?? 25);
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    const text = captionSearchText(row.caption, row.tags, row.extraTerms);
+    if (text) await setMemeCaptionEmbedding(row.id, await api.embedText(text));
+    opts.onProgress?.(i + 1, rows.length);
+  }
+  return rows.length;
+}
+
+async function prepareVisualBackfillRow(
+  row: MemeNeedingVisualEmbeddingRow,
+  idx: number
+): Promise<Prepared> {
+  return prepareFile({ uri: row.uri, name: row.name, kind: row.kind }, idx);
+}
+
+// Returns the number of rows FETCHED (0 = queue drained, caller can stop
+// looping). Termination is guaranteed by failure stamping: a row that can't be
+// prepared or embedded is marked failed and stops matching the pending query,
+// so no batch can be re-served forever. A model that went unready mid-batch is
+// transient — bail with 0 and let the next readiness change retry.
+export async function backfillVisualEmbeddings(
+  api: Pick<EmbeddingsApi, 'embedVisualImage' | 'visualModel' | 'visualReady'>,
+  opts: { limit?: number; onProgress?: (done: number, total: number) => void } = {}
+): Promise<number> {
+  if (!api.visualReady || !api.embedVisualImage || !api.visualModel.available) return 0;
+  const model = api.visualModel.id;
+  const rows = await getMemesNeedingVisualEmbedding(model, opts.limit ?? 10);
+  for (let i = 0; i < rows.length; i++) {
+    // Yield to indexing/re-tagging the moment one starts — this loop is idle
+    // work and DINO is the heaviest model in the app. Returning nonzero keeps
+    // the caller's loop alive; it re-checks the gate before calling again.
+    if (heavyPassActive()) return rows.length;
+    // Breathe between items even when idle so the backfill never pins the CPU
+    // (thermals, UI responsiveness) — it has all day.
+    if (i > 0) await new Promise<void>((r) => setTimeout(r, 400));
+    const prep = await prepareVisualBackfillRow(rows[i], i);
+    try {
+      if (!prep.ok) {
+        // Unreadable file (deleted from the folder, corrupt) — permanent.
+        await markVisualEmbeddingFailed(rows[i].id, model).catch(() => {});
+      } else {
+        const visual = await api.embedVisualImage(prep.jpeg);
+        if (!visual) return 0; // model went unready — stop, don't stamp
+        await setMemeVisualEmbedding(rows[i].id, visual.model, visual.embedding);
+      }
+    } catch {
+      // Per-image native failure (decode error etc.) — permanent for this row;
+      // stamping it keeps the loop marching instead of aborting the batch.
+      await markVisualEmbeddingFailed(rows[i].id, model).catch(() => {});
+    } finally {
+      for (const t of prep.temp) await deleteCache(t);
+    }
+    opts.onProgress?.(i + 1, rows.length);
+  }
+  return rows.length;
+}
+
+// Fast path for a poster: MediaMetadataRetriever reads the SAF content:// uri
+// directly (the module opens a file descriptor off the resolver), so grabbing
+// one frame does NOT require copying the whole multi-megabyte video into the
+// cache the way the embed pipeline must. Frame → downscaled jpeg → permanent
+// thumbs dir. Throws on any failure; the caller falls back to the copy path
+// (some providers/containers only cooperate with a real local file).
+async function extractPosterDirect(uri: string): Promise<string> {
+  const { uri: frame } = await VideoThumbnails.getThumbnailAsync(uri, { time: 1000 });
+  try {
+    const jpeg = await toJpeg(frame);
+    try {
+      return await persistThumb(jpeg);
+    } finally {
+      await deleteCache(jpeg);
+    }
+  } finally {
+    await deleteCache(frame);
+  }
+}
+
+// MediaMetadataRetriever is known to occasionally HANG (not fail) on certain
+// streams — and one hung native call would wedge the whole worker pool below,
+// silently ending the backfill for the session. Race every grab against a
+// timeout; the abandoned native op can't be cancelled (its temp files are
+// reclaimed by the launch sweep), but the loop keeps marching.
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error('timeout')), ms);
+    p.then(
+      (v) => {
+        clearTimeout(t);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(t);
+        reject(e);
+      }
+    );
+  });
+}
+const THUMB_DIRECT_TIMEOUT_MS = 8_000;
+const THUMB_FALLBACK_TIMEOUT_MS = 20_000;
+
+// Videos whose poster extraction TIMED OUT recently. Deliberately not stamped
+// THUMB_FAILED (a timeout is usually transient codec/CPU contention — a
+// describe generation or an index running underneath — and a permanent stamp
+// would blank the tile forever), but re-serving them every batch would
+// re-wedge the pool. They sit out for a cooldown, then retry: benching them
+// for the whole session turned one busy stretch into "many thumbnails still
+// missing" until the next app launch.
+const THUMB_SKIP_RETRY_MS = 10 * 60_000;
+const thumbSkip = new Map<number, number>(); // meme id -> retry-after timestamp
+
+async function nextThumbRows(limit: number): Promise<{ id: number; uri: string; name: string }[]> {
+  const now = Date.now();
+  for (const [id, until] of thumbSkip) {
+    if (until <= now) thumbSkip.delete(id);
+  }
+  const rows = await getVideosNeedingThumb(limit + thumbSkip.size);
+  return rows.filter((r) => !thumbSkip.has(r.id)).slice(0, limit);
+}
+
+// Whether any video still awaits a poster (excluding this session's timed-out
+// skips) — the DINO backfill defers to this queue.
+export async function videoThumbsPending(): Promise<boolean> {
+  return (await nextThumbRows(1)).length > 0;
+}
+
+// Extract grid posters for videos indexed before posters existed (or whose
+// inline extraction failed transiently). No model involved, and the fast path
+// doesn't even copy the file — so a few hundred missing posters drain in
+// seconds, not minutes. A small worker pool keeps several frame grabs in
+// flight (frame retrieval is I/O + a single decoded frame; Android handles a
+// few retrievers at once fine). Yields to indexing/re-tagging only — NOT the
+// interactive window: posters are what the user is actively watching for.
+// Returns rows FETCHED (0 = drained); THUMB_FAILED stamping and the timeout
+// skip-set guarantee termination.
+const isTimeout = (e: unknown): boolean => String((e as Error)?.message) === 'timeout';
+// Expo wraps native rejections in boilerplate — "Call to function 'X' has
+// been rejected. → Caused by: java.lang.IllegalStateException: <reason>" —
+// which ate the whole diagnostics budget before the reason. Keep only the
+// part after the last cause, minus the exception class name.
+const errText = (e: unknown): string => {
+  let s = String((e as Error)?.message ?? e);
+  const causedBy = s.lastIndexOf('Caused by:');
+  if (causedBy >= 0) {
+    s = s
+      .slice(causedBy + 'Caused by:'.length)
+      .replace(/^\s*[a-zA-Z0-9_.$]*(Exception|Error)[:\s]*/, '');
+  }
+  return s.trim().slice(0, 120);
+};
+
+// One video's poster, tried three ways:
+//  1. our own MediaCodec decoder (native) in AUTO mode — the player's decode
+//     path, duration-aware and near-black-frame-rejecting (a fixed t=1s
+//     poster landed on fade-from-black intros), and it reads "mp4 gif" style
+//     streams MMR flatly refuses. The primary path.
+//  2. MediaMetadataRetriever straight off the SAF uri (no copy)
+//  3. MediaMetadataRetriever on a real local copy (provider/container quirks)
+// Returns the persisted path, 'timeout' (transient — retry next session), or
+// null (genuinely undecodable — stamp THUMB_FAILED). A final failure logs all
+// three per-path reasons to the diagnostics list: extraction failures happen
+// on a device we can't attach to, and "which path said what" is the only way
+// to tell a missing codec from a broken file from a permission problem.
+async function extractPosterAnyway(
+  row: { id: number; uri: string; name: string },
+  idx: number
+): Promise<string | 'timeout' | null> {
+  let timedOut = false;
+  const errs: string[] = [];
+
+  try {
+    const frame = await withTimeout(extractVideoFrame(row.uri, -1), THUMB_FALLBACK_TIMEOUT_MS);
+    if (frame) {
+      try {
+        const jpeg = await toJpeg(frame);
+        try {
+          return await persistThumb(jpeg);
+        } finally {
+          await deleteCache(jpeg);
+        }
+      } finally {
+        await deleteCache(frame);
+      }
+    }
+    errs.push('codec: native module not built in');
+  } catch (e) {
+    timedOut ||= isTimeout(e);
+    errs.push(`codec: ${errText(e)}`);
+  }
+
+  try {
+    return await withTimeout(extractPosterDirect(row.uri), THUMB_DIRECT_TIMEOUT_MS);
+  } catch (e) {
+    timedOut ||= isTimeout(e);
+    errs.push(`direct: ${errText(e)}`);
+  }
+
+  try {
+    const prep = await withTimeout(
+      prepareFile({ uri: row.uri, name: row.name, kind: 'video' }, idx),
+      THUMB_FALLBACK_TIMEOUT_MS
+    );
+    try {
+      if (prep.ok) return await persistThumb(prep.jpeg);
+      errs.push(`copy: ${prep.stage}: ${prep.reason.slice(0, 90)}`);
+    } finally {
+      for (const t of prep.temp) await deleteCache(t);
+    }
+  } catch (e) {
+    timedOut ||= isTimeout(e);
+    errs.push(`copy: ${errText(e)}`);
+  }
+
+  if (timedOut) return 'timeout';
+  await addIndexError({
+    name: row.name,
+    kind: 'video',
+    stage: 'poster',
+    reason: errs.join(' | ').slice(0, 300),
+  }).catch(() => {});
+  return null;
+}
+
+// The Settings retry button clears the failure stamps in the DB; the session
+// skip-set has to go with them or the retried rows stay invisible here.
+export function clearThumbSkips(): void {
+  thumbSkip.clear();
+}
+
+const THUMB_POOL = 3;
+export async function backfillVideoThumbs(
+  opts: { limit?: number } = {}
+): Promise<number> {
+  const rows = await nextThumbRows(opts.limit ?? 24);
+  let next = 0;
+  const worker = async () => {
+    while (!indexingActive()) {
+      const i = next++;
+      if (i >= rows.length) return;
+      const row = rows[i];
+      const result = await extractPosterAnyway(row, i).catch(() => null);
+      if (result === 'timeout') thumbSkip.set(row.id, Date.now() + THUMB_SKIP_RETRY_MS);
+      else await setMemeThumb(row.id, result ?? THUMB_FAILED).catch(() => {});
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(THUMB_POOL, rows.length) }, worker));
+  return rows.length;
 }
 
 // Bounded session for an OS-scheduled background run: describe up to `maxItems`

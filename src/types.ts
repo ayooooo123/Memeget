@@ -7,7 +7,7 @@ export interface Tag {
   source?: 'prompt' | 'exemplar' | 'ocr' | 'vision'; // how the label was matched
 }
 
-// Lifecycle of the optional LFM2-VL enrichment pass for a meme.
+// Lifecycle of the optional VLM enrichment pass for a meme.
 //  pending -> not yet described · done -> described · failed -> describe errored
 //  (won't auto-retry; a manual "Describe library" re-run can reset failures).
 export type VisionState = 'pending' | 'done' | 'failed';
@@ -25,7 +25,7 @@ export interface MemeRecord {
   name: string;
   kind: MediaKind;
   ocrText: string;
-  caption: string; // one-line scene/joke description from LFM2-VL ('' until enriched)
+  caption: string; // one-line scene/joke description from the VLM ('' until enriched)
   transcript: string; // speech heard in a video, via on-device Whisper ('' until analyzed)
   tags: Tag[];
   extraTerms: string; // association/world-knowledge terms, for search
@@ -34,6 +34,11 @@ export interface MemeRecord {
   indexedAt: number;
   modifiedAt?: number; // file's last-modified time (ms); drives the recency sort
   pending?: boolean; // saved & visible, but not yet embedded/OCR'd/tagged
+  // Persisted poster frame for a video (file:// jpeg). Videos need one because
+  // the grid's image view can't decode a frame from every codec — tiles for
+  // "mp4 gif" style files rendered blank straight off the content:// uri.
+  // Absent for images, and for videos until the indexer/backfill extracts it.
+  thumbUri?: string;
 }
 
 // A user-taught (or pack-provided) reference example: an image embedding that
