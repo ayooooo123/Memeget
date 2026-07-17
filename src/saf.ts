@@ -7,9 +7,12 @@ import { File } from 'expo-file-system';
 import * as VideoThumbnails from 'expo-video-thumbnails';
 
 import { getFileModifiedTime } from '../modules/memeget-bg';
+import { extOf, kindOf, mimeForName, videoMimeFor } from './mediaFormats';
 
-const IMAGE_EXTS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'heic', 'heif'];
-const VIDEO_EXTS = ['mp4', 'mov', 'mkv', 'webm', 'avi', 'm4v', '3gp'];
+// Re-exported so existing importers (MemeGrid, the zip importer) can keep
+// pulling these off the SAF module; the definitions now live in the pure,
+// dependency-free mediaFormats module so they're unit-testable in isolation.
+export { kindOf, mimeForName, videoMimeFor };
 
 export interface SafFile {
   uri: string; // content:// uri
@@ -36,34 +39,6 @@ function nameFromContentUri(uri: string): string {
   } catch {
     return uri;
   }
-}
-
-function extOf(name: string): string {
-  const dot = name.lastIndexOf('.');
-  return dot >= 0 ? name.slice(dot + 1).toLowerCase() : '';
-}
-
-// MIME type for a video file from its extension, for the clipboard clip
-// description — paste targets decide whether to accept the clip by its type.
-const VIDEO_MIME: Record<string, string> = {
-  mp4: 'video/mp4',
-  mov: 'video/quicktime',
-  mkv: 'video/x-matroska',
-  webm: 'video/webm',
-  avi: 'video/x-msvideo',
-  m4v: 'video/x-m4v',
-  '3gp': 'video/3gpp',
-};
-
-export function videoMimeFor(name: string): string {
-  return VIDEO_MIME[extOf(name)] ?? 'video/mp4';
-}
-
-function kindOf(name: string): 'image' | 'video' | null {
-  const ext = extOf(name);
-  if (IMAGE_EXTS.includes(ext)) return 'image';
-  if (VIDEO_EXTS.includes(ext)) return 'video';
-  return null;
 }
 
 // Prompt the user to grant access to a folder. Returns the tree URI + a label.
@@ -235,10 +210,6 @@ export async function saveToFolder(
   mimeType: string,
   folderUri: string
 ): Promise<{ uri: string; name: string }> {
-  const safeFull = (fileName || `meme_${Date.now()}.jpg`).replace(/[^a-zA-Z0-9._-]/g, '_');
-  const dot = safeFull.lastIndexOf('.');
-  // createFileAsync derives the extension from the mime type, so pass the base.
-  const base = dot > 0 ? safeFull.slice(0, dot) : safeFull;
   const norm = src.startsWith('file://') || src.startsWith('content://') ? src : `file://${src}`;
 
   // Stage to a cache file:// first (content:// can't always be read directly),
@@ -247,11 +218,42 @@ export async function saveToFolder(
   await FileSystem.copyAsync({ from: norm, to: tmp });
   try {
     const data = await FileSystem.readAsStringAsync(tmp, { encoding: FileSystem.EncodingType.Base64 });
-    const uri = await SAF.createFileAsync(folderUri, base, mimeType || 'image/jpeg');
-    await FileSystem.writeAsStringAsync(uri, data, { encoding: FileSystem.EncodingType.Base64 });
-    return { uri, name: safeFull };
+    return await writeBase64ToFolder(data, fileName, mimeType, folderUri);
   } finally {
     await FileSystem.deleteAsync(tmp, { idempotent: true });
+  }
+}
+
+// Create a new SAF document in a linked folder and write raw base64 bytes into
+// it. The direct-bytes counterpart to saveToFolder, used by the zip importer:
+// jszip already hands us each entry's bytes as base64, so there's no source file
+// to copy from — we skip straight to createFileAsync + write. Returns the new
+// content:// uri + the sanitized display name.
+export async function writeBase64ToFolder(
+  base64: string,
+  fileName: string,
+  mimeType: string,
+  folderUri: string
+): Promise<{ uri: string; name: string }> {
+  const safeFull = (fileName || `meme_${Date.now()}.jpg`).replace(/[^a-zA-Z0-9._-]/g, '_');
+  const dot = safeFull.lastIndexOf('.');
+  // createFileAsync derives the extension from the mime type, so pass the base.
+  const base = dot > 0 ? safeFull.slice(0, dot) : safeFull;
+  const uri = await SAF.createFileAsync(folderUri, base, mimeType || 'image/jpeg');
+  await FileSystem.writeAsStringAsync(uri, base64, { encoding: FileSystem.EncodingType.Base64 });
+  return { uri, name: safeFull };
+}
+
+// Read any file (a DocumentPicker file:// cache copy, or a content:// uri) as a
+// base64 string with no data-URI prefix. Tries the uri directly first — the zip
+// the user picks with copyToCacheDirectory is already a readable file:// path —
+// and only stages a cache copy if that fails (some content:// providers refuse a
+// direct read).
+export async function readFileBase64(uri: string, name = 'file.bin'): Promise<string> {
+  try {
+    return await FileSystem.readAsStringAsync(uri, { encoding: FileSystem.EncodingType.Base64 });
+  } catch {
+    return await readImageBase64(uri, name);
   }
 }
 
