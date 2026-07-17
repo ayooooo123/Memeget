@@ -69,7 +69,14 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
   const [described, setDescribed] = useState(0);
   const [pending, setPending] = useState(0);
   const [enriching, setEnriching] = useState<{ done: number; total: number } | null>(null);
-  const [tele, setTele] = useState<VisionTelemetry>({ described: 0, deduped: 0, failed: 0, avgMs: 0 });
+  const [tele, setTele] = useState<VisionTelemetry>({
+    described: 0,
+    deduped: 0,
+    failed: 0,
+    avgMs: 0,
+    avgPromptTokens: 0,
+    avgGenTokens: 0,
+  });
   const [perf, setPerf] = useState<IndexPerf>({
     copyMs: 0,
     transcodeMs: 0,
@@ -598,6 +605,12 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
               <Text style={styles.faintSmall}>
                 ≈ {(tele.avgMs / 1000).toFixed(1)}s per meme on this device
                 {tele.deduped > 0 ? ` · ${tele.deduped} skipped as duplicates` : ''}
+              </Text>
+            )}
+            {tele.avgPromptTokens > 0 && (
+              <Text style={styles.faintSmall}>
+                {Math.round(tele.avgPromptTokens)} prompt tokens (prefill) ·{' '}
+                {Math.round(tele.avgGenTokens)} generated (decode) per caption
               </Text>
             )}
             {enriching ? (

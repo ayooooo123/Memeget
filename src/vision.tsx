@@ -20,6 +20,7 @@ import {
   indexPendingMemes,
   enrichLibrary,
   enrichNextMeme,
+  recordVisionTokens,
   videoThumbsPending,
   type EnrichProgress,
   type EnrichResult,
@@ -283,6 +284,19 @@ export function VisionProvider({ children }: { children: React.ReactNode }) {
       { role: 'system', content: SYSTEM_PROMPT },
       { role: 'user', content: userTurn(ocrHint), mediaPath: jpegPath },
     ]);
+    // Record the prefill/decode token split (defensively — older runtimes may
+    // not expose the counters). This tells us whether captioning is prefill- or
+    // decode-bound, i.e. whether a prompt trim / native prefix-KV cache is worth
+    // it or the early-stop already covers the cost.
+    try {
+      const gl = llm as unknown as {
+        getPromptTokenCount?: () => number;
+        getGeneratedTokenCount?: () => number;
+      };
+      recordVisionTokens(gl.getPromptTokenCount?.() ?? 0, gl.getGeneratedTokenCount?.() ?? 0);
+    } catch {
+      // counters unavailable on this build — skip, telemetry just stays 0
+    }
     return parseVision(reply);
   };
   const enricherRef = useRef<VisionEnricher>({ ready: false, describe });
