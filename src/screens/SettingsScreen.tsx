@@ -117,9 +117,15 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
       const n = await resetFailedThumbs();
       clearThumbSkips();
       showToast(`Retrying posters for ${n} videos…`, 'info');
-      while ((await backfillVideoThumbs({ limit: 24 }).catch(() => 0)) > 0) {
+      while (
+        (await backfillVideoThumbs({ limit: 24 }).catch(() => ({ fetched: 0, patches: [] })))
+          .fetched > 0
+      ) {
         setPosterStats(await getPosterStats().catch(() => ({ total: 0, done: 0, failed: 0, missing: 0 })));
       }
+      // A user-driven full rebuild (not a background drain) — a single library
+      // refresh at the end is fine here; they're watching this screen, not
+      // scrolling the grid.
       emitLibraryChanged();
       const stats = await getPosterStats();
       setPosterStats(stats);

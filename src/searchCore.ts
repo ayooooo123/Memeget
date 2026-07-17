@@ -31,3 +31,38 @@ export function hybridSearchScore(
   const captionScore = dot(queryVec, captionVec);
   return imageScore + CAPTION_WEIGHT * Math.max(0, captionScore - CAPTION_COS_FLOOR);
 }
+
+// Weights for the lexical channel, factored out of the db scan so the whole
+// score is unit-testable in one place. A partial keyword match nudges the score;
+// an ALL-terms literal hit (the words actually appear in the meme's text, name,
+// or tags) adds a decisive boost so keyword results outrank pure-semantic
+// near-misses — image/text cosines top out around ~0.35, so without this a
+// literal match could be buried past the result cap.
+const LEXICAL_WEIGHT = 0.35;
+const ALL_TERMS_BOOST = 0.6;
+
+// One meme's full search score: the dense hybrid channel (image + optional
+// caption text) plus the lexical channel. `queryVec` may be null (lexical-only
+// mode, served while the text-embed model is busy); `terms` are the
+// already-lowercased query words. `searchText` is the raw haystack, matched
+// case-as-stored via `.includes` — the query is lowercased, the haystack is not,
+// exactly as the previous inline scan did.
+export function scoreEntry(
+  queryVec: Float32Array | number[] | null,
+  terms: string[],
+  entry: {
+    imageVec: Float32Array | number[];
+    captionVec: Float32Array | number[] | null;
+    searchText: string;
+  }
+): number {
+  let score = queryVec ? hybridSearchScore(queryVec, entry.imageVec, entry.captionVec) : 0;
+  if (terms.length) {
+    const hay = entry.searchText;
+    let matched = 0;
+    for (const t of terms) if (hay.includes(t)) matched++;
+    score += LEXICAL_WEIGHT * (matched / terms.length);
+    if (matched === terms.length) score += ALL_TERMS_BOOST;
+  }
+  return score;
+}
