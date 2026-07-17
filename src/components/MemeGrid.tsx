@@ -34,6 +34,7 @@ import {
 import { emitLibraryChanged } from '../events';
 import { scoreExemplar } from '../learnCore';
 import { buildExemplarHeads, noteInteractive, type ExemplarModel } from '../indexer';
+import { noteCodecInteractive } from '../interactive';
 import { success, tap, thud, warn } from '../haptics';
 import { copyFileToClipboard } from '../../modules/memeget-bg';
 import { deleteFile, materialize, readImageBase64, readVideoFrameBase64, videoMimeFor } from '../saf';
@@ -105,6 +106,20 @@ const GridCell = React.memo(function GridCell({
   onPress: (it: Item) => void;
   onLongPress: (it: Item) => void;
 }) {
+  const src = thumbSource(item);
+  // Track a render failure for THIS source so a tile the image view can't decode
+  // (an "mp4 gif" whose bytes wear a .gif name and land as kind 'image', a codec
+  // expo-image refuses, a stale/missing poster file) falls back to the labeled
+  // stub instead of a permanent blank square. Reset whenever the source changes
+  // so a poster landing later (patched in by id) is retried, not stuck on the
+  // earlier failure.
+  const [renderFailed, setRenderFailed] = useState(false);
+  useEffect(() => setRenderFailed(false), [src]);
+  // A video with no poster yet goes straight to the stub (asking the image view
+  // to decode the video hits the same retriever that already refused it). Any
+  // other tile only shows the stub once its image has actually failed to render.
+  const showStub = (item.kind === 'video' && !item.thumbUri) || renderFailed;
+
   return (
     <PressableScale
       scaleTo={0.94}
@@ -112,23 +127,22 @@ const GridCell = React.memo(function GridCell({
       onLongPress={() => onLongPress(item)}
       style={{ width: size, height: size }}
     >
-      {item.kind === 'video' && !item.thumbUri ? (
-        // No poster (backfill hasn't reached it, or every decoder refused the
-        // file): show a deliberate filmstrip stub with the filename instead of
-        // asking the image view to decode the video — it goes through the same
-        // retriever that already failed, so the tile would just render blank.
+      {showStub ? (
         <View style={[styles.thumb, styles.videoStub]}>
-          <Text style={styles.videoStubGlyph}>🎞</Text>
+          <Text style={styles.videoStubGlyph}>{item.kind === 'video' ? '🎞' : '🖼'}</Text>
           <Text style={styles.videoStubName} numberOfLines={2}>
             {item.name}
           </Text>
         </View>
       ) : (
         <Image
-          source={{ uri: thumbSource(item) }}
+          source={{ uri: src }}
           style={styles.thumb}
           contentFit="cover"
           transition={150}
+          // A tile that can't be decoded (mp4-as-gif, unsupported codec, missing
+          // poster) drops to the stub above instead of rendering blank.
+          onError={() => setRenderFailed(true)}
           // Reuse the view and release the previous bitmap when a cell is
           // recycled (e.g. when retagAll hands the list a fresh array).
           recyclingKey={String(item.id)}
@@ -183,6 +197,7 @@ export const MemeGrid = React.memo(function MemeGrid({
   onSearchLabel,
   emptyState,
   scrollToTopSignal,
+  onScrollActiveChange,
 }: {
   items: Item[];
   header?: React.ReactElement;
@@ -203,6 +218,9 @@ export const MemeGrid = React.memo(function MemeGrid({
   // the list back to the top so fresh results are visible immediately instead
   // of stranding the user wherever they'd scrolled to while browsing.
   scrollToTopSignal?: number;
+  // Called with true when a drag/fling begins and false when scrolling settles,
+  // so the parent can hold refreshes and stamp interactivity during a scroll.
+  onScrollActiveChange?: (active: boolean) => void;
 }) {
   const [selected, setSelected] = useState<Item | null>(null);
   // Multi-select: long-press a cell to enter selection mode, tap to toggle, then
@@ -296,6 +314,40 @@ export const MemeGrid = React.memo(function MemeGrid({
     listRef.current?.scrollToOffset({ offset: 0, animated: true });
   }, []);
 
+  // Report scroll activity to the parent, momentum-aware so a drag→fling handoff
+  // doesn't flap "settled" for a frame between the finger lifting and momentum
+  // starting. Deactivation is deferred a beat; a momentum-begin within that beat
+  // cancels it, so we stay "active" continuously from first touch to full stop.
+  const scrollSettleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const setScrollActive = useCallback(
+    (active: boolean) => {
+      if (active) {
+        if (scrollSettleTimer.current) {
+          clearTimeout(scrollSettleTimer.current);
+          scrollSettleTimer.current = null;
+        }
+        onScrollActiveChange?.(true);
+      } else {
+        if (scrollSettleTimer.current) clearTimeout(scrollSettleTimer.current);
+        scrollSettleTimer.current = setTimeout(() => {
+          scrollSettleTimer.current = null;
+          onScrollActiveChange?.(false);
+        }, 150);
+      }
+    },
+    [onScrollActiveChange]
+  );
+  const onScrollBeginDrag = useCallback(() => setScrollActive(true), [setScrollActive]);
+  const onScrollEndDrag = useCallback(() => setScrollActive(false), [setScrollActive]);
+  const onMomentumScrollBegin = useCallback(() => setScrollActive(true), [setScrollActive]);
+  const onMomentumScrollEnd = useCallback(() => setScrollActive(false), [setScrollActive]);
+  useEffect(
+    () => () => {
+      if (scrollSettleTimer.current) clearTimeout(scrollSettleTimer.current);
+    },
+    []
+  );
+
   // Stable across renders so the memoized GridCells aren't all re-rendered
   // every time unrelated grid state changes (opening the viewer, toggling
   // `loadingMore` during pagination, teaching). An unstable onPress here was
@@ -306,6 +358,9 @@ export const MemeGrid = React.memo(function MemeGrid({
     // The viewer is interactive foreground work: stand the background loops
     // down (they hold hardware codecs the video preview / frame-copy need).
     noteInteractive();
+    // Opening a video contends for the hardware decoder the poster backfill
+    // uses — stamp the short codec window so it briefly yields the decoder.
+    if (it.kind === 'video') noteCodecInteractive();
     setSelected(it);
   }, []);
 
@@ -520,6 +575,7 @@ export const MemeGrid = React.memo(function MemeGrid({
     // Frame extraction needs a hardware decoder; make the background loops
     // yield theirs before we try (retries inside cover the in-flight one).
     noteInteractive();
+    if (isVideo) noteCodecInteractive(); // free the poster loop's decoder now
     setBusy(true);
     try {
       if (isVideo) {
@@ -793,6 +849,10 @@ export const MemeGrid = React.memo(function MemeGrid({
         keyboardDismissMode="on-drag"
         onScroll={onScroll}
         scrollEventThrottle={64}
+        onScrollBeginDrag={onScrollBeginDrag}
+        onScrollEndDrag={onScrollEndDrag}
+        onMomentumScrollBegin={onMomentumScrollBegin}
+        onMomentumScrollEnd={onMomentumScrollEnd}
         onEndReached={onEndReached}
         onEndReachedThreshold={0.6}
         // Memory is already bounded by `windowSize`: FlatList only keeps that

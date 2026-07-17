@@ -1,17 +1,66 @@
 import * as SQLite from 'expo-sqlite';
 
 import { modelStamp, PRIMARY_EMBEDDING_MODEL, VISUAL_EMBEDDING_MODEL } from './embeddingModels';
-import { hybridSearchScore } from './searchCore';
+import { scoreEntry } from './searchCore';
+import {
+  ensureSearchIndex,
+  invalidateSearchIndex,
+  type SearchCacheEntry,
+} from './searchIndexCache';
 import type { MemeRecord, MediaKind, SearchHit, Tag, LinkedFolder, Exemplar } from './types';
 import { selectPairVectors, type VisualSimilarityRecord } from './visualSearch';
 
 let dbPromise: Promise<SQLite.SQLiteDatabase> | null = null;
 
+// Whether the bundled sqlite-vec extension loaded AND its scalar cosine is
+// callable. Everything that uses it degrades gracefully to the JS brute-force
+// path when this is false — the extension is a speedup, never a requirement, so
+// a build without it (plugin not enabled, a platform without the .so) still
+// works identically, just slower on very large libraries.
+let vecReady = false;
+export function sqliteVecReady(): boolean {
+  return vecReady;
+}
+
 function getDb(): Promise<SQLite.SQLiteDatabase> {
   if (!dbPromise) {
-    dbPromise = SQLite.openDatabaseAsync('memeget.db');
+    dbPromise = (async () => {
+      const db = await SQLite.openDatabaseAsync('memeget.db');
+      await tryLoadVecExtension(db);
+      return db;
+    })();
   }
   return dbPromise;
+}
+
+// Best-effort one-time load of the bundled sqlite-vec extension. Enabled at
+// build time via the expo-sqlite config plugin (`withSQLiteVecExtension`, see
+// app.json); absent otherwise. We probe the scalar function after loading so a
+// half-configured build is treated as "no vec" rather than crashing the first
+// similarity query.
+async function tryLoadVecExtension(db: SQLite.SQLiteDatabase): Promise<void> {
+  try {
+    const bundled = (SQLite as unknown as {
+      bundledExtensions?: Record<string, { libPath: string; entryPoint?: string }>;
+    }).bundledExtensions;
+    const ext = bundled?.['sqlite-vec'];
+    if (!ext) return;
+    const loadable = db as unknown as {
+      loadExtensionAsync?: (libPath: string, entryPoint?: string) => Promise<void>;
+    };
+    if (typeof loadable.loadExtensionAsync !== 'function') return;
+    await loadable.loadExtensionAsync(ext.libPath, ext.entryPoint);
+    // Probe: the extension is only "ready" if the scalar cosine actually runs.
+    await db.getFirstAsync(
+      'SELECT vec_distance_cosine(vec_f32(?), vec_f32(?)) AS d',
+      vecToBlob([1, 0]),
+      vecToBlob([1, 0])
+    );
+    vecReady = true;
+  } catch {
+    // Extension unavailable or unusable — stay on the JS brute-force path.
+    vecReady = false;
+  }
 }
 
 export async function initDb(): Promise<void> {
@@ -276,6 +325,7 @@ export async function countPendingMemes(): Promise<number> {
 export async function deleteMeme(id: number): Promise<void> {
   const db = await getDb();
   await db.runAsync('DELETE FROM memes WHERE id = ?', id);
+  invalidateSearchIndex(); // membership changed
 }
 
 export async function insertMeme(args: {
@@ -323,6 +373,7 @@ export async function insertMeme(args: {
     args.degraded ? 'none' : args.kind === 'video' ? 'pending' : 'none',
     args.thumbUri ?? ''
   );
+  invalidateSearchIndex(); // a searchable row was added or replaced
 }
 
 // Insert a lightweight placeholder for a freshly-saved meme that hasn't been
@@ -482,6 +533,7 @@ export async function updateMemeTags(id: number, tags: Tag[], extraTerms: string
     extraTerms,
     id
   );
+  invalidateSearchIndex(); // tags / association terms feed the lexical haystack
 }
 
 // Write tags for many memes in one transaction with a single prepared statement.
@@ -503,6 +555,7 @@ export async function bulkUpdateMemeTags(
   } finally {
     await stmt.finalizeAsync();
   }
+  invalidateSearchIndex(); // bulk tag/extra-terms rewrite (re-tag library)
 }
 
 // ---- VLM enrichment ----------------------------------------------------------
@@ -593,6 +646,7 @@ export async function setMemeVision(
     args.extraTerms,
     id
   );
+  invalidateSearchIndex(); // caption + caption vector + tags all feed search
 }
 
 export interface MemeNeedingCaptionEmbeddingRow {
@@ -629,6 +683,7 @@ export async function getMemesNeedingCaptionEmbedding(
 export async function setMemeCaptionEmbedding(id: number, embedding: number[]): Promise<void> {
   const db = await getDb();
   await db.runAsync('UPDATE memes SET caption_embedding = ? WHERE id = ?', vecToBlob(embedding), id);
+  invalidateSearchIndex(); // caption vector powers the hybrid text↔text channel
 }
 
 export interface MemeNeedingVisualEmbeddingRow {
@@ -834,6 +889,7 @@ export async function setMemeTranscript(id: number, transcript: string): Promise
     transcript,
     id
   );
+  invalidateSearchIndex(); // transcript is part of the lexical haystack
 }
 
 // Mark a video as failed-to-transcribe without touching anything else, so a
@@ -1056,6 +1112,41 @@ function materializeHits(scored: { row: MemeRow; score: number }[], limit: numbe
   });
 }
 
+// Build the resident search index in one pass: decode each meme's image (and
+// optional caption) vector once, precompute its lexical haystack, and stash a
+// ready-to-render record. Deliberately skips visual_embedding (DINO) — text
+// search never touches it. Runs only on a cold or invalidated cache, never per
+// keystroke, so its cost is amortized across every search until the next
+// content change.
+async function loadSearchIndex(): Promise<SearchCacheEntry[]> {
+  const db = await getDb();
+  // Pending placeholders have no embedding/OCR/tags yet, so they'd only add
+  // noise — leave them out until the indexer fills them in.
+  const rows = await db.getAllAsync<MemeRow>(
+    `SELECT id, uri, name, kind, embedding, caption_embedding, ocr_text, caption,
+            transcript, tags, extra_terms, vision_state, audio_state, indexed_at,
+            modified_at, pending, thumb_uri
+     FROM memes WHERE pending = 0`
+  );
+  return rows.map((row) => {
+    const { embedding, ...record } = rowToRecord(row);
+    return {
+      id: row.id,
+      kind: row.kind as MediaKind,
+      imageVec: embedding,
+      captionVec: row.caption_embedding ? blobToVec(row.caption_embedding) : null,
+      searchText: rowSearchText(row),
+      record,
+    };
+  });
+}
+
+// With vectors already decoded, scoring a few thousand memes is a few ms — score
+// them in one synchronous pass. Only past this size does a single pass risk being
+// felt mid-type, so only then do we hand the event loop a macrotask between
+// chunks (and re-check `shouldAbort`).
+const SEARCH_YIELD_THRESHOLD = 20_000;
+
 // `queryVec` may be null: lexical-only mode, used to serve instant results
 // while the text-embed model is busy behind heavy background work. Scores are
 // then purely keyword/OCR/tag/caption-text matches; the caller re-runs with
@@ -1067,13 +1158,13 @@ export async function searchByVector(
   kind?: MediaKind,
   shouldAbort?: () => boolean
 ): Promise<SearchHit[] | null> {
-  const db = await getDb();
-  // Pending placeholders have no embedding/OCR/tags yet, so they'd only add
-  // noise — leave them out until the indexer fills them in.
-  const rows = kind
-    ? await db.getAllAsync<MemeRow>('SELECT * FROM memes WHERE pending = 0 AND kind = ?', kind)
-    : await db.getAllAsync<MemeRow>('SELECT * FROM memes WHERE pending = 0');
+  // The resident index replaces the per-keystroke `SELECT *` + re-decode: it
+  // rebuilds only when searchable content/membership changed (see
+  // invalidateSearchIndex), so a keystroke pays for scoring alone.
+  const all = await ensureSearchIndex(loadSearchIndex);
   if (shouldAbort?.()) return null;
+  const entries = kind ? all.filter((e) => e.kind === kind) : all;
+
   let terms = queryText
     .toLowerCase()
     .split(/\s+/)
@@ -1084,39 +1175,22 @@ export async function searchByVector(
     terms = queryText.toLowerCase().split(/\s+/).filter(Boolean);
   }
 
-  const scored: { row: MemeRow; score: number }[] = [];
-  for (let i = 0; i < rows.length; i++) {
-    const row = rows[i];
-    let score = queryVec
-      ? hybridSearchScore(
-          queryVec,
-          blobToVec(row.embedding),
-          row.caption_embedding ? blobToVec(row.caption_embedding) : null
-        )
-      : 0;
-    if (terms.length) {
-      const hay = rowSearchText(row);
-      let matched = 0;
-      for (const t of terms) if (hay.includes(t)) matched++;
-      const lexical = matched / terms.length;
-      score += 0.35 * lexical; // lexical boost (incl. world-knowledge association terms)
-      // A literal keyword hit (the word actually appears in the meme's text,
-      // name, or tags) should outrank pure-semantic near-misses — text/image
-      // cosines top out around ~0.35, so this guarantees keyword results
-      // surface to the top instead of being buried past the result cap.
-      if (matched === terms.length) score += 0.6;
-    }
-    scored.push({ row, score });
+  const yielding = entries.length > SEARCH_YIELD_THRESHOLD;
+  const scored: { entry: SearchCacheEntry; score: number }[] = [];
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i];
+    scored.push({ entry, score: scoreEntry(queryVec, terms, entry) });
 
-    // Yield between chunks so the UI thread can render/handle touch, and bail
-    // immediately if a newer query has superseded this one.
-    if ((i & (SEARCH_CHUNK - 1)) === SEARCH_CHUNK - 1) {
+    // Only huge libraries chunk-yield; below the threshold this branch never
+    // runs and the whole scan stays synchronous.
+    if (yielding && (i & (SEARCH_CHUNK - 1)) === SEARCH_CHUNK - 1) {
       if (shouldAbort?.()) return null;
       await new Promise<void>((resolve) => setTimeout(resolve, 0));
     }
   }
 
-  return materializeHits(scored, limit);
+  scored.sort((a, b) => b.score - a.score);
+  return scored.slice(0, limit).map(({ entry, score }) => ({ ...entry.record, score }) as SearchHit);
 }
 
 // "More like this" for the viewer: rank the library by cosine similarity to one
@@ -1137,6 +1211,16 @@ export async function getSimilarMemes(id: number, limit = 12): Promise<SearchHit
     visualModel: source.visual_model ?? '',
   };
   if (target.imageEmbedding.length === 0) return [];
+
+  // Native fast path: sqlite-vec computes the per-pair cosine in C (SIMD) over
+  // the stored blobs, so the whole O(N) ranking never enters JS — a real win for
+  // "More like this" on a large library. Falls through to the JS scan below if
+  // the extension isn't loaded or the native query errors for any reason.
+  if (vecReady) {
+    const hits = await getSimilarMemesVec(db, id, target, limit).catch(() => null);
+    if (hits) return hits;
+  }
+
   const rows = await db.getAllAsync<MemeRow>(
     'SELECT * FROM memes WHERE pending = 0 AND id != ?',
     id
@@ -1162,9 +1246,69 @@ export async function getSimilarMemes(id: number, limit = 12): Promise<SearchHit
   return materializeHits(scored, limit);
 }
 
+// sqlite-vec ranking for getSimilarMemes. The CASE reproduces selectPairVectors
+// exactly: the DINO (visual) space is used for a pair only when BOTH the target
+// (the bound flag) AND the candidate row carry an active-model visual vector;
+// otherwise the primary image space. Vectors are normalized, so cosine distance
+// ascending == cosine similarity descending == the JS `dot` ranking. Empty
+// (degraded) embeddings are excluded — they'd score 0 and never reach the top-N.
+async function getSimilarMemesVec(
+  db: SQLite.SQLiteDatabase,
+  id: number,
+  target: VisualSimilarityRecord,
+  limit: number
+): Promise<SearchHit[]> {
+  const targetHasDino =
+    VISUAL_EMBEDDING_MODEL.available &&
+    !!target.visualEmbedding &&
+    target.visualEmbedding.length > 0 &&
+    target.visualModel === VISUAL_EMBEDDING_MODEL.id;
+  const clipQ = vecToBlob(Array.from(target.imageEmbedding));
+  // When the target has no DINO vector the DINO branch is never taken, so this
+  // bind is unused — reuse clipQ as a harmless placeholder rather than null.
+  const dinoQ = targetHasDino ? vecToBlob(Array.from(target.visualEmbedding!)) : clipQ;
+
+  const ranked = await db.getAllAsync<{ id: number; d: number }>(
+    `SELECT id,
+        CASE WHEN ? AND visual_embedding IS NOT NULL AND length(visual_embedding) > 0 AND visual_model = ?
+             THEN vec_distance_cosine(vec_f32(visual_embedding), vec_f32(?))
+             ELSE vec_distance_cosine(vec_f32(embedding), vec_f32(?))
+        END AS d
+     FROM memes
+     WHERE pending = 0 AND id != ? AND length(embedding) > 0
+     ORDER BY d ASC
+     LIMIT ?`,
+    targetHasDino ? 1 : 0,
+    VISUAL_EMBEDDING_MODEL.id,
+    dinoQ,
+    clipQ,
+    id,
+    limit
+  );
+  if (ranked.length === 0) return [];
+
+  // Fetch the winning rows in one query, then restore the ranked order (SQL
+  // `IN (...)` doesn't preserve it) and carry the cosine through as the score.
+  const ids = ranked.map((r) => r.id);
+  const rows = await db.getAllAsync<MemeRow>(
+    `SELECT * FROM memes WHERE id IN (${ids.map(() => '?').join(',')})`,
+    ...ids
+  );
+  const byId = new Map(rows.map((r) => [r.id, r]));
+  return ranked
+    .map(({ id: rid, d }) => {
+      const row = byId.get(rid);
+      if (!row) return null;
+      const { embedding, ...record } = rowToRecord(row);
+      return { ...record, score: 1 - d } as SearchHit;
+    })
+    .filter((h): h is SearchHit => h !== null);
+}
+
 export async function clearIndex(): Promise<void> {
   const db = await getDb();
   await db.execAsync('DELETE FROM memes;');
+  invalidateSearchIndex(); // whole library gone
   // An empty index has no space yet — the next index run re-stamps it.
   await db.runAsync('DELETE FROM settings WHERE key = ?', INDEX_MODEL_KEY);
 }

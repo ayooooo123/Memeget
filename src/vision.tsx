@@ -9,7 +9,7 @@ import {
   getSetting,
   setSetting,
 } from './db';
-import { emitLibraryChanged, onLibraryChanged } from './events';
+import { emitLibraryChanged, emitThumbsUpdated, onLibraryChanged } from './events';
 import {
   backfillCaptionEmbeddings,
   backfillVideoThumbs,
@@ -25,6 +25,7 @@ import {
   type VisionEnricher,
 } from './indexer';
 import { bgNativeAvailable, getPower, type NativePower } from '../modules/memeget-bg';
+import { codecInteractiveActive } from './interactive';
 import { acquireKeepAlive } from './keepAlive';
 import {
   bgIntervalMs,
@@ -321,20 +322,31 @@ export function VisionProvider({ children }: { children: React.ReactNode }) {
           await sleep(5_000);
           continue;
         }
-        const n = await backfillVideoThumbs({ limit: 24 }).catch(async (e) => {
-          if (!loggedLoopError) {
-            loggedLoopError = true;
-            await addIndexError({
-              name: '(poster loop)',
-              kind: 'video',
-              stage: 'poster-loop',
-              reason: String((e as Error)?.message ?? e).slice(0, 300),
-            }).catch(() => {});
+        // The user is opening/copying a video and needs the hardware decoder —
+        // don't start a poster batch that would fight for it; retry shortly.
+        if (codecInteractiveActive()) {
+          await sleep(500);
+          continue;
+        }
+        const { fetched: n, patches } = await backfillVideoThumbs({ limit: 24 }).catch(
+          async (e) => {
+            if (!loggedLoopError) {
+              loggedLoopError = true;
+              await addIndexError({
+                name: '(poster loop)',
+                kind: 'video',
+                stage: 'poster-loop',
+                reason: String((e as Error)?.message ?? e).slice(0, 300),
+              }).catch(() => {});
+            }
+            return { fetched: 0, patches: [] };
           }
-          return 0;
-        });
+        );
         if (cancelled) break;
-        if (n > 0) emitLibraryChanged();
+        // Patch just the freshly-postered tiles in place (by id) instead of the
+        // old full-library emit — that whole-span re-fetch + re-merge was
+        // re-rendering memoized grid cells mid-scroll (handoff Issue 1).
+        if (patches.length > 0) emitThumbsUpdated(patches);
         // Hold the keep-alive service while there's an actual backlog, so the
         // drain continues with the app backgrounded; drop it when idle so the
         // notification doesn't sit there forever.

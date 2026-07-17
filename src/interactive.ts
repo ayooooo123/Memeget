@@ -32,6 +32,26 @@ export function interactiveActive(): boolean {
   return Date.now() - lastInteractive < INTERACTIVE_WINDOW_MS;
 }
 
+// A SEPARATE, shorter window stamped only by codec-touching gestures — opening
+// the video viewer, copying a clip. The poster backfill grabs the hardware video
+// decoder to extract frames; while the user is watching or copying a video that
+// same decoder is needed right now. This lets the poster loop briefly stand down
+// so the viewer/copy gets the codec, WITHOUT benching poster tiles for the full
+// 8s interactive window (posters are exactly what the user watches the grid for).
+// Deliberately NOT stamped by scroll or search — only by actions that contend
+// for the decoder.
+export const CODEC_INTERACTIVE_WINDOW_MS = 2_500;
+
+let lastCodecInteractive = 0;
+
+export function noteCodecInteractive(): void {
+  lastCodecInteractive = Date.now();
+}
+
+export function codecInteractiveActive(): boolean {
+  return Date.now() - lastCodecInteractive < CODEC_INTERACTIVE_WINDOW_MS;
+}
+
 // How long each yield step naps before re-checking the window.
 const YIELD_STEP_MS = 250;
 

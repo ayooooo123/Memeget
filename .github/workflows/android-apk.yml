@@ -20,6 +20,11 @@ on:
       # TEMPORARY: build this feature branch's APK for on-device testing of the
       # Gemma VLM switch + teach/search overhaul. Remove before merging to main.
       - claude/gemma-local-vl-model-7viqpi
+      # TEMPORARY: build this branch's APK for on-device testing of the search
+      # perf overhaul (in-memory search cache, scroll-jitter fix, loop
+      # contention) on top of the MobileCLIP-S2 + DINOv2 embedding swap. Remove
+      # before merging to main.
+      - claude/meme-id-performance-6d0565
     tags:
       - 'v*'
   workflow_dispatch:
