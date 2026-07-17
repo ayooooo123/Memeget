@@ -43,8 +43,10 @@ import { acquireKeepAlive } from '../keepAlive';
 import {
   backfillVideoThumbs,
   clearThumbSkips,
+  getIndexPerf,
   getVisionTelemetry,
   retagAll,
+  type IndexPerf,
   type VisionTelemetry,
 } from '../indexer';
 import { MEME_LABELS } from '../memeLabels';
@@ -68,6 +70,15 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
   const [pending, setPending] = useState(0);
   const [enriching, setEnriching] = useState<{ done: number; total: number } | null>(null);
   const [tele, setTele] = useState<VisionTelemetry>({ described: 0, deduped: 0, failed: 0, avgMs: 0 });
+  const [perf, setPerf] = useState<IndexPerf>({
+    copyMs: 0,
+    transcodeMs: 0,
+    embedMs: 0,
+    ocrMs: 0,
+    classifyMs: 0,
+    storeMs: 0,
+    samples: 0,
+  });
   const enrichCancel = useRef(false);
   const [audioPending, setAudioPending] = useState(0);
   const [audioStats, setAudioStats] = useState({ analyzed: 0, withSpeech: 0 });
@@ -94,6 +105,7 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
     setDescribed(await countMemesDescribed());
     setPending(await countMemesNeedingVision());
     setTele(getVisionTelemetry());
+    setPerf(getIndexPerf());
     setAudioPending(await countMemesNeedingAudio().catch(() => 0));
     setAudioStats(await countMemesTranscribed().catch(() => ({ analyzed: 0, withSpeech: 0 })));
     setAudioFailed(await countAudioFailed().catch(() => 0));
@@ -770,6 +782,22 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
       <Section glyph="▦" title="Index" tint={colors.accent}>
         <Row label="Indexed memes" value={String(count)} />
         <Row label="Known meme formats" value={String(MEME_LABELS.length)} />
+        {perf.samples > 0 && (
+          <Text style={styles.faintSmall}>
+            Per-image time on this device (last ~{perf.samples}):{' '}
+            {[
+              ['embed', perf.embedMs],
+              ['ocr', perf.ocrMs],
+              ['transcode', perf.transcodeMs],
+              ['copy', perf.copyMs],
+              ['classify', perf.classifyMs],
+              ['store', perf.storeMs],
+            ]
+              .filter(([, ms]) => (ms as number) >= 1)
+              .map(([name, ms]) => `${name} ${Math.round(ms as number)}ms`)
+              .join(' · ')}
+          </Text>
+        )}
         {posterStats.total > 0 && (
           <Row
             label="Video posters"
