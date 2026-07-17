@@ -1,0 +1,6 @@
+{
+  "source": "memedepot.com",
+  "generatedAt": null,
+  "note": "Populated by the harvest-memedepot-tags GitHub Action (tools/memedepot/harvest.mjs). Ships empty; a harvest PR fills `labels`. Reviewed before merge.",
+  "labels": []
+}

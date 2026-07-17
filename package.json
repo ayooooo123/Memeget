@@ -8,6 +8,8 @@
     "prebuild": "expo prebuild -p android --no-install",
     "typecheck": "tsc --noEmit",
     "test": "jest",
+    "harvest": "node tools/memedepot/harvest.mjs",
+    "harvest:test": "node --test tools/memedepot/*.test.mjs",
     "doctor": "react-doctor"
   },
   "dependencies": {
