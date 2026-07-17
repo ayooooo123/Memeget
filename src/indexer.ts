@@ -64,6 +64,17 @@ import {
   type SafFile,
 } from './saf';
 import type { VisionResult } from './visionCore';
+import {
+  dedupeFrames,
+  flattenFrameTags,
+  frameLadderMs,
+  meanPoolNormalized,
+  mergeVisionResults,
+  unionOcrText,
+  visionResultsSimilar,
+  MAX_VIDEO_FRAMES,
+  MAX_VLM_FRAMES,
+} from './videoFrames';
 import type { Tag } from './types';
 
 // Confidence in how a label was matched, highest first:
@@ -134,26 +145,105 @@ async function ocr(uri: string): Promise<string> {
 // keeps that bounded (the ML Kit OCR hint covers any small text we'd lose).
 const VLM_FRAME_WIDTH = 512;
 
-// Turn a library item (image or video) into a local JPEG path the models can
+// Pull frames from a local video by climbing the timestamp ladder, stopping as
+// soon as a rung lands past the clip's real end. Thumbnail extraction either
+// throws or clamps to the last frame for an out-of-range time depending on the
+// device/codec — both are handled: a throw stops the climb here, and a clamp is
+// collapsed downstream (dedupeFrames in the fast pass, visionResultsSimilar in
+// the VLM pass) because every out-of-range rung returns the same final frame.
+// A single-frame request (maxFrames <= 1) keeps the legacy t=1s grab so the
+// callers that only need one representative frame (poster/DINO backfill) are
+// unchanged. Extracted uris are appended to `temp` so the caller cleans them up.
+async function sampleVideoFrames(
+  work: string,
+  temp: string[],
+  maxFrames: number
+): Promise<string[]> {
+  if (maxFrames <= 1) {
+    const { uri } = await VideoThumbnails.getThumbnailAsync(work, { time: 1000 });
+    temp.push(uri);
+    return [uri];
+  }
+  const uris: string[] = [];
+  for (const time of frameLadderMs(maxFrames)) {
+    try {
+      const { uri } = await VideoThumbnails.getThumbnailAsync(work, { time });
+      uris.push(uri);
+      temp.push(uri);
+    } catch {
+      // Past the end of the video (or an undecodable timestamp): the higher
+      // rungs would only fail too, so stop climbing.
+      break;
+    }
+    if (uris.length >= maxFrames) break;
+  }
+  if (uris.length === 0) {
+    // Legacy fallback — one keyframe at 1s — so a clip the ladder couldn't
+    // sample (e.g. a first rung that threw) still gets indexed if it can at all.
+    const { uri } = await VideoThumbnails.getThumbnailAsync(work, { time: 1000 });
+    uris.push(uri);
+    temp.push(uri);
+  }
+  return uris;
+}
+
+// Turn a library item (image or video) into the local JPEG paths the models can
 // read, plus the temp files to clean up afterward. The VLM needs an actual
 // on-disk path (its `mediaPath`), and SAF content:// URIs aren't usable
-// directly — so we re-derive the frame the same way the index pass does.
-async function materializeFrame(
+// directly — so we re-derive the frames the same way the index pass does. A
+// video yields up to `maxFrames` distinct-moment candidates (the VLM pass
+// early-stops once captions stop changing); an image yields exactly one.
+async function materializeFrames(
   file: SafFile,
-  idx: number
-): Promise<{ jpeg: string; temp: string[] }> {
+  idx: number,
+  maxFrames: number
+): Promise<{ jpegs: string[]; temp: string[] }> {
   const temp: string[] = [];
   const work = await copyToCache(file, idx);
   temp.push(work);
-  let frame = work;
-  if (file.kind === 'video') {
-    const { uri } = await VideoThumbnails.getThumbnailAsync(work, { time: 1000 });
-    frame = uri;
-    temp.push(uri);
+  const frames = file.kind === 'video' ? await sampleVideoFrames(work, temp, maxFrames) : [work];
+  const jpegs: string[] = [];
+  for (const frame of frames) {
+    const jpeg = await toJpeg(frame, VLM_FRAME_WIDTH);
+    temp.push(jpeg);
+    jpegs.push(jpeg);
   }
-  const jpeg = await toJpeg(frame, VLM_FRAME_WIDTH);
-  temp.push(jpeg);
-  return { jpeg, temp };
+  return { jpegs, temp };
+}
+
+// Embed → OCR → classify a set of already-transcoded frame JPEGs and fold them
+// into one meme's worth of signal, without touching the DB schema:
+//  - embedding: the mean-pooled, re-normalized primary vector — one "gist"
+//    vector standing in for the whole clip, a better anchor than any keyframe.
+//  - ocrText:   the union of text read across DISTINCT frames, so a caption that
+//    only shows up partway through a video still gets indexed.
+//  - tags:      zero-shot labels unioned across distinct frames (a character
+//    that appears in only one moment still gets tagged), merged with OCR tags.
+// Visually-identical frames are collapsed first (dedupeFrames) so a static clip
+// costs one classify, not `maxFrames`. A single image flows through unchanged
+// (dedupe/mean-pool of one frame is a no-op, and its embed∥OCR overlap is kept).
+async function analyzeFrames(
+  api: EmbeddingsApi,
+  jpegs: string[],
+  know: Knowledge
+): Promise<{ embedding: number[]; ocrText: string; tags: Tag[] }> {
+  const frames: { embedding: number[]; ocrText: string }[] = [];
+  for (const jpeg of jpegs) {
+    // Primary embed (ExecuTorch) and OCR (ML Kit) are independent native calls
+    // on the same frame — run concurrently so the shorter hides behind the
+    // longer. Frames run sequentially so only one embed is ever in flight,
+    // keeping peak memory flat (matching the pipeline's one-per-stage design).
+    const [embedding, ocrText] = await Promise.all([api.embedImage(jpeg), ocr(jpeg)]);
+    frames.push({ embedding, ocrText });
+  }
+  const reps = dedupeFrames(frames);
+  const embedding = meanPoolNormalized(reps.map((r) => r.embedding));
+  const ocrText = unionOcrText(reps.map((r) => r.ocrText));
+  const perFrame = reps.map((r) =>
+    classifyImage(r.embedding, know.labelVecs, know.exemplarHeads, know.mean, know.negativeVecs)
+  );
+  const tags = mergeTags(flattenFrameTags(perFrame), ocrTags(ocrText));
+  return { embedding, ocrText, tags };
 }
 
 // Curated associations + any added when teaching an exemplar. Shared by the
@@ -501,13 +591,16 @@ export async function runIndex(
 // Result of stage 1 (prepare). A failed prepare still carries its temp files so
 // stage 2 can clean up and log the error with the right stage name.
 type Prepared =
-  | { ok: true; file: SafFile; modifiedAt: number | null; jpeg: string; temp: string[] }
+  | { ok: true; file: SafFile; modifiedAt: number | null; jpegs: string[]; temp: string[] }
   | { ok: false; file: SafFile; stage: string; reason: string; temp: string[] };
 
-// Stage 1 of the per-file pipeline: copy out of SAF → (video keyframe) → JPEG
+// Stage 1 of the per-file pipeline: copy out of SAF → (video keyframes) → JPEG
 // transcode. Pure native I/O + codecs, no model involvement — which is what
-// lets the NEXT file's stage 1 run while the current file sits in the model.
-async function prepareFile(file: SafFile, idx: number): Promise<Prepared> {
+// lets the NEXT file's stage 1 run while the current file sits in the model. A
+// video yields up to `maxFrames` frames sampled across its timeline (the index
+// pass wants several; the single-frame backfill callers leave the default so a
+// poster/DINO grab stays one keyframe).
+async function prepareFile(file: SafFile, idx: number, maxFrames = 1): Promise<Prepared> {
   let stage = 'copy';
   const temp: string[] = [];
   try {
@@ -519,19 +612,18 @@ async function prepareFile(file: SafFile, idx: number): Promise<Prepared> {
 
     const work = await copyToCache(file, idx);
     temp.push(work);
-    let frame = work;
 
-    if (file.kind === 'video') {
-      stage = 'thumbnail';
-      const { uri } = await VideoThumbnails.getThumbnailAsync(work, { time: 1000 });
-      frame = uri;
-      temp.push(uri);
-    }
+    stage = file.kind === 'video' ? 'thumbnail' : 'transcode';
+    const frames = file.kind === 'video' ? await sampleVideoFrames(work, temp, maxFrames) : [work];
 
     stage = 'transcode';
-    const jpeg = await toJpeg(frame);
-    temp.push(jpeg);
-    return { ok: true, file, modifiedAt, jpeg, temp };
+    const jpegs: string[] = [];
+    for (const frame of frames) {
+      const jpeg = await toJpeg(frame);
+      temp.push(jpeg);
+      jpegs.push(jpeg);
+    }
+    return { ok: true, file, modifiedAt, jpegs, temp };
   } catch (e) {
     return { ok: false, file, stage, reason: String((e as Error)?.message ?? e).slice(0, 300), temp };
   }
@@ -551,8 +643,11 @@ async function finishFile(api: EmbeddingsApi, prep: Prepared, know: Knowledge): 
       throw new Error(prep.reason);
     }
 
-    // Primary embed (ExecuTorch) and OCR (ML Kit) are independent native calls
-    // on the same JPEG — running them concurrently hides the shorter one.
+    // Embed + OCR + classify every sampled frame and fold them into one meme's
+    // worth of signal (mean-pooled gist vector, unioned OCR, unioned tags) —
+    // an image has one frame, a video several distinct moments. Per-frame the
+    // primary embed (ExecuTorch) and OCR (ML Kit) run concurrently so the
+    // shorter hides behind the longer.
     //
     // The DINO visual embed is deliberately NOT here: fp32 DINOv2-base costs a
     // multiple of the primary embed per frame, and putting it in the indexing
@@ -560,11 +655,7 @@ async function finishFile(api: EmbeddingsApi, prep: Prepared, know: Knowledge): 
     // (backfillVisualEmbeddings) owns visual vectors instead — the library is
     // browsable/searchable immediately and "More like this" upgrades to DINO
     // as the backfill catches up.
-    const [embedding, ocrText] = await Promise.all([api.embedImage(prep.jpeg), ocr(prep.jpeg)]);
-    const tags = mergeTags(
-      classifyImage(embedding, know.labelVecs, know.exemplarHeads, know.mean, know.negativeVecs),
-      ocrTags(ocrText)
-    );
+    const { embedding, ocrText, tags } = await analyzeFrames(api, prep.jpegs, know);
 
     stage = 'store';
     await insertMeme({
@@ -619,7 +710,9 @@ async function indexQueue(
 ): Promise<{ added: number; errors: number }> {
   let added = 0;
   let errors = 0;
-  let next: Promise<Prepared> | null = queue.length ? prepareFile(queue[0], 0) : null;
+  let next: Promise<Prepared> | null = queue.length
+    ? prepareFile(queue[0], 0, MAX_VIDEO_FRAMES)
+    : null;
   for (let i = 0; i < queue.length; i++) {
     const prep = await next!;
     if (opts.shouldCancel?.()) {
@@ -628,7 +721,7 @@ async function indexQueue(
     }
     // Kick off the next file's prepare BEFORE finishing this one — this is the
     // overlap that makes the pipeline worth having.
-    next = i + 1 < queue.length ? prepareFile(queue[i + 1], i + 1) : null;
+    next = i + 1 < queue.length ? prepareFile(queue[i + 1], i + 1, MAX_VIDEO_FRAMES) : null;
     opts.onFile?.(i, queue[i], added);
     const r = await finishFile(api, prep, know);
     if (r === 'added') added++;
@@ -922,11 +1015,22 @@ async function describeAndSave(
   const temp: string[] = [];
   const started = Date.now();
   try {
-    const frame = await materializeFrame({ uri: m.uri, name: m.name, kind: m.kind }, idx);
-    temp.push(...frame.temp);
+    const frames = await materializeFrames({ uri: m.uri, name: m.name, kind: m.kind }, idx, MAX_VLM_FRAMES);
+    temp.push(...frames.temp);
 
-    const res = await vision.describe(frame.jpeg, m.ocrText);
-    if (!res) return { status: 'unready' }; // model went unready; leave pending
+    // Describe each distinct frame, stopping as soon as a frame says essentially
+    // the same thing as the previous one — a static clip pays for one generation,
+    // a multi-scene edit for a few. Their descriptions are then folded into one
+    // (unioned subjects/tags/text, joined scene captions).
+    const results: VisionResult[] = [];
+    for (const jpeg of frames.jpegs) {
+      const r = await vision.describe(jpeg, m.ocrText);
+      if (!r) break; // model went unready mid-way
+      if (results.length && visionResultsSimilar(r, results[results.length - 1])) break;
+      results.push(r);
+    }
+    if (results.length === 0) return { status: 'unready' }; // never got a frame in; leave pending
+    const res = mergeVisionResults(results);
 
     // The VLM's open-vocabulary tags join the existing CLIP/OCR/exemplar tags,
     // ranked between them (above CLIP guesses, below the user's truth).
@@ -1105,7 +1209,7 @@ export async function backfillVisualEmbeddings(
         // Unreadable file (deleted from the folder, corrupt) — permanent.
         await markVisualEmbeddingFailed(rows[i].id, model).catch(() => {});
       } else {
-        const visual = await api.embedVisualImage(prep.jpeg);
+        const visual = await api.embedVisualImage(prep.jpegs[0]);
         if (!visual) return 0; // model went unready — stop, don't stamp
         await setMemeVisualEmbedding(rows[i].id, visual.model, visual.embedding);
       }
@@ -1266,7 +1370,7 @@ async function extractPosterAnyway(
       THUMB_FALLBACK_TIMEOUT_MS
     );
     try {
-      if (prep.ok) return await persistThumb(prep.jpeg);
+      if (prep.ok) return await persistThumb(prep.jpegs[0]);
       errs.push(`copy: ${prep.stage}: ${prep.reason.slice(0, 90)}`);
     } finally {
       for (const t of prep.temp) await deleteCache(t);
