@@ -1758,16 +1758,32 @@ export async function clearIndexErrors(): Promise<void> {
   await db.execAsync('DELETE FROM index_errors;');
 }
 
+// One row per (name, stage): re-logging the same failure REPLACES the prior
+// row instead of appending. Without this, every "Retry failed posters" tap and
+// every background backfill pass re-logs the same undecodable files, so the
+// error count climbs without bound (10 failing videos read as 30+ "errors")
+// even though nothing new is wrong. Delete-then-insert also collapses the
+// duplicates left over from before this fix as each file is retried.
 export async function addIndexError(e: IndexError): Promise<void> {
   const db = await getDb();
-  await db.runAsync(
-    'INSERT INTO index_errors (name, kind, stage, reason, created_at) VALUES (?, ?, ?, ?, ?)',
-    e.name,
-    e.kind,
-    e.stage,
-    e.reason,
-    Date.now()
-  );
+  await db.withTransactionAsync(async () => {
+    await db.runAsync('DELETE FROM index_errors WHERE name = ? AND stage = ?', e.name, e.stage);
+    await db.runAsync(
+      'INSERT INTO index_errors (name, kind, stage, reason, created_at) VALUES (?, ?, ?, ?, ?)',
+      e.name,
+      e.kind,
+      e.stage,
+      e.reason,
+      Date.now()
+    );
+  });
+}
+
+// Drop any logged errors for a file that has since succeeded, so a video whose
+// poster lands on retry stops showing in the indexing-errors list.
+export async function clearIndexErrorsFor(name: string): Promise<void> {
+  const db = await getDb();
+  await db.runAsync('DELETE FROM index_errors WHERE name = ?', name);
 }
 
 export async function getIndexErrors(limit = 300): Promise<IndexError[]> {
