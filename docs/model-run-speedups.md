@@ -33,26 +33,34 @@ applicable win is a faster **primary encoder** via custom export.
 
 ## The work, in impact order
 
-### B1 — Faster primary encoder: MobileCLIP2 / MobileCLIP-S2 (recommended)
-The highest-leverage model-run win, and the groundwork is already in the app:
-`src/embeddingModels.ts` (`primaryEmbeddingModelFromEnv`), the custom-model path
-in `src/embeddings.tsx`, migration guards (index model stamp, exemplar
-re-teach/auto-migrate), and `tools/model-export/export_mobileclip_s2.py` +
-`.github/workflows/export-models.yml`.
+### B1 — Faster primary encoder: MobileCLIP-S2 (SHIPPED to the build; verify on device)
+The highest-leverage model-run win, and it is **wired end-to-end** — the "swap"
+is done, only the on-device confirmation is outstanding:
 
-MobileCLIP2 (Apple, TMLR Aug 2025, ~3–15 ms image encode) is the newer, faster
-successor to CLIP ViT-B/32 and a drop-in for the same image/text-embedding role.
+- Export: `tools/model-export/export_mobileclip_s2.py` produces the fp32 image
+  ([1,3,256,256]→[1,512]) + text ([1,77]→[1,512]) towers + CLIP BPE tokenizer,
+  with normalization baked into the graph and an eager cosine-parity gate.
+- Publish: `.github/workflows/export-models.yml` ran and the `models-v1`
+  release carries `mobileclip_s2_image_xnnpack_fp32.pte` (143 MB),
+  `mobileclip_s2_text_xnnpack_fp32.pte` (254 MB), the tokenizer, and
+  `dinov2_base_xnnpack_fp32.pte` (346 MB, visual similarity).
+- Consume: `.github/workflows/android-apk.yml` sets
+  `EXPO_PUBLIC_MEMEGET_MOBILECLIP_S2_*` + `EXPO_PUBLIC_MEMEGET_DINOV2_*` at build
+  time, so **the APK it builds runs MobileCLIP-S2 as the primary image/text
+  encoder** (replacing CLIP ViT-B/32) and DINOv2 for "More like this".
+- App plumbing: `src/embeddingModels.ts` (`primaryEmbeddingModelFromEnv`),
+  `src/embeddings.tsx` custom-model path, and the migration guards (index model
+  stamp warning + exemplar re-teach/auto-migrate) all already handle the swap.
 
-Execution:
-1. Get the export producing an on-device-loadable `.pte` (fp32 first; the export
-   contract and shape checks already live in the CI workflow). Prefer MobileCLIP2
-   weights over S1 if `open_clip` exposes them; otherwise ship S2 now and treat
-   the "2" upgrade as a later weight bump.
-2. Publish to the `models-v1` release, point `EXPO_PUBLIC_MEMEGET_MOBILECLIP_S2_*`
-   at it, build the APK.
-3. On device: confirm it loads, measure image/text embed latency vs current CLIP,
-   spot-check search quality, then one-time Clear index → re-Index → re-teach
-   (the migration guards make this safe, not silent).
+Remaining (device only): install the APK, confirm both towers load (Settings
+shows MobileCLIP-S2 as the active model, no "model error"), measure embed
+latency vs the old CLIP build, spot-check search quality, then the one-time
+Clear index → re-Index → re-teach the mismatch warning prompts for.
+
+MobileCLIP2 (Apple, TMLR Aug 2025) is the newer sibling; treat it as a later
+weight bump — swap the `open_clip` model name in the exporter once its weights
+are confirmed available and re-run the export workflow. S2 is already a large
+step down in latency from ViT-B/32, so it's the safe thing to validate first.
 
 ### B3 — Quantize the CUSTOM S2/DINO exports (8da4w)
 Only the *custom* exports need this — Gemma is already 8da4w. Roughly quarters
@@ -79,9 +87,16 @@ Snapdragon device is in the test matrix: add the QNN Runtime Maven dependency +
 QNN-variant build, QNN-compile one model (CLIP image is the cheapest to try),
 and benchmark NPU vs XNNPACK. Deliver a go/no-go with numbers before committing.
 
-## Why nothing here was changed in this pass
-Changing a default model or backend that can't be exercised in a headless
-container would ship an unverifiable (and, for B2a/B4, likely wrong or
-inapplicable) change. Tier A delivered the measurable in-repo wins; Tier B is
-teed up here so it can be executed against a device with the dead ends already
-ruled out.
+## Status summary
+- **B1 (MobileCLIP-S2 swap): shipped to the APK build**, pending on-device
+  verification. This IS the model swap — the branch's APK build runs S2 + DINOv2.
+- **B2 (VLM): unchanged by design.** Gemma is Vulkan-only on Android and already
+  8da4w; the `fast` LFM tier already exists. Any default change is a quality
+  call to gate on an on-device A/B, not a blind swap.
+- **B3 (quantize custom exports): fp32 ships and works;** int8 stays parked
+  behind the cosine gate until a coherent executorch/torch/torchao set passes it.
+- **B4 (QNN/NPU): N/A** on the Tensor-G4 test device; revisit only with a
+  Snapdragon device in the matrix.
+
+The dead ends (B2a, B4) are ruled out so no device time is wasted on them; the
+one real win (B1) is already in the build to test.
