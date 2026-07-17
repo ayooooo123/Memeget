@@ -15,3 +15,29 @@ export function onLibraryChanged(cb: Listener): () => void {
 export function emitLibraryChanged(): void {
   for (const cb of listeners) cb();
 }
+
+// A video poster (thumb_uri) landed for one or more already-visible memes. This
+// is deliberately a SEPARATE channel from onLibraryChanged: a poster changes
+// only a row's thumbnail, not its membership, order, or search text. The Library
+// patches those rows in place by id instead of re-fetching and re-merging the
+// whole loaded span — which was re-rendering memoized grid cells mid-scroll and
+// causing the flick-scroll jitter (see docs/handoff-issues.md Issue 1).
+export interface ThumbPatch {
+  id: number;
+  thumbUri: string;
+}
+type ThumbListener = (patches: ThumbPatch[]) => void;
+
+const thumbListeners = new Set<ThumbListener>();
+
+export function onThumbsUpdated(cb: ThumbListener): () => void {
+  thumbListeners.add(cb);
+  return () => {
+    thumbListeners.delete(cb);
+  };
+}
+
+export function emitThumbsUpdated(patches: ThumbPatch[]): void {
+  if (patches.length === 0) return;
+  for (const cb of thumbListeners) cb(patches);
+}
