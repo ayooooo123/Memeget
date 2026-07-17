@@ -134,32 +134,84 @@ def _quantize_dynamic_int8(module: torch.nn.Module, example_inputs) -> torch.nn.
     return gm
 
 
+_QUANT_ENV_PRINTED = False
+
+
+def _print_quant_env() -> None:
+    """Log the exact torch/torchao/executorch versions once. The PT2E quant
+    stack is notoriously version-coupled — the `torch.ao.quantization has no
+    attribute 'quantizer'` failure is a torch<->torchao layout mismatch, and the
+    only way to debug it from CI logs is to see which versions actually resolved."""
+    global _QUANT_ENV_PRINTED
+    if _QUANT_ENV_PRINTED:
+        return
+    _QUANT_ENV_PRINTED = True
+    import importlib
+
+    for name in ("torch", "torchao", "executorch"):
+        try:
+            v = getattr(importlib.import_module(name), "__version__", "?")
+        except Exception as e:  # noqa: BLE001
+            v = f"<not importable: {e}>"
+        print(f"  quant-env: {name}=={v}")
+
+
+def _import_first(paths):
+    """Import the first module path that exists, returning the module. The PT2E
+    quantizer classes drifted across torch.ao ↔ torchao ↔ executorch layouts
+    between releases; try every known home rather than hard-coding one."""
+    import importlib
+
+    last = None
+    for p in paths:
+        try:
+            return importlib.import_module(p)
+        except Exception as e:  # noqa: BLE001 — keep trying the next layout
+            last = e
+    raise ImportError(f"none of {paths} importable (last: {last})")
+
+
 def _prepare_quantizer(is_dynamic: bool):
-    """Shared PT2E setup: force the submodule import torchao annotates against,
-    tolerate the torch.ao<->torchao layout shuffle, and return an XNNPACK
-    per-channel quantizer (dynamic for transformer/linear towers, static —
-    calibrated — for conv-heavy ones like FastViT)."""
-    try:
-        import torch.ao.quantization.quantizer.quantizer  # noqa: F401
-    except ImportError:
-        pass
-    try:
-        from torchao.quantization.pt2e.quantize_pt2e import convert_pt2e, prepare_pt2e
-    except ImportError:
-        from torch.ao.quantization.quantize_pt2e import convert_pt2e, prepare_pt2e
-    try:
-        from executorch.backends.xnnpack.quantizer.xnnpack_quantizer import (
-            XNNPACKQuantizer,
-            get_symmetric_quantization_config,
-        )
-    except ImportError:  # older executorch layout
-        from torch.ao.quantization.quantizer.xnnpack_quantizer import (
-            XNNPACKQuantizer,
-            get_symmetric_quantization_config,
-        )
-    quantizer = XNNPACKQuantizer()
+    """Shared PT2E setup, resilient to the torch.ao ↔ torchao ↔ executorch layout
+    shuffle. Force-imports the quantizer subpackage that later attribute access
+    annotates against (the root cause of `torch.ao.quantization has no attribute
+    quantizer`), then resolves prepare/convert and the XNNPACK quantizer from
+    whichever package actually provides them in this toolchain."""
+    _print_quant_env()
+    import importlib
+
+    # Populate whichever quantizer subpackage exists so a lazy
+    # `torch.ao.quantization.quantizer.X` annotation resolves at use time.
+    for m in (
+        "torchao.quantization.pt2e",
+        "torchao.quantization.pt2e.quantizer",
+        "torchao.quantization.pt2e.quantizer.xnnpack_quantizer",
+        "torch.ao.quantization.quantizer",
+        "torch.ao.quantization.quantizer.xnnpack_quantizer",
+    ):
+        try:
+            importlib.import_module(m)
+        except Exception:  # noqa: BLE001
+            pass
+
+    pt2e = _import_first(
+        [
+            "torchao.quantization.pt2e.quantize_pt2e",
+            "torch.ao.quantization.quantize_pt2e",
+        ]
+    )
+    prepare_pt2e, convert_pt2e = pt2e.prepare_pt2e, pt2e.convert_pt2e
+
+    xq = _import_first(
+        [
+            "executorch.backends.xnnpack.quantizer.xnnpack_quantizer",
+            "torchao.quantization.pt2e.quantizer.xnnpack_quantizer",
+            "torch.ao.quantization.quantizer.xnnpack_quantizer",
+        ]
+    )
+    quantizer = xq.XNNPACKQuantizer()
     quantizer.set_global(
-        get_symmetric_quantization_config(is_per_channel=True, is_dynamic=is_dynamic)
+        xq.get_symmetric_quantization_config(is_per_channel=True, is_dynamic=is_dynamic)
     )
     return quantizer, prepare_pt2e, convert_pt2e
 
@@ -224,7 +276,10 @@ def export_int8_if_good(
             qgm = _quantize_dynamic_int8(module, example_inputs)
         cos = _cos_vs_fp32(module, qgm, example_inputs)
     except Exception as e:  # noqa: BLE001 — any failure just means "no int8 this run"
+        import traceback
+
         print(f"SKIP {out_path.name}: int8 {mode} build failed ({type(e).__name__}: {e})")
+        traceback.print_exc()
         return None
     if cos < threshold:
         print(
