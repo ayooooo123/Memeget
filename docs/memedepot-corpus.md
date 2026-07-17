@@ -61,6 +61,15 @@ Everything lives under `tools/memedepot/` (proposed), mirroring the
 post-processing scripts. Python is the path of least resistance (shares the
 Colab/ExecuTorch stack the fine-tune uses), but a Node crawler is fine too.
 
+> **Implemented (tagging slice):** a first, tag-focused cut of this crawler now
+> ships as `tools/memedepot/harvest.mjs`, run by the
+> `harvest-memedepot-tags` GitHub Action (it runs in CI because GitHub runners
+> can reach memedepot even though the dev sandbox can't). It harvests the tag
+> vocabulary into `src/data/memedepotBaseline.json`, which the app folds into its
+> zero-shot label set on first launch (`src/baselineLabels.ts`). The full
+> image-collecting corpus below (for the eval harness and fine-tune) is still a
+> proposal.
+
 ## 1. The crawler (`tools/memedepot/crawl.py`)
 
 Goal: produce `corpus.jsonl` (one JSON object per meme) plus a local
