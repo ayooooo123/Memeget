@@ -7,14 +7,15 @@
 // The vectors are CLIP image embeddings, so a pack is only meaningful to a
 // library built with the same image encoder — hence the model/dim stamp, which
 // import checks before trusting the contents.
+import { PRIMARY_EMBEDDING_MODEL } from './embeddingModels';
 import type { Exemplar } from './types';
 
 export const PACK_FORMAT = 'memeget-teaching-pack';
 export const PACK_VERSION = 2;
 // Matches the CLIP image encoder in embeddings.tsx. Bump if that model changes
 // in a way that moves the vector space, so stale packs are rejected on import.
-export const PACK_MODEL = 'clip-vit-base-patch32';
-export const PACK_DIM = 512;
+export const PACK_MODEL = PRIMARY_EMBEDDING_MODEL.id;
+export const PACK_DIM = PRIMARY_EMBEDDING_MODEL.dim;
 
 export interface PackExemplar {
   label: string;

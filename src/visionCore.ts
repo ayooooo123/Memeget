@@ -2,7 +2,7 @@
 // background task (headlessVision.ts / backgroundTask.ts). Nothing here imports
 // React or any react-native-executorch HOOK, so it can run in a background JS
 // context with no component tree.
-import { LFM2_5_VL_450M_QUANTIZED, LFM2_5_VL_1_6B_QUANTIZED } from 'react-native-executorch';
+import { GEMMA4_E2B_MM, LFM2_5_VL_450M_QUANTIZED } from 'react-native-executorch';
 
 import type { NativePower } from '../modules/memeget-bg';
 
@@ -18,12 +18,28 @@ export const BG_ONLY_CHARGING_KEY = 'vision.bg.onlyCharging';
 export const BG_PAUSE_HOT_KEY = 'vision.bg.pauseHot';
 export const BG_PAUSE_LOW_KEY = 'vision.bg.pauseLowBattery';
 
-// fast → 450M (smaller, snappier) · max → 1.6B (sharper, heavier). Each constant
-// is a complete ExecuTorch model descriptor (source + tokenizer + capabilities).
+// Gemma ships no recommended sampling settings in the library descriptor, so we
+// pin the same near-greedy config the LFM card recommended — this is a cataloging
+// task, not creative writing, and low temperature keeps the four-line format tight.
+const GEMMA_GENERATION_CONFIG = {
+  temperature: 0.1,
+  minP: 0.15,
+  repetitionPenalty: 1.05,
+} as const;
+
+// fast → LFM2.5-VL 450M (small, snappy — for weaker devices or huge backlogs) ·
+// max → Gemma 4 E2B multimodal (the default: much sharper captions/tags and far
+// better meme-culture knowledge, at a bigger download + slower generation).
+// Each entry is a complete ExecuTorch model descriptor (source + tokenizer +
+// capabilities). On Android the Gemma binary runs on the Vulkan (GPU) backend;
+// LFM stays on XNNPACK (CPU).
 export const MODEL = {
   fast: LFM2_5_VL_450M_QUANTIZED,
-  max: LFM2_5_VL_1_6B_QUANTIZED,
+  max: { ...GEMMA4_E2B_MM, generationConfig: GEMMA_GENERATION_CONFIG },
 } as const;
+
+// Fresh installs (no persisted choice) get Gemma.
+export const DEFAULT_QUALITY: VisionQuality = 'max';
 
 // Never hammer the accelerator faster than this between items, even at Extreme.
 export const MIN_BG_INTERVAL_MS = 1200;
@@ -44,7 +60,7 @@ export const SYSTEM_PROMPT =
   'search using four labeled lines. Output ONLY those lines — no prose, no JSON, no ' +
   'markdown, no code fences.';
 
-// A flat "LABEL: value" format instead of JSON. A 450M/1.6B model frequently
+// A flat "LABEL: value" format instead of JSON. A small on-device model frequently
 // botches nested JSON (unbalanced braces/brackets, bad quote-escaping), and any
 // truncation there loses the whole object. Line-delimited output has no nesting
 // to corrupt and degrades gracefully: a reply cut off early still yields every

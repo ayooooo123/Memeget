@@ -23,8 +23,8 @@ import * as Sharing from 'expo-sharing';
 import { useVideoPlayer, VideoView } from 'expo-video';
 
 import { addExemplar, deleteMeme, getLabels, getMemeEmbedding, getSimilarMemes } from '../db';
-import { EXEMPLAR_PROB_THRESHOLD, headProb } from '../embeddings';
-import { buildExemplarHeads, type ExemplarModel } from '../indexer';
+import { scoreExemplar } from '../learnCore';
+import { buildExemplarHeads, noteInteractive, type ExemplarModel } from '../indexer';
 import { success, tap, warn } from '../haptics';
 import { copyFileToClipboard } from '../../modules/memeget-bg';
 import { deleteFile, materialize, readImageBase64, readVideoFrameBase64, videoMimeFor } from '../saf';
@@ -42,7 +42,21 @@ const COLS = 3;
 // roughly a couple of screens, where flick-scrolling back up gets tedious.
 const SHOW_TOP_AFTER = 1400;
 
+// Similarity floor for the "also these?" confirm step after a teach — below
+// this, CLIP cosine is background noise and the sheet would pad itself with
+// unrelated memes.
+const CONFIRM_MIN_COSINE = 0.6;
+
 type Item = MemeRecord | SearchHit;
+
+// What an <Image> thumbnail should load for an item: the persisted poster
+// jpeg when one exists — the image view can't decode a frame from every video
+// codec, and "mp4 gif" style files (including mp4 bytes wearing a .gif name,
+// which land as kind 'image') rendered blank straight off their content://
+// uri. Falls back to the original uri for everything without a poster.
+function thumbSource(item: Pick<Item, 'kind' | 'uri' | 'thumbUri'>): string {
+  return item.thumbUri || item.uri;
+}
 
 // Track the on-screen keyboard height so the teach sheet (a bottom-anchored
 // Modal) can lift itself clear of the keyboard. KeyboardAvoidingView is
@@ -78,27 +92,40 @@ const GridCell = React.memo(function GridCell({
 }) {
   return (
     <PressableScale scaleTo={0.94} onPress={() => onPress(item)} style={{ width: size, height: size }}>
-      <Image
-        source={{ uri: item.uri }}
-        style={styles.thumb}
-        contentFit="cover"
-        transition={150}
-        // Reuse the view and release the previous bitmap when a cell is
-        // recycled (e.g. when retagAll hands the list a fresh array).
-        recyclingKey={String(item.id)}
-        // Memory-only cache (NOT "disk"). The originals already live as local
-        // content:// files in the user's linked folder, so a disk cache just
-        // duplicates the entire library into the app's cache dir — it ballooned
-        // cache to library size, and once Android purged that cache the
-        // thumbnails got stranded in a perpetual loading state. Disk-only also
-        // meant no in-memory bitmaps, so every recycled cell re-decoded a
-        // full-res image off disk while scrolling, saturating the decode thread
-        // (the "feed won't load while scrolling" jank). The in-memory LRU keeps
-        // the active window smooth; off-screen cells decode again from the local
-        // file — cheap because allowDownscaling decodes straight to thumb size.
-        cachePolicy="memory"
-        allowDownscaling
-      />
+      {item.kind === 'video' && !item.thumbUri ? (
+        // No poster (backfill hasn't reached it, or every decoder refused the
+        // file): show a deliberate filmstrip stub with the filename instead of
+        // asking the image view to decode the video — it goes through the same
+        // retriever that already failed, so the tile would just render blank.
+        <View style={[styles.thumb, styles.videoStub]}>
+          <Text style={styles.videoStubGlyph}>🎞</Text>
+          <Text style={styles.videoStubName} numberOfLines={2}>
+            {item.name}
+          </Text>
+        </View>
+      ) : (
+        <Image
+          source={{ uri: thumbSource(item) }}
+          style={styles.thumb}
+          contentFit="cover"
+          transition={150}
+          // Reuse the view and release the previous bitmap when a cell is
+          // recycled (e.g. when retagAll hands the list a fresh array).
+          recyclingKey={String(item.id)}
+          // Memory-only cache (NOT "disk"). The originals already live as local
+          // content:// files in the user's linked folder, so a disk cache just
+          // duplicates the entire library into the app's cache dir — it ballooned
+          // cache to library size, and once Android purged that cache the
+          // thumbnails got stranded in a perpetual loading state. Disk-only also
+          // meant no in-memory bitmaps, so every recycled cell re-decoded a
+          // full-res image off disk while scrolling, saturating the decode thread
+          // (the "feed won't load while scrolling" jank). The in-memory LRU keeps
+          // the active window smooth; off-screen cells decode again from the local
+          // file — cheap because allowDownscaling decodes straight to thumb size.
+          cachePolicy="memory"
+          allowDownscaling
+        />
+      )}
       {item.kind === 'video' && (
         <View style={styles.play}>
           <Text style={styles.playIcon}>▶</Text>
@@ -156,8 +183,19 @@ export const MemeGrid = React.memo(function MemeGrid({
   const [positive, setPositive] = useState(true);
   const [labels, setLabels] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
+  // Step 2 of a positive teach: "these look similar — are they also <label>?".
+  // Confirming candidates turns one teach into several exemplars, which is what
+  // actually makes a taught label reliable (a single example rarely is).
+  const [confirming, setConfirming] = useState<{
+    label: string;
+    candidates: SearchHit[];
+    picked: number[]; // meme ids the user has tapped
+  } | null>(null);
+  const [confirmSaving, setConfirmSaving] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [matchInfo, setMatchInfo] = useState<{ label: string; score: number }[] | null>(null);
+  const [matchInfo, setMatchInfo] = useState<
+    { label: string; score: number; matched: boolean }[] | null
+  >(null);
   const [matchBusy, setMatchBusy] = useState(false);
   // Cache the trained heads so we don't retrain on every modal open; cleared
   // after teaching so the next open reflects the new example.
@@ -224,6 +262,9 @@ export const MemeGrid = React.memo(function MemeGrid({
   // flicker you'd see right as the next page loaded in.
   const openViewer = useCallback((it: Item) => {
     tap();
+    // The viewer is interactive foreground work: stand the background loops
+    // down (they hold hardware codecs the video preview / frame-copy need).
+    noteInteractive();
     setSelected(it);
   }, []);
 
@@ -254,9 +295,13 @@ export const MemeGrid = React.memo(function MemeGrid({
         setMatchInfo([]);
         return;
       }
-      const centered = model.mean ? Array.from(emb, (v, i) => v - model.mean![i]) : Array.from(emb);
+      const raw = Array.from(emb);
+      const centered = model.mean ? Array.from(emb, (v, i) => v - model.mean![i]) : raw;
       const scored = model.heads
-        .map((h) => ({ label: h.label, score: headProb(h, centered) }))
+        .map((h) => {
+          const s = scoreExemplar(h, raw, centered);
+          return { label: h.label, score: s.prob, matched: s.matched };
+        })
         .sort((a, b) => b.score - a.score)
         .slice(0, 6);
       setMatchInfo(scored);
@@ -269,6 +314,7 @@ export const MemeGrid = React.memo(function MemeGrid({
   // fastest way to get a meme onto another platform on mobile.
   const onShare = async () => {
     if (!selected || busy) return;
+    noteInteractive();
     setBusy(true);
     try {
       if (!(await Sharing.isAvailableAsync())) {
@@ -287,6 +333,9 @@ export const MemeGrid = React.memo(function MemeGrid({
   const onCopy = async () => {
     if (!selected || busy) return;
     const isVideo = selected.kind === 'video';
+    // Frame extraction needs a hardware decoder; make the background loops
+    // yield theirs before we try (retries inside cover the in-flight one).
+    noteInteractive();
     setBusy(true);
     try {
       if (isVideo) {
@@ -357,6 +406,24 @@ export const MemeGrid = React.memo(function MemeGrid({
     );
   };
 
+  // Backdrop / back button on the teach modal. During the confirm step this is
+  // a "skip": the first exemplar is already saved, so the deferred apply must
+  // still run — only the extra picks are dropped.
+  const closeTeachModal = () => {
+    if (confirming) {
+      if (!confirmSaving) finishConfirm([]);
+    } else {
+      setTeaching(false);
+    }
+  };
+
+  // Label ideas for the teach sheet: the open meme's own tags first (you're
+  // usually naming something the indexer already half-recognized — one tap
+  // promotes the guess to ground truth), then every previously taught label.
+  const suggestions = selected
+    ? [...new Set([...selected.tags.map((t) => t.label), ...labels])]
+    : labels;
+
   const openTeach = (asPositive: boolean, preset?: string) => {
     tap();
     setLabelInput(preset ?? '');
@@ -368,13 +435,41 @@ export const MemeGrid = React.memo(function MemeGrid({
       .catch(() => setLabels([]));
   };
 
+  // Apply taught examples across the library off the button: retrain heads and
+  // re-tag everything. Chained so concurrent teaches run one retag at a time —
+  // the teach buttons are gated only on persisting the exemplar (fast), never on
+  // this heavy pass, so they don't sit frozen while the library reclassifies.
+  const applyTeach = (label: string, taughtPositive: boolean, examples: number) => {
+    modelRef.current = null; // new example(s) → retrain heads on next open
+    applyChainRef.current = (applyChainRef.current ?? Promise.resolve())
+      .catch(() => {})
+      .then(async () => {
+        try {
+          const matched = onTaught ? await onTaught(label) : undefined;
+          if (typeof matched === 'number') {
+            showToast(
+              taughtPositive
+                ? `Taught “${label}” from ${examples} example${examples === 1 ? '' : 's'} — ` +
+                    `${matched} meme${matched === 1 ? '' : 's'} now tagged` +
+                    (examples === 1 && matched <= 1 ? '. Teach a few more examples to catch the rest' : '')
+                : `Got it — NOT “${label}”. ${matched} meme${matched === 1 ? '' : 's'} still carry the tag`,
+              'success'
+            );
+          } else {
+            showToast(
+              taughtPositive ? `Taught “${label}” — re-tag in Settings to apply it` : `Correction for “${label}” saved`,
+              'success'
+            );
+          }
+        } catch (e) {
+          showToast(`Saved “${label}”, but applying it failed: ${String(e)}`, 'error');
+        }
+      });
+  };
+
   const saveExemplar = async () => {
     const label = labelInput.trim();
     if (!selected || !label) return;
-    // The teach itself is just persisting the exemplar — fast. We gate the
-    // button on that alone, not on the heavy library-wide re-tag that follows,
-    // so the button never sits frozen on "Saving…" (and a second teach isn't
-    // blocked) while the whole library is being reclassified.
     setSaving(true);
     try {
       const emb = await getMemeEmbedding(selected.id);
@@ -402,39 +497,100 @@ export const MemeGrid = React.memo(function MemeGrid({
       setSaving(false);
     }
 
-    // Exemplar saved — close the sheet and give immediate feedback. `positive`
-    // is captured now because the sheet (and its state) may be reused before the
-    // detached apply below runs.
+    // Exemplar saved. `positive` is captured now because the sheet (and its
+    // state) may be reused before the detached apply runs.
     const taughtPositive = positive;
     setTeaching(false);
-    modelRef.current = null; // new example → retrain heads on next open
     success();
 
-    // Apply the new example across the library off the button: retrain heads and
-    // re-tag everything. Chained so concurrent teaches run one retag at a time.
-    applyChainRef.current = (applyChainRef.current ?? Promise.resolve())
-      .catch(() => {})
-      .then(async () => {
-        try {
-          const matched = onTaught ? await onTaught(label) : undefined;
-          if (typeof matched === 'number') {
-            showToast(
-              taughtPositive
-                ? `Taught “${label}” — ${matched} meme${matched === 1 ? '' : 's'} now tagged` +
-                    (matched <= 1 ? '. Teach a few more examples to catch the rest' : '')
-                : `Got it — NOT “${label}”. ${matched} meme${matched === 1 ? '' : 's'} still carry the tag`,
-              'success'
-            );
-          } else {
-            showToast(
-              taughtPositive ? `Taught “${label}” — re-tag in Settings to apply it` : `Correction for “${label}” saved`,
-              'success'
-            );
-          }
-        } catch (e) {
-          showToast(`Saved “${label}”, but applying it failed: ${String(e)}`, 'error');
+    // For a positive teach, offer step 2: visually similar memes the user can
+    // confirm as further examples in one tap each. The apply is deferred until
+    // that step closes so the whole round costs a single library re-tag.
+    if (taughtPositive) {
+      try {
+        const candidates = (await getSimilarMemes(selected.id, 12)).filter(
+          (s) => s.score >= CONFIRM_MIN_COSINE
+        );
+        if (candidates.length > 0) {
+          setConfirming({ label, candidates, picked: [] });
+          return;
         }
+      } catch {
+        // candidate fetch is best-effort — fall through to a normal apply
+      }
+    }
+    applyTeach(label, taughtPositive, 1);
+  };
+
+  const togglePick = (id: number) => {
+    tap();
+    setConfirming((cur) =>
+      cur
+        ? {
+            ...cur,
+            picked: cur.picked.includes(id) ? cur.picked.filter((p) => p !== id) : [...cur.picked, id],
+          }
+        : cur
+    );
+  };
+
+  // Close the confirm step: persist the picked memes as extra exemplars, then
+  // run the single deferred apply for everything taught this round. `picks` is
+  // explicit so Skip/backdrop pass [] while the confirm button passes the
+  // current selection (no race against state updates).
+  const finishConfirm = async (picks: number[]) => {
+    const c = confirming;
+    if (!c || confirmSaving) return;
+    setConfirmSaving(true);
+    let added = 0;
+    try {
+      for (const id of picks) {
+        const hit = c.candidates.find((s) => s.id === id);
+        const emb = await getMemeEmbedding(id);
+        if (!hit || !emb) continue;
+        await addExemplar({
+          label: c.label,
+          category: 'character',
+          vector: Array.from(emb),
+          associations: [], // world-knowledge terms were captured with the first example
+          sourceUri: hit.uri,
+          positive: true,
+        });
+        added++;
+      }
+    } catch (e) {
+      showToast(`Some examples failed to save: ${String(e)}`, 'error');
+    } finally {
+      setConfirmSaving(false);
+      setConfirming(null);
+    }
+    if (added > 0) success();
+    applyTeach(c.label, true, 1 + added);
+  };
+
+  // One-tap positive teach from a tag chip's long-press menu — the fastest way
+  // to turn a model guess (CLIP/VLM) into the user's own ground truth.
+  const confirmTag = async (label: string) => {
+    if (!selected) return;
+    try {
+      const emb = await getMemeEmbedding(selected.id);
+      if (!emb) {
+        showToast('Could not teach: no stored embedding for this item', 'error');
+        return;
+      }
+      await addExemplar({
+        label,
+        category: 'character',
+        vector: Array.from(emb),
+        associations: [],
+        sourceUri: selected.uri,
+        positive: true,
       });
+      success();
+      applyTeach(label, true, 1);
+    } catch (e) {
+      showToast(`Could not teach: ${String(e)}`, 'error');
+    }
   };
 
   return (
@@ -508,6 +664,7 @@ export const MemeGrid = React.memo(function MemeGrid({
         onCopyText={onCopyText}
         onDelete={onDelete}
         onTeach={openTeach}
+        onConfirmTag={confirmTag}
         onShowConfidence={computeMatchInfo}
         onSearchLabel={
           onSearchLabel
@@ -528,14 +685,70 @@ export const MemeGrid = React.memo(function MemeGrid({
       />
 
       <Modal
-        visible={teaching}
+        visible={teaching || confirming !== null}
         transparent
         animationType="slide"
         statusBarTranslucent
-        onRequestClose={() => setTeaching(false)}
+        onRequestClose={closeTeachModal}
       >
         <View style={[styles.teachRoot, { paddingBottom: kbHeight }]}>
-          <Pressable style={StyleSheet.absoluteFill} onPress={() => setTeaching(false)} />
+          <Pressable style={StyleSheet.absoluteFill} onPress={closeTeachModal} />
+          {confirming ? (
+            <View style={styles.teachSheet}>
+              <View style={styles.grabber} />
+              <Text style={styles.sheetHeading}>More “{confirming.label}”?</Text>
+              <Text style={styles.teachHint}>
+                These look similar. Tap the ones that are also “{confirming.label}” — every
+                confirmation becomes another example and makes the label sharper.
+              </Text>
+              <View style={styles.confirmGrid}>
+                {confirming.candidates.map((s) => {
+                  const picked = confirming.picked.includes(s.id);
+                  return (
+                    <Pressable key={s.id} onPress={() => togglePick(s.id)} style={styles.confirmCell}>
+                      <Image
+                        source={{ uri: thumbSource(s) }}
+                        style={[styles.confirmThumb, picked && styles.confirmThumbOn]}
+                        contentFit="cover"
+                        recyclingKey={`conf-${s.id}`}
+                        cachePolicy="memory"
+                        allowDownscaling
+                      />
+                      {picked && (
+                        <View style={styles.confirmCheck}>
+                          <Text style={styles.confirmCheckText}>✓</Text>
+                        </View>
+                      )}
+                    </Pressable>
+                  );
+                })}
+              </View>
+              <View style={styles.teachActions}>
+                <PressableScale
+                  style={[styles.teachAction, styles.teachCancel]}
+                  onPress={() => finishConfirm([])}
+                  disabled={confirmSaving}
+                >
+                  <Text style={styles.teachCancelText}>Skip</Text>
+                </PressableScale>
+                <PressableScale
+                  style={[
+                    styles.teachAction,
+                    styles.teachSave,
+                    confirming.picked.length === 0 && styles.teachActionDisabled,
+                  ]}
+                  onPress={() => finishConfirm(confirming.picked)}
+                  disabled={confirmSaving || confirming.picked.length === 0}
+                >
+                  <Text style={styles.teachSaveText}>
+                    {confirmSaving
+                      ? 'Saving…'
+                      : `Teach ${confirming.picked.length} more`}
+                  </Text>
+                </PressableScale>
+              </View>
+            </View>
+          ) : (
           <View style={styles.teachSheet}>
             <View style={styles.grabber} />
             <Text style={styles.sheetHeading}>Teach Memeget</Text>
@@ -566,14 +779,14 @@ export const MemeGrid = React.memo(function MemeGrid({
               placeholderTextColor={colors.muted}
               autoFocus
             />
-            {labels.length > 0 && (
+            {suggestions.length > 0 && (
               <ScrollView
                 horizontal
                 showsHorizontalScrollIndicator={false}
                 contentContainerStyle={styles.suggestRow}
                 keyboardShouldPersistTaps="handled"
               >
-                {labels.map((l) => (
+                {suggestions.map((l) => (
                   <Chip key={l} label={l} active={labelInput.trim() === l} onPress={() => setLabelInput(l)} />
                 ))}
               </ScrollView>
@@ -602,6 +815,7 @@ export const MemeGrid = React.memo(function MemeGrid({
               </PressableScale>
             </View>
           </View>
+          )}
         </View>
       </Modal>
     </>
@@ -620,13 +834,14 @@ function ViewerSheet({
   onCopyText,
   onDelete,
   onTeach,
+  onConfirmTag,
   onShowConfidence,
   onSearchLabel,
   onSelectItem,
 }: {
   item: Item | null;
   busy: boolean;
-  matchInfo: { label: string; score: number }[] | null;
+  matchInfo: { label: string; score: number; matched: boolean }[] | null;
   matchBusy: boolean;
   onClose: () => void;
   onShare: () => void;
@@ -634,6 +849,8 @@ function ViewerSheet({
   onCopyText: () => void;
   onDelete: () => void;
   onTeach: (positive: boolean, preset?: string) => void;
+  // One-tap "this tag is right" — saves a positive exemplar for the open meme.
+  onConfirmTag: (label: string) => void;
   onShowConfidence: () => void;
   onSearchLabel?: (label: string) => void;
   // Tap a "More like this" thumbnail to view that meme in this sheet instead.
@@ -688,6 +905,18 @@ function ViewerSheet({
   useEffect(() => {
     if (item) drag.setValue(0);
   }, [item, drag]);
+
+  // Long-press verdict on a tag chip: promote the model's guess to a taught
+  // positive example, or mark it wrong. Either way this meme stops being a
+  // guess and becomes the user's ground truth.
+  const askTagVerdict = (label: string) => {
+    tap();
+    Alert.alert(`“${label}”`, 'Is this tag right for this meme?', [
+      { text: 'Cancel', style: 'cancel' },
+      { text: '✗ Wrong — not this', style: 'destructive', onPress: () => onTeach(false, label) },
+      { text: '✓ Right — teach it', onPress: () => onConfirmTag(label) },
+    ]);
+  };
 
   const { height: winHeight } = useWindowDimensions();
   const imgHeight = Math.round(winHeight * 0.42);
@@ -771,7 +1000,7 @@ function ViewerSheet({
               {item.tags.length > 0 && (
                 <View style={styles.block}>
                   <Text style={styles.sectionLabel}>
-                    {onSearchLabel ? 'Tags · tap to search · hold to correct' : 'Tags · tap to correct'}
+                    {onSearchLabel ? 'Tags · tap to search · hold to confirm/fix' : 'Tags · hold to confirm/fix'}
                   </Text>
                   <View style={styles.tagWrap}>
                     {item.tags.map((t) => (
@@ -780,9 +1009,9 @@ function ViewerSheet({
                         label={t.label}
                         taught={t.source === 'exemplar'}
                         onPress={
-                          onSearchLabel ? () => onSearchLabel(t.label) : () => onTeach(false, t.label)
+                          onSearchLabel ? () => onSearchLabel(t.label) : () => askTagVerdict(t.label)
                         }
-                        onLongPress={() => onTeach(false, t.label)}
+                        onLongPress={() => askTagVerdict(t.label)}
                       />
                     ))}
                   </View>
@@ -823,7 +1052,7 @@ function ViewerSheet({
                         style={styles.similarCell}
                       >
                         <Image
-                          source={{ uri: s.uri }}
+                          source={{ uri: thumbSource(s) }}
                           style={styles.similarThumb}
                           contentFit="cover"
                           transition={100}
@@ -865,7 +1094,7 @@ function ViewerSheet({
                   {matchInfo.map((m) => (
                     <Text key={m.label} style={styles.mutedSmall}>
                       {m.label}: {(m.score * 100).toFixed(0)}%{' '}
-                      {m.score >= EXEMPLAR_PROB_THRESHOLD ? '✓ match' : ''}
+                      {m.matched ? '✓ match' : ''}
                     </Text>
                   ))}
                 </View>
@@ -951,6 +1180,9 @@ const styles = StyleSheet.create({
   topFabIcon: { color: colors.volt, fontSize: 18, fontWeight: '800' },
   listContent: { gap: GAP, paddingBottom: TABBAR_CLEARANCE + 24 },
   thumb: { width: '100%', height: '100%', backgroundColor: colors.surface2, borderRadius: radius.sm },
+  videoStub: { alignItems: 'center', justifyContent: 'center', padding: 8, gap: 4 },
+  videoStubGlyph: { fontSize: 22, opacity: 0.6 },
+  videoStubName: { color: colors.faint, fontSize: 9, textAlign: 'center' },
   play: {
     position: 'absolute',
     right: 6,
@@ -1124,6 +1356,28 @@ const styles = StyleSheet.create({
   },
   teachActions: { flexDirection: 'row', gap: space.sm, marginTop: 2, marginBottom: 6 },
   teachAction: { flex: 1, paddingVertical: 13, borderRadius: radius.md, alignItems: 'center' },
+  teachActionDisabled: { opacity: 0.4 },
+  confirmGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  confirmCell: { width: 72, height: 72 },
+  confirmThumb: {
+    width: '100%',
+    height: '100%',
+    borderRadius: radius.sm,
+    backgroundColor: colors.surface2,
+  },
+  confirmThumbOn: { borderWidth: 2, borderColor: colors.volt },
+  confirmCheck: {
+    position: 'absolute',
+    top: 4,
+    right: 4,
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: colors.volt,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  confirmCheckText: { color: colors.onVolt, fontSize: 11, fontWeight: '800' },
   teachCancel: { borderWidth: 1, borderColor: colors.border },
   teachCancelText: { color: colors.textDim, fontWeight: '700' },
   teachSave: { backgroundColor: colors.volt },

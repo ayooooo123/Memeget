@@ -26,6 +26,7 @@ interface MemegetBgNative {
   stopForeground(): void;
   getModifiedTime(uri: string): number | null;
   extractAudio(source: string, maxSeconds: number): Promise<ExtractedAudio | null>;
+  extractVideoFrame(source: string, seconds: number): Promise<string | null>;
   copyFileToClipboard(uri: string, name: string, mimeType: string): Promise<void>;
 }
 
@@ -98,6 +99,22 @@ export async function extractAudio(
   if (!native || typeof native.extractAudio !== 'function') return null;
   const res = await native.extractAudio(source, maxSeconds);
   return res && typeof res.path === 'string' ? res : null;
+}
+
+// Decode one frame of a video via MediaCodec (native) and return a file://
+// jpeg path in the cache dir — the caller owns deleting it. MediaCodec is the
+// player's own decode path, so it reads streams MediaMetadataRetriever (used
+// by expo-image AND expo-video-thumbnails) refuses — including mp4 bytes
+// wearing a .gif name. Pass seconds < 0 for AUTO: duration-proportional
+// positions are tried and near-black frames rejected, so posters don't land
+// on fade-from-black intros. Resolves null when the native module isn't
+// built in; REJECTS with a specific reason ("no decoder for video/av01",
+// "decode timeout", …) on failure so the caller can record why — those
+// messages are the only debugging signal off a device without a debugger.
+export async function extractVideoFrame(source: string, seconds: number): Promise<string | null> {
+  if (!native || typeof native.extractVideoFrame !== 'function') return null;
+  const p = await native.extractVideoFrame(source, seconds);
+  return typeof p === 'string' && p ? p : null;
 }
 
 // Put an actual file (in practice a video, which expo-clipboard can't hold) on
