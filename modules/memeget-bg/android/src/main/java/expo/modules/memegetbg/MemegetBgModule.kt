@@ -91,6 +91,16 @@ class MemegetBgModule : Module() {
       VideoFrameExtractor.extract(ctx, source, seconds)
     }
 
+    // Same job as extractVideoFrame, but through ExoPlayer's (media3) decode
+    // pipeline — whose own container parsers read some streams the platform
+    // MediaExtractor/MediaMetadataRetriever reject. The last poster rung: if a
+    // clip plays in the viewer but no platform decoder can poster it, this can.
+    AsyncFunction("extractVideoFramePlayer") { source: String, seconds: Double ->
+      val ctx = appContext.reactContext
+        ?: throw IllegalStateException("React context unavailable")
+      VideoPlayerFrameExtractor.extract(ctx, source, seconds)
+    }
+
     // Battery + thermal snapshot the JS loop polls to decide whether to keep
     // describing. Cheap, synchronous reads.
     Function("getPower") {
