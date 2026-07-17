@@ -44,9 +44,11 @@ import {
   backfillVideoThumbs,
   clearThumbSkips,
   getVisionTelemetry,
+  indexSavedFiles,
   retagAll,
   type VisionTelemetry,
 } from '../indexer';
+import { importMemesFromZip, type ZipImportPhase } from '../zipImport';
 import { MEME_LABELS } from '../memeLabels';
 import { buildPack, parsePack, serializePack } from '../teachingPack';
 import { colors, radius, space, TABBAR_CLEARANCE } from '../theme';
@@ -81,6 +83,9 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
   const [migrating, setMigrating] = useState(false);
   const [posterStats, setPosterStats] = useState({ total: 0, done: 0, failed: 0, missing: 0 });
   const [retryingPosters, setRetryingPosters] = useState(false);
+  const [zipImport, setZipImport] = useState<{ done: number; total: number; phase: ZipImportPhase } | null>(
+    null
+  );
 
   const refresh = useCallback(async () => {
     setFolders(await getFolders());
@@ -141,6 +146,59 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
       setRetryingPosters(false);
     }
   }, [retryingPosters]);
+
+  // Import every compatible meme out of a .zip: pick the archive, unzip its
+  // image/video entries into the linked folder (skipping duplicates), then hand
+  // the freshly saved files to the background indexer — the same two-phase path
+  // a shared meme takes. Needs a linked folder (importMemesFromZip throws a
+  // readable message otherwise).
+  const onImportZip = useCallback(async () => {
+    if (zipImport) return;
+    if (folders.length === 0) {
+      showToast('Link a folder first (Library tab) so imported memes have a home', 'info');
+      return;
+    }
+    const res = await DocumentPicker.getDocumentAsync({
+      // Android zip pickers report a few different mime types; keep */* so the
+      // archive is always selectable, and we validate the bytes on read.
+      type: ['application/zip', 'application/x-zip-compressed', 'multipart/x-zip', '*/*'],
+      copyToCacheDirectory: true,
+    }).catch(() => null);
+    if (!res || res.canceled) return;
+    const picked = res.assets[0];
+    if (!picked) return;
+
+    const release = acquireKeepAlive('Importing memes from zip');
+    setZipImport({ done: 0, total: 0, phase: 'reading' });
+    try {
+      const result = await importMemesFromZip(picked.uri, {
+        zipName: picked.name,
+        onProgress: (done, total, phase) => setZipImport({ done, total, phase }),
+      });
+      // Files are on disk as pending rows now — show them, then embed/OCR/tag in
+      // the background. If the model isn't ready yet nothing is lost: they stay
+      // as normal folder files for the next Index (or the pending-recovery sweep).
+      emitLibraryChanged();
+      if (result.saved.length > 0 && emb.ready) {
+        indexSavedFiles(emb, result.saved)
+          .then(() => emitLibraryChanged())
+          .catch(() => {});
+      }
+      await refresh();
+
+      const parts = [`Imported ${result.imported} meme${result.imported === 1 ? '' : 's'}`];
+      if (result.duplicates > 0) parts.push(`${result.duplicates} duplicate${result.duplicates === 1 ? '' : 's'} skipped`);
+      if (result.unsupported > 0) parts.push(`${result.unsupported} unsupported`);
+      if (result.errors > 0) parts.push(`${result.errors} failed`);
+      if (result.imported > 0) success();
+      showToast(parts.join(' · '), result.imported > 0 ? 'success' : 'info');
+    } catch (e) {
+      showToast(`Zip import failed: ${String((e as Error)?.message ?? e)}`, 'error');
+    } finally {
+      release();
+      setZipImport(null);
+    }
+  }, [zipImport, folders.length, emb, refresh]);
 
   const onRetag = useCallback(async () => {
     if (!emb.ready) {
@@ -816,6 +874,36 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
             ))}
           </View>
         )}
+        <View style={styles.divider} />
+        <Text style={styles.note}>
+          Import an archive of memes: pulls every supported image and video out of a{' '}
+          <Text style={styles.noteStrong}>.zip</Text> into your linked folder, skips anything already
+          there, and indexes the rest in the background.
+        </Text>
+        {zipImport ? (
+          <View style={{ gap: 8 }}>
+            <Text style={styles.note}>
+              {zipImport.phase === 'reading'
+                ? 'Reading the archive…'
+                : `Importing ${zipImport.done}/${zipImport.total || '…'}`}
+            </Text>
+            <ProgressBar value={zipImport.total ? zipImport.done / zipImport.total : 0} />
+          </View>
+        ) : (
+          <Button
+            small
+            variant="secondary"
+            icon="⇩"
+            label="Import from a .zip"
+            onPress={onImportZip}
+            disabled={folders.length === 0}
+          />
+        )}
+        {folders.length === 0 && (
+          <Text style={styles.faintSmall}>Link a folder first to import into it.</Text>
+        )}
+
+        <View style={styles.divider} />
         <Button variant="dangerGhost" small label="Clear index" onPress={onClear} />
       </Section>
 
