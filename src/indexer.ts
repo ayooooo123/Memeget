@@ -1240,6 +1240,47 @@ export async function backfillVisualEmbeddings(
   return rows.length;
 }
 
+// Grid thumbnail width for images. Cells are one-third of the screen — a few
+// hundred physical px on a phone — so a 512px JPEG covers them crisply while
+// decoding an order of magnitude faster than a full-res original and costing a
+// few tens of KB on disk (vs the multi-MB source). expo-image downscales it the
+// rest of the way to the exact cell size.
+const IMAGE_THUMB_WIDTH = 512;
+
+// One image's grid thumbnail: transcode the original down to IMAGE_THUMB_WIDTH
+// and persist it. manipulateAsync reads the SAF content:// uri directly (via the
+// resolver), so the common case never copies the whole file; a copy-to-cache
+// fallback covers providers/formats that won't decode straight off the uri.
+// Returns the persisted path, or null if neither path could decode it — for a
+// normal image that's a corrupt file (the grid keeps falling back to the
+// original uri); for an mp4-as-gif the caller then tries the video ladder.
+async function extractImageThumb(row: { uri: string; name: string }, idx: number): Promise<string | null> {
+  try {
+    const jpeg = await toJpeg(row.uri, IMAGE_THUMB_WIDTH);
+    try {
+      return await persistThumb(jpeg);
+    } finally {
+      await deleteCache(jpeg);
+    }
+  } catch {
+    // fall through to the local-copy attempt
+  }
+  let work: string | null = null;
+  try {
+    work = await copyToCache({ uri: row.uri, name: row.name, kind: 'image' }, idx);
+    const jpeg = await toJpeg(work, IMAGE_THUMB_WIDTH);
+    try {
+      return await persistThumb(jpeg);
+    } finally {
+      await deleteCache(jpeg);
+    }
+  } catch {
+    return null;
+  } finally {
+    if (work) await deleteCache(work);
+  }
+}
+
 // Fast path for a poster: MediaMetadataRetriever reads the SAF content:// uri
 // directly (the module opens a file descriptor off the resolver), so grabbing
 // one frame does NOT require copying the whole multi-megabyte video into the
@@ -1293,7 +1334,9 @@ const THUMB_FALLBACK_TIMEOUT_MS = 20_000;
 const THUMB_SKIP_RETRY_MS = 10 * 60_000;
 const thumbSkip = new Map<number, number>(); // meme id -> retry-after timestamp
 
-async function nextThumbRows(limit: number): Promise<{ id: number; uri: string; name: string }[]> {
+async function nextThumbRows(
+  limit: number
+): Promise<{ id: number; uri: string; name: string; kind: 'image' | 'video' }[]> {
   const now = Date.now();
   for (const [id, until] of thumbSkip) {
     if (until <= now) thumbSkip.delete(id);
@@ -1346,9 +1389,31 @@ const errText = (e: unknown): string => {
 // on a device we can't attach to, and "which path said what" is the only way
 // to tell a missing codec from a broken file from a permission problem.
 async function extractPosterAnyway(
-  row: { id: number; uri: string; name: string },
+  row: { id: number; uri: string; name: string; kind: 'image' | 'video' },
   idx: number
 ): Promise<string | 'timeout' | null> {
+  // Images just transcode down to a small grid thumb (no codec, no seek). A
+  // real image succeeds here; only a genuinely undecodable one falls through —
+  // and then only .gif-named files are worth the video ladder (mp4 bytes wearing
+  // a .gif name). A normal image that won't decode is a corrupt download: return
+  // null so it's stamped and the grid keeps rendering off the original uri,
+  // instead of burning the whole 30s video ladder on a file it can't help.
+  if (row.kind === 'image') {
+    const thumb = await extractImageThumb(row, idx);
+    if (thumb) return thumb;
+    if (!/\.gif$/i.test(row.name)) {
+      await addIndexError({
+        name: row.name,
+        kind: 'image',
+        stage: 'thumbnail',
+        reason: 'image could not be decoded to a grid thumbnail',
+      }).catch(() => {});
+      return null;
+    }
+    // .gif-named and undecodable as an image → almost certainly an mp4 in
+    // disguise; fall through to the video decode ladder below.
+  }
+
   let timedOut = false;
   const errs: string[] = [];
 
