@@ -70,15 +70,15 @@ export const SYSTEM_PROMPT =
 export const USER_PROMPT =
   'Describe this meme so it can be found later by search. Reply with EXACTLY these ' +
   'four lines, each starting with the label in caps, and nothing else:\n' +
-  'CAPTION: one sentence, <=14 words, what is happening and why it is funny\n' +
+  'CAPTION: one sentence, <=14 words, the action taking place, the feeling or mood being conveyed, and why it is funny\n' +
   'TEXT: text visible in the image, verbatim; leave blank if none\n' +
   'SUBJECTS: comma-separated main people, characters, or objects\n' +
-  'TAGS: 4-8 comma-separated lowercase keywords (meme format/template name if known, topic, emotion, named characters)\n' +
+  'TAGS: 4-8 comma-separated lowercase keywords (meme format/template name if known, topic, actions happening, emotion/feeling conveyed, named characters)\n' +
   '\nExample of the exact format:\n' +
-  'CAPTION: a distracted man looks back at another woman while his girlfriend glares\n' +
+  'CAPTION: a man turns to admire another woman while his girlfriend glares in disgust\n' +
   'TEXT: me, new framework, the project i should be working on\n' +
   'SUBJECTS: man, girlfriend, other woman\n' +
-  'TAGS: distracted boyfriend, temptation, priorities, relatable, stock photo\n' +
+  'TAGS: distracted boyfriend, turning to look, temptation, jealousy, disgust, relatable\n' +
   '\nNow describe the image. If it is not a meme, still describe it the same way. Be concise.';
 
 // Cap the injected OCR so it can't bloat the prompt (prefill cost) — a hint.
@@ -100,7 +100,8 @@ export function userTurn(ocrHint?: string): string {
 // echoes a hint instead of filling it in; a value containing one of these is
 // noise and must never reach the UI.
 const HINT_FRAGMENTS = [
-  'what is happening and why it is funny',
+  'the action taking place, the feeling or mood being conveyed, and why it is funny',
+  'the feeling or mood being conveyed',
   'text visible in the image',
   'leave blank if none',
   'main people, characters, or objects',

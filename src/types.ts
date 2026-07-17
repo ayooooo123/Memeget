@@ -4,7 +4,7 @@ export interface Tag {
   label: string;
   category: string;
   score: number;
-  source?: 'prompt' | 'exemplar' | 'ocr' | 'vision'; // how the label was matched
+  source?: 'prompt' | 'exemplar' | 'ocr' | 'vision' | 'manual'; // how the label was matched ('manual' = user-applied, e.g. bulk-tagged)
 }
 
 // Lifecycle of the optional VLM enrichment pass for a meme.
