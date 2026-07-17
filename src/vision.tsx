@@ -286,11 +286,14 @@ export function VisionProvider({ children }: { children: React.ReactNode }) {
     };
   }, [embeddings.ready]);
 
-  // Video grid posters: pure I/O + codec work, no model — runs once per app
-  // session until the queue drains. Yields to indexing/re-tagging only, NOT to
-  // the interactive window: the user browsing the grid is exactly when blank
-  // tiles are visible, so freezing on every touch made the backfill look dead.
-  // Each batch that lands nudges the library so tiles fill in live.
+  // Grid thumbnails: video posters (codec work) AND small downscaled image
+  // thumbs (pure transcode) — no model, runs once per app session until the
+  // queue drains. Image thumbs are what stop the grid decoding full-res
+  // originals on every scroll, so they matter as much as posters here. Yields to
+  // indexing/re-tagging only, NOT to the interactive window: the user browsing
+  // the grid is exactly when slow/blank tiles show, so freezing on every touch
+  // made the backfill look dead. Each batch that lands nudges the library so
+  // tiles fill in live.
   useEffect(() => {
     let cancelled = false;
     let hold: (() => void) | null = null;
@@ -350,7 +353,7 @@ export function VisionProvider({ children }: { children: React.ReactNode }) {
         // Hold the keep-alive service while there's an actual backlog, so the
         // drain continues with the app backgrounded; drop it when idle so the
         // notification doesn't sit there forever.
-        if (n > 0 && !hold) hold = acquireKeepAlive('Extracting video previews');
+        if (n > 0 && !hold) hold = acquireKeepAlive('Generating thumbnails');
         if (n === 0 && hold) {
           hold();
           hold = null;
@@ -431,11 +434,12 @@ export function VisionProvider({ children }: { children: React.ReactNode }) {
           await sleep(10_000);
           continue;
         }
-        // Grid posters outrank visual vectors: both this loop and the thumb
-        // backfill chew the same codecs/CPU, but a missing poster is a blank
-        // tile the user is looking at, while a missing DINO vector just means
-        // "More like this" ranks on the image embedding for a while longer.
-        // The poster queue is small and drains once; let it finish first.
+        // Grid thumbnails outrank visual vectors: both this loop and the thumb
+        // backfill chew CPU, but a slow/blank tile is what the user is looking
+        // at, while a missing DINO vector just means "More like this" ranks on
+        // the image embedding for a while longer. Image thumbs transcode fast
+        // (no codec) so the queue still drains quickly even now that it covers
+        // the whole library, not just videos; let it finish first.
         if (await videoThumbsPending().catch(() => false)) {
           await sleep(5_000);
           continue;
