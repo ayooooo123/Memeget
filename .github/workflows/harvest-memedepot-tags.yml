@@ -1,0 +1,76 @@
+name: Harvest memedepot tags
+
+# Crawls memedepot for its curated tag/format vocabulary and refreshes
+# `src/data/memedepotBaseline.json` — the breadth tier the app folds into its
+# zero-shot tagging set on first launch (src/baselineLabels.ts).
+#
+# WHY CI: memedepot sits behind Cloudflare and the dev sandbox's egress policy
+# blocks it, but GitHub-hosted runners have open internet — so this is the one
+# place the harvest can actually reach the site. The job opens a PR with the
+# regenerated file; a human reviews the vocabulary before it ships. It never
+# commits straight to a release branch.
+
+on:
+  workflow_dispatch:
+    inputs:
+      max_pages:
+        description: 'Max pages to crawl'
+        default: '400'
+      max_tags:
+        description: 'Max tags to keep'
+        default: '300'
+  schedule:
+    # Monthly — the meme vocabulary drifts slowly and we don't want PR spam.
+    - cron: '0 6 1 * *'
+
+concurrency:
+  group: harvest-memedepot-tags
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  harvest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # Guard the deterministic parsing logic before trusting a live crawl.
+      - name: Test harvester helpers
+        run: npm run harvest:test
+
+      - name: Harvest tags
+        run: |
+          node tools/memedepot/harvest.mjs \
+            --maxPages "${{ github.event.inputs.max_pages || '400' }}" \
+            --maxTags "${{ github.event.inputs.max_tags || '300' }}"
+
+      # If the crawl found nothing it leaves the file untouched (see harvest.mjs),
+      # so create-pull-request simply sees no diff and does nothing.
+      - name: Open PR with refreshed baseline
+        uses: peter-evans/create-pull-request@v6
+        with:
+          branch: automation/memedepot-tags
+          base: main
+          add-paths: src/data/memedepotBaseline.json
+          commit-message: 'chore(data): refresh memedepot tag baseline'
+          title: 'chore(data): refresh memedepot tag baseline'
+          body: |
+            Automated harvest of memedepot's tag/format vocabulary
+            (`tools/memedepot/harvest.mjs`), folded into the app's first-launch
+            tagging baseline via `src/baselineLabels.ts`.
+
+            **Review before merge:** skim the new/changed labels for junk or
+            miscategorized terms, and — once the search-quality eval harness
+            exists (docs/memedepot-corpus.md) — confirm no tagging regression.
+            Only derived text (tag terms + counts) is harvested; no meme images.
+          delete-branch: true
