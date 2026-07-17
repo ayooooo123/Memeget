@@ -16,6 +16,7 @@ import {
   addIndexError,
   bulkUpdateMemeTags,
   clearIndexErrors,
+  clearIndexErrorsFor,
   countMemesDescribed,
   dot,
   getAllMemeEmbeddings,
@@ -1502,7 +1503,11 @@ export async function backfillVideoThumbs(
         await setMemeThumb(row.id, result ?? THUMB_FAILED).catch(() => {});
         // A successful extraction is the only thing the grid needs to repaint;
         // JS is single-threaded so this push across workers is race-free.
-        if (result) patches.push({ id: row.id, thumbUri: result });
+        if (result) {
+          patches.push({ id: row.id, thumbUri: result });
+          // Retire any stale error row now that this file finally postered.
+          await clearIndexErrorsFor(row.name).catch(() => {});
+        }
       }
     }
   };
