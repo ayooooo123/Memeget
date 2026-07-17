@@ -23,7 +23,7 @@ No accounts. No servers. No uploads.
 | Index storage | `expo-sqlite`; image and caption embeddings stored as float32 blobs, brute-force cosine search. |
 | Folder access | Android **Storage Access Framework** — per-folder permission, no broad media access. |
 | Save from a link | Share an **X/Twitter**, **Tenor**, or any social-post URL into Memeget and it resolves the underlying media (tweet-syndication for X, Open Graph `og:video`/`og:image` for everything else), downloads it into your linked folder, and indexes it like a normal share — no manual download + re-import. |
-| Import from a `.zip` | Settings → *Index* → **Import from a .zip**: pulls every supported image/video out of an archive into your linked folder, skips anything already there (by filename), and indexes the rest in the background — the same two-phase path as a share. |
+| Import from a `.zip` | **Share a .zip into Memeget** (or Settings → *Index* → **Import from a .zip**): pulls every supported image/video out of the archive into your linked folder, skips anything already there (by filename), indexes the rest in the background, and discards the archive — the same two-phase path as any other share. |
 
 ## Saving from a shared link
 
@@ -48,12 +48,14 @@ and nothing is saved.
 
 ## Importing a `.zip` of memes
 
-Got a whole archive of memes (a backup, a shared pack, a download dump)? Instead
-of unzipping and re-sharing each one:
+Got a whole archive of memes (a backup, a shared pack, a download dump)? Just
+**share the `.zip` into Memeget** — from your Files app, a chat, a browser
+download, wherever — and it imports the lot, then throws the archive away. (No
+zip handy in a share sheet? **Settings → Index → Import from a .zip** opens a
+file picker for the same thing.)
 
-- Go to **Settings → Index → Import from a .zip** and pick the archive.
-- Memeget reads it on-device (via [`jszip`](https://stuk.github.io/jszip/)) and
-  pulls out only the formats it handles — the same image/video extensions the
+- Memeget reads the archive on-device (via [`jszip`](https://stuk.github.io/jszip/))
+  and pulls out only the formats it handles — the same image/video extensions the
   folder scan accepts (`jpg`, `png`, `gif`, `webp`, `heic`, `mp4`, `webm`, …).
   Anything else (PDFs, text, audio) is left behind and reported as *unsupported*.
 - **Duplicates are skipped**: any entry whose filename already exists in your
@@ -64,7 +66,9 @@ of unzipping and re-sharing each one:
 - Everything that survives is copied into your **first linked folder** and handed
   to the same background indexer as a share — so it picks up CLIP/OCR/VLM tags
   automatically and shows up in search. You'll get a summary like
-  *"Imported 42 memes · 3 duplicates skipped · 1 unsupported."*
+  *"Imported 42 memes from zip — indexing in background (3 dups skipped)."*
+- The shared archive itself is **discarded** once its memes are extracted — only
+  the individual memes are kept, as normal files in your folder.
 
 You need a linked folder first (it's where the imported files live). Nothing is
 uploaded — the archive is read entirely on your device.
