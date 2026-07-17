@@ -21,4 +21,11 @@ dependencies {
   implementation 'androidx.core:core-ktx:1.13.1'
   // Read a linked SAF document's lastModified() for the library's recency sort.
   implementation 'androidx.documentfile:documentfile:1.0.1'
+
+  // ExoPlayer frame extraction for the last-resort poster path
+  // (VideoPlayerFrameExtractor). Pinned to the SAME media3 version expo-video
+  // bundles (see its android/build.gradle: androidxMedia3Version) so the app
+  // resolves a single coherent ExoPlayer — a mismatched media3 across modules
+  // crashes at runtime. Keep this in lockstep whenever expo-video is upgraded.
+  implementation 'androidx.media3:media3-inspector:1.9.0'
 }

@@ -46,16 +46,24 @@ object VideoFrameExtractor {
 
       var trackIndex = -1
       var format: MediaFormat? = null
+      val trackMimes = ArrayList<String>()
       for (i in 0 until extractor.trackCount) {
         val f = extractor.getTrackFormat(i)
         val mime = f.getString(MediaFormat.KEY_MIME) ?: continue
-        if (mime.startsWith("video/")) {
+        trackMimes.add(mime)
+        if (trackIndex < 0 && mime.startsWith("video/")) {
           trackIndex = i
           format = f
-          break
         }
       }
-      if (trackIndex < 0 || format == null) throw IllegalStateException("no video track")
+      // Report WHAT the container actually held so a genuinely trackless/
+      // non-media download (a truncated or error-page ".mp4") is told apart
+      // from an audio-only file or an unexpected codec — "no video track"
+      // alone can't distinguish a corrupt download from an extractor gap.
+      if (trackIndex < 0 || format == null) {
+        val summary = if (trackMimes.isEmpty()) "0 tracks" else trackMimes.joinToString(",")
+        throw IllegalStateException("no video track ($summary)")
+      }
       extractor.selectTrack(trackIndex)
       val mime = format.getString(MediaFormat.KEY_MIME)!!
 

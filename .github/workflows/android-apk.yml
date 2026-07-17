@@ -25,6 +25,10 @@ on:
       # contention) on top of the MobileCLIP-S2 + DINOv2 embedding swap. Remove
       # before merging to main.
       - claude/meme-id-performance-6d0565
+      # TEMPORARY: build this branch's APK to on-device test the ExoPlayer
+      # (media3) last-resort poster path for mp4-gif videos the platform
+      # decoders reject. Remove before merging to main.
+      - claude/mp4-gif-thumbnail-errors-ggjf4w
     tags:
       - 'v*'
   workflow_dispatch:
