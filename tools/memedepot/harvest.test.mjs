@@ -37,6 +37,29 @@ test('normalizeTerm guards against [object Object] leakage', () => {
   assert.equal(normalizeTerm('object object object'), '');
 });
 
+test('normalizeTerm drops generic denylisted nouns', () => {
+  for (const junk of ['Gun', 'car', 'Phone', 'eyes', 'Walmart', 'family', 'gaming']) {
+    assert.equal(normalizeTerm(junk), '', `${junk} should be denylisted`);
+  }
+});
+
+test('normalizeTerm folds apostrophes instead of leaving orphan letters', () => {
+  assert.equal(normalizeTerm("Don't Leave Babe"), 'dont leave babe'); // not "don t leave babe"
+  assert.equal(normalizeTerm("Auntie Anne's"), 'auntie annes');
+  assert.equal(normalizeTerm('E.T.'), ''); // both letters orphaned -> empty
+});
+
+test('normalizeTerm drops single-token junk (short, tickers, no-vowel)', () => {
+  assert.equal(normalizeTerm('rrs'), ''); // no vowel
+  assert.equal(normalizeTerm('gme'), ''); // too short (<4)
+  assert.equal(normalizeTerm('usd1'), ''); // contains a digit
+  assert.equal(normalizeTerm('51349b'), ''); // id fragment
+  assert.equal(normalizeTerm('esq'), ''); // too short
+  // ...but real multi-word and normal tokens survive
+  assert.equal(normalizeTerm('space odyssey'), 'space odyssey');
+  assert.equal(normalizeTerm('Trollface'), 'trollface');
+});
+
 test('jsonTerm extracts a name from tag objects, never "[object Object]"', () => {
   assert.equal(jsonTerm('Gigachad'), 'Gigachad');
   assert.equal(jsonTerm({ name: 'Wojak' }), 'Wojak');
@@ -101,6 +124,13 @@ test('aggregate normalizes and counts', () => {
   assert.equal(freq['gigachad'], 2);
   assert.equal(freq['wojak'], 1);
   assert.equal(freq['the'], undefined);
+});
+
+test('buildBaseline collapses plural variants, higher count wins', () => {
+  const freq = { pills: 6, pill: 4, goblin: 3, goblins: 2, trollface: 5 };
+  const out = buildBaseline(freq, { generatedAt: '2026-01-01T00:00:00Z' });
+  const labels = out.labels.map((l) => l.label);
+  assert.deepEqual(labels, ['Pills', 'Trollface', 'Goblin']); // pill folded into Pills, goblins into Goblin
 });
 
 test('buildBaseline ranks, drops singletons, caps, and stays pure', () => {
