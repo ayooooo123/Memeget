@@ -96,6 +96,7 @@ export function normalizeTerm(raw) {
   if (t.length < 3 || t.length > 40) return '';
   if (STOPWORDS.has(t) || GENERIC_DENYLIST.has(t)) return '';
   if (/^\d+$/.test(t)) return ''; // pure numbers
+  if (t.split(' ').length > 6) return ''; // sentence-like junk (long KYM entry titles) — real formats are short
   if (/^object( object)*$/.test(t)) return ''; // "[object Object]" leakage guard
   // Crypto-ticker / id noise (memedepot is a crypto-meme community): reject any
   // term with a token that mixes letters and digits (hpos10i, 1000u, lt3, web3,
@@ -525,12 +526,14 @@ async function fetchImgflip(opts) {
   }
 }
 
-// Scrape KYM's /memes browse index across a few pages (no API). Best-effort:
-// Cloudflare may block a runner, in which case fetchText returns null → [].
+// Scrape KYM's /memes/popular browse index across a few pages (no API). We use
+// /popular, NOT the default /memes feed — the default is sorted by RECENCY and
+// returns obscure new submissions, whereas /popular surfaces the canonical
+// classic formats. Best-effort: Cloudflare may block a runner (→ null → []).
 async function fetchKym(opts) {
   const out = [];
   for (let page = 1; page <= (opts.kymPages ?? 5); page++) {
-    const html = await fetchText(`https://knowyourmeme.com/memes/page/${page}`, opts.timeoutMs);
+    const html = await fetchText(`https://knowyourmeme.com/memes/popular/page/${page}`, opts.timeoutMs);
     if (!html) break;
     out.push(...kymCandidates(html, out.length));
     await sleep(opts.delayMs);
