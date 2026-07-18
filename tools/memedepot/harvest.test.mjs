@@ -69,6 +69,13 @@ test('normalizeTerm drops crypto-ticker/id noise (incl. multi-word)', () => {
   assert.equal(normalizeTerm('The Simpsons'), 'the simpsons');
 });
 
+test('normalizeTerm drops sentence-like junk (>6 words), keeps real names', () => {
+  assert.equal(normalizeTerm('Jax Look Know we Dont Get Along But'), ''); // 8 words
+  assert.equal(normalizeTerm('Nahhh Wait You Look Tuff im Taking Photo'), '');
+  assert.equal(normalizeTerm('Woman Yelling at Cat'), 'woman yelling at cat'); // 4 words, kept
+  assert.equal(normalizeTerm('Distracted Boyfriend'), 'distracted boyfriend');
+});
+
 test('normalizeTerm drops admin/generic depot names', () => {
   for (const junk of ['My Depot', 'Public Testing Depot', 'Meme Templates', 'Marketing', 'Community Art']) {
     assert.equal(normalizeTerm(junk), '', `${junk} should be denylisted`);
