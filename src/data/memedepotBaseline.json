@@ -21,12 +21,6 @@
       "count": 2
     },
     {
-      "label": "In my Lane",
-      "prompt": "a in my lane meme",
-      "category": "topic",
-      "count": 2
-    },
-    {
       "label": "Pyramids",
       "prompt": "a pyramids meme",
       "category": "topic",
@@ -39,12 +33,6 @@
       "count": 2
     },
     {
-      "label": "Charlie",
-      "prompt": "a charlie meme",
-      "category": "topic",
-      "count": 2
-    },
-    {
       "label": "Conspiracy",
       "prompt": "a conspiracy meme",
       "category": "topic",
@@ -53,12 +41,6 @@
     {
       "label": "Hot Dog",
       "prompt": "a hot dog meme",
-      "category": "topic",
-      "count": 2
-    },
-    {
-      "label": "Point",
-      "prompt": "a point meme",
       "category": "topic",
       "count": 2
     },
