@@ -48,7 +48,13 @@ jobs:
       - name: Test harvester helpers
         run: npm run harvest:test
 
+      # GIPHY_API_KEY / TENOR_API_KEY are optional repo secrets — the Giphy and
+      # Tenor sources stay inert (empty) if they're not set; the other sources
+      # are unaffected.
       - name: Harvest tags
+        env:
+          GIPHY_API_KEY: ${{ secrets.GIPHY_API_KEY }}
+          TENOR_API_KEY: ${{ secrets.TENOR_API_KEY }}
         run: |
           node tools/memedepot/harvest.mjs \
             --maxPages "${{ github.event.inputs.max_pages || '400' }}" \

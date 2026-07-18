@@ -25,6 +25,7 @@ const DEFAULTS = {
   out: new URL('../../src/data/memedepotBaseline.json', import.meta.url).pathname,
   maxPages: 400,
   maxTags: 300,
+  kymPages: 5, // Know Your Meme browse pages to scrape
   delayMs: 1100, // ~1 req/sec
   timeoutMs: 20000,
 };
@@ -340,6 +341,53 @@ export function imgflipCandidates(memes) {
     .filter((c) => c.term);
 }
 
+// Know Your Meme adapter: KYM has no clean API, so we scrape its /memes browse
+// index. Entries live at /memes/<slug>; the slug prettifies into the meme name
+// ("distracted-boyfriend" → "distracted boyfriend"). NAME tier, page order kept.
+// `startRank` lets successive pages continue the popularity ranking.
+const KYM_NAV = new Set([
+  'page', 'popular', 'all', 'researching', 'submissions', 'subcultures', 'cultures',
+  'events', 'sites', 'types', 'editorials', 'confirmed', 'deadpool', 'submission', 'search',
+]);
+export function kymCandidates(html, startRank = 0) {
+  if (typeof html !== 'string') return [];
+  const out = [];
+  const seen = new Set();
+  for (const m of html.matchAll(/href=["']\/memes\/([a-z0-9][a-z0-9-]*)["']/gi)) {
+    const slug = m[1].toLowerCase();
+    if (KYM_NAV.has(slug) || seen.has(slug)) continue;
+    seen.add(slug);
+    out.push({ term: slug.replace(/-+/g, ' '), weight: NAME_BASE - (startRank + out.length), source: 'knowyourmeme.com' });
+  }
+  return out;
+}
+
+// Giphy adapter: /v1/gifs/categories → broad reaction/topic categories +
+// subcategories ("Reactions", "Happy", …). Not format names, so TAG tier (low
+// weight) for breadth. Requires a GIPHY_API_KEY.
+export function giphyCandidates(json) {
+  const out = [];
+  for (const c of asArray(json?.data ?? json, 'data')) {
+    if (typeof c?.name === 'string') out.push({ term: c.name, weight: 3, source: 'giphy.com' });
+    for (const s of Array.isArray(c?.subcategories) ? c.subcategories : []) {
+      if (typeof s?.name === 'string') out.push({ term: s.name, weight: 2, source: 'giphy.com' });
+    }
+  }
+  return out;
+}
+
+// Tenor adapter: /v2/categories → featured search-term tags ("wojak", "facepalm",
+// …). Reaction/search terms, so TAG tier. Requires a TENOR_API_KEY.
+export function tenorCandidates(json) {
+  return asArray(json?.tags ?? json, 'tags')
+    .map((t) => ({
+      term: typeof t?.searchterm === 'string' ? t.searchterm : typeof t?.name === 'string' ? t.name : '',
+      weight: 2,
+      source: 'tenor.com',
+    }))
+    .filter((c) => c.term);
+}
+
 // Merge candidates from every source into the baseline file shape: normalize +
 // quality-filter each term, de-dupe by stem keeping the highest-weight variant
 // (and its provenance), rank by weight, cap. `count` carries the weight for the
@@ -477,6 +525,47 @@ async function fetchImgflip(opts) {
   }
 }
 
+// Scrape KYM's /memes browse index across a few pages (no API). Best-effort:
+// Cloudflare may block a runner, in which case fetchText returns null → [].
+async function fetchKym(opts) {
+  const out = [];
+  for (let page = 1; page <= (opts.kymPages ?? 5); page++) {
+    const html = await fetchText(`https://knowyourmeme.com/memes/page/${page}`, opts.timeoutMs);
+    if (!html) break;
+    out.push(...kymCandidates(html, out.length));
+    await sleep(opts.delayMs);
+  }
+  return out;
+}
+
+// Giphy / Tenor need API keys (GitHub secrets → env). Inert without them.
+async function fetchGiphy(opts) {
+  const key = (typeof process !== 'undefined' && process.env?.GIPHY_API_KEY) || '';
+  if (!key) return [];
+  const txt = await fetchText(`https://api.giphy.com/v1/gifs/categories?api_key=${key}`, opts.timeoutMs);
+  if (!txt) return [];
+  try {
+    return giphyCandidates(JSON.parse(txt));
+  } catch {
+    return [];
+  }
+}
+
+async function fetchTenor(opts) {
+  const key = (typeof process !== 'undefined' && process.env?.TENOR_API_KEY) || '';
+  if (!key) return [];
+  const txt = await fetchText(
+    `https://tenor.googleapis.com/v2/categories?key=${key}&client_key=memeget&type=featured`,
+    opts.timeoutMs
+  );
+  if (!txt) return [];
+  try {
+    return tenorCandidates(JSON.parse(txt));
+  } catch {
+    return [];
+  }
+}
+
 // Fallback: the original per-post tag crawl (sitemap/homepage discovery →
 // extract inline tag arrays → per-page count). Kept for resilience if the depot
 // API shape ever changes out from under us.
@@ -542,13 +631,25 @@ async function main() {
   console.log(`  [imgflip] templates: ${memes.length}`);
   candidates.push(...imgflipCandidates(memes));
 
+  // Source 3 — Know Your Meme (scraped browse index): the meme encyclopedia's
+  // entry names. Best-effort; Cloudflare may block a runner.
+  console.log('  [knowyourmeme] scraping /memes browse index…');
+  const kym = await fetchKym(opts);
+  console.log(`  [knowyourmeme] entries: ${kym.length}`);
+  candidates.push(...kym);
+
+  // Sources 4/5 — Giphy + Tenor reaction categories (TAG tier). Inert unless
+  // GIPHY_API_KEY / TENOR_API_KEY are set (GitHub secrets).
+  const giphy = await fetchGiphy(opts);
+  const tenor = await fetchTenor(opts);
+  console.log(`  [giphy] categories: ${giphy.length}${giphy.length ? '' : ' (set GIPHY_API_KEY)'}`);
+  console.log(`  [tenor] categories: ${tenor.length}${tenor.length ? '' : ' (set TENOR_API_KEY)'}`);
+  candidates.push(...giphy, ...tenor);
+
   let baseline;
   if (candidates.length) {
-    baseline = buildMultiSourceBaseline(candidates, {
-      max: opts.maxTags,
-      source: 'memedepot.com + imgflip.com',
-      generatedAt,
-    });
+    const activeSources = [...new Set(candidates.map((c) => c.source))].sort().join(' + ');
+    baseline = buildMultiSourceBaseline(candidates, { max: opts.maxTags, source: activeSources, generatedAt });
   } else {
     console.warn('  no candidates from any source — falling back to the memedepot HTML tag crawl.');
     baseline = await crawlHtmlBaseline(opts, host, generatedAt);

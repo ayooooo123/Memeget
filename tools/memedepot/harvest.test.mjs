@@ -20,6 +20,9 @@ import {
   depotName,
   depotCandidates,
   imgflipCandidates,
+  kymCandidates,
+  giphyCandidates,
+  tenorCandidates,
   buildMultiSourceBaseline,
   parseRobots,
   isDisallowed,
@@ -222,6 +225,37 @@ test('imgflipCandidates: each template a high-weight name, popularity-ranked', (
   );
   assert.ok(cands[0].weight > cands[1].weight); // popularity order preserved
   assert.ok(cands.every((c) => c.source === 'imgflip.com'));
+});
+
+test('kymCandidates: scrapes /memes slugs → names, skips nav, dedupes', () => {
+  const html = `
+    <a href="/memes/distracted-boyfriend">x</a>
+    <a href="/memes/this-is-fine">y</a>
+    <a href="/memes/page/2">next</a>       <!-- nav, skipped -->
+    <a href="/memes/popular">popular</a>    <!-- nav, skipped -->
+    <a href="/memes/distracted-boyfriend">dup</a>`;
+  const cands = kymCandidates(html);
+  assert.deepEqual(
+    cands.map((c) => c.term),
+    ['distracted boyfriend', 'this is fine']
+  );
+  assert.ok(cands.every((c) => c.source === 'knowyourmeme.com'));
+  assert.ok(cands[0].weight > cands[1].weight); // page order preserved
+});
+
+test('giphyCandidates: categories + subcategories as low-weight tags', () => {
+  const json = { data: [{ name: 'Reactions', subcategories: [{ name: 'facepalm' }] }, { name: 'Emotions' }] };
+  const cands = giphyCandidates(json);
+  assert.deepEqual(cands.map((c) => c.term).sort(), ['Emotions', 'Reactions', 'facepalm']);
+  assert.ok(cands.every((c) => c.weight <= 3 && c.source === 'giphy.com'));
+});
+
+test('tenorCandidates: featured search-terms as tags', () => {
+  const json = { tags: [{ searchterm: 'wojak' }, { searchterm: 'facepalm', name: '#facepalm' }, { image: 'x' }] };
+  assert.deepEqual(
+    tenorCandidates(json).map((c) => c.term),
+    ['wojak', 'facepalm'] // entry without a searchterm/name dropped
+  );
 });
 
 test('buildMultiSourceBaseline: cross-source stem-dedupe, names lead, filter applies', () => {
