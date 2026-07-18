@@ -121,3 +121,67 @@ export function regressions(
   }
   return out;
 }
+
+// ---- tagging eval -----------------------------------------------------------
+//
+// The dual of retrieval: given a meme IMAGE, does zero-shot classification pick
+// its right FORMAT? This is the metric that responds to label/prompt quality
+// (retrieval doesn't route through labels). Ground truth is free: each golden
+// meme's depot IS its format, and every depot contributes a text vector (its
+// name query), so the depots ARE the label set. We rank a meme against every
+// label vector and check where its own label lands.
+
+function cosine(a: number[], b: number[]): number {
+  let s = 0;
+  const n = Math.min(a.length, b.length);
+  for (let i = 0; i < n; i++) s += a[i] * b[i];
+  return s; // vectors are L2-normalized, so dot == cosine
+}
+
+export interface TaggingMetrics {
+  n: number; // memes classified
+  labels: number; // size of the label set (classes)
+  recallAt1: number; // top label is the right format
+  recallAt3: number;
+  recallAt5: number;
+  mrr: number;
+}
+
+export function evaluateTagging(golden: GoldenSet): TaggingMetrics {
+  // Distinct labels + their text vectors, and each meme's ground-truth label,
+  // both derived from the (query → expected meme) pairs.
+  const labelVec = new Map<string, number[]>();
+  const memeLabel = new Map<string, string>();
+  for (const q of golden.queries) {
+    if (!labelVec.has(q.query)) labelVec.set(q.query, q.queryVec);
+    memeLabel.set(q.expectedId, q.query);
+  }
+  const labels = [...labelVec.entries()];
+
+  const ranks: number[] = [];
+  for (const m of golden.memes) {
+    const expected = memeLabel.get(m.id);
+    if (!expected) continue;
+    const scored = labels
+      .map(([label, vec]) => ({ label, score: cosine(m.imageVec, vec) }))
+      .sort((a, b) => b.score - a.score);
+    const idx = scored.findIndex((s) => s.label === expected);
+    ranks.push(idx === -1 ? Infinity : idx + 1);
+  }
+  const n = ranks.length;
+  const denom = n || 1;
+  const rAt = (k: number) => ranks.filter((r) => r <= k).length / denom;
+  const mrr = ranks.reduce((s, r) => s + (Number.isFinite(r) ? 1 / r : 0), 0) / denom;
+  return { n, labels: labels.length, recallAt1: rAt(1), recallAt3: rAt(3), recallAt5: rAt(5), mrr };
+}
+
+export function formatTagging(m: TaggingMetrics): string {
+  const pct = (x: number) => `${(x * 100).toFixed(1)}%`;
+  return [
+    `memes:     ${m.n}   (over ${m.labels} format labels)`,
+    `top-1:     ${pct(m.recallAt1)}   (right format is #1)`,
+    `top-3:     ${pct(m.recallAt3)}`,
+    `top-5:     ${pct(m.recallAt5)}`,
+    `MRR:       ${m.mrr.toFixed(3)}`,
+  ].join('\n');
+}

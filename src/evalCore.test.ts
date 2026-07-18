@@ -7,6 +7,7 @@ import {
   rankQuery,
   rankOfExpected,
   evaluateRetrieval,
+  evaluateTagging,
   regressions,
   formatMetrics,
   type GoldenSet,
@@ -65,6 +66,42 @@ describe('metrics', () => {
     const m = evaluateRetrieval({ memes: [], queries: [] });
     expect(m.mrr).toBe(0);
     expect(m.recallAt1).toBe(0);
+  });
+});
+
+describe('tagging (zero-shot format)', () => {
+  it('classifies each meme image against the label set', () => {
+    // In DENSE, each meme's image points straight at its own label vector, so
+    // zero-shot classification puts the right format at #1 for all three.
+    const t = evaluateTagging(DENSE);
+    expect(t.n).toBe(3);
+    expect(t.labels).toBe(3); // one distinct label per query
+    expect(t.recallAt1).toBeCloseTo(1, 6);
+    expect(t.mrr).toBeCloseTo(1, 6);
+  });
+
+  it('buries the right label when the image leans toward a wrong one', () => {
+    // m3's image is closer to label "a" than to its own label "c" → rank 2.
+    const g: GoldenSet = {
+      memes: [
+        { id: 'm1', imageVec: [1, 0, 0] },
+        { id: 'm3', imageVec: [0.6, 0, 0.5] },
+      ],
+      queries: [
+        { query: 'a', queryVec: [1, 0, 0], expectedId: 'm1' },
+        { query: 'c', queryVec: [0, 0, 1], expectedId: 'm3' },
+      ],
+    };
+    const t = evaluateTagging(g);
+    expect(t.recallAt1).toBeCloseTo(0.5, 6); // m1 #1, m3 #2
+    expect(t.recallAt3).toBeCloseTo(1, 6);
+    expect(t.mrr).toBeCloseTo((1 + 0.5) / 2, 6);
+  });
+
+  it('is 0, not NaN, on an empty set', () => {
+    const t = evaluateTagging({ memes: [], queries: [] });
+    expect(t.mrr).toBe(0);
+    expect(t.recallAt1).toBe(0);
   });
 });
 

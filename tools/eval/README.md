@@ -79,11 +79,30 @@ const after = evaluateRetrieval(golden);
 const bad = regressions(before, after);      // [] = safe to ship
 ```
 
+## Tagging eval (zero-shot format)
+
+Retrieval routes a query straight to an image, so it never touches the label
+prompts — it can't tell you whether the labels/prompts are any good. The
+**tagging** eval is the dual that does: given a meme **image**, does zero-shot
+classification put its right **format** at the top? That's the metric that moves
+when you add labels, fix a prompt, or retune the harvested baseline — and it's
+the one that tracks the north star (*every aspect of a meme searchable*), since
+aspect search is classification against a label vocabulary.
+
+Ground truth is free and needs no extra annotation: each golden meme's **depot
+is its format**, and every depot already contributes a text vector (its name
+query), so the depots *are* the label set. `evaluateTagging(golden)` ranks each
+meme's image against every label vector and reports top-1/3/5 + MRR
+(`formatTagging`). `npm run eval` prints it right under retrieval.
+
+```ts
+const t = evaluateTagging(golden);   // { n, labels, recallAt1/3/5, mrr }
+```
+
+Baseline on the current 180-meme / 24-format golden set: **top-1 15%, top-3 30%,
+top-5 38%, MRR 0.29** — the number a labels/prompt change has to beat.
+
 ## Next (not yet built)
 
-- **Tagging eval** — precision/recall/F1 of zero-shot label assignment vs.
-  `expectedLabels`, reusing the classify path. This is what most directly gates
-  the harvested-baseline cap; the retrieval metrics above are the headline, this
-  is the companion.
 - A standalone `npm run eval -- path/to/golden.json` CLI once real golden sets
   exist (trivial wrapper around `evaluateRetrieval` + `formatMetrics`).
