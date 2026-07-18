@@ -102,6 +102,34 @@ const t = evaluateTagging(golden);   // { n, labels, recallAt1/3/5, mrr }
 Baseline on the current 180-meme / 24-format golden set: **top-1 15%, top-3 30%,
 top-5 38%, MRR 0.29** — the number a labels/prompt change has to beat.
 
+## Aspect search (single-word queries — how the app is really searched)
+
+Nobody types a full sentence to find a meme; they type **one word** — an emotion
+(`smug`), an action (`pointing`), a character (`wojak`), a format — and expect
+every meme carrying that aspect to surface. That's the north star (*any aspect
+findable by a plain-word description*), and it runs through the **lexical
+`searchText` channel** (`scoreEntry`'s `.includes`), which retrieval and tagging
+never touch. So it's the eval that actually moves when tags get deeper or a
+caption changes.
+
+A one-word query has **many** correct answers, so this is multi-relevant
+retrieval. `evaluateAspectSearch(golden)` scores every meme and reports **MAP**
+(the headline), **precision@5** ("are my top 5 on-topic"), **recall@10**, and
+**MRR** of the first hit. Ground truth is free: each memedepot meme's own
+per-meme **tags** are its aspects — a meme tagged `smug` is a labeled positive
+for the query `smug`. No hand-annotation.
+
+`build_golden.py` emits the substrate: it walks each meme for tag fields,
+lowercases `name + tags` into `searchText` (mirroring `db.ts`'s `rowSearchText`),
+embeds `name + tags` as `captionVec`, and turns every tag on ≥ `--min-tag-memes`
+memes into an `aspects[]` query. `npm run eval` prints aspect metrics under
+retrieval + tagging once the golden set carries `aspects[]` (re-run the **Build
+eval golden set** workflow to refresh an older set that lacks them).
+
+```ts
+const a = evaluateAspectSearch(golden);   // { n, avgRelevant, precisionAt5, recallAt10, map, mrr }
+```
+
 ## Next (not yet built)
 
 - A standalone `npm run eval -- path/to/golden.json` CLI once real golden sets

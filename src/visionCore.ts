@@ -68,17 +68,19 @@ export const SYSTEM_PROMPT =
 // model echoing the field hints back verbatim. (react-native-executorch has no
 // hard max-token knob, so brevity is enforced via the prompt.)
 export const USER_PROMPT =
-  'Describe this meme so it can be found later by search. Reply with EXACTLY these ' +
-  'four lines, each starting with the label in caps, and nothing else:\n' +
-  'CAPTION: one sentence, <=14 words, the action taking place, the feeling or mood being conveyed, and why it is funny\n' +
+  'Describe this meme so it can be found later by search. People search with a SINGLE ' +
+  'word for any aspect — a feeling, an action, a character, a format, or the situation ' +
+  'they would send it in — so name each aspect explicitly. Reply with EXACTLY these four ' +
+  'lines, each starting with the label in caps, and nothing else:\n' +
+  'CAPTION: one sentence, <=20 words: the action taking place, the feeling or mood, the situation it is used to react to, and why it is funny\n' +
   'TEXT: text visible in the image, verbatim; leave blank if none\n' +
   'SUBJECTS: comma-separated main people, characters, or objects\n' +
-  'TAGS: 4-8 comma-separated lowercase keywords (meme format/template name if known, topic, actions happening, emotion/feeling conveyed, named characters)\n' +
+  'TAGS: 6-12 comma-separated lowercase keywords covering every searchable facet — meme format/template name if known, named characters or subjects, the action happening, the emotion or feeling conveyed, the topic, and the real-life situation you would send it to react to\n' +
   '\nExample of the exact format:\n' +
-  'CAPTION: a man turns to admire another woman while his girlfriend glares in disgust\n' +
+  'CAPTION: a man turns to admire another woman while his girlfriend glares, used when tempted by a shiny new option\n' +
   'TEXT: me, new framework, the project i should be working on\n' +
   'SUBJECTS: man, girlfriend, other woman\n' +
-  'TAGS: distracted boyfriend, turning to look, temptation, jealousy, disgust, relatable\n' +
+  'TAGS: distracted boyfriend, turning to look, temptation, jealousy, disgust, tempted by something new, choosing the exciting new thing\n' +
   '\nNow describe the image. If it is not a meme, still describe it the same way. Be concise.';
 
 // Cap the injected OCR so it can't bloat the prompt (prefill cost) — a hint.
@@ -100,8 +102,11 @@ export function userTurn(ocrHint?: string): string {
 // echoes a hint instead of filling it in; a value containing one of these is
 // noise and must never reach the UI.
 const HINT_FRAGMENTS = [
-  'the action taking place, the feeling or mood being conveyed, and why it is funny',
-  'the feeling or mood being conveyed',
+  'the action taking place, the feeling or mood, the situation it is used to react to, and why it is funny',
+  'the feeling or mood',
+  'the situation it is used to react to',
+  'the real-life situation you would send it to react to',
+  'covering every searchable facet',
   'text visible in the image',
   'leave blank if none',
   'main people, characters, or objects',

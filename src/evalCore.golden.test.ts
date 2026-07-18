@@ -5,7 +5,15 @@
 
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { evaluateRetrieval, formatMetrics, evaluateTagging, formatTagging, type GoldenSet } from './evalCore';
+import {
+  evaluateRetrieval,
+  formatMetrics,
+  evaluateTagging,
+  formatTagging,
+  evaluateAspectSearch,
+  formatAspect,
+  type GoldenSet,
+} from './evalCore';
 
 const GOLDEN_PATH = join(process.cwd(), 'tools/eval/golden.json');
 
@@ -30,5 +38,20 @@ describe('eval harness — real golden set', () => {
     const tagging = evaluateTagging(golden);
     console.log(`\n--- tagging / zero-shot format (${tagging.labels} labels) ---\n${formatTagging(tagging)}\n`);
     expect(tagging.n).toBeGreaterThan(0);
+
+    // Aspect search: single-word queries ("smug", "pointing") over the lexical
+    // tag channel — how the app is really searched. Needs a golden set with
+    // per-meme tags (aspects[]); older sets omit it, so this just reports 0.
+    const aspects = golden.aspects ?? [];
+    if (aspects.length) {
+      const aspect = evaluateAspectSearch(golden);
+      console.log(`\n--- aspect search (single-word, ${aspect.n} queries) ---\n${formatAspect(aspect)}\n`);
+      expect(aspect.n).toBeGreaterThan(0);
+    } else {
+      console.log(
+        '\n[eval] this golden set has no aspects[] (per-meme tags) yet — re-run the ' +
+          '"Build eval golden set" workflow to add single-word aspect-search scoring.\n'
+      );
+    }
   });
 });
