@@ -53,6 +53,25 @@ test('normalizeTerm folds apostrophes instead of leaving orphan letters', () => 
   assert.equal(normalizeTerm('E.T.'), ''); // both letters orphaned -> empty
 });
 
+test('normalizeTerm drops crypto-ticker/id noise (incl. multi-word)', () => {
+  assert.equal(normalizeTerm('Hpos10i Ticker Bitcoin'), ''); // letter+digit token
+  assert.equal(normalizeTerm('Btcs 1000u'), ''); // 1000u
+  assert.equal(normalizeTerm('Alkanes Monkey 21711'), ''); // 4+ digit run
+  assert.equal(normalizeTerm('Lt3 Memes'), ''); // lt3
+  assert.equal(normalizeTerm('Web3 Playboys'), ''); // web3
+  // ...but legitimate numbers survive
+  assert.equal(normalizeTerm('Mario 64'), 'mario 64');
+  assert.equal(normalizeTerm('The Simpsons'), 'the simpsons');
+});
+
+test('normalizeTerm drops admin/generic depot names', () => {
+  for (const junk of ['My Depot', 'Public Testing Depot', 'Meme Templates', 'Marketing', 'Community Art']) {
+    assert.equal(normalizeTerm(junk), '', `${junk} should be denylisted`);
+  }
+  assert.equal(normalizeTerm('Milady'), 'milady'); // real depot survives
+  assert.equal(normalizeTerm('Woman Yelling at Cat'), 'woman yelling at cat');
+});
+
 test('normalizeTerm drops single-token junk (short, tickers, no-vowel)', () => {
   assert.equal(normalizeTerm('rrs'), ''); // no vowel
   assert.equal(normalizeTerm('gme'), ''); // too short (<4)
