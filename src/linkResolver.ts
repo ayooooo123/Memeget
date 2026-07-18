@@ -1,5 +1,5 @@
-// Resolve a shared link (X/Twitter, Tenor, or any social post) into an actual
-// downloadable media file, then fetch it into the cache so the normal share
+// Resolve a shared link (X/Twitter, Tenor, memedepot, or any social post) into
+// an actual downloadable media file, then fetch it into the cache so the normal share
 // pipeline (saveSharedFiles → indexSavedFiles) can treat it like any other
 // shared image/video.
 //
@@ -123,6 +123,7 @@ function metaContent(html: string, ...names: string[]): string | null {
 
 const isTwitter = (u: string) => /https?:\/\/(?:[\w-]+\.)*(?:twitter|x)\.com\//i.test(u);
 const isTenor = (u: string) => /https?:\/\/(?:[\w-]+\.)*tenor\.com\//i.test(u);
+const isMemedepot = (u: string) => /https?:\/\/(?:[\w-]+\.)*memedepot\.com\//i.test(u);
 
 function tweetId(url: string): string | null {
   const m = url.match(/(?:twitter|x)\.com\/[^/]+\/status(?:es)?\/(\d+)/i);
@@ -182,7 +183,46 @@ async function resolveGeneric(url: string): Promise<MediaRef> {
   }
   const image = metaContent(html, 'og:image:secure_url', 'og:image', 'twitter:image', 'twitter:image:src');
   if (image) return { url: absolutize(image, url), mimeType: metaContent(html, 'og:image:type') ?? undefined };
+
+  // Last resort for JS-rendered galleries (e.g. memedepot) that don't emit
+  // Open Graph media tags: pull a media URL straight out of the markup.
+  const embedded = embeddedMedia(html, url);
+  if (embedded) return embedded;
   throw new Error('No image or video found at that link.');
+}
+
+// Fallback media discovery when a page advertises no Open Graph/Twitter-card
+// media: an inline <video>/<source> element, or a direct media URL sitting in
+// the page markup or an embedded JSON blob (how single-page meme galleries
+// often ship their asset). Deliberately narrow — a <video>/<source> src or a
+// full media-extension URL — so we don't mistake a logo or favicon for content.
+function embeddedMedia(html: string, base: string): MediaRef | null {
+  const tag = html.match(/<(?:video|source)\b[^>]*\bsrc=["']([^"']+)["']/i);
+  if (tag && MEDIA_EXT_RE.test(tag[1])) return { url: absolutize(decodeEntities(tag[1]), base) };
+
+  const direct = html.match(
+    /https?:\/\/[^\s"'<>\\]+\.(?:mp4|m4v|webm|gif|jpe?g|png|webp)(?:[?#][^\s"'<>\\]*)?/i
+  );
+  if (direct) return { url: decodeEntities(direct[0]) };
+  return null;
+}
+
+// memedepot.com is a meme-hosting/curation site (depots = collections). It's a
+// client-rendered app, so resolution leans on its share-preview Open Graph tags,
+// with the embedded-media scan above as a backstop. A path-derived filename
+// keeps saved memes recognizable in the linked folder.
+async function resolveMemedepot(url: string): Promise<MediaRef> {
+  const ref = await resolveGeneric(url);
+  return { ...ref, fileName: ref.fileName ?? `memedepot_${slugFromUrl(url)}` };
+}
+
+function slugFromUrl(url: string): string {
+  try {
+    const parts = new URL(url).pathname.split('/').filter(Boolean);
+    return parts[parts.length - 1] || 'meme';
+  } catch {
+    return 'meme';
+  }
 }
 
 // ---- download ---------------------------------------------------------------
@@ -226,6 +266,7 @@ export async function resolveSharedLink(
   if (MEDIA_EXT_RE.test(url)) ref = { url }; // already a direct media link
   else if (isTwitter(url)) ref = await resolveTwitter(url);
   else if (isTenor(url)) ref = await resolveGeneric(url);
+  else if (isMemedepot(url)) ref = await resolveMemedepot(url);
   else ref = await resolveGeneric(url);
 
   opts.onProgress?.({ stage: 'downloading' });

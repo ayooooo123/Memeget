@@ -11,6 +11,7 @@
 // the user's taught exemplars ARE the curation surface of the app.
 
 import type { Tag } from './types';
+import { buildBaselineLabels } from './baselineLabels';
 
 export interface LabelDef {
   label: string; // human-facing name shown as a tag
@@ -19,7 +20,10 @@ export interface LabelDef {
   associations?: string[]; // related search terms (world knowledge)
 }
 
-export const MEME_LABELS: LabelDef[] = [
+// The hand-authored knowledge core. Each prompt is deliberately written by a
+// person — that curation is the quality of the app. The harvested memedepot
+// baseline (see ./baselineLabels) is appended below for breadth.
+export const CURATED_MEME_LABELS: LabelDef[] = [
   // --- Recurring characters / archetypes ---
   { label: 'Pepe the Frog', prompt: 'a Pepe the Frog meme, a green cartoon frog', category: 'character', associations: ['pepe', 'frog', 'feelsgoodman', 'rare pepe', '4chan'] },
   { label: 'Sad Pepe', prompt: 'a sad crying Pepe the Frog feels bad man meme', category: 'character', associations: ['pepe', 'feelsbadman', 'sad', 'crying'] },
@@ -94,6 +98,15 @@ export const MEME_LABELS: LabelDef[] = [
   { label: 'Dog', prompt: 'a funny dog meme', category: 'topic', associations: ['dog', 'doggo', 'puppy'] },
   { label: 'Politics', prompt: 'a political meme', category: 'topic', associations: ['politics', 'political'] },
   { label: 'Relatable / Mood', prompt: 'a relatable everyday mood meme', category: 'topic', associations: ['relatable', 'mood', 'me when'] },
+];
+
+// The active label vocabulary: curated core + the harvested memedepot baseline
+// (breadth). The baseline ships empty and is filled by CI, so today this equals
+// `CURATED_MEME_LABELS`; a merged harvest just makes it longer. `ASSOCIATIONS`
+// below is derived from this, so baseline association terms flow into search too.
+export const MEME_LABELS: LabelDef[] = [
+  ...CURATED_MEME_LABELS,
+  ...buildBaselineLabels(CURATED_MEME_LABELS),
 ];
 
 // Generic "not a recognizable format" anchors so weak matches don't get forced
