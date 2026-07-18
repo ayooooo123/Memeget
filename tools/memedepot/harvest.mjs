@@ -268,6 +268,73 @@ export function buildBaseline(freq, { max = DEFAULTS.maxTags, source = 'memedepo
   return { source, generatedAt, labels };
 }
 
+// ---- depot catalog (the high-signal source) --------------------------------
+//
+// memedepot is a Next.js app whose real taxonomy is its DEPOTS (collections,
+// each a human-named format — "Milady", "Wojak") served by a JSON API:
+//   /api/depots?page=N&limit=…   → the catalog
+// A depot NAME is a curated format label, worth far more than an incidental
+// per-post tag, so depot names are included wholesale (not frequency-gated);
+// depot tags are counted across depots as secondary breadth.
+
+// Unwrap an API payload that may be a bare array or a wrapper object
+// ({depots|memes|data|results|items: [...]}, or any object whose first array
+// value is the list). Returns [] if no array is found.
+export function asArray(json, ...keys) {
+  if (Array.isArray(json)) return json;
+  if (json && typeof json === 'object') {
+    for (const k of keys) if (Array.isArray(json[k])) return json[k];
+    for (const v of Object.values(json)) if (Array.isArray(v)) return v;
+  }
+  return [];
+}
+
+// A depot's display name — the human-authored format name. Falls back to a
+// prettified slug when no name-like field is present.
+export function depotName(d) {
+  for (const k of ['name', 'title', 'displayName', 'label']) {
+    if (typeof d?.[k] === 'string' && d[k].trim()) return d[k].trim();
+  }
+  if (typeof d?.slug === 'string' && d.slug.trim()) return d.slug.replace(/[-_]+/g, ' ').trim();
+  return '';
+}
+
+// Build the baseline from the depot catalog: every depot name becomes a label
+// (high-signal, quality-filtered + de-duped but NOT frequency-gated), ranked
+// above frequency-filtered depot tags. `count` carries provenance for the app's
+// ranker — names get a high sentinel so they lead; API order breaks ties.
+export function buildDepotBaseline(depots, { max = DEFAULTS.maxTags, source = 'memedepot.com', generatedAt = null } = {}) {
+  const seen = new Set();
+  const nameLabels = [];
+  depots.forEach((d, i) => {
+    const t = normalizeTerm(depotName(d));
+    if (!t) return;
+    const key = dedupeKey(t);
+    if (seen.has(key)) return;
+    seen.add(key);
+    nameLabels.push({
+      label: titleCase(t),
+      prompt: templatePrompt(t),
+      category: guessCategory(t),
+      count: 1000 - i, // rank all depot names above per-post tags, keep API order
+    });
+  });
+
+  // Depot tags, counted once per depot (dedupe per depot = same page semantics).
+  const tagPages = depots.map((d) => (Array.isArray(d?.tags) ? d.tags.map(jsonTerm).filter(Boolean) : []));
+  const tagBaseline = buildBaseline(aggregatePages(tagPages), { max, source, generatedAt });
+
+  const labels = [...nameLabels];
+  for (const t of tagBaseline.labels) {
+    if (labels.length >= max) break;
+    const key = dedupeKey(normalizeTerm(t.label));
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    labels.push(t);
+  }
+  return { source, generatedAt, labels: labels.slice(0, max) };
+}
+
 // ---- network orchestration (CI only; not unit-tested) ----------------------
 
 function parseArgs(argv) {
@@ -334,21 +401,46 @@ const isDisallowed = (url, disallow, base) => {
   }
 };
 
-async function main() {
-  const opts = parseArgs(process.argv.slice(2));
-  const host = new URL(opts.base).host;
-  console.log(`Harvesting ${host} (max ${opts.maxPages} pages, ${opts.delayMs}ms delay)…`);
+// Enumerate the depot catalog via /api/depots?page=N. Stops when a page returns
+// no depots (end of catalog) or the endpoint 404s (fetchText → null). Logs the
+// first depot's keys + derived name so a shape mismatch is visible in the run
+// log without another diagnostic round-trip.
+async function harvestDepots(base, opts) {
+  const depots = [];
+  for (let page = 0; page < 200; page++) {
+    const url = new URL(`/api/depots?page=${page}&limit=50`, base).href;
+    const txt = await fetchText(url, opts.timeoutMs);
+    if (!txt) break;
+    let json;
+    try {
+      json = JSON.parse(txt);
+    } catch {
+      break;
+    }
+    const batch = asArray(json, 'depots', 'data', 'results', 'items');
+    if (!batch.length) break;
+    if (page === 0) {
+      console.log(`  first depot keys: ${Object.keys(batch[0] ?? {}).join(', ')}`);
+      console.log(`  first depot name: "${depotName(batch[0])}"`);
+    }
+    depots.push(...batch);
+    await sleep(opts.delayMs);
+  }
+  return depots;
+}
 
+// Fallback: the original per-post tag crawl (sitemap/homepage discovery →
+// extract inline tag arrays → per-page count). Kept for resilience if the depot
+// API shape ever changes out from under us.
+async function crawlHtmlBaseline(opts, host, generatedAt) {
   const robotsTxt = await fetchText(new URL('/robots.txt', opts.base).href, opts.timeoutMs);
   const { sitemaps, disallow } = parseRobots(robotsTxt, opts.base);
   if (disallow.length) console.log(`  robots.txt disallows: ${disallow.join(', ')}`);
 
-  // Discover URLs: sitemaps first (canonical + polite), else homepage anchors.
   const queue = new Set();
   for (const sm of sitemaps.length ? sitemaps : []) {
     const xml = await fetchText(sm, opts.timeoutMs);
     for (const loc of parseSitemap(xml)) {
-      // A sitemap index points at more sitemaps; fetch one level down.
       if (/\.xml($|\?)/i.test(loc)) {
         const child = await fetchText(loc, opts.timeoutMs);
         for (const u of parseSitemap(child)) queue.add(u);
@@ -377,27 +469,30 @@ async function main() {
     if (++done % 25 === 0) console.log(`  …${done}/${urls.length}`);
     await sleep(opts.delayMs);
   }
-  const rawTerms = pages.flat();
+  return buildBaseline(aggregatePages(pages), { max: opts.maxTags, source: host, generatedAt });
+}
 
-  // Diagnostic: surface the most common RAW (pre-normalization) terms so a bad
-  // extraction — wrong tag-object shape, junk leakage — is visible directly in
-  // the CI run logs, instead of costing another blind harvest round-trip.
-  const rawFreq = {};
-  for (const r of rawTerms) {
-    const k = String(r).trim();
-    if (k) rawFreq[k] = (rawFreq[k] ?? 0) + 1;
+async function main() {
+  const opts = parseArgs(process.argv.slice(2));
+  const host = new URL(opts.base).host;
+  console.log(`Harvesting ${host} (max ${opts.maxPages} pages, ${opts.delayMs}ms delay)…`);
+
+  const generatedAt = new Date().toISOString();
+
+  // Primary source: the depot catalog API. Depot names are human-authored format
+  // names (Milady, Wojak, …) — the high-signal taxonomy the per-post tag crawl
+  // misses. (Structure confirmed by tools/memedepot/diagnose.mjs.)
+  console.log('  fetching depot catalog (/api/depots)…');
+  const depots = await harvestDepots(opts.base, opts);
+  console.log(`  depots: ${depots.length}`);
+
+  let baseline;
+  if (depots.length) {
+    baseline = buildDepotBaseline(depots, { max: opts.maxTags, source: host, generatedAt });
+  } else {
+    console.warn('  depot API returned nothing — falling back to the HTML tag crawl.');
+    baseline = await crawlHtmlBaseline(opts, host, generatedAt);
   }
-  const topRaw = Object.entries(rawFreq)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 20);
-  console.log(`  raw terms: ${rawTerms.length} total, ${Object.keys(rawFreq).length} distinct`);
-  if (topRaw.length) console.log(`  top raw: ${topRaw.map(([t, c]) => `${t} (${c})`).join(', ')}`);
-
-  const baseline = buildBaseline(aggregatePages(pages), {
-    max: opts.maxTags,
-    source: host,
-    generatedAt: new Date().toISOString(),
-  });
 
   if (baseline.labels.length === 0) {
     console.warn(
