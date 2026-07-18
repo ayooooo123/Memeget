@@ -1,0 +1,13 @@
+{
+  "_comment": "SCHEMA EXAMPLE for the search-quality eval harness (src/evalCore.ts). Vectors here are tiny and synthetic — a real golden set carries L2-normalized CLIP embeddings (dim 512) produced offline with the same encoder the app ships (see README.md), curated from the memedepot corpus as (image, human query, expected meme) triples.",
+  "memes": [
+    { "id": "gigachad-001", "imageVec": [0.9, 0.1, 0.0, 0.0], "searchText": "gigachad sigma chad", "captionVec": [0.8, 0.2, 0.0, 0.0] },
+    { "id": "wojak-002", "imageVec": [0.1, 0.9, 0.0, 0.0], "searchText": "wojak feels guy" },
+    { "id": "thisisfine-003", "imageVec": [0.0, 0.0, 0.9, 0.1], "searchText": "this is fine dog fire" }
+  ],
+  "queries": [
+    { "query": "gigachad", "queryVec": [0.95, 0.05, 0.0, 0.0], "expectedId": "gigachad-001" },
+    { "query": "feels guy wojak", "queryVec": [0.1, 0.9, 0.0, 0.0], "expectedId": "wojak-002" },
+    { "query": "dog in a burning room", "queryVec": [0.0, 0.05, 0.9, 0.05], "expectedId": "thisisfine-003" }
+  ]
+}

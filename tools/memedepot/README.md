@@ -86,6 +86,12 @@ becomes a zero-shot label:
 - **Apostrophe folding** — `mcdonald's` → `mcdonalds`, not `mcdonald s`.
 - **Plural stem-dedupe** — `pill`/`pills`, `goblin`/`goblins` collapse to one
   slot (higher count wins).
+- **Per-page counting** (`aggregatePages`) — a term is counted at most once per
+  page. A tag routinely appears in several extraction strategies on one page
+  (JSON-LD + inline array + `/tag` href), so a flat count double/triple-counts
+  it and the `count >= 2` "seen on >1 page" floor collapses to "seen once",
+  leaking the single-page tail. Per-page dedupe makes the count mean *distinct
+  pages*, which is what the floor assumes.
 
 On the first real harvest this removed ~half the raw tags. The residue is
 community-specific in-group slang (vowel-having, non-English) that generic rules
