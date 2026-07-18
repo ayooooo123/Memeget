@@ -40,21 +40,65 @@ const STOPWORDS = new Set([
   'all', 'new', 'top', 'best', 'funny', 'random', 'stuff', 'misc', 'other', 'page',
 ]);
 
-// Normalize a raw term to a comparable key: lowercase, strip surrounding
-// punctuation, collapse whitespace. Returns '' for anything too short or a
-// stopword, so callers can drop it.
+// Generic concrete nouns / everyday actions / brand & place names that are real
+// words (so the heuristics below can't catch them) but make TERRIBLE zero-shot
+// meme-format labels: as CLIP classes "gun"/"car"/"phone" fire on a huge fraction
+// of any library, tanking tag precision. memedepot's freeform per-item tags are
+// full of these. This is the necessary hand-maintained part of the quality
+// filter; extend it as review surfaces more. (Deliberately does NOT list real
+// formats/characters — pepe, wojak, chad, troll, etc. stay.)
+const GENERIC_DENYLIST = new Set([
+  // objects / wearables / props
+  'gun', 'car', 'phone', 'telephone', 'computer', 'laptop', 'robot', 'knife', 'pipe',
+  'cage', 'fan', 'gift', 'toy', 'backpack', 'necklace', 'lipstick', 'monocle', 'helmet',
+  'sombrero', 'hat', 'tophat', 'top hat', 'party hat', 'coat', 'suit', 'pants', 'jeans',
+  'glass', 'window', 'windshield', 'bomb', 'missile', 'headphones', 'chopsticks', 'pretzel',
+  'ramen', 'bed', 'pool', 'door', 'gold', 'coins', 'penny', 'binoculars', 'camera', 'pipe',
+  // body / scenery / weather
+  'hair', 'eyes', 'lips', 'butt', 'lightning', 'cloud', 'clouds', 'mountain', 'cliff',
+  'desert', 'field', 'water', 'fire', 'smoke', 'cigarette', 'glass',
+  // generic actions / states
+  'running', 'reading', 'talking', 'studying', 'typing', 'pray', 'praying', 'hug', 'exercise',
+  'climbing', 'shooting', 'hide', 'flying', 'mixing', 'sleep', 'sleepy', 'silence', 'dance',
+  'dancing', 'moisturized', 'focused', 'unbothered', 'flourishing', 'smart', 'evil', 'dark',
+  // brands / places / institutions (not memes)
+  'mcdonalds', 'walmart', 'costco', 'trader joes', 'waffle house', 'home depot', 'red bull',
+  'louis vuitton', 'binance', 'federal reserve', 'church', 'jail', 'gym', 'japan', 'nagoya',
+  // generic topics / scene descriptors
+  'blank', 'cutout', 'halo', 'war', 'king', 'pope', 'god', 'jesus', 'christ', 'bible',
+  'family', 'job', 'employee', 'music', 'football', 'soccer', 'marathon', 'race', 'soldier',
+  'chicken', 'bear', 'ghost', 'eagle', 'camel', 'wheelchair', 'nerd', 'gaming', 'gun',
+  'no background', 'group picture', 'low poly',
+]);
+
+// Normalize a raw term to a comparable key AND drop noise. Beyond lowercasing /
+// punctuation-stripping, this is the quality gate: folds apostrophes, removes
+// orphan single-letter tokens, and rejects stopwords, denylisted generic nouns,
+// and single-token junk (too-short abbreviations, tickers/ids with digits,
+// unpronounceable consonant runs). Returns '' for anything dropped.
 export function normalizeTerm(raw) {
   if (typeof raw !== 'string') return '';
-  const t = raw
+  let t = raw
     .toLowerCase()
+    .replace(/['’`]/g, '') // fold apostrophes so "mcdonald's" -> "mcdonalds", not "mcdonald s"
     .replace(/[_/]+/g, ' ')
     .replace(/[^a-z0-9 +-]+/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
+  // Drop orphan single-letter tokens left by punctuation ("e t" -> "", "i m the x" -> "the x").
+  if (t.includes(' ')) t = t.split(' ').filter((w) => w.length > 1).join(' ').trim();
   if (t.length < 3 || t.length > 40) return '';
-  if (STOPWORDS.has(t)) return '';
+  if (STOPWORDS.has(t) || GENERIC_DENYLIST.has(t)) return '';
   if (/^\d+$/.test(t)) return ''; // pure numbers
   if (/^object( object)*$/.test(t)) return ''; // "[object Object]" leakage guard
+  // Single-token junk that plagues memedepot tags: short abbreviations, tickers /
+  // ids containing digits (usd1, 51349b), and vowel-less consonant runs (rrs).
+  // Multi-word terms ("space odyssey") are exempt — the noise is in bare tokens.
+  if (!t.includes(' ')) {
+    if (t.length < 4) return '';
+    if (/\d/.test(t)) return '';
+    if (!/[aeiouy]/.test(t)) return '';
+  }
   return t;
 }
 
@@ -174,14 +218,26 @@ export function aggregate(rawTerms) {
   return freq;
 }
 
+// Collapse trivial plural variants ("pill"/"pills", "goblin"/"goblins") to one
+// dedupe key so they don't both occupy label slots. Naive singularization is
+// fine here — it only groups, and the higher-count variant wins.
+const dedupeKey = (term) => (term.length > 3 && term.endsWith('s') ? term.slice(0, -1) : term);
+
 // Turn a frequency map into the baseline file shape the app consumes. Ranks by
-// count, drops singletons (noise), Title-Cases the display label, dedupes, and
-// caps. `generatedAt` is injected (not read from the clock) so this stays pure
-// and testable.
+// count, drops singletons (noise), collapses plural variants, Title-Cases the
+// display label, and caps. `generatedAt` is injected (not read from the clock)
+// so this stays pure and testable.
 export function buildBaseline(freq, { max = DEFAULTS.maxTags, source = 'memedepot.com', generatedAt = null } = {}) {
+  const seenStems = new Set();
   const labels = Object.entries(freq)
     .filter(([, count]) => count >= 2) // seen on >1 page → likelier a real tag
-    .sort((a, b) => b[1] - a[1])
+    .sort((a, b) => b[1] - a[1]) // rank before dedupe so the most frequent variant wins
+    .filter(([term]) => {
+      const key = dedupeKey(term);
+      if (seenStems.has(key)) return false;
+      seenStems.add(key);
+      return true;
+    })
     .slice(0, max)
     .map(([term, count]) => ({
       label: titleCase(term),

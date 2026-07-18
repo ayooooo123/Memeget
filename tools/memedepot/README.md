@@ -70,6 +70,29 @@ result). Run it via the workflow, or locally from an unrestricted network.
 the quality core; the app merges the two and the curated entry always wins on a
 label collision.
 
+## Quality filter
+
+memedepot's per-item tags are freeform user hashtags, not a clean format
+taxonomy, so `normalizeTerm` / `buildBaseline` apply a quality gate before a term
+becomes a zero-shot label:
+
+- **`GENERIC_DENYLIST`** — generic concrete nouns / actions / brands (`gun`,
+  `car`, `phone`, `walmart`, `family`…) that are real words but make terrible
+  zero-shot classes (they'd fire on a huge fraction of any library). Hand-
+  maintained; extend it as review surfaces more.
+- **Single-token heuristics** — drop bare tokens that are too short (`gme`,
+  `esq`), contain digits (tickers/ids like `usd1`, `51349b`), or have no vowel
+  (`rrs`). Multi-word terms are exempt.
+- **Apostrophe folding** — `mcdonald's` → `mcdonalds`, not `mcdonald s`.
+- **Plural stem-dedupe** — `pill`/`pills`, `goblin`/`goblins` collapse to one
+  slot (higher count wins).
+
+On the first real harvest this removed ~half the raw tags. The residue is
+community-specific in-group slang (vowel-having, non-English) that generic rules
+can't catch without overfitting — that's what the **eval harness**
+(`docs/memedepot-corpus.md`) is for: measure which harvested labels actually help
+tagging precision, then set the cap and denylist from data, not eyeballing.
+
 ## Caveats
 
 - The extraction strategies in `extractTagsFromHtml` are best-effort against a

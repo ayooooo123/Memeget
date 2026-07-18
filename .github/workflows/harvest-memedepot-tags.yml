@@ -56,7 +56,14 @@ jobs:
 
       # If the crawl found nothing it leaves the file untouched (see harvest.mjs),
       # so create-pull-request simply sees no diff and does nothing.
+      #
+      # continue-on-error: opening the PR needs the "Allow GitHub Actions to
+      # create and approve pull requests" repo setting. If it's off, this step
+      # errors but the branch has already been pushed — so the harvest still
+      # succeeds and a maintainer (or the review bot) opens the PR by hand. Don't
+      # fail the whole run over a permission we intentionally may not grant.
       - name: Open PR with refreshed baseline
+        continue-on-error: true
         uses: peter-evans/create-pull-request@v6
         with:
           branch: automation/memedepot-tags
