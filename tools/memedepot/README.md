@@ -52,6 +52,17 @@ Sources today:
   canonical image-macro templates (Drake, Distracted Boyfriend, Two Buttons…),
   popularity-ranked → all name-tier. The clean classic-format list memedepot's
   crypto-heavy catalog underweights.
+- **Know Your Meme** (`kymCandidates`) — scraped `/memes/page/N` browse index
+  (no public API). Entry slugs → prettified names, name-tier. Best-effort:
+  Cloudflare may block a runner, in which case it contributes nothing.
+- **Giphy** (`giphyCandidates`) — `/v1/gifs/categories`, broad reaction/topic
+  categories, **tag-tier** (breadth, not formats). **Needs `GIPHY_API_KEY`.**
+- **Tenor** (`tenorCandidates`) — `/v2/categories`, featured search-terms,
+  tag-tier. **Needs `TENOR_API_KEY`.**
+
+**API keys:** Giphy and Tenor are inert unless their keys are set as repo secrets
+(Settings → Secrets and variables → Actions → `GIPHY_API_KEY`, `TENOR_API_KEY`).
+Every other source works without keys.
 
 Adding a source = write a `*Candidates(payload)` adapter returning candidates +
 a small fetch helper, then `candidates.push(...)` in `main()`. If every source
