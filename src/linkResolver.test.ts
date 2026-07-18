@@ -181,6 +181,62 @@ describe('generic Open Graph', () => {
   });
 });
 
+describe('memedepot', () => {
+  it('resolves via Open Graph and names the file from the URL slug', async () => {
+    mockFetch(() => ({
+      text: `<meta property="og:video" content="https://cdn.memedepot.com/abc/clip.mp4">`,
+    }));
+    const res = await resolveSharedLink('https://memedepot.com/d/funny/media/gigachad-clip');
+    expect(downloadedUrl()).toBe('https://cdn.memedepot.com/abc/clip.mp4');
+    expect(res.fileName).toBe('memedepot_gigachad-clip.mp4');
+  });
+
+  it('falls back to an inline <video> when the page has no Open Graph media', async () => {
+    mockFetch(() => ({
+      text: `<html><body><video controls src="https://cdn.memedepot.com/x/v.mp4"></video></body></html>`,
+    }));
+    const res = await resolveSharedLink('https://memedepot.com/d/clips/media/42');
+    expect(downloadedUrl()).toBe('https://cdn.memedepot.com/x/v.mp4');
+    expect(res.fileName).toBe('memedepot_42.mp4');
+  });
+
+  it('falls back to a direct media URL embedded in the page JSON', async () => {
+    mockFetch(() => ({
+      text: `<script>window.__DATA__={"media":{"url":"https://cdn.memedepot.com/y/pic.jpg?v=2"}}</script>`,
+    }));
+    mockDownload({ 'Content-Type': 'image/jpeg' });
+    const res = await resolveSharedLink('https://memedepot.com/d/pics/media/hello');
+    expect(downloadedUrl()).toBe('https://cdn.memedepot.com/y/pic.jpg?v=2');
+    expect(res.fileName).toBe('memedepot_hello.jpg');
+  });
+
+  it('errors when a memedepot page exposes no media at all', async () => {
+    mockFetch(() => ({ text: `<html><head><title>Memedepot</title></head></html>` }));
+    await expect(resolveSharedLink('https://memedepot.com/d/empty')).rejects.toThrow(/no image or video/i);
+  });
+});
+
+describe('embedded-media fallback (generic)', () => {
+  it('uses a <source> element when Open Graph tags are absent', async () => {
+    mockFetch(() => ({
+      text: `<video><source src="//cdn.site.com/a.webm" type="video/webm"></video>`,
+    }));
+    mockDownload({ 'Content-Type': 'video/webm' });
+    await resolveSharedLink('https://some.gallery/view/1');
+    expect(downloadedUrl()).toBe('https://cdn.site.com/a.webm');
+  });
+
+  it('prefers Open Graph over an incidental embedded URL', async () => {
+    mockFetch(() => ({
+      text: `<meta property="og:image" content="https://cdn.site.com/real.png">
+             <img src="https://cdn.site.com/logo.png">`,
+    }));
+    mockDownload({ 'Content-Type': 'image/png' });
+    await resolveSharedLink('https://some.gallery/view/2');
+    expect(downloadedUrl()).toBe('https://cdn.site.com/real.png');
+  });
+});
+
 describe('direct media URLs', () => {
   it('downloads a direct .mp4 without any page fetch', async () => {
     const res = await resolveSharedLink('https://cdn.example.com/clip.mp4');
