@@ -18,7 +18,9 @@ import {
   buildBaseline,
   asArray,
   depotName,
-  buildDepotBaseline,
+  depotCandidates,
+  imgflipCandidates,
+  buildMultiSourceBaseline,
   parseRobots,
   isDisallowed,
   jsonTerm,
@@ -51,6 +53,25 @@ test('normalizeTerm folds apostrophes instead of leaving orphan letters', () => 
   assert.equal(normalizeTerm("Don't Leave Babe"), 'dont leave babe'); // not "don t leave babe"
   assert.equal(normalizeTerm("Auntie Anne's"), 'auntie annes');
   assert.equal(normalizeTerm('E.T.'), ''); // both letters orphaned -> empty
+});
+
+test('normalizeTerm drops crypto-ticker/id noise (incl. multi-word)', () => {
+  assert.equal(normalizeTerm('Hpos10i Ticker Bitcoin'), ''); // letter+digit token
+  assert.equal(normalizeTerm('Btcs 1000u'), ''); // 1000u
+  assert.equal(normalizeTerm('Alkanes Monkey 21711'), ''); // 4+ digit run
+  assert.equal(normalizeTerm('Lt3 Memes'), ''); // lt3
+  assert.equal(normalizeTerm('Web3 Playboys'), ''); // web3
+  // ...but legitimate numbers survive
+  assert.equal(normalizeTerm('Mario 64'), 'mario 64');
+  assert.equal(normalizeTerm('The Simpsons'), 'the simpsons');
+});
+
+test('normalizeTerm drops admin/generic depot names', () => {
+  for (const junk of ['My Depot', 'Public Testing Depot', 'Meme Templates', 'Marketing', 'Community Art']) {
+    assert.equal(normalizeTerm(junk), '', `${junk} should be denylisted`);
+  }
+  assert.equal(normalizeTerm('Milady'), 'milady'); // real depot survives
+  assert.equal(normalizeTerm('Woman Yelling at Cat'), 'woman yelling at cat');
 });
 
 test('normalizeTerm drops single-token junk (short, tickers, no-vowel)', () => {
@@ -178,24 +199,48 @@ test('depotName prefers a name-like field, falls back to a prettified slug', () 
   assert.equal(depotName({ id: 7 }), '');
 });
 
-test('buildDepotBaseline: depot names lead (all included), then filtered tags', () => {
+test('depotCandidates: names (high weight) + tags on ≥2 depots (raw count)', () => {
   const depots = [
     { name: 'Milady', tags: [{ name: 'ethereum' }, 'zorp'] },
     { name: 'Wojak', tags: ['ethereum'] },
-    { name: 'Gun' }, // denylisted generic noun → dropped by normalizeTerm
     { slug: 'this-is-fine', tags: ['reaction'] },
   ];
-  const { labels } = buildDepotBaseline(depots, { generatedAt: '2026-01-01T00:00:00Z' });
+  const cands = depotCandidates(depots);
+  const byTerm = Object.fromEntries(cands.map((c) => [c.term, c.weight]));
+  assert.ok(byTerm['Milady'] > 1000); // NAME_BASE band
+  assert.ok(byTerm['Wojak'] > 1000);
+  assert.equal(byTerm['ethereum'], 2); // tag on 2 depots → raw count
+  assert.equal(byTerm['reaction'], undefined); // 1 depot, below the ≥2 floor
+  assert.ok(cands.every((c) => c.source === 'memedepot.com'));
+});
+
+test('imgflipCandidates: each template a high-weight name, popularity-ranked', () => {
+  const cands = imgflipCandidates([{ name: 'Drake Hotline Bling' }, { name: 'Two Buttons' }, { bad: 1 }]);
+  assert.deepEqual(
+    cands.map((c) => c.term),
+    ['Drake Hotline Bling', 'Two Buttons'] // the nameless entry is dropped
+  );
+  assert.ok(cands[0].weight > cands[1].weight); // popularity order preserved
+  assert.ok(cands.every((c) => c.source === 'imgflip.com'));
+});
+
+test('buildMultiSourceBaseline: cross-source stem-dedupe, names lead, filter applies', () => {
+  const candidates = [
+    ...depotCandidates([
+      { name: 'Milady', tags: ['ethereum', 'ethereum'] },
+      { name: 'Wojak', tags: ['ethereum'] },
+      { name: 'Gun' }, // denylisted → dropped
+    ]),
+    ...imgflipCandidates([{ name: 'Wojak' }, { name: 'Distracted Boyfriend' }]),
+  ];
+  const { labels } = buildMultiSourceBaseline(candidates, { generatedAt: '2026-01-01T00:00:00Z' });
   const names = labels.map((l) => l.label);
-  // Depot names (minus the denylisted "Gun"), then "ethereum" (a tag on 2 depots).
   assert.ok(names.includes('Milady'));
-  assert.ok(names.includes('Wojak'));
-  assert.ok(names.includes('This is Fine')); // slug "this-is-fine" → prettified + Title Cased
-  assert.ok(!names.includes('Gun'));
-  assert.ok(names.includes('Ethereum')); // tag seen on ≥2 depots survives the floor
-  assert.ok(!names.includes('Reaction')); // tag on only 1 depot, below the floor
-  // Names outrank tags (higher sentinel count).
-  assert.ok(labels[0].count > labels[names.indexOf('Ethereum')].count);
+  assert.ok(names.includes('Distracted Boyfriend'));
+  assert.ok(!names.includes('Gun')); // denylisted noun filtered
+  assert.equal(names.filter((n) => n === 'Wojak').length, 1); // deduped across sources
+  // A name outranks the "ethereum" tag (which appears on 2 depots).
+  assert.ok(labels[0].count > (labels.find((l) => l.label === 'Ethereum')?.count ?? 0));
 });
 
 test('parseRobots collects sitemaps and *-scoped disallows', () => {

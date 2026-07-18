@@ -69,6 +69,11 @@ const GENERIC_DENYLIST = new Set([
   'family', 'job', 'employee', 'music', 'football', 'soccer', 'marathon', 'race', 'soldier',
   'chicken', 'bear', 'ghost', 'eagle', 'camel', 'wheelchair', 'nerd', 'gaming', 'gun',
   'no background', 'group picture', 'low poly',
+  // memedepot admin / generic / personal depots (not a meme format)
+  'my depot', 'public testing depot', 'meme templates', 'blank memes', 'blank memes templates',
+  'community art', 'marketing', 'culture', 'nonce', 'chains', 'experiments lain', 'send memes',
+  'sticker project', 'throwback memes', 'greatestmeme', 'pixel art', 'abstract', 'experiments',
+  'hold', 'grind', 'chains', 'book of nft meme', 'sticker', 'stickers', 'templates', 'template',
 ]);
 
 // Normalize a raw term to a comparable key AND drop noise. Beyond lowercasing /
@@ -91,6 +96,15 @@ export function normalizeTerm(raw) {
   if (STOPWORDS.has(t) || GENERIC_DENYLIST.has(t)) return '';
   if (/^\d+$/.test(t)) return ''; // pure numbers
   if (/^object( object)*$/.test(t)) return ''; // "[object Object]" leakage guard
+  // Crypto-ticker / id noise (memedepot is a crypto-meme community): reject any
+  // term with a token that mixes letters and digits (hpos10i, 1000u, lt3, web3,
+  // 92s) or is a long digit run (…monkey 21711). Applies to multi-word names too,
+  // where the single-token check below can't reach. "mario 64" survives — "64" is
+  // neither mixed nor 4+ digits.
+  for (const w of t.split(' ')) {
+    if (/[a-z]/.test(w) && /\d/.test(w)) return '';
+    if (/^\d{4,}$/.test(w)) return '';
+  }
   // Single-token junk that plagues memedepot tags: short abbreviations, tickers /
   // ids containing digits (usd1, 51349b), and vowel-less consonant runs (rrs).
   // Multi-word terms ("space odyssey") are exempt — the noise is in bare tokens.
@@ -268,14 +282,20 @@ export function buildBaseline(freq, { max = DEFAULTS.maxTags, source = 'memedepo
   return { source, generatedAt, labels };
 }
 
-// ---- depot catalog (the high-signal source) --------------------------------
+// ---- multi-source model -----------------------------------------------------
 //
-// memedepot is a Next.js app whose real taxonomy is its DEPOTS (collections,
-// each a human-named format — "Milady", "Wojak") served by a JSON API:
-//   /api/depots?page=N&limit=…   → the catalog
-// A depot NAME is a curated format label, worth far more than an incidental
-// per-post tag, so depot names are included wholesale (not frequency-gated);
-// depot tags are counted across depots as secondary breadth.
+// Each source (memedepot, imgflip, …) is an adapter that emits CANDIDATES:
+//   { term, weight, category?, source }
+// `weight` ranks a candidate for the cap. Two tiers by convention:
+//   • NAME tier  — collection/template names (Milady, "Distracted Boyfriend"):
+//     the human-authored taxonomy. Weight = NAME_BASE − rank, so names always
+//     lead and each source's own popularity order is preserved.
+//   • TAG tier   — frequency terms (a depot's tags): weight = raw count, always
+//     below names.
+// `buildMultiSourceBaseline` normalizes + quality-filters, de-dupes across
+// sources by stem (highest weight wins, provenance kept), ranks, and caps.
+
+const NAME_BASE = 100000; // keeps every name above every frequency tag
 
 // Unwrap an API payload that may be a bare array or a wrapper object
 // ({depots|memes|data|results|items: [...]}, or any object whose first array
@@ -299,40 +319,56 @@ export function depotName(d) {
   return '';
 }
 
-// Build the baseline from the depot catalog: every depot name becomes a label
-// (high-signal, quality-filtered + de-duped but NOT frequency-gated), ranked
-// above frequency-filtered depot tags. `count` carries provenance for the app's
-// ranker — names get a high sentinel so they lead; API order breaks ties.
-export function buildDepotBaseline(depots, { max = DEFAULTS.maxTags, source = 'memedepot.com', generatedAt = null } = {}) {
-  const seen = new Set();
-  const nameLabels = [];
-  depots.forEach((d, i) => {
-    const t = normalizeTerm(depotName(d));
-    if (!t) return;
-    const key = dedupeKey(t);
-    if (seen.has(key)) return;
-    seen.add(key);
-    nameLabels.push({
-      label: titleCase(t),
-      prompt: templatePrompt(t),
-      category: guessCategory(t),
-      count: 1000 - i, // rank all depot names above per-post tags, keep API order
-    });
-  });
-
-  // Depot tags, counted once per depot (dedupe per depot = same page semantics).
-  const tagPages = depots.map((d) => (Array.isArray(d?.tags) ? d.tags.map(jsonTerm).filter(Boolean) : []));
-  const tagBaseline = buildBaseline(aggregatePages(tagPages), { max, source, generatedAt });
-
-  const labels = [...nameLabels];
-  for (const t of tagBaseline.labels) {
-    if (labels.length >= max) break;
-    const key = dedupeKey(normalizeTerm(t.label));
-    if (!key || seen.has(key)) continue;
-    seen.add(key);
-    labels.push(t);
+// memedepot adapter: each depot NAME is a high-weight candidate (API order kept);
+// each depot's TAGS are counted across depots (per-depot dedupe) as breadth.
+export function depotCandidates(depots) {
+  const out = depots
+    .map((d, i) => ({ term: depotName(d), weight: NAME_BASE - i, source: 'memedepot.com' }))
+    .filter((c) => c.term);
+  const tagFreq = aggregatePages(depots.map((d) => (Array.isArray(d?.tags) ? d.tags.map(jsonTerm) : [])));
+  for (const [term, count] of Object.entries(tagFreq)) {
+    if (count >= 2) out.push({ term, weight: count, source: 'memedepot.com' });
   }
-  return { source, generatedAt, labels: labels.slice(0, max) };
+  return out;
+}
+
+// imgflip adapter: api.imgflip.com/get_memes returns the ~100 canonical
+// image-macro templates by name, already popularity-ranked → all NAME tier.
+export function imgflipCandidates(memes) {
+  return memes
+    .map((m, i) => ({ term: typeof m?.name === 'string' ? m.name : '', weight: NAME_BASE - i, source: 'imgflip.com' }))
+    .filter((c) => c.term);
+}
+
+// Merge candidates from every source into the baseline file shape: normalize +
+// quality-filter each term, de-dupe by stem keeping the highest-weight variant
+// (and its provenance), rank by weight, cap. `count` carries the weight for the
+// app's ranker (names in a high band, tags at their real frequency).
+export function buildMultiSourceBaseline(
+  candidates,
+  { max = DEFAULTS.maxTags, source = 'multi', generatedAt = null } = {}
+) {
+  const best = new Map(); // stem -> {term, weight, category, source}
+  for (const c of candidates) {
+    const t = normalizeTerm(c?.term);
+    if (!t) continue;
+    const key = dedupeKey(t);
+    const prev = best.get(key);
+    if (!prev || (c.weight ?? 0) > prev.weight) {
+      best.set(key, { term: t, weight: c.weight ?? 0, category: c.category, source: c.source });
+    }
+  }
+  const labels = [...best.values()]
+    .sort((a, b) => b.weight - a.weight)
+    .slice(0, max)
+    .map((c) => ({
+      label: titleCase(c.term),
+      prompt: templatePrompt(c.term),
+      category: c.category || guessCategory(c.term),
+      count: c.weight,
+      source: c.source,
+    }));
+  return { source, generatedAt, labels };
 }
 
 // ---- network orchestration (CI only; not unit-tested) ----------------------
@@ -429,6 +465,18 @@ async function harvestDepots(base, opts) {
   return depots;
 }
 
+// Fetch imgflip's canonical meme-template catalog — a public JSON API, no auth:
+// { data: { memes: [{ id, name, url, … }] } }, ~100 templates, popularity-ranked.
+async function fetchImgflip(opts) {
+  const txt = await fetchText('https://api.imgflip.com/get_memes', opts.timeoutMs);
+  if (!txt) return [];
+  try {
+    return asArray(JSON.parse(txt)?.data, 'memes');
+  } catch {
+    return [];
+  }
+}
+
 // Fallback: the original per-post tag crawl (sitemap/homepage discovery →
 // extract inline tag arrays → per-page count). Kept for resilience if the depot
 // API shape ever changes out from under us.
@@ -478,19 +526,31 @@ async function main() {
   console.log(`Harvesting ${host} (max ${opts.maxPages} pages, ${opts.delayMs}ms delay)…`);
 
   const generatedAt = new Date().toISOString();
+  const candidates = [];
 
-  // Primary source: the depot catalog API. Depot names are human-authored format
-  // names (Milady, Wojak, …) — the high-signal taxonomy the per-post tag crawl
-  // misses. (Structure confirmed by tools/memedepot/diagnose.mjs.)
-  console.log('  fetching depot catalog (/api/depots)…');
+  // Source 1 — memedepot depot catalog. Depot names are human-authored format
+  // names (Milady, Wojak, …). (Structure confirmed by diagnose.mjs.)
+  console.log('  [memedepot] fetching depot catalog (/api/depots)…');
   const depots = await harvestDepots(opts.base, opts);
-  console.log(`  depots: ${depots.length}`);
+  console.log(`  [memedepot] depots: ${depots.length}`);
+  candidates.push(...depotCandidates(depots));
+
+  // Source 2 — imgflip's canonical image-macro templates (Drake, Two Buttons, …),
+  // the clean classic-format list memedepot's crypto-heavy catalog underweights.
+  console.log('  [imgflip] fetching template catalog…');
+  const memes = await fetchImgflip(opts);
+  console.log(`  [imgflip] templates: ${memes.length}`);
+  candidates.push(...imgflipCandidates(memes));
 
   let baseline;
-  if (depots.length) {
-    baseline = buildDepotBaseline(depots, { max: opts.maxTags, source: host, generatedAt });
+  if (candidates.length) {
+    baseline = buildMultiSourceBaseline(candidates, {
+      max: opts.maxTags,
+      source: 'memedepot.com + imgflip.com',
+      generatedAt,
+    });
   } else {
-    console.warn('  depot API returned nothing — falling back to the HTML tag crawl.');
+    console.warn('  no candidates from any source — falling back to the memedepot HTML tag crawl.');
     baseline = await crawlHtmlBaseline(opts, host, generatedAt);
   }
 

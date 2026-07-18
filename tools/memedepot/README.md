@@ -32,21 +32,30 @@ never writes straight to a release branch.
   rate-limits (~1 req/sec), identifies as a browser, caps total pages, and backs
   off on `429`/`503`.
 
-## Where the labels come from
+## Where the labels come from (multi-source)
 
-memedepot is a Next.js app whose real taxonomy is its **depots** (collections,
-each a human-named format — "Milady", "Wojak"). The harvester's **primary source
-is the depot catalog API**, `/api/depots?page=N`:
+The harvester merges **candidates** from several source adapters, each emitting
+`{ term, weight, source }`. Two weight tiers: **names** (collection/template
+names — the human-authored taxonomy, `weight = NAME_BASE − rank`, always kept
+and ranked top) and **tags** (frequency terms, `weight = count`). The pipeline
+normalizes + quality-filters every term, de-dupes across sources by stem
+(highest weight wins, provenance kept), ranks, and caps.
 
-- **Depot names** → labels, included wholesale (each collection is a curated
-  format, so they're not frequency-gated — just quality-filtered + de-duped) and
-  ranked above per-post tags.
-- **Depot tags** → counted across depots (per-depot dedupe) as secondary breadth,
-  subject to the "seen on ≥2 depots" floor.
+Sources today:
 
-If the API ever returns nothing, it falls back to the older per-post HTML tag
-crawl (sitemap/homepage discovery → inline tag arrays). The site's structure was
-mapped with `diagnose.mjs` (below); re-run it if the API shape changes.
+- **memedepot** (`depotCandidates`) — a Next.js app whose taxonomy is its
+  **depots** (collections named by format — "Milady", "Wojak"), read from the
+  catalog API `/api/depots?page=N`. Depot **names** → name-tier candidates;
+  depot **tags** → tag-tier (counted across depots, ≥2-depot floor). Structure
+  mapped by `diagnose.mjs`; re-run it if the API shape changes.
+- **imgflip** (`imgflipCandidates`) — `api.imgflip.com/get_memes`, the ~100
+  canonical image-macro templates (Drake, Distracted Boyfriend, Two Buttons…),
+  popularity-ranked → all name-tier. The clean classic-format list memedepot's
+  crypto-heavy catalog underweights.
+
+Adding a source = write a `*Candidates(payload)` adapter returning candidates +
+a small fetch helper, then `candidates.push(...)` in `main()`. If every source
+comes back empty, it falls back to the legacy memedepot per-post HTML crawl.
 
 ## Files
 
