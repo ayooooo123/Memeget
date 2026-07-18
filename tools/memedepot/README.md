@@ -32,11 +32,31 @@ never writes straight to a release branch.
   rate-limits (~1 req/sec), identifies as a browser, caps total pages, and backs
   off on `429`/`503`.
 
+## Where the labels come from
+
+memedepot is a Next.js app whose real taxonomy is its **depots** (collections,
+each a human-named format — "Milady", "Wojak"). The harvester's **primary source
+is the depot catalog API**, `/api/depots?page=N`:
+
+- **Depot names** → labels, included wholesale (each collection is a curated
+  format, so they're not frequency-gated — just quality-filtered + de-duped) and
+  ranked above per-post tags.
+- **Depot tags** → counted across depots (per-depot dedupe) as secondary breadth,
+  subject to the "seen on ≥2 depots" floor.
+
+If the API ever returns nothing, it falls back to the older per-post HTML tag
+crawl (sitemap/homepage discovery → inline tag arrays). The site's structure was
+mapped with `diagnose.mjs` (below); re-run it if the API shape changes.
+
 ## Files
 
-- `harvest.mjs` — the crawler. Pure helpers (normalization, category guessing,
-  sitemap/HTML extraction, aggregation, baseline building) are exported and
-  unit-tested; `main()` is the network orchestration.
+- `harvest.mjs` — the harvester. Pure helpers (normalization, category guessing,
+  depot-catalog parsing, HTML extraction, aggregation, baseline building) are
+  exported and unit-tested; `main()` / `harvestDepots` / `crawlHtmlBaseline` are
+  the network orchestration.
+- `diagnose.mjs` — one-shot structure recon (run via the *Diagnose memedepot
+  structure* workflow) that dumps the URL scheme + where depot names live, so the
+  extractor targets the right fields instead of guessing.
 - `harvest.test.mjs` — `node:test` coverage for the pure helpers. The live crawl
   isn't covered (it can't run from the sandbox — that's the whole reason it's a
   CI job).

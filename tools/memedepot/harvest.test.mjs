@@ -16,6 +16,9 @@ import {
   aggregate,
   aggregatePages,
   buildBaseline,
+  asArray,
+  depotName,
+  buildDepotBaseline,
   parseRobots,
   isDisallowed,
   jsonTerm,
@@ -157,6 +160,42 @@ test('buildBaseline ranks, drops singletons, caps, and stays pure', () => {
   );
   assert.equal(out.labels[0].prompt, 'a gigachad meme');
   assert.equal(out.labels[0].count, 10);
+});
+
+test('asArray unwraps bare arrays and common wrappers', () => {
+  assert.deepEqual(asArray([1, 2]), [1, 2]);
+  assert.deepEqual(asArray({ depots: [{ a: 1 }] }, 'depots'), [{ a: 1 }]);
+  assert.deepEqual(asArray({ data: ['x'] }, 'depots', 'data'), ['x']);
+  assert.deepEqual(asArray({ whatever: [9] }), [9]); // first array value
+  assert.deepEqual(asArray({ n: 1 }), []);
+  assert.deepEqual(asArray(null), []);
+});
+
+test('depotName prefers a name-like field, falls back to a prettified slug', () => {
+  assert.equal(depotName({ name: 'Milady' }), 'Milady');
+  assert.equal(depotName({ title: 'Distracted Boyfriend' }), 'Distracted Boyfriend');
+  assert.equal(depotName({ slug: 'meme-templates' }), 'meme templates'); // slug fallback
+  assert.equal(depotName({ id: 7 }), '');
+});
+
+test('buildDepotBaseline: depot names lead (all included), then filtered tags', () => {
+  const depots = [
+    { name: 'Milady', tags: [{ name: 'ethereum' }, 'zorp'] },
+    { name: 'Wojak', tags: ['ethereum'] },
+    { name: 'Gun' }, // denylisted generic noun → dropped by normalizeTerm
+    { slug: 'this-is-fine', tags: ['reaction'] },
+  ];
+  const { labels } = buildDepotBaseline(depots, { generatedAt: '2026-01-01T00:00:00Z' });
+  const names = labels.map((l) => l.label);
+  // Depot names (minus the denylisted "Gun"), then "ethereum" (a tag on 2 depots).
+  assert.ok(names.includes('Milady'));
+  assert.ok(names.includes('Wojak'));
+  assert.ok(names.includes('This is Fine')); // slug "this-is-fine" → prettified + Title Cased
+  assert.ok(!names.includes('Gun'));
+  assert.ok(names.includes('Ethereum')); // tag seen on ≥2 depots survives the floor
+  assert.ok(!names.includes('Reaction')); // tag on only 1 depot, below the floor
+  // Names outrank tags (higher sentinel count).
+  assert.ok(labels[0].count > labels[names.indexOf('Ethereum')].count);
 });
 
 test('parseRobots collects sitemaps and *-scoped disallows', () => {
