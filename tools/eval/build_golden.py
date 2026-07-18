@@ -56,19 +56,31 @@ def depot_name(d):
     return s.replace("-", " ").strip() if isinstance(s, str) else ""
 
 
+IMG_EXT = (".jpg", ".jpeg", ".png", ".webp", ".gif")
+
+
+def _walk_urls(obj, out):
+    """Collect every http(s) string anywhere in a nested dict/list."""
+    if isinstance(obj, str):
+        if obj.startswith("http"):
+            out.append(obj)
+    elif isinstance(obj, dict):
+        for v in obj.values():
+            _walk_urls(v, out)
+    elif isinstance(obj, list):
+        for v in obj:
+            _walk_urls(v, out)
+
+
 def meme_image_url(m):
-    """Robustly find a meme's image URL — the field name is unknown, so try the
-    usual suspects and any http(s) value that looks like an image."""
-    for k in ("media_url", "url", "image", "image_url", "src", "file", "media", "thumbnail"):
-        v = m.get(k)
-        if isinstance(v, str) and v.startswith("http"):
-            return v
-    for v in m.values():
-        if isinstance(v, str) and v.startswith("http") and any(
-            v.lower().split("?")[0].endswith(e) for e in (".jpg", ".jpeg", ".png", ".webp", ".gif")
-        ):
-            return v
-    return None
+    """Find a meme's image URL. memedepot's field is unknown and may be nested,
+    so recursively collect every URL in the object and prefer an image
+    extension; fall back to any URL (a video → Image.open fails → skipped, which
+    is fine, we only want images)."""
+    urls = []
+    _walk_urls(m, urls)
+    imgs = [u for u in urls if u.lower().split("?")[0].endswith(IMG_EXT)]
+    return (imgs or urls or [None])[0]
 
 
 def main():
@@ -123,6 +135,10 @@ def main():
         except Exception as e:
             print(f"  ! {slug}: {e}")
             continue
+        if items and not getattr(main, "_dumped", False):
+            main._dumped = True
+            print(f"  [diag] first meme keys: {list(items[0].keys())}")
+            print(f"  [diag] first meme sample: {json.dumps(items[0])[:500]}")
         got = 0
         for m in items:
             if got >= args.per_depot:
