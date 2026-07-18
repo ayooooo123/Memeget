@@ -1,0 +1,32 @@
+name: Diagnose memedepot structure
+
+# One-shot recon run (manual only). Dumps memedepot's URL scheme + where depot /
+# collection names live into this job's log, so we can build the depot-level
+# extractor without guessing. Runs in CI because memedepot is egress-blocked from
+# the dev sandbox. Read-only: fetches a handful of pages, writes nothing, opens no
+# PR — the deliverable is the log output.
+
+on:
+  workflow_dispatch:
+    inputs:
+      base:
+        description: 'Base URL to diagnose'
+        default: 'https://memedepot.com'
+
+concurrency:
+  group: diagnose-memedepot
+  cancel-in-progress: true
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Diagnose
+        run: node tools/memedepot/diagnose.mjs "${{ github.event.inputs.base || 'https://memedepot.com' }}"

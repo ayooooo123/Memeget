@@ -10,6 +10,7 @@
     "test": "jest",
     "harvest": "node tools/memedepot/harvest.mjs",
     "harvest:test": "node --test tools/memedepot/*.test.mjs",
+    "diagnose": "node tools/memedepot/diagnose.mjs",
     "eval": "jest evalCore",
     "doctor": "react-doctor"
   },
