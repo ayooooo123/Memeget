@@ -23,6 +23,7 @@ No accounts. No servers. No uploads.
 | Index storage | `expo-sqlite`; image and caption embeddings stored as float32 blobs, brute-force cosine search. |
 | Folder access | Android **Storage Access Framework** — per-folder permission, no broad media access. |
 | Save from a link | Share an **X/Twitter**, **Tenor**, **memedepot**, or any social-post URL into Memeget and it resolves the underlying media (tweet-syndication for X, Open Graph `og:video`/`og:image` — with an embedded-media fallback — for everything else), downloads it into your linked folder, and indexes it like a normal share — no manual download + re-import. |
+| Import from a `.zip` | **Share a .zip into Memeget** (or Settings → *Index* → **Import from a .zip**): pulls every supported image/video out of the archive into your linked folder, skips anything already there (by filename), indexes the rest in the background, and discards the archive — the same two-phase path as any other share. |
 
 ## Saving from a shared link
 
@@ -47,6 +48,33 @@ Memeget fetch the meme for you:
 This is best-effort: a private/age-gated post, or a site that hides its media
 behind JavaScript, may not resolve — you'll get a short "no media found" notice
 and nothing is saved.
+
+## Importing a `.zip` of memes
+
+Got a whole archive of memes (a backup, a shared pack, a download dump)? Just
+**share the `.zip` into Memeget** — from your Files app, a chat, a browser
+download, wherever — and it imports the lot, then throws the archive away. (No
+zip handy in a share sheet? **Settings → Index → Import from a .zip** opens a
+file picker for the same thing.)
+
+- Memeget reads the archive on-device (via [`jszip`](https://stuk.github.io/jszip/))
+  and pulls out only the formats it handles — the same image/video extensions the
+  folder scan accepts (`jpg`, `png`, `gif`, `webp`, `heic`, `mp4`, `webm`, …).
+  Anything else (PDFs, text, audio) is left behind and reported as *unsupported*.
+- **Duplicates are skipped**: any entry whose filename already exists in your
+  linked folder — or appears twice in the archive — is not imported again, so
+  re-importing the same zip is a no-op. Nested folders inside the zip are
+  flattened by filename, and macOS/Windows archive cruft (`__MACOSX`,
+  `.DS_Store`, `Thumbs.db`) is ignored.
+- Everything that survives is copied into your **first linked folder** and handed
+  to the same background indexer as a share — so it picks up CLIP/OCR/VLM tags
+  automatically and shows up in search. You'll get a summary like
+  *"Imported 42 memes from zip — indexing in background (3 dups skipped)."*
+- The shared archive itself is **discarded** once its memes are extracted — only
+  the individual memes are kept, as normal files in your folder.
+
+You need a linked folder first (it's where the imported files live). Nothing is
+uploaded — the archive is read entirely on your device.
 
 ## Privacy / network honesty
 
@@ -131,6 +159,7 @@ src/audioCore.ts        # React-free audio helpers: PCM decode, transcript clean
 src/db.ts               # SQLite schema, vector storage, cosine search
 src/saf.ts              # Storage Access Framework folder linking
 src/linkResolver.ts     # shared X/Tenor/social links -> resolve + download media
+src/zipImport.ts        # .zip archive -> filter compatible media, skip dups, save
 src/memeLabels.ts       # curated meme-format/character/emotion prompts
 src/screens/            # Library (index), Search, Settings
 modules/memeget-bg/     # native module: power/thermal, keep-alive, SAF mtime,
