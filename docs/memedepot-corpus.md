@@ -199,6 +199,12 @@ tags)` triples — turn a slice of them into a golden set and we get a regressio
 test for retrieval. Build this *first*; it's the yardstick for both label mining
 and the fine-tune.
 
+> **Scaffolded:** the core now exists — `src/evalCore.ts` ranks a golden set with
+> the app's own `scoreEntry` and reports Recall@k / MRR plus a `regressions()`
+> A/B gate (`npm run eval`, tests in `src/evalCore.test.ts`, schema +
+> instructions in `tools/eval/`). What remains is curating a *real* golden set
+> (offline CLIP vectors) and adding the tagging-precision companion metric.
+
 ### Design (`tools/eval/`)
 
 **Golden set** (`golden.jsonl`, curated from the corpus — a few hundred items):

@@ -14,6 +14,7 @@ import {
   parseSitemap,
   extractTagsFromHtml,
   aggregate,
+  aggregatePages,
   buildBaseline,
   parseRobots,
   isDisallowed,
@@ -124,6 +125,19 @@ test('aggregate normalizes and counts', () => {
   assert.equal(freq['gigachad'], 2);
   assert.equal(freq['wojak'], 1);
   assert.equal(freq['the'], undefined);
+});
+
+test('aggregatePages counts each term once per page (no double-count)', () => {
+  // "gigachad" appears 3x on page 1 (JSON-LD + inline array + href) but must
+  // count as ONE page; it's on 2 of 2 pages, wojak on 1.
+  const pages = [
+    ['Gigachad', 'gigachad!', 'GIGACHAD', 'Wojak'],
+    ['gigachad', 'Pepe'],
+  ];
+  const freq = aggregatePages(pages);
+  assert.equal(freq['gigachad'], 2); // 2 pages, not 4 occurrences
+  assert.equal(freq['wojak'], 1);
+  assert.equal(freq['pepe'], 1);
 });
 
 test('buildBaseline collapses plural variants, higher count wins', () => {
