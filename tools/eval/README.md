@@ -44,17 +44,28 @@ Shape (`golden.sample.json` is a runnable schema example):
 }
 ```
 
-Building a real one (a few hundred entries) — the one manual/offline step:
+Building a real one is automated by **`build_golden.py`** + the **Build eval
+golden set** workflow — it runs in CI (needs memedepot access + a torch/CLIP
+toolchain, both unavailable in the dev sandbox):
 
-1. **Curate** `(image, query, expected meme)` triples. The memedepot corpus
-   (`docs/memedepot-corpus.md`) hands these over nearly for free: an item's
-   human title/tags become the `query`, the item is the `expectedId`. Dedupe
-   near-identical templates and spread across formats so one viral template
-   doesn't dominate the score. **Commit vectors + ids only — never raw images.**
-2. **Embed** each image and query with CLIP ViT-B/32 (the `open_clip` weights
-   matching the app's export, or the on-device model) and L2-normalize. Verify
-   parity against a couple of on-device vectors first.
-3. Drop the vectors into a `golden.json` and evaluate.
+1. Actions → **Build eval golden set** → Run workflow (`depots`, `per_depot`
+   inputs). It pulls memes from N memedepot depots, embeds each **image** + the
+   depot **name** (the query) with CLIP ViT-B/32, and opens a PR with
+   `tools/eval/golden.json`. The encoded eval: *does searching a format's name
+   retrieve that format's memes?* **Vectors + ids only — never images.**
+2. Merge the PR → `npm run eval` now scores the real set and prints Recall@k /
+   MRR (see `src/evalCore.golden.test.ts`).
+
+Run locally instead (Colab or any box with network + torch):
+
+```bash
+pip install open_clip_torch torch pillow requests
+python tools/eval/build_golden.py --out tools/eval/golden.json --depots 25 --per-depot 8
+```
+
+Note: `build_golden.py`'s `meme_image_url()` guesses the memedepot meme-image
+field; if the first run writes 0 memes, the log names the keys it saw — adjust
+and re-run (same diagnostic pattern as the harvester).
 
 ## Accept-gate usage
 
