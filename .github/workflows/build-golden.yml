@@ -42,8 +42,13 @@ jobs:
           PIP_NO_CACHE_DIR: '1'
         run: |
           pip install --upgrade pip
-          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          # torch AND torchvision from the SAME CPU index so their compiled ops
+          # match — installing them separately (or letting open_clip pull
+          # torchvision from PyPI) yields "operator torchvision::nms does not
+          # exist". open_clip is installed after, so it reuses this torchvision.
+          pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
           pip install open_clip_torch pillow requests
+          python -c "import torch, torchvision; print('torch', torch.__version__, '| torchvision', torchvision.__version__)"
 
       - name: Build golden set
         run: |
