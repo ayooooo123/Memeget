@@ -69,6 +69,11 @@ const GENERIC_DENYLIST = new Set([
   'family', 'job', 'employee', 'music', 'football', 'soccer', 'marathon', 'race', 'soldier',
   'chicken', 'bear', 'ghost', 'eagle', 'camel', 'wheelchair', 'nerd', 'gaming', 'gun',
   'no background', 'group picture', 'low poly',
+  // memedepot admin / generic / personal depots (not a meme format)
+  'my depot', 'public testing depot', 'meme templates', 'blank memes', 'blank memes templates',
+  'community art', 'marketing', 'culture', 'nonce', 'chains', 'experiments lain', 'send memes',
+  'sticker project', 'throwback memes', 'greatestmeme', 'pixel art', 'abstract', 'experiments',
+  'hold', 'grind', 'chains', 'book of nft meme', 'sticker', 'stickers', 'templates', 'template',
 ]);
 
 // Normalize a raw term to a comparable key AND drop noise. Beyond lowercasing /
@@ -91,6 +96,15 @@ export function normalizeTerm(raw) {
   if (STOPWORDS.has(t) || GENERIC_DENYLIST.has(t)) return '';
   if (/^\d+$/.test(t)) return ''; // pure numbers
   if (/^object( object)*$/.test(t)) return ''; // "[object Object]" leakage guard
+  // Crypto-ticker / id noise (memedepot is a crypto-meme community): reject any
+  // term with a token that mixes letters and digits (hpos10i, 1000u, lt3, web3,
+  // 92s) or is a long digit run (…monkey 21711). Applies to multi-word names too,
+  // where the single-token check below can't reach. "mario 64" survives — "64" is
+  // neither mixed nor 4+ digits.
+  for (const w of t.split(' ')) {
+    if (/[a-z]/.test(w) && /\d/.test(w)) return '';
+    if (/^\d{4,}$/.test(w)) return '';
+  }
   // Single-token junk that plagues memedepot tags: short abbreviations, tickers /
   // ids containing digits (usd1, 51349b), and vowel-less consonant runs (rrs).
   // Multi-word terms ("space odyssey") are exempt — the noise is in bare tokens.
