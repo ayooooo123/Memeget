@@ -218,6 +218,26 @@ export function aggregate(rawTerms) {
   return freq;
 }
 
+// Count each normalized term at most ONCE per page. A tag routinely appears in
+// several extraction strategies on the same page (JSON-LD keywords AND an inline
+// tags array AND a /tag href), so a flat count double/triple-counts it — which
+// silently degrades the "seen on >1 page" signal (buildBaseline's count>=2
+// floor) to "seen once", leaking the entire single-page tail. Deduping per page
+// makes the count mean what the floor assumes: distinct pages.
+export function aggregatePages(pages) {
+  const freq = {};
+  for (const page of pages) {
+    const seen = new Set();
+    for (const raw of page) {
+      const t = normalizeTerm(raw);
+      if (!t || seen.has(t)) continue;
+      seen.add(t);
+      freq[t] = (freq[t] ?? 0) + 1;
+    }
+  }
+  return freq;
+}
+
 // Collapse trivial plural variants ("pill"/"pills", "goblin"/"goblins") to one
 // dedupe key so they don't both occupy label slots. Naive singularization is
 // fine here — it only groups, and the higher-count variant wins.
@@ -349,14 +369,15 @@ async function main() {
   const urls = [...queue].filter((u) => !isDisallowed(u, disallow, opts.base)).slice(0, opts.maxPages);
   console.log(`  crawling ${urls.length} pages…`);
 
-  const rawTerms = [];
+  const pages = []; // one array of raw terms per page, so counting is per-page
   let done = 0;
   for (const url of urls) {
     const html = await fetchText(url, opts.timeoutMs);
-    if (html) rawTerms.push(...extractTagsFromHtml(html));
+    if (html) pages.push(extractTagsFromHtml(html));
     if (++done % 25 === 0) console.log(`  …${done}/${urls.length}`);
     await sleep(opts.delayMs);
   }
+  const rawTerms = pages.flat();
 
   // Diagnostic: surface the most common RAW (pre-normalization) terms so a bad
   // extraction — wrong tag-object shape, junk leakage — is visible directly in
@@ -372,7 +393,7 @@ async function main() {
   console.log(`  raw terms: ${rawTerms.length} total, ${Object.keys(rawFreq).length} distinct`);
   if (topRaw.length) console.log(`  top raw: ${topRaw.map(([t, c]) => `${t} (${c})`).join(', ')}`);
 
-  const baseline = buildBaseline(aggregate(rawTerms), {
+  const baseline = buildBaseline(aggregatePages(pages), {
     max: opts.maxTags,
     source: host,
     generatedAt: new Date().toISOString(),
