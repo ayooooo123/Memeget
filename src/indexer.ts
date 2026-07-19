@@ -66,7 +66,7 @@ import {
   sweepOrphanThumbs,
   type SafFile,
 } from './saf';
-import type { VisionResult } from './visionCore';
+import { formatGrounding, type GroundingLabel, type VisionResult } from './visionCore';
 import {
   dedupeFrames,
   flattenFrameTags,
@@ -917,7 +917,7 @@ export interface EnrichResult {
 // re-reading small text — which lets us downscale the frame aggressively.
 export interface VisionEnricher {
   ready: boolean;
-  describe: (jpegPath: string, ocrHint?: string) => Promise<VisionResult | null>;
+  describe: (jpegPath: string, ocrHint?: string, grounding?: string) => Promise<VisionResult | null>;
   embedText?: (text: string) => Promise<number[]>;
 }
 
@@ -1022,13 +1022,23 @@ async function describeAndSave(
     const frames = await materializeFrames({ uri: m.uri, name: m.name, kind: m.kind }, idx, MAX_VLM_FRAMES);
     temp.push(...frames.temp);
 
+    // Retrieval-augmented grounding: the fast CLIP pass already tagged this meme
+    // (m.tags) from the harvested label vocabulary — knowledge the small VLM
+    // often lacks. Hand it the top format/character guesses (+ their association
+    // terms) so it can NAME templates/characters it couldn't recognize alone.
+    const groundLabels: GroundingLabel[] = [...m.tags]
+      .sort((a, b) => b.score - a.score)
+      .map((t) => ({ label: t.label, category: t.category }));
+    const related = m.tags.flatMap((t) => assoc.get(t.label) ?? []);
+    const grounding = formatGrounding(groundLabels, related);
+
     // Describe each distinct frame, stopping as soon as a frame says essentially
     // the same thing as the previous one — a static clip pays for one generation,
     // a multi-scene edit for a few. Their descriptions are then folded into one
     // (unioned subjects/tags/text, joined scene captions).
     const results: VisionResult[] = [];
     for (const jpeg of frames.jpegs) {
-      const r = await vision.describe(jpeg, m.ocrText);
+      const r = await vision.describe(jpeg, m.ocrText, grounding);
       if (!r) break; // model went unready mid-way
       if (results.length && visionResultsSimilar(r, results[results.length - 1])) break;
       results.push(r);
