@@ -66,6 +66,19 @@ const FACET_LEXICON: Partial<Record<LabelCategory, string[]>> = {
     'bedroom', 'bathroom', 'street', 'road', 'beach', 'park', 'restaurant', 'bar',
     'hospital', 'church', 'prison', 'store', 'shop', 'club', 'stadium', 'arena', 'home',
   ],
+  // Public figures that recur as meme subjects — mostly harvested from real
+  // teachings the classifier was filing as 'character' for lack of a name list.
+  person: [
+    'trump', 'obama', 'biden', 'elon', 'musk', 'putin', 'xi jinping', 'epstein',
+    'alex jones', 'nick fuentes', 'mamdani', 'jd vance', 'sam hyde', 'ben affleck',
+    'mel gibson', 'ryan gosling', 'haaland', 'ansem', 'tim dillon', 'john kiriakou',
+    'nigel farage', 'tony soprano', 'walter white', 'patrick bateman', 'andrew tate',
+    'joe rogan', 'kanye', 'messi', 'ronaldo', 'zelensky', 'vance',
+  ],
+  topic: [
+    'china', 'russia', 'ukraine', 'monero', 'bitcoin', 'ethereum', 'immigration',
+    'immigrants', 'nazi', 'communism', 'wwe', 'ufc', 'soccer', 'football', 'nba',
+  ],
 };
 
 // Per-facet keyword sets built from the label vocabulary + the lexicon above.

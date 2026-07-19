@@ -47,6 +47,13 @@ describe('guessFacet (categorize a teaching from its label)', () => {
     expect(guessFacet('Zorblax')).toBe('character');
     expect(guessFacet('Zorblax', 'topic')).toBe('topic'); // caller can override
   });
+
+  it('recognizes public figures as person (the teach-pack gap)', () => {
+    expect(guessFacet('Xi Jinping')).toBe('person');
+    expect(guessFacet('Epstein')).toBe('person');
+    expect(guessFacet('Alex Jones')).toBe('person');
+    expect(guessFacet('China')).toBe('topic');
+  });
 });
 
 describe('facetCoverage', () => {
