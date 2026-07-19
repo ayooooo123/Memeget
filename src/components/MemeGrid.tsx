@@ -29,9 +29,11 @@ import {
   getLibraryTagLabels,
   getMemeEmbedding,
   getSimilarMemes,
+  propagateTagToSimilarMemes,
   requeueMemeThumb,
   requeueMemeVision,
 } from '../db';
+import { termsWithLabel } from '../tagPropagation';
 import { emitLibraryChanged } from '../events';
 import { scoreExemplar } from '../learnCore';
 import { buildExemplarHeads, noteInteractive, type ExemplarModel } from '../indexer';
@@ -233,6 +235,9 @@ export const MemeGrid = React.memo(function MemeGrid({
   const [bulkLabelInput, setBulkLabelInput] = useState('');
   const [bulkLabels, setBulkLabels] = useState<string[]>([]);
   const [bulkBusy, setBulkBusy] = useState(false);
+  // Spread the tag to visual look-alikes after tagging (the toggle in the
+  // bulk-tag sheet). On by default; sticks for the session.
+  const [bulkSpread, setBulkSpread] = useState(true);
   // Read the latest selection mode from the tap/long-press handlers without
   // giving them a new identity each toggle (which would bust GridCell's memo).
   const selectionModeRef = useRef(false);
@@ -439,14 +444,6 @@ export const MemeGrid = React.memo(function MemeGrid({
       .catch(() => setBulkLabels([]));
   };
 
-  // Append the label to a meme's extra_terms (deduped) so the new tag is also
-  // reachable by text search, not just visible as a chip.
-  const termsWithLabel = (extraTerms: string, label: string): string => {
-    const set = new Set(extraTerms.split(/\s+/).filter(Boolean));
-    for (const w of label.toLowerCase().split(/\s+/)) if (w) set.add(w);
-    return [...set].join(' ');
-  };
-
   const applyBulkTag = async () => {
     const label = bulkLabelInput.trim();
     if (!label || selectedIds.size === 0 || bulkBusy) return;
@@ -467,11 +464,27 @@ export const MemeGrid = React.memo(function MemeGrid({
           };
         });
       await bulkUpdateMemeTags(updates);
+      // Optionally spread the tag to the tagged memes' visual look-alikes
+      // (DINOv2 space when configured, else CLIP — see tagPropagation.ts).
+      // Best-effort: a spread failure never rolls back the tag itself.
+      let spread = 0;
+      if (bulkSpread) {
+        spread = await propagateTagToSimilarMemes(
+          updates.map((u) => u.id),
+          label
+        )
+          .then((r) => r.propagated)
+          .catch(() => 0);
+      }
       emitLibraryChanged();
       setBulkTagging(false);
       exitSelection();
       success();
-      showToast(`Tagged ${updates.length} meme${updates.length === 1 ? '' : 's'} “${label}”`, 'success');
+      const tagged = `Tagged ${updates.length} meme${updates.length === 1 ? '' : 's'} “${label}”`;
+      showToast(
+        spread > 0 ? `${tagged} · spread to ${spread} look-alike${spread === 1 ? '' : 's'}` : tagged,
+        'success'
+      );
     } catch (e) {
       showToast(`Could not tag: ${String(e)}`, 'error');
     } finally {
@@ -1179,6 +1192,24 @@ export const MemeGrid = React.memo(function MemeGrid({
                 ))}
               </ScrollView>
             )}
+            <Pressable
+              style={styles.spreadRow}
+              onPress={() => {
+                tap();
+                setBulkSpread((v) => !v);
+              }}
+            >
+              <Text style={[styles.spreadBox, bulkSpread && styles.spreadBoxOn]}>
+                {bulkSpread ? '✓' : ''}
+              </Text>
+              <View style={styles.spreadCopy}>
+                <Text style={styles.spreadTitle}>Spread to look-alikes</Text>
+                <Text style={styles.spreadHint}>
+                  Also tags memes that look almost identical to the selected ones — other crops and
+                  variants of the same template.
+                </Text>
+              </View>
+            </Pressable>
             <View style={styles.teachActions}>
               <PressableScale
                 style={[styles.teachAction, styles.teachCancel]}
@@ -1795,6 +1826,25 @@ const styles = StyleSheet.create({
     color: colors.text,
     fontSize: 14,
   },
+  spreadRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 10, paddingVertical: 2 },
+  spreadBox: {
+    width: 22,
+    height: 22,
+    borderRadius: radius.sm,
+    borderWidth: 1.5,
+    borderColor: colors.border,
+    backgroundColor: colors.surface2,
+    color: colors.bg,
+    fontSize: 14,
+    fontWeight: '800',
+    textAlign: 'center',
+    lineHeight: 20,
+    marginTop: 1,
+  },
+  spreadBoxOn: { backgroundColor: colors.volt, borderColor: colors.volt },
+  spreadCopy: { flex: 1, gap: 2 },
+  spreadTitle: { color: colors.text, fontSize: 13, fontWeight: '700' },
+  spreadHint: { color: colors.muted, fontSize: 12, lineHeight: 17 },
   teachActions: { flexDirection: 'row', gap: space.sm, marginTop: 2, marginBottom: 6 },
   teachAction: { flex: 1, paddingVertical: 13, borderRadius: radius.md, alignItems: 'center' },
   teachActionDisabled: { opacity: 0.4 },

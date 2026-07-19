@@ -8,6 +8,13 @@ import {
   invalidateSearchIndex,
   type SearchCacheEntry,
 } from './searchIndexCache';
+import {
+  propagatedTag,
+  rankPropagationHits,
+  scorePropagationCandidate,
+  termsWithLabel,
+  type PropagationHit,
+} from './tagPropagation';
 import type { MemeRecord, MediaKind, SearchHit, Tag, LinkedFolder, Exemplar } from './types';
 import { selectPairVectors, type VisualSimilarityRecord } from './visualSearch';
 
@@ -1325,6 +1332,83 @@ async function getSimilarMemesVec(
       return { ...record, score: 1 - d } as SearchHit;
     })
     .filter((h): h is SearchHit => h !== null);
+}
+
+// Spread a just-applied manual tag to the library's visual look-alikes — the
+// write side of the bulk-tag sheet's "spread to look-alikes" toggle. Loads the
+// tagged memes' stored vectors, scans every other indexed meme in the
+// visual-similarity space (DINO per pair when both sides carry a stamped
+// vector, else the primary image space — selectPairVectors' routing), and tags
+// everything above the strict per-space threshold (tagPropagation.ts). All
+// stored-vector reads plus one bulk write; no model call.
+export async function propagateTagToSimilarMemes(
+  sourceIds: number[],
+  label: string
+): Promise<{ propagated: number }> {
+  const trimmed = label.trim();
+  if (sourceIds.length === 0 || !trimmed) return { propagated: 0 };
+  const db = await getDb();
+  const marks = sourceIds.map(() => '?').join(',');
+
+  interface VectorCols {
+    embedding: Uint8Array;
+    visual_embedding: Uint8Array | null;
+    visual_model: string | null;
+  }
+  const toRecord = (r: VectorCols): VisualSimilarityRecord => ({
+    imageEmbedding: blobToVec(r.embedding),
+    visualEmbedding: r.visual_embedding ? blobToVec(r.visual_embedding) : null,
+    visualModel: r.visual_model ?? '',
+  });
+
+  const srcRows = await db.getAllAsync<VectorCols>(
+    `SELECT embedding, visual_embedding, visual_model FROM memes WHERE pending = 0 AND id IN (${marks})`,
+    ...sourceIds
+  );
+  const sources = srcRows.map(toRecord).filter((s) => s.imageEmbedding.length > 0);
+  if (sources.length === 0) return { propagated: 0 };
+
+  const candRows = await db.getAllAsync<VectorCols & { id: number; tags: string; extra_terms: string }>(
+    `SELECT id, tags, extra_terms, embedding, visual_embedding, visual_model FROM memes WHERE pending = 0 AND id NOT IN (${marks})`,
+    ...sourceIds
+  );
+
+  // Cheap already-has-label check straight off the raw tags JSON (the exact
+  // encoded token, compared lowercase like the bulk-tag dedupe) — avoids
+  // JSON.parsing the whole library when only the winners need their tags
+  // materialized.
+  const needle = ('"label":' + JSON.stringify(trimmed)).toLowerCase();
+
+  const hits: PropagationHit[] = [];
+  for (let i = 0; i < candRows.length; i++) {
+    const r = candRows[i];
+    const hit = scorePropagationCandidate(
+      sources,
+      { id: r.id, hasLabel: (r.tags ?? '').toLowerCase().includes(needle), record: toRecord(r) },
+      VISUAL_EMBEDDING_MODEL
+    );
+    if (hit) hits.push(hit);
+    // Same chunked yield as the search scans, so spreading across a big
+    // library never hitches the UI.
+    if ((i & (SEARCH_CHUNK - 1)) === SEARCH_CHUNK - 1) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    }
+  }
+
+  const winners = rankPropagationHits(hits);
+  if (winners.length === 0) return { propagated: 0 };
+
+  const byId = new Map(candRows.map((r) => [r.id, r]));
+  const updates = winners.map((w) => {
+    const row = byId.get(w.id)!;
+    return {
+      id: w.id,
+      tags: [...safeParseTags(row.tags), propagatedTag(trimmed, w.score)],
+      extraTerms: termsWithLabel(row.extra_terms ?? '', trimmed),
+    };
+  });
+  await bulkUpdateMemeTags(updates);
+  return { propagated: updates.length };
 }
 
 export async function clearIndex(): Promise<void> {
