@@ -1,4 +1,4 @@
-import type { EmbeddingModelSpec } from './embeddingModels';
+import type { EmbeddingModelSpec, EmbeddingSpace } from './embeddingModels';
 
 export interface VisualSimilarityRecord {
   imageEmbedding: Float32Array;
@@ -33,15 +33,18 @@ export function selectVisualSimilarityVector(
 // either side is missing/stale falls back to the primary image space. (Scores
 // from the two spaces are both cosines and rank tolerably together while a
 // backfill is in flight; once backfill completes every pair is DINO.)
+// The chosen space is reported alongside the vectors — callers that apply
+// absolute cosine thresholds (tag propagation) need it, because the two spaces
+// sit on very different baselines.
 export function selectPairVectors(
   target: VisualSimilarityRecord,
   candidate: VisualSimilarityRecord,
   activeVisualModel: Pick<EmbeddingModelSpec, 'id' | 'available'>
-): { a: Float32Array; b: Float32Array } {
+): { a: Float32Array; b: Float32Array; space: EmbeddingSpace } {
   if (hasActiveVisual(target, activeVisualModel) && hasActiveVisual(candidate, activeVisualModel)) {
-    return { a: target.visualEmbedding!, b: candidate.visualEmbedding! };
+    return { a: target.visualEmbedding!, b: candidate.visualEmbedding!, space: 'visual' };
   }
-  return { a: target.imageEmbedding, b: candidate.imageEmbedding };
+  return { a: target.imageEmbedding, b: candidate.imageEmbedding, space: 'primary' };
 }
 
 export function visualEmbeddingNeedsRefresh(

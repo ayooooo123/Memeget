@@ -67,12 +67,13 @@ describe('visual search routing', () => {
     );
     expect(both.a).toBe(dinoA);
     expect(both.b).toBe(dinoB);
+    expect(both.space).toBe('visual');
   });
 
   it('never mixes spaces in a pair: one stale side drops BOTH to the image space', () => {
     const targetImage = v(1, 0);
     const candidateImage = v(0.8, 0.6);
-    const { a, b } = selectPairVectors(
+    const { a, b, space } = selectPairVectors(
       rec({
         imageEmbedding: targetImage,
         visualEmbedding: v(0, 1, 0), // target has a fresh DINO vector…
@@ -83,6 +84,7 @@ describe('visual search routing', () => {
     );
     expect(a).toBe(targetImage);
     expect(b).toBe(candidateImage);
+    expect(space).toBe('primary');
   });
 
   it('knows whether a row needs visual embedding refresh', () => {
