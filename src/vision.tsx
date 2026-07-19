@@ -75,7 +75,7 @@ export interface VisionApi {
   error: string | null;
   setEnabled: (on: boolean) => void;
   setQuality: (q: VisionQuality) => void;
-  describe: (jpegPath: string, ocrHint?: string) => Promise<VisionResult | null>;
+  describe: (jpegPath: string, ocrHint?: string, grounding?: string) => Promise<VisionResult | null>;
 
   // Background processing — a paced trickle that describes the library while the
   // app is open, throttled by the intensity slider and battery/thermal state.
@@ -241,14 +241,18 @@ export function VisionProvider({ children }: { children: React.ReactNode }) {
 
   // The describe primitive. Kept in a ref so the background loop / burst pass
   // always call the latest version (llm gets a new identity each render).
-  const describe = async (jpegPath: string, ocrHint?: string): Promise<VisionResult | null> => {
+  const describe = async (
+    jpegPath: string,
+    ocrHint?: string,
+    grounding?: string
+  ): Promise<VisionResult | null> => {
     if (!llm.isReady) return null;
     // Stateless one-shot: generate() does NOT accumulate conversation history,
     // so every meme is described from a clean slate (no drift, no unbounded
     // context growth across a whole library).
     const reply = await llm.generate([
       { role: 'system', content: SYSTEM_PROMPT },
-      { role: 'user', content: userTurn(ocrHint), mediaPath: jpegPath },
+      { role: 'user', content: userTurn(ocrHint, grounding), mediaPath: jpegPath },
     ]);
     return parseVision(reply);
   };

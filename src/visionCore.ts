@@ -68,40 +68,129 @@ export const SYSTEM_PROMPT =
 // model echoing the field hints back verbatim. (react-native-executorch has no
 // hard max-token knob, so brevity is enforced via the prompt.)
 export const USER_PROMPT =
-  'Describe this meme so it can be found later by search. Reply with EXACTLY these ' +
-  'four lines, each starting with the label in caps, and nothing else:\n' +
-  'CAPTION: one sentence, <=14 words, the action taking place, the feeling or mood being conveyed, and why it is funny\n' +
+  'Describe this meme so it can be found later by search. People search with a SINGLE ' +
+  'word for any aspect — a feeling, an action, a character, a format, or the situation ' +
+  'they would send it in — so name each aspect explicitly. Reply with EXACTLY these four ' +
+  'lines, each starting with the label in caps, and nothing else:\n' +
+  'CAPTION: one sentence, <=20 words: the action taking place, the feeling or mood, the situation it is used to react to, and why it is funny\n' +
   'TEXT: text visible in the image, verbatim; leave blank if none\n' +
   'SUBJECTS: comma-separated main people, characters, or objects\n' +
-  'TAGS: 4-8 comma-separated lowercase keywords (meme format/template name if known, topic, actions happening, emotion/feeling conveyed, named characters)\n' +
+  'TAGS: 6-12 comma-separated lowercase keywords covering every searchable facet — meme format/template name if known, named characters or subjects, the action happening, key objects on screen, the setting or place, the emotion or feeling conveyed, the humor style, the topic, and the real-life situation you would send it to react to\n' +
   '\nExample of the exact format:\n' +
-  'CAPTION: a man turns to admire another woman while his girlfriend glares in disgust\n' +
+  'CAPTION: a man turns to admire another woman while his girlfriend glares, used when tempted by a shiny new option\n' +
   'TEXT: me, new framework, the project i should be working on\n' +
   'SUBJECTS: man, girlfriend, other woman\n' +
-  'TAGS: distracted boyfriend, turning to look, temptation, jealousy, disgust, relatable\n' +
+  'TAGS: distracted boyfriend, turning to look, temptation, jealousy, disgust, tempted by something new, choosing the exciting new thing\n' +
   '\nNow describe the image. If it is not a meme, still describe it the same way. Be concise.';
 
 // Cap the injected OCR so it can't bloat the prompt (prefill cost) — a hint.
 export const OCR_HINT_MAX = 280;
 
-// Build the user turn, optionally grounding it with text ML Kit already read so
-// the small model doesn't have to re-OCR small text from a downscaled frame.
-export function userTurn(ocrHint?: string): string {
-  const hint = (ocrHint ?? '').replace(/\s+/g, ' ').trim();
-  if (!hint) return USER_PROMPT;
+// ---- retrieval-augmented grounding ------------------------------------------
+//
+// The on-device VLM has limited meme knowledge: it can SEE the action/emotion
+// but often can't NAME an obscure template or a niche character ("Milady",
+// "gigachad", a specific format). The CLIP zero-shot pass already guessed those
+// from the harvested label vocabulary — knowledge that otherwise dies in a
+// separate channel the VLM never sees. Feeding the top guesses into the prompt
+// (with a strict "only if it matches" caveat, so a wrong guess is harmless) lets
+// the VLM name what it couldn't recognize on its own.
+
+export interface GroundingLabel {
+  label: string;
+  category: string; // 'format' | 'character' | 'person' | 'topic' | 'emotion' | …
+}
+
+// Facet order in the grounding line: identity-bearing and most visually grounded
+// first. EVERY facet the CLIP pass guessed is surfaced grouped by name — not just
+// the format — because the point is to hand the VLM a full aspect breakdown
+// (what it is, who's in it, what's happening, how it feels, the moment it fits).
+const GROUNDING_FACET_ORDER = [
+  'format',
+  'character',
+  'person',
+  'action',
+  'object',
+  'setting',
+  'emotion',
+  'situation',
+  'tone',
+  'topic',
+];
+const MAX_PER_FACET = 2; // keep one loud facet from crowding out the rest
+const MAX_GROUNDING_LABELS = 8;
+const MAX_GROUNDING_RELATED = 6;
+
+// Build the grounding line from CLIP's per-facet guesses (+ their association
+// terms), grouped and labeled by facet: "format: drake; emotion: smug; action:
+// pointing". Returns '' when there's nothing to offer.
+export function formatGrounding(labels: GroundingLabel[], related: string[] = []): string {
+  const byFacet = new Map<string, string[]>();
+  const seen = new Set<string>();
+  for (const l of labels) {
+    const label = l.label.trim();
+    const key = label.toLowerCase();
+    if (!label || seen.has(key)) continue;
+    seen.add(key);
+    const arr = byFacet.get(l.category) ?? [];
+    if (arr.length < MAX_PER_FACET) {
+      arr.push(label);
+      byFacet.set(l.category, arr);
+    }
+  }
+
+  // Known facets in order, then any unrecognized facet after them.
+  const order = [
+    ...GROUNDING_FACET_ORDER,
+    ...[...byFacet.keys()].filter((c) => !GROUNDING_FACET_ORDER.includes(c)),
+  ];
+  const segments: string[] = [];
+  let total = 0;
+  for (const facet of order) {
+    const arr = byFacet.get(facet);
+    if (!arr || arr.length === 0 || total >= MAX_GROUNDING_LABELS) continue;
+    const take = arr.slice(0, MAX_GROUNDING_LABELS - total);
+    segments.push(`${facet}: ${take.join(', ')}`);
+    total += take.length;
+  }
+  if (segments.length === 0) return '';
+
+  const rel = [...new Set(related.map((r) => r.trim().toLowerCase()).filter(Boolean))]
+    .slice(0, MAX_GROUNDING_RELATED)
+    .join(', ');
   return (
-    USER_PROMPT +
-    `\nText already extracted from this image by OCR — use it verbatim for the TEXT line and ` +
-    `as a hint for the caption: "${hint.slice(0, OCR_HINT_MAX)}"`
+    `\nA visual recognizer suggests — ${segments.join('; ')}` +
+    (rel ? ` (related: ${rel})` : '') +
+    `. Use any that match what you actually see in SUBJECTS and TAGS; ignore any that do not.`
   );
+}
+
+// Build the user turn, optionally grounding it with (1) text ML Kit already read
+// so the small model doesn't have to re-OCR a downscaled frame, and (2) the CLIP
+// format/character guess (see formatGrounding).
+export function userTurn(ocrHint?: string, grounding?: string): string {
+  let turn = USER_PROMPT;
+  const hint = (ocrHint ?? '').replace(/\s+/g, ' ').trim();
+  if (hint) {
+    turn +=
+      `\nText already extracted from this image by OCR — use it verbatim for the TEXT line and ` +
+      `as a hint for the caption: "${hint.slice(0, OCR_HINT_MAX)}"`;
+  }
+  const g = (grounding ?? '').trim();
+  if (g) turn += `\n${g}`;
+  return turn;
 }
 
 // Fragments of the prompt's own field descriptions. The small model occasionally
 // echoes a hint instead of filling it in; a value containing one of these is
 // noise and must never reach the UI.
 const HINT_FRAGMENTS = [
-  'the action taking place, the feeling or mood being conveyed, and why it is funny',
-  'the feeling or mood being conveyed',
+  'the action taking place, the feeling or mood, the situation it is used to react to, and why it is funny',
+  'the feeling or mood',
+  'the situation it is used to react to',
+  'the real-life situation you would send it to react to',
+  'covering every searchable facet',
+  'a visual recognizer suggests',
   'text visible in the image',
   'leave blank if none',
   'main people, characters, or objects',

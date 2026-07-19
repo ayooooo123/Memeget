@@ -7,6 +7,8 @@ import {
   rankQuery,
   rankOfExpected,
   evaluateRetrieval,
+  evaluateTagging,
+  evaluateAspectSearch,
   regressions,
   formatMetrics,
   type GoldenSet,
@@ -65,6 +67,91 @@ describe('metrics', () => {
     const m = evaluateRetrieval({ memes: [], queries: [] });
     expect(m.mrr).toBe(0);
     expect(m.recallAt1).toBe(0);
+  });
+});
+
+describe('tagging (zero-shot format)', () => {
+  it('classifies each meme image against the label set', () => {
+    // In DENSE, each meme's image points straight at its own label vector, so
+    // zero-shot classification puts the right format at #1 for all three.
+    const t = evaluateTagging(DENSE);
+    expect(t.n).toBe(3);
+    expect(t.labels).toBe(3); // one distinct label per query
+    expect(t.recallAt1).toBeCloseTo(1, 6);
+    expect(t.mrr).toBeCloseTo(1, 6);
+  });
+
+  it('buries the right label when the image leans toward a wrong one', () => {
+    // m3's image is closer to label "a" than to its own label "c" → rank 2.
+    const g: GoldenSet = {
+      memes: [
+        { id: 'm1', imageVec: [1, 0, 0] },
+        { id: 'm3', imageVec: [0.6, 0, 0.5] },
+      ],
+      queries: [
+        { query: 'a', queryVec: [1, 0, 0], expectedId: 'm1' },
+        { query: 'c', queryVec: [0, 0, 1], expectedId: 'm3' },
+      ],
+    };
+    const t = evaluateTagging(g);
+    expect(t.recallAt1).toBeCloseTo(0.5, 6); // m1 #1, m3 #2
+    expect(t.recallAt3).toBeCloseTo(1, 6);
+    expect(t.mrr).toBeCloseTo((1 + 0.5) / 2, 6);
+  });
+
+  it('is 0, not NaN, on an empty set', () => {
+    const t = evaluateTagging({ memes: [], queries: [] });
+    expect(t.mrr).toBe(0);
+    expect(t.recallAt1).toBe(0);
+  });
+});
+
+describe('aspect search (single-word, multi-relevant)', () => {
+  it('scores a one-word query via the lexical channel over the relevant set', () => {
+    // "smug" should surface both smug memes and nothing else. Dense channel is
+    // neutralized (zero vectors) so this is a pure single-word tag-hit test.
+    const g: GoldenSet = {
+      memes: [
+        { id: 'a', imageVec: [0, 0], searchText: 'smug pepe grin' },
+        { id: 'b', imageVec: [0, 0], searchText: 'crying wojak' },
+        { id: 'c', imageVec: [0, 0], searchText: 'smug anime girl' },
+        { id: 'd', imageVec: [0, 0], searchText: 'pointing rick' },
+      ],
+      queries: [],
+      aspects: [{ query: 'smug', queryVec: [0, 0], relevantIds: ['a', 'c'], terms: ['smug'] }],
+    };
+    const m = evaluateAspectSearch(g);
+    expect(m.n).toBe(1);
+    expect(m.avgRelevant).toBeCloseTo(2, 6);
+    expect(m.map).toBeCloseTo(1, 6); // both relevant land at the top
+    expect(m.precisionAt5).toBeCloseTo(2 / 5, 6);
+    expect(m.recallAt10).toBeCloseTo(1, 6);
+    expect(m.mrr).toBeCloseTo(1, 6);
+  });
+
+  it('penalizes a non-relevant meme wedged between two relevant ones (MAP < 1)', () => {
+    // Dense-only ranking x(1) > y(.95, off-topic) > z(.9): the intruder at #2
+    // drops average precision below a perfect 1.
+    const g: GoldenSet = {
+      memes: [
+        { id: 'x', imageVec: [1, 0], searchText: '' },
+        { id: 'y', imageVec: [0.95, 0], searchText: '' },
+        { id: 'z', imageVec: [0.9, 0], searchText: '' },
+      ],
+      queries: [],
+      aspects: [{ query: 'q', queryVec: [1, 0], relevantIds: ['x', 'z'], terms: [] }],
+    };
+    const m = evaluateAspectSearch(g);
+    expect(m.map).toBeCloseTo((1 + 2 / 3) / 2, 6); // 0.8333
+    expect(m.mrr).toBeCloseTo(1, 6); // first hit still at rank 1
+    expect(m.recallAt10).toBeCloseTo(1, 6);
+  });
+
+  it('is 0, not NaN, when there are no aspect queries', () => {
+    const m = evaluateAspectSearch({ memes: [], queries: [] });
+    expect(m.n).toBe(0);
+    expect(m.map).toBe(0);
+    expect(m.precisionAt5).toBe(0);
   });
 });
 

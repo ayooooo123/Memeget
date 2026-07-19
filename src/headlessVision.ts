@@ -65,11 +65,15 @@ export function unloadHeadless(): void {
 export function headlessEnricher(): VisionEnricher {
   return {
     ready: instance != null,
-    describe: async (jpegPath: string, ocrHint?: string): Promise<VisionResult | null> => {
+    describe: async (
+      jpegPath: string,
+      ocrHint?: string,
+      grounding?: string
+    ): Promise<VisionResult | null> => {
       if (!instance) return null;
       const reply = await instance.mod.generate([
         { role: 'system', content: SYSTEM_PROMPT },
-        { role: 'user', content: userTurn(ocrHint), mediaPath: jpegPath },
+        { role: 'user', content: userTurn(ocrHint, grounding), mediaPath: jpegPath },
       ]);
       return parseVision(reply);
     },
