@@ -69,17 +69,18 @@ CI attempts against executorch 1.0's quant stack; the eager cosine-parity gate
 kept broken results from shipping. Do it in `tools/model-export` behind that same
 gate, after B1's fp32 path is proven on device.
 
-### B2 — VLM tier tuning (measure before changing the default)
+### B2 — VLM model choice (DECIDED: single LFM2.5-VL 1.6B, no tiers)
 The captioner is inherently the heaviest run, but it's **opt-in** ("AI
-descriptions"), so it isn't what a non-opted-in user feels as sluggish. Levers
-that don't require a new export:
-- The `fast` tier (LFM2.5-VL 450M, XNNPACK) already exists for weaker devices /
-  big backlogs and is dramatically lighter than Gemma. Consider auto-suggesting
-  it on low-RAM devices instead of defaulting everyone to `max`.
-- `LFM2_5_VL_1_6B_QUANTIZED` is available as a middle option if a quality/speed
-  point between 450M and Gemma is wanted.
-Any default change is a quality tradeoff — gate it on an on-device A/B, don't
-flip it blind.
+descriptions"), so it isn't what a non-opted-in user feels as sluggish.
+
+**Resolved (July 2026):** the `fast`/`max` tier toggle is removed and the app now
+runs a **single** VLM — **LFM2.5-VL 1.6B** — chosen as the fastest turnkey RNE
+catalog model that keeps strong caption/OCR quality. Rationale, alternatives, and
+the ruled-out runtime/finetune paths are in
+[`vlm-model-decision.md`](./vlm-model-decision.md). One caveat carried forward:
+LFM runs on XNNPACK (CPU) where Gemma ran on Vulkan (GPU), so the expected speed
+win is **still to be confirmed on-device** (P50/P90 including image encode) — do
+not book it as a win until measured.
 
 ### B4 — QNN / Hexagon NPU spike (Snapdragon only)
 Not applicable to the Tensor-G4 test device. Worth a spike **only** if a
@@ -90,9 +91,10 @@ and benchmark NPU vs XNNPACK. Deliver a go/no-go with numbers before committing.
 ## Status summary
 - **B1 (MobileCLIP-S2 swap): shipped to the APK build**, pending on-device
   verification. This IS the model swap — the branch's APK build runs S2 + DINOv2.
-- **B2 (VLM): unchanged by design.** Gemma is Vulkan-only on Android and already
-  8da4w; the `fast` LFM tier already exists. Any default change is a quality
-  call to gate on an on-device A/B, not a blind swap.
+- **B2 (VLM): decided — single LFM2.5-VL 1.6B, tiers removed.** The model picker
+  is gone (one magic default); LFM2.5-VL 1.6B replaces the Gemma/LFM-450M toggle.
+  Speed win vs Gemma-on-Vulkan is expected but must be confirmed on-device. See
+  `vlm-model-decision.md`.
 - **B3 (quantize custom exports): fp32 ships and works;** int8 stays parked
   behind the cosine gate until a coherent executorch/torch/torchao set passes it.
 - **B4 (QNN/NPU): N/A** on the Tensor-G4 test device; revisit only with a
