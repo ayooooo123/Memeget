@@ -21,6 +21,7 @@ import {
   deleteExemplarsByLabel,
   deleteExemplarsByPack,
   getExemplars,
+  exportDescribedTags,
   getFolders,
   getImportedPacks,
   getIndexErrors,
@@ -247,6 +248,39 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
         });
       } else {
         showToast(`Saved pack to ${path}`, 'info');
+      }
+      success();
+    } catch (e) {
+      showToast(`Export failed: ${String(e)}`, 'error');
+    } finally {
+      setTransferBusy(false);
+    }
+  }, [transferBusy]);
+
+  // Export the model's own per-meme tags (source 'vision') as JSON, for the
+  // facet-coverage prompt-tuning loop (drop into tools/eval/described.json, run
+  // `npm run coverage`). Distinct from the teaching-pack export above: teachings
+  // are what YOU taught; this is what the MODEL produced.
+  const onExportDescribedTags = useCallback(async () => {
+    if (transferBusy) return;
+    setTransferBusy(true);
+    try {
+      const memes = await exportDescribedTags();
+      if (memes.length === 0) {
+        showToast('Nothing described yet — describe some memes first', 'info');
+        return;
+      }
+      const stamp = new Date().toISOString().slice(0, 10);
+      const path = `${FileSystem.cacheDirectory}memeget-described-tags-${stamp}.json`;
+      await FileSystem.writeAsStringAsync(path, JSON.stringify(memes));
+      if (await Sharing.isAvailableAsync()) {
+        await Sharing.shareAsync(path, {
+          mimeType: 'application/json',
+          dialogTitle: 'Export described tags',
+          UTI: 'public.json',
+        });
+      } else {
+        showToast(`Saved to ${path}`, 'info');
       }
       success();
     } catch (e) {
@@ -1003,6 +1037,21 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
             style={styles.transferBtn}
           />
         </View>
+
+        <View style={styles.divider} />
+        <Text style={styles.note}>
+          Export the tags the <Text style={styles.noteStrong}>model</Text> produced for your described
+          memes (not your teachings) — used to measure how well it covers each facet.
+        </Text>
+        <Button
+          small
+          variant="secondary"
+          icon="⇪"
+          label="Export described tags"
+          onPress={onExportDescribedTags}
+          disabled={transferBusy}
+          style={styles.transferBtn}
+        />
 
         {importedPacks.length > 0 && (
           <>
