@@ -201,6 +201,26 @@ predictions is the model step: either a device export, or (planned) a CI action
 that runs the app's prompt through a proxy VLM on the committed test images so
 the prompt can be A/B'd in a PR without a device.
 
+## Emergent templates (npm run templates)
+
+There is no list of meme templates — anything can become one
+(`docs/composite-meme-understanding.md`). So templates are **discovered, not
+enumerated**: `src/templateClusters.ts` single-links the collection by embedding
+cosine (primary space — the same vectors the collection zip carries), and a
+cluster of visually-linked memes with **different overlay text** is a learned
+template: the same base media reused to convey different ideas. Clusters are
+named from the dominant shared tag when one exists.
+
+```bash
+npm run templates   # clusters tools/eval/collection-manifest.json when present
+```
+
+Drop the `manifest.json` from a Settings → "Export collection (zip)" export at
+`tools/eval/collection-manifest.json` to see a real library's learned formats.
+Tunables: link threshold (default 0.86 — above noise, below the 0.99 twin-dedup
+bar), min size 2 ("the second variation is the moment a template is born"),
+min distinct texts 2 (a dupe pile is not a template).
+
 ## Next (not yet built)
 
 - A CI-backed **tag-precision** eval: score our produced tags against memedepot's
