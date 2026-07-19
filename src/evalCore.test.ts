@@ -153,6 +153,26 @@ describe('aspect search (single-word, multi-relevant)', () => {
     expect(m.map).toBe(0);
     expect(m.precisionAt5).toBe(0);
   });
+
+  it('dense-only mode ignores the lexical searchText leak', () => {
+    // 'a' has the tag written in its text but a WRONG image; 'b' has no text hit
+    // but the RIGHT image. Lexical mode is fooled by the text; dense-only ranks
+    // by the image and puts the truly-relevant meme first.
+    const g: GoldenSet = {
+      memes: [
+        { id: 'a', imageVec: [0, 1], searchText: 'smug' }, // text says smug, image doesn't (dense 0)
+        { id: 'b', imageVec: [0.9, 0], searchText: '' }, // image mostly matches (dense .9), no text
+      ],
+      queries: [],
+      aspects: [{ query: 'smug', queryVec: [1, 0], relevantIds: ['b'], terms: ['smug'] }],
+    };
+    // Lexical: a scores .35+.6 lexical = .95 vs b's .9 dense → a first, b buried.
+    const lex = evaluateAspectSearch(g);
+    // Dense-only: a's image is orthogonal (0) → b's .9 wins outright.
+    const dense = evaluateAspectSearch(g, { lexical: false });
+    expect(lex.mrr).toBeCloseTo(0.5, 6); // b at rank 2 behind the text-matched a
+    expect(dense.mrr).toBeCloseTo(1, 6); // b at rank 1 on image alone
+  });
 });
 
 describe('regression gate', () => {
