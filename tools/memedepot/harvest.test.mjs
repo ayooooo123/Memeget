@@ -127,6 +127,15 @@ test('guessCategory maps hints, defaults to topic', () => {
   assert.equal(guessCategory('something unknown'), 'topic');
 });
 
+test('guessCategory routes the new natural-language facets', () => {
+  assert.equal(guessCategory('pointing'), 'action');
+  assert.equal(guessCategory('facepalm'), 'action');
+  assert.equal(guessCategory('fire'), 'object');
+  assert.equal(guessCategory('office'), 'setting');
+  assert.equal(guessCategory('me when the code finally works'), 'situation');
+  assert.equal(guessCategory('deep fried'), 'tone');
+});
+
 test('templatePrompt builds a CLIP-style prompt', () => {
   assert.equal(templatePrompt('gigachad'), 'a gigachad meme');
 });

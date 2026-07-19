@@ -8,41 +8,44 @@ describe('formatGrounding', () => {
     expect(formatGrounding([])).toBe('');
   });
 
-  it('surfaces format/character/person before other facets', () => {
+  it('groups every facet by name and keeps emotion/action (does not drop them)', () => {
     const labels: GroundingLabel[] = [
       { label: 'happy', category: 'emotion' },
       { label: 'crypto', category: 'topic' },
       { label: 'distracted boyfriend', category: 'format' },
       { label: 'milady', category: 'character' },
+      { label: 'pointing', category: 'action' },
     ];
     const g = formatGrounding(labels);
-    // format + character lead; emotion/topic come after and get truncated last.
-    expect(g.indexOf('distracted boyfriend')).toBeGreaterThan(-1);
-    expect(g.indexOf('milady')).toBeGreaterThan(-1);
-    expect(g.indexOf('distracted boyfriend')).toBeLessThan(g.indexOf('happy'));
-    expect(g.indexOf('milady')).toBeLessThan(g.indexOf('crypto'));
+    // Grouped, labeled by facet — and emotion/action survive rather than being
+    // truncated in favor of format/character.
+    expect(g).toContain('format: distracted boyfriend');
+    expect(g).toContain('character: milady');
+    expect(g).toContain('action: pointing');
+    expect(g).toContain('emotion: happy');
+    // Facet order: format leads, topic trails.
+    expect(g.indexOf('format:')).toBeLessThan(g.indexOf('action:'));
+    expect(g.indexOf('action:')).toBeLessThan(g.indexOf('topic:'));
   });
 
-  it('caps the label list at four and dedupes case-insensitively', () => {
+  it('caps at two labels per facet and dedupes case-insensitively', () => {
     const labels: GroundingLabel[] = [
       { label: 'Wojak', category: 'character' },
       { label: 'wojak', category: 'character' }, // dup
       { label: 'gigachad', category: 'character' },
-      { label: 'pepe', category: 'character' },
-      { label: 'doomer', category: 'character' },
-      { label: 'coomer', category: 'character' }, // 5th distinct → dropped
+      { label: 'pepe', category: 'character' }, // 3rd distinct in facet → dropped
     ];
     const g = formatGrounding(labels);
     expect(g).toContain('Wojak');
-    expect(g).not.toContain('coomer');
-    // "wojak" appears once (the original casing), not twice.
-    expect(g.toLowerCase().match(/wojak/g)?.length).toBe(1);
+    expect(g).toContain('gigachad');
+    expect(g).not.toContain('pepe'); // per-facet cap of 2
+    expect(g.toLowerCase().match(/wojak/g)?.length).toBe(1); // deduped
   });
 
-  it('includes related themes and carries the strict "only if it matches" caveat', () => {
+  it('includes related themes and carries the "only if it matches" caveat', () => {
     const g = formatGrounding([{ label: 'this is fine', category: 'format' }], ['denial', 'chaos', 'denial']);
     expect(g).toContain('related: denial, chaos'); // deduped
-    expect(g.toLowerCase()).toContain('only if they match');
+    expect(g.toLowerCase()).toContain('match what you actually see');
   });
 });
 

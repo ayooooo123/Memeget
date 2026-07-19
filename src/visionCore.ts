@@ -75,7 +75,7 @@ export const USER_PROMPT =
   'CAPTION: one sentence, <=20 words: the action taking place, the feeling or mood, the situation it is used to react to, and why it is funny\n' +
   'TEXT: text visible in the image, verbatim; leave blank if none\n' +
   'SUBJECTS: comma-separated main people, characters, or objects\n' +
-  'TAGS: 6-12 comma-separated lowercase keywords covering every searchable facet — meme format/template name if known, named characters or subjects, the action happening, the emotion or feeling conveyed, the topic, and the real-life situation you would send it to react to\n' +
+  'TAGS: 6-12 comma-separated lowercase keywords covering every searchable facet — meme format/template name if known, named characters or subjects, the action happening, key objects on screen, the setting or place, the emotion or feeling conveyed, the humor style, the topic, and the real-life situation you would send it to react to\n' +
   '\nExample of the exact format:\n' +
   'CAPTION: a man turns to admire another woman while his girlfriend glares, used when tempted by a shiny new option\n' +
   'TEXT: me, new framework, the project i should be working on\n' +
@@ -101,37 +101,67 @@ export interface GroundingLabel {
   category: string; // 'format' | 'character' | 'person' | 'topic' | 'emotion' | …
 }
 
-// Facets the small VLM is worst at naming, surfaced first.
-const GROUNDING_PRIORITY = ['format', 'character', 'person'];
-const MAX_GROUNDING_LABELS = 4;
+// Facet order in the grounding line: identity-bearing and most visually grounded
+// first. EVERY facet the CLIP pass guessed is surfaced grouped by name — not just
+// the format — because the point is to hand the VLM a full aspect breakdown
+// (what it is, who's in it, what's happening, how it feels, the moment it fits).
+const GROUNDING_FACET_ORDER = [
+  'format',
+  'character',
+  'person',
+  'action',
+  'object',
+  'setting',
+  'emotion',
+  'situation',
+  'tone',
+  'topic',
+];
+const MAX_PER_FACET = 2; // keep one loud facet from crowding out the rest
+const MAX_GROUNDING_LABELS = 8;
 const MAX_GROUNDING_RELATED = 6;
 
-// Build the grounding sentence from CLIP's format/character guesses (+ their
-// association terms). Returns '' when there's nothing confident to offer.
+// Build the grounding line from CLIP's per-facet guesses (+ their association
+// terms), grouped and labeled by facet: "format: drake; emotion: smug; action:
+// pointing". Returns '' when there's nothing to offer.
 export function formatGrounding(labels: GroundingLabel[], related: string[] = []): string {
+  const byFacet = new Map<string, string[]>();
   const seen = new Set<string>();
-  const picked: GroundingLabel[] = [];
-  const take = (l: GroundingLabel) => {
-    const key = l.label.trim().toLowerCase();
-    if (key && !seen.has(key)) {
-      seen.add(key);
-      picked.push(l);
+  for (const l of labels) {
+    const label = l.label.trim();
+    const key = label.toLowerCase();
+    if (!label || seen.has(key)) continue;
+    seen.add(key);
+    const arr = byFacet.get(l.category) ?? [];
+    if (arr.length < MAX_PER_FACET) {
+      arr.push(label);
+      byFacet.set(l.category, arr);
     }
-  };
-  for (const p of GROUNDING_PRIORITY) for (const l of labels) if (l.category === p) take(l);
-  for (const l of labels) take(l); // then everything else, order preserved
-  const top = picked.slice(0, MAX_GROUNDING_LABELS);
-  if (top.length === 0) return '';
+  }
 
-  const named = top.map((l) => l.label).join(', ');
+  // Known facets in order, then any unrecognized facet after them.
+  const order = [
+    ...GROUNDING_FACET_ORDER,
+    ...[...byFacet.keys()].filter((c) => !GROUNDING_FACET_ORDER.includes(c)),
+  ];
+  const segments: string[] = [];
+  let total = 0;
+  for (const facet of order) {
+    const arr = byFacet.get(facet);
+    if (!arr || arr.length === 0 || total >= MAX_GROUNDING_LABELS) continue;
+    const take = arr.slice(0, MAX_GROUNDING_LABELS - total);
+    segments.push(`${facet}: ${take.join(', ')}`);
+    total += take.length;
+  }
+  if (segments.length === 0) return '';
+
   const rel = [...new Set(related.map((r) => r.trim().toLowerCase()).filter(Boolean))]
     .slice(0, MAX_GROUNDING_RELATED)
     .join(', ');
   return (
-    `\nA visual recognizer thinks this meme may be: ${named}` +
+    `\nA visual recognizer suggests — ${segments.join('; ')}` +
     (rel ? ` (related: ${rel})` : '') +
-    `. Use those names in SUBJECTS and TAGS ONLY if they match what you actually see; ` +
-    `if they do not match, ignore them completely.`
+    `. Use any that match what you actually see in SUBJECTS and TAGS; ignore any that do not.`
   );
 }
 
@@ -160,7 +190,7 @@ const HINT_FRAGMENTS = [
   'the situation it is used to react to',
   'the real-life situation you would send it to react to',
   'covering every searchable facet',
-  'a visual recognizer thinks this meme may be',
+  'a visual recognizer suggests',
   'text visible in the image',
   'leave blank if none',
   'main people, characters, or objects',
