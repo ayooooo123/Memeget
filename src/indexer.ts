@@ -948,8 +948,10 @@ interface VisionPayload {
 // with different top-text has a high visual cosine but different text, so it is
 // NOT merged — its caption genuinely differs.
 // One-time flag: existing exemplars have been re-filed off the legacy blanket
-// 'character' category into their inferred facet.
-const REFACET_EXEMPLARS_KEY = 'exemplars.refaceted.v1';
+// 'character' category into their inferred facet. Bump the version when the
+// facet vocabulary grows so the re-facet pass runs again and catches labels it
+// now recognizes (v2: added a public-figure person list + topic words).
+const REFACET_EXEMPLARS_KEY = 'exemplars.refaceted.v2';
 
 const DUP_COSINE = 0.99;
 const normText = (s: string) => s.toLowerCase().replace(/\s+/g, ' ').trim();
