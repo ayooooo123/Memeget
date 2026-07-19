@@ -77,16 +77,34 @@ export function ShareReceiver() {
 
     // Hand freshly saved files to the background indexer, refresh the library,
     // and report the outcome. Shared by the file and link paths.
-    const acceptSaved = (res: { saved: SafFile[]; errors: number; folderName: string }) => {
+    const acceptSaved = (res: {
+      saved: SafFile[];
+      errors: number;
+      duplicates?: number;
+      folderName: string;
+    }) => {
       if (res.saved.length > 0) {
         queueRef.current.push(...res.saved);
         setTick((t) => t + 1);
       }
       emitLibraryChanged();
-      const errNote = res.errors > 0 ? ` (${res.errors} failed)` : '';
+      // When a share was *entirely* memes already in the library, say so plainly
+      // rather than "Saved 0" — that's the case the dedup exists to handle.
+      const dups = res.duplicates ?? 0;
+      if (res.saved.length === 0 && res.errors === 0 && dups > 0) {
+        setStatus({
+          kind: 'done',
+          msg: dups === 1 ? '✓ Already in your library' : `✓ Already in your library (${dups} duplicates)`,
+        });
+        return;
+      }
+      const extras: string[] = [];
+      if (dups > 0) extras.push(`${dups} already saved`);
+      if (res.errors > 0) extras.push(`${res.errors} failed`);
+      const note = extras.length ? ` (${extras.join(' · ')})` : '';
       setStatus({
         kind: 'done',
-        msg: `✓ Saved ${res.saved.length} to “${res.folderName}” — indexing in background${errNote}`,
+        msg: `✓ Saved ${res.saved.length} to “${res.folderName}” — indexing in background${note}`,
       });
     };
 

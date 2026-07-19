@@ -34,9 +34,11 @@ import {
   getPendingMemes,
   getPendingUris,
   getVideosNeedingThumb,
+  findContentHashUri,
   insertMeme,
   insertPendingMeme,
   markVisionFailed,
+  recordContentHash,
   markVisualEmbeddingFailed,
   migrateStaleExemplars,
   refacetExemplars,
@@ -65,10 +67,12 @@ import {
   getModifiedTime,
   listMedia,
   persistThumb,
-  saveToFolder,
+  readSourceBase64,
+  writeBase64ToFolder,
   sweepOrphanThumbs,
   type SafFile,
 } from './saf';
+import { hashBase64 } from './contentHash';
 import { formatGrounding, type GroundingLabel, type VisionResult } from './visionCore';
 import { captionSearchText, memeExtraTerms } from './searchText';
 import {
@@ -758,7 +762,7 @@ async function indexQueue(
 export async function saveSharedFiles(
   files: { path: string; fileName: string; mimeType: string }[],
   opts: { onProgress?: (done: number, total: number) => void } = {}
-): Promise<{ saved: SafFile[]; errors: number; folderName: string }> {
+): Promise<{ saved: SafFile[]; errors: number; duplicates: number; folderName: string }> {
   const folders = await getFolders();
   if (folders.length === 0) {
     throw new Error('Link a folder first (Library tab) so shared memes have a place to live.');
@@ -767,12 +771,26 @@ export async function saveSharedFiles(
 
   const saved: SafFile[] = [];
   let errors = 0;
+  let duplicates = 0;
   for (let i = 0; i < files.length; i++) {
     opts.onProgress?.(i, files.length);
     const src = files[i];
     const kind: 'image' | 'video' = src.mimeType.startsWith('video') ? 'video' : 'image';
     try {
-      const { uri, name } = await saveToFolder(src.path, src.fileName, src.mimeType, folder.uri);
+      // Read the bytes once, fingerprint them, and skip the save entirely if
+      // this exact meme is already in the library. This is what stops a re-share
+      // (or an OS that redelivers the same share intent to a cold-started
+      // process) from writing a second copy — every save mints a new file/URI,
+      // so URI-uniqueness alone never catches it. writeBase64ToFolder then reuses
+      // the bytes we already read, so a duplicate costs no extra write.
+      const data = await readSourceBase64(src.path);
+      const hash = hashBase64(data);
+      if (await findContentHashUri(hash).catch(() => null)) {
+        duplicates++;
+        continue;
+      }
+      const { uri, name } = await writeBase64ToFolder(data, src.fileName, src.mimeType, folder.uri);
+      await recordContentHash(hash, uri).catch(() => {});
       // Record a pending placeholder right away so the meme appears in the
       // library list the instant it's saved — before the (model-dependent,
       // possibly much later) embed/OCR/tag pass replaces it with the real row.
@@ -783,7 +801,7 @@ export async function saveSharedFiles(
     }
   }
   opts.onProgress?.(files.length, files.length);
-  return { saved, errors, folderName: folder.name };
+  return { saved, errors, duplicates, folderName: folder.name };
 }
 
 // Phase 2: embed/OCR/tag files already saved into the library and store them.

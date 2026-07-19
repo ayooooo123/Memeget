@@ -130,6 +130,15 @@ export async function initDb(): Promise<void> {
       reason TEXT NOT NULL,
       created_at INTEGER NOT NULL
     );
+    -- Content fingerprints of saved memes, so a re-shared (or OS-redelivered)
+    -- meme with identical bytes is skipped instead of landing as a duplicate.
+    -- Kept in its own table (not a memes column) so the indexer's row-replacing
+    -- insertMeme can never blank it. A new CREATE IF NOT EXISTS doubles as the
+    -- migration for existing databases.
+    CREATE TABLE IF NOT EXISTS content_hashes (
+      hash TEXT PRIMARY KEY,
+      uri TEXT NOT NULL
+    );
   `);
   // Migrate v1 databases that predate the extra_terms column.
   const cols = await db.getAllAsync<{ name: string }>('PRAGMA table_info(memes)');
@@ -333,8 +342,33 @@ export async function countPendingMemes(): Promise<number> {
 
 export async function deleteMeme(id: number): Promise<void> {
   const db = await getDb();
+  // Drop the content fingerprint first so re-sharing this exact meme later
+  // isn't wrongly rejected as a duplicate of a row that no longer exists.
+  await db.runAsync('DELETE FROM content_hashes WHERE uri IN (SELECT uri FROM memes WHERE id = ?)', id);
   await db.runAsync('DELETE FROM memes WHERE id = ?', id);
   invalidateSearchIndex(); // membership changed
+}
+
+// Record a saved meme's content fingerprint → its URI. Called right after a
+// shared file is written into a linked folder.
+export async function recordContentHash(hash: string, uri: string): Promise<void> {
+  const db = await getDb();
+  await db.runAsync('INSERT OR REPLACE INTO content_hashes (hash, uri) VALUES (?, ?)', hash, uri);
+}
+
+// Look up the URI a content fingerprint belongs to, but only if that meme still
+// exists (the JOIN self-heals a stale mapping a delete somehow missed — so a
+// user can always re-add a meme they previously removed). Returns null when the
+// bytes aren't already in the library.
+export async function findContentHashUri(hash: string): Promise<string | null> {
+  const db = await getDb();
+  const row = await db.getFirstAsync<{ uri: string }>(
+    `SELECT ch.uri AS uri FROM content_hashes ch
+     JOIN memes m ON m.uri = ch.uri
+     WHERE ch.hash = ? LIMIT 1`,
+    hash
+  );
+  return row?.uri ?? null;
 }
 
 export async function insertMeme(args: {
@@ -1439,7 +1473,7 @@ export async function propagateTagToSimilarMemes(
 
 export async function clearIndex(): Promise<void> {
   const db = await getDb();
-  await db.execAsync('DELETE FROM memes;');
+  await db.execAsync('DELETE FROM memes; DELETE FROM content_hashes;');
   invalidateSearchIndex(); // whole library gone
   // An empty index has no space yet — the next index run re-stamps it.
   await db.runAsync('DELETE FROM settings WHERE key = ?', INDEX_MODEL_KEY);
