@@ -39,16 +39,20 @@ retrieval on its own. Against that job, LFM2.5-VL 1.6B is the best single pick:
 
 ### ⚠️ Open verification item
 
-Gemma E2B ran on the **Vulkan GPU** backend; LFM runs on **XNNPACK (CPU)**. A
-smaller model on CPU is *not automatically* faster than a bigger one on GPU —
-GPU delegation helps VLM prefill a lot (image tokens dominate). So the speed win
-is **expected but unproven in this container** — per `model-run-speedups.md`, a
-model-run change can only be accepted on a real device / in CI. **Before calling
-this a latency win, measure P50/P90 end-to-end (including image encode) on the
-target Android device tiers, LFM2.5-VL 1.6B vs the old Gemma build**, alongside a
-quality spot-check (OCR exactness on text-heavy memes, caption usefulness, tag
-recall). If LFM loses on quality-per-latency on your device floor, the fallback
-is LFM 450M (fastest, lower quality) or reverting to Gemma.
+Gemma E2B ran on the **Vulkan GPU** backend; LFM runs on **XNNPACK (CPU)**. The
+speed win is **expected but unproven in this container** — per
+`model-run-speedups.md`, a model-run change can only be accepted on a real
+device / in CI. **Before calling this a latency win, measure P50/P90 end-to-end
+(including image encode) on the target Android device, LFM2.5-VL 1.6B (CPU) vs
+the old Gemma build (Vulkan)**, alongside a quality spot-check (OCR exactness on
+text-heavy memes, caption usefulness, tag recall). If LFM loses on
+quality-per-latency, the fallback is LFM 450M (fastest, lower quality) or
+reverting to Gemma.
+
+Note the "GPU vs CPU" section below: on the Pixel 9 Pro (Tensor G4 / Mali-G715),
+ExecuTorch Vulkan is immature and often *inferior* to XNNPACK, so CPU-LFM
+plausibly **beats** GPU-Gemma. The measurement is to confirm which, not a
+foregone GPU loss.
 
 ## Alternatives weighed (on-device VLMs)
 
@@ -63,6 +67,48 @@ runtime, not by quality:
 | **FastVLM** (Apple) | Best latency-per-quality in the class, but CoreML/MLX only — no ExecuTorch/Android/Vulkan path. Off the table. |
 | **Qwen3-VL 2B/4B** | Likely edges Gemma on document-OCR; an ExecuTorch vision export just landed in `optimum-executorch` (PR #214). **Not in the RNE catalog, not Vulkan-validated.** The one to watch as a future upgrade if OCR becomes the bottleneck. |
 | **SmolVLM2 / moondream 2·3 / MiniCPM-V / InternVL / PaliGemma 2** | No working ExecuTorch vision export. Disqualified regardless of quality. |
+
+## GPU vs CPU — why "a smaller model on the GPU" isn't an option
+
+The obvious instinct is "run a small model on the GPU for speed." On this stack
+and this device, that combination **does not exist**, and GPU is likely not even
+the faster path. Verified against the installed RNE 0.9.2 package and upstream
+ExecuTorch docs:
+
+- **The only GPU (Vulkan) VLM in RNE is Gemma E2B.** `GEMMA4_E2B_MM` resolves to
+  `gemma_4_e2b_vulkan_8da4w.pte` on Android (`Platform.OS === 'android' ?
+  GEMMA4_E2B_VULKAN_MM : GEMMA4_E2B_MLX_MM`). **Every** LFM2-VL variant (450M,
+  1.6B) ships XNNPACK-only — there is no Vulkan LFM build. So the GPU model is the
+  *bigger* one; going smaller means going to CPU.
+- **ExecuTorch's Vulkan delegate is immature.** It's a partitioner-based backend
+  with **CPU fallback** (not full-graph); RNE's own FAQ says Vulkan "operator
+  support is very limited meaning that the resulting performance is often
+  **inferior to XNNPACK**," and ExecuTorch's LLM docs warn a partially-lowered
+  model is "very slow due to the high amount of delegate blobs… transfer to and
+  from the GPU for each subgraph." Gemma runs well on Vulkan only because Software
+  Mansion hand-engineered that one export (PR #1162).
+- **No NPU path on the test device.** Pixel 9 Pro = Tensor G4 / Mali-G715. Vulkan
+  (Mali GPU) is the *only* ExecuTorch GPU option — there is no ExecuTorch backend
+  for Google's Tensor TPU/NPU, and the Qualcomm (QNN) / MediaTek backends don't
+  apply to Pixel. The only thing that genuinely accelerates the Mali GPU is Google
+  **LiteRT-LM (OpenCL / ML Drift)** — a different runtime, i.e. leaving RNE.
+- **There is no vision-token-budget knob.** RNE exposes `getVisualTokenCount()`
+  read-only (context math); the only `generationConfig` levers are temperature /
+  topP / minP / repetitionPenalty / batching. The "selectable 70–1120 vision
+  tokens" some sources cite is not reachable from the app.
+
+**Pick two, never three:**
+
+| Want | Turnkey model | Backend |
+|---|---|---|
+| Smaller + turnkey (shipped) | LFM2-VL 1.6B / 450M | XNNPACK **CPU** |
+| GPU + turnkey | Gemma E2B (bigger) | Vulkan **GPU** |
+| Smaller + GPU | custom Vulkan export — R&D (see appendix) | Vulkan (partial) |
+
+**Conclusion:** don't chase GPU on Tensor-G4-class hardware. A small model on
+mature XNNPACK CPU can beat a bigger model on immature Vulkan GPU, so the
+shipped **LFM2-VL-1.6B-on-CPU is plausibly both the smallest and the fastest**
+option here. Confirm with the measurement in the open-item above.
 
 ## Ruled out: switching runtime to ONNX Runtime
 
@@ -139,3 +185,60 @@ Finetune / RL:
 - Distillation data (ShareGPT-4V/ALLaVA): https://arxiv.org/pdf/2402.11684
 - MemeCap: https://arxiv.org/abs/2305.13703
 - optimum-executorch (8da4w export): https://github.com/huggingface/optimum-executorch
+
+GPU / Vulkan:
+- ExecuTorch Vulkan backend overview: https://github.com/pytorch/executorch/blob/main/docs/source/backends/vulkan/vulkan-overview.md
+- RNE Vulkan Gemma PR: https://github.com/software-mansion/react-native-executorch/pull/1162
+- RNE FAQ (Vulkan vs XNNPACK): https://docs.swmansion.com/react-native-executorch/docs/fundamentals/frequently-asked-questions
+- ExecuTorch upstream LFM2 example (XNNPACK/MLX only): https://github.com/pytorch/executorch/blob/main/examples/models/lfm2/README.md
+- LFM2 export control-flow blocker: https://github.com/huggingface/transformers/issues/39436
+- ExecuTorch backend-for-Pixel question (unanswered): https://github.com/pytorch/executorch/issues/15670
+- SmolVLM2: https://huggingface.co/blog/smolvlm2
+
+---
+
+## Appendix: SmolVLM2-256M Vulkan lowering-feasibility spike
+
+**Purpose.** Answer *one* question cheaply before anyone commits to the
+"smaller + GPU" R&D path: **can a small VLM's graph actually lower to the
+ExecuTorch Vulkan delegate without shattering into CPU-fallback subgraphs?** This
+is a go/no-go probe, not a productionization. Timebox: ~1 day. Do NOT wire
+anything into the app during the spike.
+
+**Why SmolVLM2-256M is the target.** It's the smallest credible caption/OCR VLM
+(93M SigLIP-B/16 encoder + SmolLM2-135M), and critically its vision encoder is a
+**plain fixed-resolution SigLIP-B/16** — unlike LFM2-VL's dynamic SigLIP2-NaFlex,
+whose variable shapes are exactly what fragments a Vulkan partition. If SmolVLM2
+can't lower cleanly, LFM2-VL almost certainly can't either, and the whole
+GPU-small-VLM idea is dead. If it *can*, SmolVLM2 itself becomes a candidate.
+
+**Steps.**
+1. **Export both halves to Vulkan** via `optimum-executorch` /
+   `executorch` export with `--task multimodal-text-to-text` and the Vulkan
+   backend (PT2E quant, 4-bit weight / 8-bit activation per the Vulkan doc).
+   Export the **vision encoder** and the **text decoder** as separate `.pte`s
+   (EarlyFusion split, mirroring the upstream Gemma3 multimodal runner).
+2. **Inspect partitioner tagging — the actual measurement.** After
+   `to_edge_transform_and_lower(..., partitioner=[VulkanPartitioner()])`, dump the
+   lowered graph and **count delegate boundaries**: how many ops landed on Vulkan
+   vs fell back to CPU, and how many distinct `executorch_call_delegate` blobs
+   result. Many blobs = many CPU⇄GPU transfers = the documented "very slow" mode.
+   The vision encoder is the risk: if its conv/attention ops don't lower, it runs
+   on CPU regardless and there's no GPU win.
+3. **Micro-benchmark, if it lowers at all.** On the Pixel (Mali-G715), run the
+   Vulkan `.pte` vs an XNNPACK export of the *same* model on ~20 representative
+   memes; record image-encode + prefill + decode P50/P90. The bar is not "works"
+   — it's "beats XNNPACK on the same model on this GPU."
+
+**Decision gate.**
+- **No-go** if: the vision encoder won't lower to Vulkan (runs CPU anyway), the
+  graph shatters into many delegate blobs, or Vulkan loses to XNNPACK on Mali.
+  → Record the delegate-boundary counts here and close the GPU track.
+- **Go** (rare) only if: mostly-full-graph Vulkan delegation *and* a measured win
+  over XNNPACK on the target device. Then evaluate SmolVLM2-256M quality on the
+  golden meme eval before considering it as the shipped model.
+
+**Explicitly out of scope for the spike:** app wiring, quality tuning, any
+LFM2-VL Vulkan attempt (blocked upstream — see the control-flow issue above),
+and iOS. Point RNE at a custom `.pte` via `useLLM({ modelSource, tokenizerSource,
+tokenizerConfigSource })` only *after* a Go.
