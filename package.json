@@ -12,6 +12,7 @@
     "harvest:test": "node --test tools/memedepot/*.test.mjs",
     "diagnose": "node tools/memedepot/diagnose.mjs",
     "eval": "jest evalCore",
+    "coverage": "jest facetCoverage --silent=false --verbose",
     "doctor": "react-doctor"
   },
   "dependencies": {
