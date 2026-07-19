@@ -4,7 +4,9 @@ export interface Tag {
   label: string;
   category: string;
   score: number;
-  source?: 'prompt' | 'exemplar' | 'ocr' | 'vision' | 'manual'; // how the label was matched ('manual' = user-applied, e.g. bulk-tagged)
+  // How the label was matched. 'manual' = user-applied (e.g. bulk-tagged);
+  // 'propagated' = spread from a manual tag to a visually-similar meme.
+  source?: 'prompt' | 'exemplar' | 'ocr' | 'vision' | 'manual' | 'propagated';
 }
 
 // Lifecycle of the optional VLM enrichment pass for a meme.
