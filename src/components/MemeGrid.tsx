@@ -20,6 +20,7 @@ import {
 import * as Clipboard from 'expo-clipboard';
 import * as Sharing from 'expo-sharing';
 import { useVideoPlayer, VideoView } from 'expo-video';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import {
   addExemplar,
@@ -72,6 +73,18 @@ function thumbSource(item: Pick<Item, 'kind' | 'uri' | 'thumbUri'>): string {
   return item.thumbUri || item.uri;
 }
 
+// Ordered source candidates for a grid cell. Real GIFs skip their persisted
+// thumb (a static jpeg — it froze them) and load the original bytes so they
+// animate right in the grid; when that decode fails (mp4 bytes wearing a .gif
+// name) the cell falls back to the extracted poster before giving up on the
+// stub. Everything else keeps loading the small persisted thumb.
+function cellSources(item: Pick<Item, 'kind' | 'uri' | 'name' | 'thumbUri'>): string[] {
+  if (item.kind === 'image' && /\.gif$/i.test(item.name)) {
+    return item.thumbUri ? [item.uri, item.thumbUri] : [item.uri];
+  }
+  return [thumbSource(item)];
+}
+
 // Track the on-screen keyboard height so the teach sheet (a bottom-anchored
 // Modal) can lift itself clear of the keyboard. KeyboardAvoidingView is
 // unreliable inside an Android Modal — it shares no window with the soft input —
@@ -110,19 +123,23 @@ const GridCell = React.memo(function GridCell({
   onPress: (it: Item) => void;
   onLongPress: (it: Item) => void;
 }) {
-  const src = thumbSource(item);
-  // Track a render failure for THIS source so a tile the image view can't decode
-  // (an "mp4 gif" whose bytes wear a .gif name and land as kind 'image', a codec
-  // expo-image refuses, a stale/missing poster file) falls back to the labeled
-  // stub instead of a permanent blank square. Reset whenever the source changes
-  // so a poster landing later (patched in by id) is retried, not stuck on the
-  // earlier failure.
-  const [renderFailed, setRenderFailed] = useState(false);
-  useEffect(() => setRenderFailed(false), [src]);
+  // Walk the item's source candidates on render failure (an "mp4 gif" whose
+  // bytes wear a .gif name and land as kind 'image', a codec expo-image
+  // refuses, a stale/missing poster file): a failed source advances to the
+  // next, and only a tile with nothing left to try shows the labeled stub
+  // instead of a permanent blank square. The index resets whenever the
+  // candidate list changes so a poster landing later (patched in by id) is
+  // retried, not stuck on the earlier failure.
+  const sources = cellSources(item);
+  const [srcIdx, setSrcIdx] = useState(0);
+  const srcKey = sources.join('\n');
+  useEffect(() => setSrcIdx(0), [srcKey]);
+  const exhausted = srcIdx >= sources.length;
+  const src = sources[Math.min(srcIdx, sources.length - 1)];
   // A video with no poster yet goes straight to the stub (asking the image view
   // to decode the video hits the same retriever that already refused it). Any
-  // other tile only shows the stub once its image has actually failed to render.
-  const showStub = (item.kind === 'video' && !item.thumbUri) || renderFailed;
+  // other tile only shows the stub once every candidate has failed to render.
+  const showStub = (item.kind === 'video' && !item.thumbUri) || exhausted;
 
   return (
     <PressableScale
@@ -144,9 +161,10 @@ const GridCell = React.memo(function GridCell({
           style={styles.thumb}
           contentFit="cover"
           transition={150}
-          // A tile that can't be decoded (mp4-as-gif, unsupported codec, missing
-          // poster) drops to the stub above instead of rendering blank.
-          onError={() => setRenderFailed(true)}
+          // A source that can't be decoded (mp4-as-gif, unsupported codec,
+          // missing poster) advances to the next candidate; the stub above is
+          // the last resort instead of rendering blank.
+          onError={() => setSrcIdx((i) => i + 1)}
           // Reuse the view and release the previous bitmap when a cell is
           // recycled (e.g. when retagAll hands the list a fresh array).
           recyclingKey={String(item.id)}
@@ -1234,8 +1252,12 @@ export const MemeGrid = React.memo(function MemeGrid({
   );
 });
 
-// Centered popup viewer. Tapping the backdrop (anywhere outside the card) or the
-// ✕ returns to the library.
+// Full-screen viewer: the meme fills the screen with a slim top bar (name ·
+// match · close) and a collapsible details panel docked at the bottom. Tapping
+// the image (or the panel's grabber) hides the panel for an uncluttered look;
+// the ⓘ pill brings it back. The panel carries only the everyday actions —
+// share, copy, tag, delete — while maintenance (re-caption, poster refresh,
+// label corrections, debug confidence, file dates) lives behind “More”.
 function ViewerSheet({
   item,
   busy,
@@ -1310,8 +1332,28 @@ function ViewerSheet({
     ]);
   };
 
-  const { height: winHeight } = useWindowDimensions();
-  const imgHeight = Math.round(winHeight * 0.42);
+  // Details panel + More menu visibility. Reset per meme so a panel hidden on
+  // the previous meme (or a menu left open) doesn't leak into the next one.
+  const [showInfo, setShowInfo] = useState(true);
+  const [moreOpen, setMoreOpen] = useState(false);
+  useEffect(() => {
+    setShowInfo(true);
+    setMoreOpen(false);
+  }, [itemId]);
+
+  // A full-res image expo-image can't decode (mp4 bytes wearing a .gif name)
+  // falls back to the extracted poster instead of a black void. Reset per meme.
+  const [mediaFailed, setMediaFailed] = useState(false);
+  useEffect(() => setMediaFailed(false), [itemId]);
+
+  // The modal covers the whole screen (statusBarTranslucent), so the top bar
+  // and bottom panel pad themselves clear of the system bars.
+  const insets = useSafeAreaInsets();
+
+  const closeMoreThen = (fn: () => void) => () => {
+    setMoreOpen(false);
+    fn();
+  };
 
   return (
     <Modal
@@ -1321,195 +1363,262 @@ function ViewerSheet({
       statusBarTranslucent
       onRequestClose={onClose}
     >
-      <View style={styles.viewerRoot}>
-        {/* Backdrop fills the screen behind the popup: a tap anywhere outside
-            the card closes the viewer and returns to the library. Taps inside
-            the card don't reach it, so scrolling/teaching/selecting never
-            dismiss. */}
-        <Pressable style={StyleSheet.absoluteFill} onPress={onClose} />
-        {item && (
-          <View style={styles.sheet}>
-            <View style={styles.sheetHeader}>
-              <View style={styles.sheetTitleRow}>
-                <Text style={styles.sheetTitle} numberOfLines={1} selectable>
-                  {item.name}
+      {item && (
+        <View style={styles.viewerRoot}>
+          <View style={[styles.viewerTop, { paddingTop: insets.top + 6 }]}>
+            <View style={styles.viewerTitleWrap}>
+              <Text style={styles.viewerTitle} numberOfLines={1}>
+                {item.name}
+              </Text>
+              {/* Clamped to 0 as well as 100: search ranks the whole
+                  collection, so weak-tail items (even slightly negative
+                  cosines) are reachable and shouldn't read "-3% match". */}
+              {'score' in item && (
+                <Text style={styles.matchScore}>
+                  {Math.min(100, Math.max(0, item.score * 100)).toFixed(0)}% match
                 </Text>
-                <Pressable onPress={onClose} hitSlop={12} style={styles.closeBtn} accessibilityLabel="Close">
-                  <Text style={styles.closeIcon}>✕</Text>
-                </Pressable>
-              </View>
+              )}
             </View>
+            <Pressable onPress={onClose} hitSlop={12} style={styles.closeBtn} accessibilityLabel="Close">
+              <Text style={styles.closeIcon}>✕</Text>
+            </Pressable>
+          </View>
 
-            {item.kind === 'video' ? (
-              <VideoPreview key={item.id} uri={item.uri} height={imgHeight} />
-            ) : (
+          {item.kind === 'video' ? (
+            <VideoPreview key={item.id} uri={item.uri} />
+          ) : (
+            // Tap the image to hide/show the details panel — the meme itself is
+            // what the viewer is for. (Videos keep the panel toggling on the
+            // grabber/pill only; taps there belong to the native controls.)
+            <Pressable style={styles.mediaArea} onPress={() => setShowInfo((v) => !v)}>
               <Image
-                source={{ uri: item.uri }}
-                style={[styles.preview, { height: imgHeight }]}
+                source={{ uri: mediaFailed && item.thumbUri ? item.thumbUri : item.uri }}
+                style={styles.media}
                 contentFit="contain"
+                onError={() => setMediaFailed(true)}
                 recyclingKey={String(item.id)}
                 // Same reasoning as the grid: it's a local file, so skip the
                 // redundant on-disk copy and only hold it in memory while open.
                 cachePolicy="memory"
                 allowDownscaling
               />
-            )}
+            </Pressable>
+          )}
 
-            {/* Per-meme actions. Each meme gets its own buttons to share, copy,
-                tag it, re-run the on-device caption/tags, regenerate a video
-                poster, copy its text, or delete it. */}
-            <View style={styles.actionBar}>
-              <ActionButton glyph="⤴" label={busy ? '…' : 'Share'} onPress={onShare} disabled={busy} />
-              <ActionButton glyph="⧉" label="Copy" onPress={onCopy} disabled={busy} />
-              <ActionButton glyph="🏷" label="Tag" onPress={() => onTeach(true)} disabled={busy} />
-              <ActionButton glyph="✨" label="Caption" onPress={onRecaption} disabled={busy} />
-              {item.kind === 'video' && (
-                <ActionButton glyph="🖼" label="Poster" onPress={onRethumb} disabled={busy} />
-              )}
-              {!!item.ocrText && <ActionButton glyph="🆎" label="Text" onPress={onCopyText} />}
-              <ActionButton glyph="🗑" label="Delete" danger onPress={onDelete} disabled={busy} />
-            </View>
-
-            <ScrollView
-              style={styles.meta}
-              contentContainerStyle={styles.metaContent}
-              keyboardShouldPersistTaps="handled"
+          {!showInfo && (
+            <PressableScale
+              scaleTo={0.9}
+              onPress={() => setShowInfo(true)}
+              style={[styles.infoPill, { bottom: insets.bottom + 18 }]}
+              accessibilityRole="button"
+              accessibilityLabel="Show details"
             >
-              {/* Clamped to 0 as well as 100: search now ranks the whole
-                  collection, so weak-tail items (even slightly negative
-                  cosines) are reachable and shouldn't read "match -3%". */}
-              {'score' in item && (
-                <Text style={styles.matchScore}>
-                  match {Math.min(100, Math.max(0, item.score * 100)).toFixed(0)}%
-                </Text>
-              )}
+              <Text style={styles.infoPillText}>ⓘ Details</Text>
+            </PressableScale>
+          )}
 
-              {/* Recency debug: the file date drives library ordering; shown so
-                  the stored value can be verified against the real file. */}
-              <Text style={styles.mutedSmall}>
-                file date: {item.modifiedAt ? new Date(item.modifiedAt).toLocaleString() : 'unknown'}
-                {'  ·  indexed: '}
-                {new Date(item.indexedAt).toLocaleString()}
-              </Text>
+          {showInfo && (
+            <View style={[styles.infoPanel, { paddingBottom: insets.bottom + 4 }]}>
+              <Pressable
+                onPress={() => setShowInfo(false)}
+                hitSlop={10}
+                accessibilityRole="button"
+                accessibilityLabel="Hide details"
+              >
+                <View style={styles.grabber} />
+              </Pressable>
 
-              {!!item.caption && (
-                <View style={styles.block}>
-                  <Text style={styles.sectionLabel}>What this is · on-device AI</Text>
+              {/* Everyday actions only; everything else is behind More. */}
+              <View style={styles.actionBar}>
+                <ActionButton glyph="⤴" label={busy ? '…' : 'Share'} onPress={onShare} disabled={busy} />
+                <ActionButton glyph="⧉" label="Copy" onPress={onCopy} disabled={busy} />
+                <ActionButton glyph="🏷" label="Tag" onPress={() => onTeach(true)} disabled={busy} />
+                <ActionButton glyph="⋯" label="More" onPress={() => setMoreOpen(true)} />
+                <ActionButton glyph="🗑" label="Delete" danger onPress={onDelete} disabled={busy} />
+              </View>
+
+              <ScrollView
+                style={styles.meta}
+                contentContainerStyle={styles.metaContent}
+                keyboardShouldPersistTaps="handled"
+              >
+                {!!item.caption && (
                   <Text style={styles.caption} selectable>
                     {item.caption}
                   </Text>
-                </View>
-              )}
+                )}
 
-              {item.tags.length > 0 && (
-                <View style={styles.block}>
-                  <Text style={styles.sectionLabel}>
-                    {onSearchLabel ? 'Tags · tap to search · hold to confirm/fix' : 'Tags · hold to confirm/fix'}
-                  </Text>
-                  <View style={styles.tagWrap}>
-                    {item.tags.map((t) => (
-                      <Chip
-                        key={t.label}
-                        label={t.label}
-                        taught={t.source === 'exemplar'}
-                        onPress={
-                          onSearchLabel ? () => onSearchLabel(t.label) : () => askTagVerdict(t.label)
-                        }
-                        onLongPress={() => askTagVerdict(t.label)}
-                      />
-                    ))}
-                  </View>
-                </View>
-              )}
-
-              {!!item.ocrText && (
-                <View style={styles.block}>
-                  <Text style={styles.sectionLabel}>Text in meme · long-press to copy</Text>
-                  <Text style={styles.ocr} selectable>
-                    {item.ocrText}
-                  </Text>
-                </View>
-              )}
-
-              {!!item.transcript && (
-                <View style={styles.block}>
-                  <Text style={styles.sectionLabel}>Speech in video · on-device Whisper</Text>
-                  <Text style={styles.ocr} selectable>
-                    {item.transcript}
-                  </Text>
-                </View>
-              )}
-
-              {similar !== null && similar.length > 0 && (
-                <View style={styles.block}>
-                  <Text style={styles.sectionLabel}>More like this · tap to open</Text>
-                  <ScrollView
-                    horizontal
-                    showsHorizontalScrollIndicator={false}
-                    contentContainerStyle={styles.similarRow}
-                  >
-                    {similar.map((s) => (
-                      <PressableScale
-                        key={s.id}
-                        scaleTo={0.92}
-                        onPress={() => onSelectItem?.(s)}
-                        style={styles.similarCell}
-                      >
-                        <Image
-                          source={{ uri: thumbSource(s) }}
-                          style={styles.similarThumb}
-                          contentFit="cover"
-                          transition={100}
-                          recyclingKey={`sim-${s.id}`}
-                          // Same reasoning as the grid: originals are local
-                          // files, keep decoded thumbs in memory only.
-                          cachePolicy="memory"
-                          allowDownscaling
-                        />
-                        {s.kind === 'video' && (
-                          <View style={styles.similarPlay}>
-                            <Text style={styles.playIcon}>▶</Text>
-                          </View>
-                        )}
-                      </PressableScale>
-                    ))}
-                  </ScrollView>
-                </View>
-              )}
-
-              <View style={styles.teachRow}>
-                <PressableScale style={styles.teachBtn} onPress={() => onTeach(true)}>
-                  <Text style={styles.teachBtnText}>＋ This IS a…</Text>
-                </PressableScale>
-                <PressableScale style={[styles.teachBtn, styles.teachBtnNeg]} onPress={() => onTeach(false)}>
-                  <Text style={styles.teachBtnNegText}>✗ This is NOT a…</Text>
-                </PressableScale>
-              </View>
-
-              {matchInfo === null ? (
-                <Pressable onPress={onShowConfidence} disabled={matchBusy}>
-                  <Text style={styles.debugLink}>
-                    {matchBusy ? 'Scoring…' : 'Show taught-label confidence (debug)'}
-                  </Text>
-                </Pressable>
-              ) : matchInfo.length > 0 ? (
-                <View style={styles.block}>
-                  <Text style={styles.sectionLabel}>Taught-label confidence (debug)</Text>
-                  {matchInfo.map((m) => (
-                    <Text key={m.label} style={styles.mutedSmall}>
-                      {m.label}: {(m.score * 100).toFixed(0)}%{' '}
-                      {m.matched ? '✓ match' : ''}
+                {item.tags.length > 0 && (
+                  <View style={styles.block}>
+                    <Text style={styles.sectionLabel}>
+                      {onSearchLabel ? 'Tags · tap to search · hold to fix' : 'Tags · hold to fix'}
                     </Text>
+                    <View style={styles.tagWrap}>
+                      {item.tags.map((t) => (
+                        <Chip
+                          key={t.label}
+                          label={t.label}
+                          taught={t.source === 'exemplar'}
+                          onPress={
+                            onSearchLabel ? () => onSearchLabel(t.label) : () => askTagVerdict(t.label)
+                          }
+                          onLongPress={() => askTagVerdict(t.label)}
+                        />
+                      ))}
+                    </View>
+                  </View>
+                )}
+
+                {!!item.ocrText && (
+                  <View style={styles.block}>
+                    <Text style={styles.sectionLabel}>Text in meme · hold to copy</Text>
+                    <Text style={styles.ocr} selectable onLongPress={onCopyText}>
+                      {item.ocrText}
+                    </Text>
+                  </View>
+                )}
+
+                {!!item.transcript && (
+                  <View style={styles.block}>
+                    <Text style={styles.sectionLabel}>Speech in video</Text>
+                    <Text style={styles.ocr} selectable>
+                      {item.transcript}
+                    </Text>
+                  </View>
+                )}
+
+                {similar !== null && similar.length > 0 && (
+                  <View style={styles.block}>
+                    <Text style={styles.sectionLabel}>More like this · tap to open</Text>
+                    <ScrollView
+                      horizontal
+                      showsHorizontalScrollIndicator={false}
+                      contentContainerStyle={styles.similarRow}
+                    >
+                      {similar.map((s) => (
+                        <PressableScale
+                          key={s.id}
+                          scaleTo={0.92}
+                          onPress={() => onSelectItem?.(s)}
+                          style={styles.similarCell}
+                        >
+                          <Image
+                            source={{ uri: thumbSource(s) }}
+                            style={styles.similarThumb}
+                            contentFit="cover"
+                            transition={100}
+                            recyclingKey={`sim-${s.id}`}
+                            // Same reasoning as the grid: originals are local
+                            // files, keep decoded thumbs in memory only.
+                            cachePolicy="memory"
+                            allowDownscaling
+                          />
+                          {s.kind === 'video' && (
+                            <View style={styles.similarPlay}>
+                              <Text style={styles.playIcon}>▶</Text>
+                            </View>
+                          )}
+                        </PressableScale>
+                      ))}
+                    </ScrollView>
+                  </View>
+                )}
+
+                {/* Filled in when "taught-label confidence" is run from More. */}
+                {matchInfo !== null &&
+                  (matchInfo.length > 0 ? (
+                    <View style={styles.block}>
+                      <Text style={styles.sectionLabel}>Taught-label confidence</Text>
+                      {matchInfo.map((m) => (
+                        <Text key={m.label} style={styles.mutedSmall}>
+                          {m.label}: {(m.score * 100).toFixed(0)}%{' '}
+                          {m.matched ? '✓ match' : ''}
+                        </Text>
+                      ))}
+                    </View>
+                  ) : (
+                    <Text style={styles.mutedSmall}>No taught labels yet.</Text>
                   ))}
-                </View>
-              ) : (
-                <Text style={styles.mutedSmall}>No taught labels yet.</Text>
-              )}
-            </ScrollView>
-          </View>
-        )}
-      </View>
+              </ScrollView>
+            </View>
+          )}
+
+          {/* “More” menu: the maintenance actions that used to crowd the main
+              action bar, plus the file/index dates (a recency-sort debug aid). */}
+          {moreOpen && (
+            <View style={StyleSheet.absoluteFill}>
+              <Pressable style={[StyleSheet.absoluteFill, styles.moreScrim]} onPress={() => setMoreOpen(false)} />
+              <View style={[styles.moreSheet, { paddingBottom: insets.bottom + space.md }]}>
+                <View style={styles.grabber} />
+                {!!item.ocrText && (
+                  <MoreRow glyph="🆎" label="Copy the text in this meme" onPress={closeMoreThen(onCopyText)} />
+                )}
+                <MoreRow
+                  glyph="✗"
+                  label="Fix a wrong label…"
+                  hint="Teach that this meme is NOT some label"
+                  onPress={closeMoreThen(() => onTeach(false))}
+                />
+                <MoreRow
+                  glyph="✨"
+                  label="Re-run the caption"
+                  hint="Fresh on-device description for this meme"
+                  onPress={closeMoreThen(onRecaption)}
+                  disabled={busy}
+                />
+                {item.kind === 'video' && (
+                  <MoreRow
+                    glyph="🖼"
+                    label="Regenerate the thumbnail"
+                    hint="Extract a new poster frame for the grid"
+                    onPress={closeMoreThen(onRethumb)}
+                    disabled={busy}
+                  />
+                )}
+                <MoreRow
+                  glyph="◎"
+                  label={matchBusy ? 'Scoring taught labels…' : 'Show taught-label confidence'}
+                  hint="How strongly each taught label matches this meme"
+                  onPress={closeMoreThen(() => {
+                    setShowInfo(true); // the readout lands in the details panel
+                    onShowConfidence();
+                  })}
+                  disabled={matchBusy}
+                />
+                <Text style={styles.moreDates}>
+                  file date {item.modifiedAt ? new Date(item.modifiedAt).toLocaleString() : 'unknown'}
+                  {'  ·  '}indexed {new Date(item.indexedAt).toLocaleString()}
+                </Text>
+              </View>
+            </View>
+          )}
+        </View>
+      )}
     </Modal>
+  );
+}
+
+function MoreRow({
+  glyph,
+  label,
+  hint,
+  onPress,
+  disabled,
+}: {
+  glyph: string;
+  label: string;
+  hint?: string;
+  onPress: () => void;
+  disabled?: boolean;
+}) {
+  return (
+    <PressableScale scaleTo={0.97} style={styles.moreRow} onPress={onPress} disabled={disabled}>
+      <Text style={styles.moreGlyph}>{glyph}</Text>
+      <View style={styles.moreCopy}>
+        <Text style={styles.moreLabel}>{label}</Text>
+        {!!hint && <Text style={styles.moreHint}>{hint}</Text>}
+      </View>
+    </PressableScale>
   );
 }
 
@@ -1518,7 +1627,7 @@ function ViewerSheet({
 // so there's no need to materialize a temp file just to watch it. The player is
 // created per-uri and released automatically when the sheet unmounts; keying the
 // element by item.id guarantees a fresh player when you swipe to another video.
-function VideoPreview({ uri, height }: { uri: string; height: number }) {
+function VideoPreview({ uri }: { uri: string }) {
   const player = useVideoPlayer(uri, (p) => {
     p.loop = true;
     p.play();
@@ -1526,7 +1635,7 @@ function VideoPreview({ uri, height }: { uri: string; height: number }) {
 
   return (
     <VideoView
-      style={[styles.preview, { height }]}
+      style={styles.mediaArea}
       player={player}
       contentFit="contain"
       nativeControls
@@ -1671,27 +1780,19 @@ const styles = StyleSheet.create({
   bulkDeleteBtn: { backgroundColor: colors.dangerDim, borderWidth: 1, borderColor: colors.danger },
   bulkDeleteText: { color: colors.danger, fontSize: 13, fontWeight: '800' },
 
-  viewerRoot: {
-    flex: 1,
-    backgroundColor: colors.overlay,
-    justifyContent: 'center',
+  // Full-screen viewer: near-black canvas so the meme is the loudest thing on
+  // screen; the chrome (top bar, details panel) sits quietly at the edges.
+  viewerRoot: { flex: 1, backgroundColor: '#050608' },
+  viewerTop: {
+    flexDirection: 'row',
     alignItems: 'center',
-    padding: space.lg,
+    gap: 10,
+    paddingHorizontal: space.lg,
+    paddingBottom: 8,
   },
-  // Centered popup card (was a bottom sheet): rounded on every corner, capped in
-  // both dimensions, floating over the dimmed library.
-  sheet: {
-    width: '100%',
-    maxWidth: 480,
-    backgroundColor: colors.surface,
-    borderRadius: radius.xl,
-    overflow: 'hidden',
-    maxHeight: '88%',
-    borderWidth: 1,
-    borderColor: colors.borderLight,
-    ...shadow.float,
-  },
-  sheetHeader: { paddingTop: 12, paddingBottom: 4 },
+  viewerTitleWrap: { flex: 1, gap: 2 },
+  viewerTitle: { color: colors.textDim, fontWeight: '600', fontSize: 13 },
+  matchScore: { color: colors.accent, fontSize: 11, fontWeight: '700' },
   grabber: {
     alignSelf: 'center',
     width: 38,
@@ -1700,14 +1801,6 @@ const styles = StyleSheet.create({
     backgroundColor: colors.borderLight,
     marginBottom: 8,
   },
-  sheetTitleRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: space.lg,
-    gap: 10,
-  },
-  sheetTitle: { color: colors.textDim, fontWeight: '600', fontSize: 13, flex: 1 },
   closeBtn: {
     width: 28,
     height: 28,
@@ -1717,13 +1810,39 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   closeIcon: { color: colors.text, fontSize: 13, fontWeight: '800' },
-  preview: { width: '100%', backgroundColor: '#000' },
+  // The media takes every pixel the chrome doesn't.
+  mediaArea: { flex: 1 },
+  media: { width: '100%', height: '100%' },
 
+  // Floating pill that restores a hidden details panel.
+  infoPill: {
+    position: 'absolute',
+    alignSelf: 'center',
+    backgroundColor: colors.surface3,
+    borderWidth: 1,
+    borderColor: colors.borderLight,
+    borderRadius: radius.pill,
+    paddingHorizontal: 16,
+    paddingVertical: 9,
+    ...shadow.float,
+  },
+  infoPillText: { color: colors.text, fontSize: 13, fontWeight: '700' },
+
+  // Bottom details panel: actions on top, scrollable metadata under them. Capped
+  // so the meme always keeps the upper part of the screen.
+  infoPanel: {
+    maxHeight: '55%',
+    backgroundColor: colors.surface,
+    borderTopLeftRadius: radius.xl,
+    borderTopRightRadius: radius.xl,
+    borderWidth: 1,
+    borderBottomWidth: 0,
+    borderColor: colors.borderLight,
+    paddingTop: 10,
+  },
   actionBar: {
     flexDirection: 'row',
-    flexWrap: 'wrap',
     justifyContent: 'space-evenly',
-    rowGap: space.md,
     paddingVertical: space.md,
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: colors.border,
@@ -1747,7 +1866,6 @@ const styles = StyleSheet.create({
 
   meta: { flexGrow: 0 },
   metaContent: { padding: space.lg, gap: space.md, paddingBottom: space.xl },
-  matchScore: { color: colors.accent, fontSize: 12, fontWeight: '700' },
   block: { gap: 8 },
   sectionLabel: {
     color: colors.faint,
@@ -1775,23 +1893,39 @@ const styles = StyleSheet.create({
     paddingVertical: 1,
   },
   ocr: { color: colors.textDim, fontSize: 13, lineHeight: 19 },
-  caption: { color: colors.text, fontSize: 14, lineHeight: 20, fontWeight: '500' },
+  caption: { color: colors.text, fontSize: 15, lineHeight: 21, fontWeight: '500' },
   mutedSmall: { color: colors.muted, fontSize: 12 },
-  debugLink: { color: colors.faint, fontSize: 12, textDecorationLine: 'underline' },
 
-  teachRow: { flexDirection: 'row', gap: space.sm },
-  teachBtn: {
-    flex: 1,
+  // The “More” menu sheet inside the viewer.
+  moreScrim: { backgroundColor: colors.scrim },
+  moreSheet: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: colors.surface,
+    borderTopLeftRadius: radius.xl,
+    borderTopRightRadius: radius.xl,
     borderWidth: 1,
-    borderColor: colors.border,
-    backgroundColor: colors.surface2,
-    borderRadius: radius.md,
-    paddingVertical: 11,
-    alignItems: 'center',
+    borderBottomWidth: 0,
+    borderColor: colors.borderLight,
+    paddingTop: 10,
+    paddingHorizontal: space.sm,
+    gap: 2,
   },
-  teachBtnText: { color: colors.good, fontWeight: '700', fontSize: 13 },
-  teachBtnNeg: { borderColor: colors.danger, backgroundColor: 'transparent' },
-  teachBtnNegText: { color: colors.danger, fontWeight: '700', fontSize: 13 },
+  moreRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    paddingHorizontal: space.md,
+    paddingVertical: 12,
+    borderRadius: radius.md,
+  },
+  moreGlyph: { color: colors.volt, fontSize: 16, width: 24, textAlign: 'center' },
+  moreCopy: { flex: 1, gap: 1 },
+  moreLabel: { color: colors.text, fontSize: 14, fontWeight: '600' },
+  moreHint: { color: colors.muted, fontSize: 12 },
+  moreDates: { color: colors.faint, fontSize: 11, textAlign: 'center', paddingVertical: 10 },
 
   teachRoot: { flex: 1, backgroundColor: colors.scrim, justifyContent: 'flex-end' },
   teachSheet: {
