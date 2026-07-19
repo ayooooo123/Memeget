@@ -29,7 +29,7 @@ import { codecInteractiveActive } from './interactive';
 import { acquireKeepAlive } from './keepAlive';
 import {
   bgIntervalMs,
-  parseVision,
+  runVision,
   powerBlockReason,
   userTurn,
   BG_ENABLED_KEY,
@@ -192,6 +192,16 @@ export function VisionProvider({ children }: { children: React.ReactNode }) {
       readyWaitersRef.current = [];
     }
   }, [llm.isReady, llm.error]);
+
+  // The describe path awaits generate() and never reads the streamed response, so
+  // the hook's per-token-batch state updates (which re-run this provider's body)
+  // are pure overhead here. Widen the batch window once the model is ready to cut
+  // them from ~12/s to ~2/s. configure() only touches the fields it's given, so
+  // this merges over the model's sampling config; re-applies on each (re)load.
+  useEffect(() => {
+    if (!llm.isReady) return;
+    llm.configure({ generationConfig: { outputTokenBatchSize: 64, batchTimeInterval: 500 } });
+  }, [llm.isReady]);
   const llmReadyRef = useRef(false);
   llmReadyRef.current = llm.isReady;
   const ensureModelLoaded = (): Promise<void> => {
@@ -247,14 +257,23 @@ export function VisionProvider({ children }: { children: React.ReactNode }) {
     grounding?: string
   ): Promise<VisionResult | null> => {
     if (!llm.isReady) return null;
-    // Stateless one-shot: generate() does NOT accumulate conversation history,
-    // so every meme is described from a clean slate (no drift, no unbounded
-    // context growth across a whole library).
-    const reply = await llm.generate([
-      { role: 'system', content: SYSTEM_PROMPT },
-      { role: 'user', content: userTurn(ocrHint, grounding), mediaPath: jpegPath },
-    ]);
-    return parseVision(reply);
+    // Stateless one-shot: generate() does NOT accumulate conversation history, so
+    // every meme is described from a clean slate (no drift, no unbounded context
+    // growth across a whole library). runVision adds the hard output cap +
+    // prefill/decode telemetry; the hook exposes getPromptTokenCount (singular).
+    return runVision(
+      {
+        generate: llm.generate,
+        interrupt: llm.interrupt,
+        getGeneratedTokenCount: llm.getGeneratedTokenCount,
+        getPromptTokenCount: llm.getPromptTokenCount,
+      },
+      [
+        { role: 'system', content: SYSTEM_PROMPT },
+        { role: 'user', content: userTurn(ocrHint, grounding), mediaPath: jpegPath },
+      ],
+      quality
+    );
   };
   const enricherRef = useRef<VisionEnricher>({ ready: false, describe });
   enricherRef.current = {

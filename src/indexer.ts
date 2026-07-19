@@ -158,7 +158,13 @@ async function ocr(uri: string): Promise<string> {
 // tiling over 512), so feeding more pixels only inflates decode/transcode cost —
 // and for LFM, prefill time, the dominant cost of a caption. Capping at 512
 // keeps that bounded (the ML Kit OCR hint covers any small text we'd lose).
-const VLM_FRAME_WIDTH = 512;
+// Overridable for on-device A/B: lowering it cuts LFM's tiled vision-token count
+// (the biggest per-meme prefill driver on the CPU tier). Falls back to 512.
+const VLM_FRAME_WIDTH_ENV = Number(process.env.EXPO_PUBLIC_MEMEGET_VLM_FRAME_WIDTH);
+const VLM_FRAME_WIDTH =
+  Number.isFinite(VLM_FRAME_WIDTH_ENV) && VLM_FRAME_WIDTH_ENV > 0
+    ? Math.round(VLM_FRAME_WIDTH_ENV)
+    : 512;
 
 // Pull frames from a local video by climbing the timestamp ladder, stopping as
 // soon as a rung lands past the clip's real end. Thumbnail extraction either
