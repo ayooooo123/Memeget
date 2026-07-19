@@ -172,6 +172,35 @@ associations + `FACET_LEXICON`); it's for **relative** comparison across prompt
 versions with the same classifier, not an absolute truth. Expanding the lexicon
 tightens it.
 
+## Tagging test (findable-by-search gate)
+
+The coverage loop measures *how much* the model tags; this measures whether it
+tags a meme with the words you'd actually **search**. A hand-labeled set states,
+per meme, the search terms it must be findable by and the facets it must carry:
+
+```jsonc
+// tools/eval/tagging-cases.json   (see tagging-cases.sample.json)
+{ "id": "shush", "file": "images/shush.jpg",
+  "mustFind": ["shush", "quiet", "be quiet"],   // findable by ANY of these
+  "expectFacets": ["situation", "action"] }      // and tagged in these facets
+```
+
+`scoreTagging(cases, predictions)` (`src/taggingEval.ts`) joins those against
+predicted tags — a device export (`described.json`) or a CI proxy-VLM run — and
+reports **findable %** (a search term hits the meme, matched with the app's own
+lexical `.includes`), **facet recall**, and a per-meme list of what failed. The
+shush meme becomes a literal pass/fail. `taggingRegressions(base, cand)` is the
+A/B gate so a prompt change can't silently make tagging worse.
+
+```bash
+npm run tagtest    # scores tools/eval/tagging-cases.json vs described.json
+```
+
+Model-free and deterministic — it scores *given* predictions. Producing the
+predictions is the model step: either a device export, or (planned) a CI action
+that runs the app's prompt through a proxy VLM on the committed test images so
+the prompt can be A/B'd in a PR without a device.
+
 ## Next (not yet built)
 
 - A CI-backed **tag-precision** eval: score our produced tags against memedepot's
