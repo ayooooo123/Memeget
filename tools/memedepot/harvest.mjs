@@ -148,6 +148,13 @@ const FORMAT_HINTS = /\b(format|template|vs|versus|comparison|chart|starter pack
 const EMOTION_HINTS = /\b(sad|angry|happy|smug|cursed|wholesome|crying|mad|confused|cringe|based)\b/;
 const CHARACTER_HINTS = /(jak|wojak|chad|pepe|frog|doomer|bloomer|npc|troll|doge|cheems|apu|bobo)\b/;
 const TOPIC_HINTS = /\b(crypto|nft|bitcoin|ethereum|anime|gaming|programming|politics|cat|dog|stock)\b/;
+// New natural-language facets. Checked before TOPIC so a verb/prop/place/moment
+// lands in its own facet instead of the topic catch-all.
+const ACTION_HINTS = /\b(pointing|staring|screaming|yelling|flexing|running|walking away|sipping|facepalm|slapping|pressing|crying|laughing|dancing|explosion|exploding)\b/;
+const OBJECT_HINTS = /\b(fire|burning|button|sign|poster|brain|coffee|tea|graph|gun|weapon|phone|rope|door)\b/;
+const SETTING_HINTS = /\b(office|work|gym|school|classroom|courtroom|kitchen|space|hospital|church|prison)\b/;
+const SITUATION_HINTS = /\b(when you|me when|pov|reaction|awkward|regret|procrastinat|avoiding|arguing|deadline|finally works|nobody)\b/;
+const TONE_HINTS = /\b(ironic|irony|sarcastic|absurd|surreal|deep fried|dark humor|edgy|shitpost|wholesome)\b/;
 
 // Best-effort category guess for the harvested term. Imperfect by design — the
 // app defaults anything unknown to 'topic', and a maintainer can fix categories
@@ -155,6 +162,11 @@ const TOPIC_HINTS = /\b(crypto|nft|bitcoin|ethereum|anime|gaming|programming|pol
 export function guessCategory(term) {
   if (FORMAT_HINTS.test(term)) return 'format';
   if (CHARACTER_HINTS.test(term)) return 'character';
+  if (SITUATION_HINTS.test(term)) return 'situation';
+  if (ACTION_HINTS.test(term)) return 'action';
+  if (OBJECT_HINTS.test(term)) return 'object';
+  if (SETTING_HINTS.test(term)) return 'setting';
+  if (TONE_HINTS.test(term)) return 'tone';
   if (EMOTION_HINTS.test(term)) return 'emotion';
   if (TOPIC_HINTS.test(term)) return 'topic';
   return 'topic';

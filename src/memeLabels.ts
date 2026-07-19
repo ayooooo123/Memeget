@@ -13,10 +13,25 @@
 import type { Tag } from './types';
 import { buildBaselineLabels } from './baselineLabels';
 
+// Facets a meme is dissected into — so any aspect is findable by a plain-word
+// description. The first five are the identity/topic core; the rest capture
+// what's happening, what's on screen, where, the moment it fits, and the vibe.
+export type LabelCategory =
+  | 'format'
+  | 'character'
+  | 'emotion'
+  | 'topic'
+  | 'person'
+  | 'action'
+  | 'object'
+  | 'setting'
+  | 'situation'
+  | 'tone';
+
 export interface LabelDef {
   label: string; // human-facing name shown as a tag
   prompt: string; // CLIP text prompt used for matching
-  category: 'format' | 'character' | 'emotion' | 'topic' | 'person';
+  category: LabelCategory;
   associations?: string[]; // related search terms (world knowledge)
 }
 
@@ -98,6 +113,49 @@ export const CURATED_MEME_LABELS: LabelDef[] = [
   { label: 'Dog', prompt: 'a funny dog meme', category: 'topic', associations: ['dog', 'doggo', 'puppy'] },
   { label: 'Politics', prompt: 'a political meme', category: 'topic', associations: ['politics', 'political'] },
   { label: 'Relatable / Mood', prompt: 'a relatable everyday mood meme', category: 'topic', associations: ['relatable', 'mood', 'me when'] },
+
+  // --- Actions (what is physically happening — a verb you'd search) ---
+  { label: 'Pointing', prompt: 'a meme of a person pointing at something', category: 'action', associations: ['pointing', 'points at', 'soyjak pointing', 'look at this'] },
+  { label: 'Facepalm', prompt: 'a facepalm meme, hand covering the face in disbelief', category: 'action', associations: ['facepalm', 'disbelief', 'picard', 'smh'] },
+  { label: 'Flexing', prompt: 'a meme of someone flexing muscles or showing off', category: 'action', associations: ['flexing', 'flex', 'muscles', 'showing off', 'gigachad'] },
+  { label: 'Walking Away', prompt: 'a meme of a person walking or running away', category: 'action', associations: ['walking away', 'running away', 'leaving', 'noped out'] },
+  { label: 'Sipping Tea', prompt: 'a meme of someone sipping a drink smugly, kermit sipping tea', category: 'action', associations: ['sipping', 'but thats none of my business', 'kermit', 'tea'] },
+  { label: 'Staring', prompt: 'a meme of an intense blank stare at the camera', category: 'action', associations: ['staring', 'blank stare', 'side eye', 'unsettled'] },
+  { label: 'Screaming', prompt: 'a meme of a person screaming or yelling', category: 'action', associations: ['screaming', 'yelling', 'shouting', 'panik'] },
+  { label: 'Crying', prompt: 'a meme of someone crying with tears', category: 'action', associations: ['crying', 'sobbing', 'tears', 'wojak crying'] },
+  { label: 'Pressing a Button', prompt: 'a meme of a hand pressing or choosing a button', category: 'action', associations: ['button', 'pressing', 'two buttons', 'red button'] },
+  { label: 'Explosion', prompt: 'a meme with a big explosion or something blowing up', category: 'action', associations: ['explosion', 'exploding', 'boom', 'mind blown'] },
+
+  // --- Objects / props (a thing on screen you'd search for) ---
+  { label: 'Fire / Burning', prompt: 'a meme with fire or a room on fire', category: 'object', associations: ['fire', 'burning', 'flames', 'this is fine'] },
+  { label: 'Sign / Poster', prompt: 'a meme of a person holding a sign with text', category: 'object', associations: ['sign', 'poster', 'holding a sign', 'change my mind'] },
+  { label: 'Brain', prompt: 'a meme showing a brain, glowing or expanding', category: 'object', associations: ['brain', 'expanding brain', 'galaxy brain', 'big brain'] },
+  { label: 'Coffee / Tea', prompt: 'a meme featuring a coffee or tea cup', category: 'object', associations: ['coffee', 'tea', 'mug', 'cup'] },
+  { label: 'Graph / Chart', prompt: 'a meme with a chart, graph, or arrow going up or down', category: 'object', associations: ['graph', 'chart', 'stonks', 'line goes up', 'bell curve'] },
+  { label: 'Gun / Weapon', prompt: 'a meme featuring a gun or weapon pointed', category: 'object', associations: ['gun', 'weapon', 'pointing a gun', 'always has been'] },
+
+  // --- Settings (where the scene takes place) ---
+  { label: 'Office / Work', prompt: 'a meme set in an office or workplace', category: 'setting', associations: ['office', 'work', 'meeting', 'cubicle', 'corporate'] },
+  { label: 'Gym', prompt: 'a meme set in a gym with weights', category: 'setting', associations: ['gym', 'workout', 'lifting', 'fitness'] },
+  { label: 'Classroom / School', prompt: 'a meme set in a school or classroom', category: 'setting', associations: ['school', 'classroom', 'teacher', 'exam', 'homework'] },
+  { label: 'Courtroom', prompt: 'a meme set in a courtroom', category: 'setting', associations: ['courtroom', 'court', 'objection', 'lawyer', 'trial'] },
+  { label: 'Outer Space', prompt: 'a meme set in outer space with astronauts or planets', category: 'setting', associations: ['space', 'astronaut', 'always has been', 'planet', 'earth'] },
+
+  // --- Situations (the real-life moment you would send it in) ---
+  { label: 'It Finally Worked', prompt: 'a triumphant meme about something finally succeeding', category: 'situation', associations: ['it works', 'finally', 'success', 'we did it', 'victory'] },
+  { label: 'Avoiding Responsibility', prompt: 'a meme about dodging blame or responsibility', category: 'situation', associations: ['not my problem', 'avoiding', 'dodging', 'none of my business'] },
+  { label: 'Procrastinating', prompt: 'a meme about procrastination and putting things off', category: 'situation', associations: ['procrastination', 'later', 'putting off', 'deadline'] },
+  { label: 'False Confidence', prompt: 'a meme about pretending everything is fine while it is not', category: 'situation', associations: ['this is fine', 'pretending', 'false confidence', 'coping'] },
+  { label: 'Awkward Moment', prompt: 'a meme about an awkward or uncomfortable situation', category: 'situation', associations: ['awkward', 'cringe', 'uncomfortable', 'tension'] },
+  { label: 'Regret / Bad Decision', prompt: 'a meme about regret or a bad decision', category: 'situation', associations: ['regret', 'bad decision', 'mistake', 'i made a mistake'] },
+  { label: 'Arguing Online', prompt: 'a meme about arguing or debating on the internet', category: 'situation', associations: ['arguing', 'debate', 'internet argument', 'reply guy', 'ratio'] },
+
+  // --- Tone (the humor style / vibe — how it is funny) ---
+  { label: 'Ironic', prompt: 'an ironic or sarcastic meme', category: 'tone', associations: ['ironic', 'irony', 'sarcastic'] },
+  { label: 'Absurdist / Surreal', prompt: 'a surreal absurdist nonsensical meme', category: 'tone', associations: ['surreal', 'absurd', 'weird', 'nonsense', 'shitpost'] },
+  { label: 'Deep Fried', prompt: 'a deep fried meme, oversaturated and distorted', category: 'tone', associations: ['deep fried', 'fried', 'crispy', 'oversaturated'] },
+  { label: 'Dark Humor', prompt: 'a dark humor meme', category: 'tone', associations: ['dark humor', 'dark', 'morbid', 'edgy'] },
+  { label: 'Wholesome Tone', prompt: 'a wholesome heartwarming positive meme', category: 'tone', associations: ['wholesome', 'heartwarming', 'sweet', 'positive'] },
 ];
 
 // The active label vocabulary: curated core + the harvested memedepot baseline

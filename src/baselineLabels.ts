@@ -46,6 +46,13 @@ const VALID_CATEGORIES: readonly LabelDef['category'][] = [
   'emotion',
   'topic',
   'person',
+  // Facets that make a meme findable by a natural-language description of ANY
+  // aspect — a verb, a prop, a place, the moment you'd send it, the humor style.
+  'action',
+  'object',
+  'setting',
+  'situation',
+  'tone',
 ];
 
 // Cap on how many harvested labels become active zero-shot classes. Bounded so a
