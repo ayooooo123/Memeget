@@ -72,8 +72,9 @@ describe('the model is actually asked for facets, grounded by the CLIP guess', (
     ];
     const turn = userTurn('this is fine', formatGrounding(clipGuess));
     // The prompt requests the new facets…
-    expect(turn).toMatch(/action happening/);
+    expect(turn).toMatch(/how a person would search/i);
     expect(turn).toMatch(/real-life situation/);
+    expect(turn).toMatch(/be quiet/); // the gesture-meaning teaching example
     // …and hands the model CLIP's facet guess to confirm/expand.
     expect(turn).toContain('format: This Is Fine');
     expect(turn).toContain('situation: False Confidence');
