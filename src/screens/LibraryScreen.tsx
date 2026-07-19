@@ -20,12 +20,13 @@ import {
   getFolders,
   getLabels,
   getLibraryTagLabels,
+  getMemesBefore,
   getRecentMemes,
   searchByVector,
 } from '../db';
 import { noteInteractive, runIndex, retagAll, type IndexProgress } from '../indexer';
 import { emitLibraryChanged, onLibraryChanged, onThumbsUpdated } from '../events';
-import { mergeRecords, patchThumbs } from '../libraryCore';
+import { appendPage, mergeRecords, patchThumbs } from '../libraryCore';
 import { success, tap, thud } from '../haptics';
 import { pickFolder } from '../saf';
 import { colors, radius, space, type } from '../theme';
@@ -52,10 +53,15 @@ export function LibraryScreen() {
   const [loadingMore, setLoadingMore] = useState(false);
   const [progress, setProgress] = useState<IndexProgress | null>(null);
 
-  // Search-as-filter on the same page: empty query => browse recents,
-  // non-empty => semantic results replace the grid.
+  // Search-as-sort on the same page: empty query => browse recents; non-empty
+  // => the ENTIRE indexed collection ranked by the query replaces the grid
+  // (best matches first, recency for ties). `results` holds the full ranked
+  // list; `visibleResults` is how much of it the grid currently shows, grown by
+  // the same infinite scroll as browse — so the whole library stays reachable
+  // under any search.
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<SearchHit[] | null>(null);
+  const [visibleResults, setVisibleResults] = useState(PAGE);
   const [searching, setSearching] = useState(false);
   // Bumped each time a search kicks off so the grid scrolls back to the top —
   // otherwise a search run while scrolled deep into the library leaves the user
@@ -78,6 +84,14 @@ export function LibraryScreen() {
   // for. Used both here and by the kind effect below.
   const queryRef = useRef('');
   queryRef.current = query;
+  // Loaded browse rows / active results, mirrored into refs so refresh() and
+  // loadMore() can stay referentially stable (no state deps) — an unstable
+  // onEndReached used to bust MemeGrid's memo on every page load and re-render
+  // the whole grid mid-fling.
+  const recentRef = useRef<MemeRecord[]>([]);
+  recentRef.current = recent;
+  const resultsRef = useRef<SearchHit[] | null>(null);
+  resultsRef.current = results;
   // How many recents are currently loaded, mirrored into a ref so refresh()
   // (stable, no deps) can re-fetch the same span without losing the user's
   // scroll position — important because background indexing of a freshly shared
@@ -89,19 +103,41 @@ export function LibraryScreen() {
   const scrollingRef = useRef(false);
   const pendingRefreshRef = useRef(false);
 
-  const refresh = useCallback(async () => {
-    setFolders(await getFolders());
-    const k = kindRef.current === 'all' ? undefined : kindRef.current;
-    const span = Math.max(PAGE, loadedCountRef.current);
-    const rows = await getRecentMemes(span, 0, k);
-    setRecent((prev) => mergeRecords(prev, rows));
-    loadedCountRef.current = rows.length;
-    // Only assume there's more to page in when we filled a clean page boundary.
-    hasMoreRef.current = rows.length === span && rows.length % PAGE === 0;
-    setCount(await countMemes());
-    setTaughtLabels(await getLabels().catch(() => []));
-    setLibraryTags(await getLibraryTagLabels().catch(() => []));
+  // Serialize refresh and page loads through one promise chain. They both read
+  // "how much is loaded" and then write `recent`; interleaved (a background
+  // refresh landing while a page fetch is in flight) the shorter span-refetch
+  // could clobber a just-appended page — the list visibly truncated and the
+  // scroll position jumped. One at a time, the reads are always consistent.
+  const opChainRef = useRef<Promise<void>>(Promise.resolve());
+  const serialize = useCallback(<T,>(op: () => Promise<T>): Promise<T> => {
+    const run = opChainRef.current.then(op, op);
+    opChainRef.current = run.then(
+      () => undefined,
+      () => undefined
+    );
+    return run;
   }, []);
+
+  const refresh = useCallback(
+    () =>
+      serialize(async () => {
+        setFolders(await getFolders());
+        const k = kindRef.current === 'all' ? undefined : kindRef.current;
+        const span = Math.max(PAGE, loadedCountRef.current);
+        const rows = await getRecentMemes(span, 0, k);
+        setRecent((prev) => mergeRecords(prev, rows));
+        loadedCountRef.current = rows.length;
+        // A full span means the library may extend past what's loaded; a short
+        // read means we're holding everything. (This used to also require the
+        // span to sit on a PAGE boundary — after any deletion it never did, so
+        // one delete permanently switched infinite scroll off.)
+        hasMoreRef.current = rows.length === span;
+        setCount(await countMemes());
+        setTaughtLabels(await getLabels().catch(() => []));
+        setLibraryTags(await getLibraryTagLabels().catch(() => []));
+      }),
+    [serialize]
+  );
 
   // Coalesce library-changed bursts. Background indexing/sharing can fire
   // onLibraryChanged many times in quick succession (once per meme); without
@@ -159,24 +195,44 @@ export function LibraryScreen() {
     [scheduleRefresh]
   );
 
-  const loadMore = useCallback(async () => {
-    if (results !== null) return; // pagination only while browsing
+  const loadMore = useCallback(() => {
+    // Search mode: the full ranked collection is already in memory — paging is
+    // just revealing the next slice, no fetch needed.
+    if (resultsRef.current !== null) {
+      const total = resultsRef.current.length;
+      setVisibleResults((v) => (v >= total ? v : Math.min(v + PAGE, total)));
+      return;
+    }
     if (loadingMoreRef.current || !hasMoreRef.current) return;
     loadingMoreRef.current = true;
     setLoadingMore(true);
-    try {
-      const next = await getRecentMemes(PAGE, recent.length, kindArg());
-      hasMoreRef.current = next.length === PAGE;
-      setRecent((cur) => {
-        const merged = [...cur, ...next];
-        loadedCountRef.current = merged.length;
-        return merged;
-      });
-    } finally {
-      loadingMoreRef.current = false;
-      setLoadingMore(false);
-    }
-  }, [recent.length, results]);
+    serialize(async () => {
+      try {
+        // Page from a keyset cursor (the last loaded row's sort position), not
+        // an OFFSET — rows arriving/leaving above the fold shift an offset and
+        // made pages repeat or skip, the old infinite-scroll glitch.
+        const last = recentRef.current[recentRef.current.length - 1];
+        if (!last) {
+          hasMoreRef.current = false;
+          return;
+        }
+        const next = await getMemesBefore(
+          { modifiedAt: last.modifiedAt ?? last.indexedAt, id: last.id },
+          PAGE,
+          kindArg()
+        );
+        hasMoreRef.current = next.length === PAGE;
+        setRecent((cur) => {
+          const merged = appendPage(cur, next);
+          loadedCountRef.current = merged.length;
+          return merged;
+        });
+      } finally {
+        loadingMoreRef.current = false;
+        setLoadingMore(false);
+      }
+    });
+  }, [serialize]);
 
   // Run a search for the given text. Empty text drops back to browse mode.
   const runSearch = useCallback(
@@ -193,6 +249,8 @@ export function LibraryScreen() {
       noteInteractive();
       setSearching(true);
       setScrollToTopSignal((n) => n + 1);
+      // Fresh ranking → back to the first page of it.
+      setVisibleResults(PAGE);
       // The scan aborts itself the moment a newer keystroke supersedes this
       // query (returns null), so stale full scans don't pile up on the JS
       // thread behind the latest one.
@@ -201,7 +259,10 @@ export function LibraryScreen() {
         // The text embed competes for CPU with whatever generation is already
         // in flight. If it takes noticeably long, serve lexical-only results
         // (OCR/tags/captions/filenames) immediately, then upgrade to the full
-        // hybrid ranking when the vector lands.
+        // hybrid ranking when the vector lands. `Infinity` ranks the ENTIRE
+        // indexed collection — a search sorts the library, it doesn't cut it
+        // down — and the grid pages the ranked list via the same infinite
+        // scroll as browse.
         const vecPromise = emb.embedText(q);
         const TIMED_OUT = Symbol('embed-timeout');
         const first = await Promise.race([
@@ -209,12 +270,12 @@ export function LibraryScreen() {
           new Promise<typeof TIMED_OUT>((r) => setTimeout(() => r(TIMED_OUT), 1_200)),
         ]);
         if (first === TIMED_OUT) {
-          const quick = await searchByVector(null, q, 80, kindArg(), stale);
+          const quick = await searchByVector(null, q, Infinity, kindArg(), stale);
           if (quick !== null && !stale()) setResults(quick);
         }
         const vec = await vecPromise;
         if (stale()) return;
-        const hits = await searchByVector(vec, q, 80, kindArg(), stale);
+        const hits = await searchByVector(vec, q, Infinity, kindArg(), stale);
         // Embedding + brute-force search are async and on-device, so they can
         // resolve long after the box was cleared or retyped. If the current
         // query no longer matches what we searched for, drop these results —
@@ -245,6 +306,7 @@ export function LibraryScreen() {
   useEffect(() => {
     if (!query.trim()) {
       setResults(null);
+      setVisibleResults(PAGE);
       // A search in flight when the box is cleared bails without clearing its
       // own spinner (it's no longer the active query), so reset it here.
       setSearching(false);
@@ -345,6 +407,15 @@ export function LibraryScreen() {
   const isSearch = results !== null;
   const hasLibrary = count > 0 || recent.length > 0;
 
+  // What the grid renders: browse recents, or the currently revealed slice of
+  // the full ranked search list. Memoized so the slice keeps its identity
+  // across unrelated re-renders (a fresh array every render would defeat the
+  // grid's memo and re-run the list mid-scroll).
+  const items = useMemo(
+    () => (results ? results.slice(0, visibleResults) : recent),
+    [results, visibleResults, recent]
+  );
+
   // Quick-filter chips: the labels the user has taught (starred) first, then the
   // known meme tags the indexer actually applied across the library — so people
   // can narrow to a recognized format/character by tapping instead of typing.
@@ -374,7 +445,7 @@ export function LibraryScreen() {
           ) : (
             <Text style={styles.resultText}>
               <Text style={styles.resultCount}>{results.length}</Text>
-              {` result${results.length === 1 ? '' : 's'} for “${query.trim()}”`}
+              {` meme${results.length === 1 ? '' : 's'} · best matches for “${query.trim()}” first`}
             </Text>
           )}
         </View>
@@ -453,11 +524,16 @@ export function LibraryScreen() {
   const emptyState = useMemo(
     () =>
       isSearch && !searching && results.length === 0 ? (
+        // A search now ranks the whole indexed collection, so an empty result
+        // list means there's nothing indexed to rank (possibly just under the
+        // active media filter) — not that the words missed.
         <View style={styles.noResults}>
           <Text style={styles.noResultsGlyph}>¯\_(ツ)_/¯</Text>
-          <Text style={styles.noResultsTitle}>Nothing matched</Text>
+          <Text style={styles.noResultsTitle}>Nothing to search yet</Text>
           <Text style={styles.noResultsHint}>
-            Try fewer words, a vibe (“sad frog”), or text you remember from the meme.
+            {kind !== 'all'
+              ? `No indexed ${kind === 'video' ? 'videos' : 'images'} to rank — clear the media filter or index more.`
+              : 'Index your library first, then search by vibe, character, or the text inside.'}
           </Text>
         </View>
       ) : !isSearch && hasLibrary && recent.length === 0 && kind !== 'all' ? (
@@ -527,7 +603,7 @@ export function LibraryScreen() {
       </View>
 
       <MemeGrid
-        items={results ?? recent}
+        items={items}
         header={header}
         onTaught={onTaught}
         onEndReached={loadMore}

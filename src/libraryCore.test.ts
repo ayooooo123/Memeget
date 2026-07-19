@@ -1,4 +1,4 @@
-import { mergeRecords, patchThumbs, sameRecord } from './libraryCore';
+import { appendPage, mergeRecords, patchThumbs, sameRecord } from './libraryCore';
 import type { MemeRecord } from './types';
 
 const rec = (over: Partial<MemeRecord> = {}): MemeRecord => ({
@@ -69,6 +69,33 @@ describe('mergeRecords identity reuse', () => {
     expect(merged).not.toBe(prev);
     expect(merged[0]).toBe(prev[0]); // identical row kept
     expect(merged[1]).not.toBe(prev[1]); // caption changed
+  });
+});
+
+describe('appendPage', () => {
+  it('appends a fresh page after the loaded rows', () => {
+    const prev = [rec({ id: 1 }), rec({ id: 2 })];
+    const next = [rec({ id: 3 }), rec({ id: 4 })];
+    expect(appendPage(prev, next).map((m) => m.id)).toEqual([1, 2, 3, 4]);
+  });
+
+  it('drops rows already loaded so FlatList never sees duplicate keys', () => {
+    const prev = [rec({ id: 1 }), rec({ id: 2 })];
+    // A refresh landing between cursor read and fetch can re-serve a boundary row.
+    const next = [rec({ id: 2 }), rec({ id: 3 })];
+    expect(appendPage(prev, next).map((m) => m.id)).toEqual([1, 2, 3]);
+  });
+
+  it('returns the SAME array reference for an empty or fully-duplicate page', () => {
+    const prev = [rec({ id: 1 }), rec({ id: 2 })];
+    expect(appendPage(prev, [])).toBe(prev);
+    expect(appendPage(prev, [rec({ id: 1 }), rec({ id: 2 })])).toBe(prev);
+  });
+
+  it('keeps identity of the previously loaded rows on append', () => {
+    const a = rec({ id: 1 });
+    const merged = appendPage([a], [rec({ id: 2 })]);
+    expect(merged[0]).toBe(a);
   });
 });
 
