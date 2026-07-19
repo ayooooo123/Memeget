@@ -565,7 +565,7 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
         .then(refresh)
         .catch(() => {});
       showToast(
-        `Switched to ${q === 'max' ? 'Best · Gemma E2B' : 'Fast · LFM 450M'} — re-run Describe to apply`,
+        `Switched to ${q === 'max' ? 'Best · Gemma E2B' : 'Light · LFM 450M'} — re-run Describe to apply`,
         'info'
       );
     },
@@ -727,11 +727,15 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
                 onPress={() => onSwitchQuality('max')}
               />
               <Chip
-                label="Fast · LFM 450M"
+                label="Light · LFM 450M"
                 active={vision.quality === 'fast'}
                 onPress={() => onSwitchQuality('fast')}
               />
             </View>
+            <Text style={[styles.note, { marginTop: 6 }]}>
+              Gemma runs on the GPU (faster and sharper where supported); LFM is a
+              lighter CPU-only fallback for low-RAM or no-GPU devices.
+            </Text>
 
             <Row label="Described" value={`${described} / ${describedTotal}`} />
             {tele.avgMs > 0 && (

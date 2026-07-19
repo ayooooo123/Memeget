@@ -3,7 +3,7 @@ import { LLMModule } from 'react-native-executorch';
 import {
   MODEL,
   SYSTEM_PROMPT,
-  parseVision,
+  runVision,
   userTurn,
   type VisionQuality,
   type VisionResult,
@@ -37,9 +37,16 @@ export async function loadHeadless(quality: VisionQuality): Promise<void> {
       instance = null;
     }
     const mod = await LLMModule.fromModelName(MODEL[quality]);
-    // Apply the model card's recommended generation settings (temp 0.1 etc.),
-    // which the hook applies automatically but the class does not.
-    mod.configure({ generationConfig: MODEL[quality].generationConfig });
+    // The class does NOT auto-apply the model card's sampling config (the hook
+    // does), so set it here; also widen the token-batch window to trim needless
+    // native→JS callbacks during background generation.
+    mod.configure({
+      generationConfig: {
+        ...MODEL[quality].generationConfig,
+        outputTokenBatchSize: 64,
+        batchTimeInterval: 500,
+      },
+    });
     instance = { quality, mod };
   })().finally(() => {
     loading = null;
@@ -70,12 +77,23 @@ export function headlessEnricher(): VisionEnricher {
       ocrHint?: string,
       grounding?: string
     ): Promise<VisionResult | null> => {
-      if (!instance) return null;
-      const reply = await instance.mod.generate([
-        { role: 'system', content: SYSTEM_PROMPT },
-        { role: 'user', content: userTurn(ocrHint, grounding), mediaPath: jpegPath },
-      ]);
-      return parseVision(reply);
+      const inst = instance;
+      if (!inst) return null;
+      // runVision adds the hard output cap + prefill/decode telemetry. The class
+      // exposes getPromptTokensCount (plural) — adapted to the runner's getter.
+      return runVision(
+        {
+          generate: (m) => inst.mod.generate(m),
+          interrupt: () => inst.mod.interrupt(),
+          getGeneratedTokenCount: () => inst.mod.getGeneratedTokenCount(),
+          getPromptTokenCount: () => inst.mod.getPromptTokensCount(),
+        },
+        [
+          { role: 'system', content: SYSTEM_PROMPT },
+          { role: 'user', content: userTurn(ocrHint, grounding), mediaPath: jpegPath },
+        ],
+        inst.quality
+      );
     },
   };
 }
