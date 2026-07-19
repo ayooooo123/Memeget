@@ -53,6 +53,13 @@ const FACET_LEXICON: Partial<Record<LabelCategory, string[]>> = {
     'winning', 'coping', 'regret', 'regretting', 'celebrating', 'giving up', 'overthinking',
     'pretending', 'realizing', 'panicking', 'relatable', 'awkward', 'flexing on',
     'when you', 'me when', 'trying to', 'about to',
+    // reaction/use phrasings the model actually emits (were landing unclassified)
+    'ignoring', 'ignore', 'busy', 'being busy', 'tired', 'exhausted', 'stressed',
+    'overwhelmed', 'forgetting', 'remembering', 'missing', 'stuck', 'struggling',
+    'quitting', 'escaping', 'dodging', 'hiding', 'refusing', 'denying', 'bragging',
+    'showing off', 'messing up', 'no messages', "can't reply", 'cant reply', 'slow down',
+    'self-affirmation', 'asserting', 'sleep deprivation', 'no explanation', 'wanting',
+    'be quiet', 'shushing', 'keep it a secret', 'keep quiet',
   ],
   tone: [
     'ironic', 'irony', 'sarcastic', 'sarcasm', 'absurd', 'surreal', 'wholesome', 'dark',
