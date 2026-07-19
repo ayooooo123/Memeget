@@ -15,7 +15,8 @@
     "coverage": "jest facetCoverage --silent=false --verbose",
     "tagtest": "jest taggingEval --silent=false --verbose",
     "templates": "jest templateClusters --silent=false --verbose",
-    "doctor": "react-doctor"
+    "doctor": "react-doctor",
+    "agreement": "jest tagAgreement --silent=false --verbose"
   },
   "dependencies": {
     "expo": "~56.0.0",

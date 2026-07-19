@@ -221,6 +221,26 @@ Tunables: link threshold (default 0.86 — above noise, below the 0.99 twin-dedu
 bar), min size 2 ("the second variation is the moment a template is born"),
 min distinct texts 2 (a dupe pile is not a template).
 
+## Tag agreement (npm run agreement) — free ground truth from your own tags
+
+Coverage measures the *shape* of the model's output; it can't know what's TRUE.
+But every manual tag and taught exemplar is a labeled example: the user asserted
+"this meme IS X." `src/tagAgreement.ts` grades the model against those — on any
+meme carrying a user-truth tag (source `manual`/`exemplar`), does the model's
+OWN description (its `vision` tags + caption) surface that label? Agreement =
+the model sees what you see; each miss is a named recognition gap. Zero labeling
+effort — the user already did the work by using the app.
+
+```bash
+npm run agreement   # grades tools/eval/collection-manifest.json when present
+```
+
+Scope, honestly: user truth skews toward IDENTITY labels (characters, people,
+formats), so this grades **recognition**; the hand-labeled tagging cases grade
+**recall-by-meaning** (situations, reactions). Complements, not substitutes.
+Memes the model never described are reported as `undescribed` and skipped — a
+coverage gap, not a wrong answer.
+
 ## Next (not yet built)
 
 - A CI-backed **tag-precision** eval: score our produced tags against memedepot's
