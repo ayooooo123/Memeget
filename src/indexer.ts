@@ -914,7 +914,7 @@ function unionTerms(a: string, b: string): string {
   return [...set].join(' ');
 }
 
-// ---- VLM enrichment pass (Gemma 4 / LFM2.5-VL) --------------------------------
+// ---- VLM enrichment pass (LFM2.5-VL 1.6B) ------------------------------------
 
 export interface EnrichProgress {
   done: number;
