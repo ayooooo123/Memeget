@@ -1031,6 +1031,31 @@ export async function getLibraryTagLabels(limit = 40): Promise<string[]> {
     .map(([label]) => label);
 }
 
+// Export the model-produced tags per described meme, for the facet-coverage
+// prompt-tuning loop (drop into tools/eval/described.json, run `npm run
+// coverage`). Only the VLM's OWN tags (source 'vision') — that's what the
+// caption prompt controls — so coverage measures the model, not the CLIP/OCR/
+// exemplar tags mixed into the same list. Memes the VLM tagged nothing on are
+// kept (empty tags) so coverage honestly reflects misses.
+export async function exportDescribedTags(): Promise<{ id: string; tags: string[] }[]> {
+  const db = await getDb();
+  const rows = await db.getAllAsync<{ id: number; tags: string }>(
+    "SELECT id, tags FROM memes WHERE vision_state = 'done' AND tags != '[]'"
+  );
+  const out: { id: string; tags: string[] }[] = [];
+  for (const r of rows) {
+    let parsed: Tag[] = [];
+    try {
+      parsed = JSON.parse(r.tags) as Tag[];
+    } catch {
+      continue;
+    }
+    const vision = parsed.filter((t) => t.source === 'vision').map((t) => t.label);
+    out.push({ id: String(r.id), tags: vision });
+  }
+  return out;
+}
+
 // How many memes currently carry a given tag label (used for teach feedback).
 export async function countMemesWithLabel(label: string): Promise<number> {
   const db = await getDb();
