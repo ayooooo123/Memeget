@@ -209,7 +209,8 @@ export const MemeGrid = React.memo(function MemeGrid({
   // memes now carry the label (for feedback). Optional.
   onTaught?: (label: string) => Promise<number | void>;
   // Infinite-scroll hook: called when the user nears the end of the list so
-  // the parent can append the next page. Optional (search passes a fixed set).
+  // the parent can append the next page (browse pages from the DB; search
+  // reveals more of its already-ranked list). Optional.
   onEndReached?: () => void;
   loadingMore?: boolean;
   // Called after a meme is deleted so the parent can drop it from its list.
@@ -1374,9 +1375,12 @@ function ViewerSheet({
               contentContainerStyle={styles.metaContent}
               keyboardShouldPersistTaps="handled"
             >
+              {/* Clamped to 0 as well as 100: search now ranks the whole
+                  collection, so weak-tail items (even slightly negative
+                  cosines) are reachable and shouldn't read "match -3%". */}
               {'score' in item && (
                 <Text style={styles.matchScore}>
-                  match {Math.min(100, item.score * 100).toFixed(0)}%
+                  match {Math.min(100, Math.max(0, item.score * 100)).toFixed(0)}%
                 </Text>
               )}
 
