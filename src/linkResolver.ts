@@ -124,6 +124,20 @@ function metaContent(html: string, ...names: string[]): string | null {
 const isTwitter = (u: string) => /https?:\/\/(?:[\w-]+\.)*(?:twitter|x)\.com\//i.test(u);
 const isTenor = (u: string) => /https?:\/\/(?:[\w-]+\.)*tenor\.com\//i.test(u);
 const isMemedepot = (u: string) => /https?:\/\/(?:[\w-]+\.)*memedepot\.com\//i.test(u);
+// X's share sheet (and many apps) hand over a t.co wrapper rather than the real
+// post URL. Follow the redirect once to recover the x.com/…/status/… link so
+// the tweet resolver can run instead of falling through to a generic OG scrape.
+const isShortlink = (u: string) => /https?:\/\/t\.co\//i.test(u);
+
+async function unwrapShortlink(url: string): Promise<string> {
+  try {
+    const r = await fetch(url, { headers: { 'User-Agent': BROWSER_UA }, redirect: 'follow' });
+    if (r.url && r.url !== url) return r.url;
+  } catch {
+    // Fall back to the original URL; the normal resolvers still get a shot.
+  }
+  return url;
+}
 
 function tweetId(url: string): string | null {
   const m = url.match(/(?:twitter|x)\.com\/[^/]+\/status(?:es)?\/(\d+)/i);
@@ -136,15 +150,46 @@ function syndicationToken(id: string): string {
   return ((Number(id) / 1e15) * Math.PI).toString(36).replace(/(0+|\.)/g, '');
 }
 
+// The syndication endpoint also gates on a `features` flag set. Without it X
+// stopped returning the tweet body (it answers with a TweetTombstone instead),
+// which is what silently broke "share an X video → save it". This is the same
+// flag list react-tweet sends; the exact values don't matter much, but the
+// parameter must be present for the endpoint to hand back `mediaDetails`.
+const SYNDICATION_FEATURES = [
+  'tfw_timeline_list:',
+  'tfw_follower_count_sunset:true',
+  'tfw_tweet_edit_backend:on',
+  'tfw_refsrc_session:on',
+  'tfw_fosnr_soft_interventions_enabled:on',
+  'tfw_show_birdwatch_pivots_enabled:on',
+  'tfw_show_business_verified_badge:on',
+  'tfw_duplicate_scribes_to_settings:on',
+  'tfw_use_profile_image_shape_enabled:on',
+  'tfw_show_blue_verified_badge:on',
+  'tfw_legacy_timeline_sunset:true',
+  'tfw_show_gov_verified_badge:on',
+  'tfw_show_business_affiliate_badge:on',
+  'tfw_tweet_edit_frontend:on',
+].join(';');
+
 async function resolveTwitter(url: string): Promise<MediaRef> {
   const id = tweetId(url);
   if (!id) return resolveGeneric(url); // profile/other link — best-effort OG
-  const api = `https://cdn.syndication.twimg.com/tweet-result?id=${id}&token=${syndicationToken(
-    id
-  )}&lang=en`;
+  const params = new URLSearchParams({
+    id,
+    token: syndicationToken(id),
+    features: SYNDICATION_FEATURES,
+    lang: 'en',
+  });
+  const api = `https://cdn.syndication.twimg.com/tweet-result?${params.toString()}`;
   const r = await fetch(api, { headers: { 'User-Agent': BROWSER_UA, Accept: 'application/json' } });
   if (!r.ok) throw new Error(`Couldn't read that tweet (HTTP ${r.status}).`);
   const data: any = await r.json();
+  // A tombstone means X won't serve this tweet to logged-out clients (protected,
+  // age-restricted, or removed) — there's no public media to fetch.
+  if (data?.__typename === 'TweetTombstone' || data?.tombstone) {
+    throw new Error("That tweet can't be opened without signing in to X (it may be age-restricted or protected).");
+  }
   const media: any[] = data?.mediaDetails ?? [];
 
   // Prefer the highest-bitrate mp4 (covers both videos and animated GIFs, which
@@ -259,8 +304,12 @@ export async function resolveSharedLink(
   rawUrl: string,
   opts: { onProgress?: (p: ResolveProgress) => void } = {}
 ): Promise<ResolvedMedia> {
-  const url = rawUrl.trim();
+  let url = rawUrl.trim();
   opts.onProgress?.({ stage: 'resolving' });
+
+  // Unwrap a t.co (or other) shortener to its destination first, so an X post
+  // shared as a t.co link is recognized as a tweet rather than scraped blindly.
+  if (isShortlink(url)) url = await unwrapShortlink(url);
 
   let ref: MediaRef;
   if (MEDIA_EXT_RE.test(url)) ref = { url }; // already a direct media link

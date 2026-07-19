@@ -29,12 +29,17 @@ function mockDownload(headers: Record<string, string> = { 'Content-Type': 'video
 }
 const downloadedUrl = () => downloadAsync.mock.calls[0][0] as string;
 
-function mockFetch(handler: (url: string) => { ok?: boolean; status?: number; json?: any; text?: string }) {
+function mockFetch(
+  handler: (url: string) => { ok?: boolean; status?: number; json?: any; text?: string; url?: string }
+) {
   (global as any).fetch = jest.fn(async (url: string) => {
     const r = handler(url);
     return {
       ok: r.ok ?? true,
       status: r.status ?? 200,
+      // The resolver follows redirects via response.url (t.co unwrap); default
+      // to the requested URL unless the handler overrides it.
+      url: r.url ?? url,
       json: async () => r.json,
       text: async () => r.text ?? '',
     };
@@ -86,13 +91,38 @@ describe('X / Twitter', () => {
     ],
   };
 
-  it('hits the syndication endpoint with the tweet id + a token', async () => {
+  it('hits the syndication endpoint with the tweet id, token, and features flags', async () => {
     mockFetch(() => ({ json: VIDEO_TWEET }));
     await resolveSharedLink('https://x.com/someone/status/1790000000000000001');
     const apiUrl = (global.fetch as jest.Mock).mock.calls[0][0] as string;
     expect(apiUrl).toContain('cdn.syndication.twimg.com/tweet-result');
     expect(apiUrl).toContain('id=1790000000000000001');
     expect(apiUrl).toMatch(/token=[^&]+/);
+    // Without `features` X now returns a tombstone instead of the media — this
+    // is the parameter whose absence broke X video downloads.
+    expect(apiUrl).toMatch(/features=[^&]+/);
+  });
+
+  it('reports a clear error when X returns a tombstone (gated/protected tweet)', async () => {
+    mockFetch(() => ({ json: { __typename: 'TweetTombstone', tombstone: { text: {} } } }));
+    await expect(
+      resolveSharedLink('https://x.com/u/status/1790000000000000002')
+    ).rejects.toThrow(/signing in to X|age-restricted|protected/i);
+  });
+
+  it('unwraps a t.co share link to the underlying tweet before resolving', async () => {
+    mockFetch((url) =>
+      // t.co redirects to the real post; the syndication call then returns media.
+      url.startsWith('https://t.co/')
+        ? { url: 'https://x.com/someone/status/1790000000000000001' }
+        : { json: VIDEO_TWEET }
+    );
+    const res = await resolveSharedLink('https://t.co/AbCdEf123');
+    // First fetch follows the shortlink, second hits syndication with the id.
+    const apiUrl = (global.fetch as jest.Mock).mock.calls[1][0] as string;
+    expect(apiUrl).toContain('id=1790000000000000001');
+    expect(downloadedUrl()).toBe('https://video.twimg.com/high.mp4');
+    expect(res.fileName).toBe('tweet_1790000000000000001.mp4');
   });
 
   it('downloads the highest-bitrate mp4 variant', async () => {
