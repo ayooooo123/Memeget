@@ -67,6 +67,7 @@ import {
   type SafFile,
 } from './saf';
 import { formatGrounding, type GroundingLabel, type VisionResult } from './visionCore';
+import { captionSearchText, memeExtraTerms } from './searchText';
 import {
   dedupeFrames,
   flattenFrameTags,
@@ -996,15 +997,7 @@ export function getVisionTelemetry(): VisionTelemetry {
 
 // Build searchable terms from merged tags + the model's free text.
 function visionExtraTerms(merged: Tag[], assoc: Map<string, string[]>, res: VisionResult): string {
-  const extra = [res.text, res.subjects.join(' '), res.tags.join(' ')].join(' ').toLowerCase();
-  return `${extraTermsFor(merged, assoc)} ${extra}`.replace(/\s+/g, ' ').trim();
-}
-
-function captionSearchText(caption: string, tags: Tag[], extraTerms: string): string {
-  return [caption, tags.map((t) => t.label).join(' '), extraTerms]
-    .join(' ')
-    .replace(/\s+/g, ' ')
-    .trim();
+  return memeExtraTerms(extraTermsFor(merged, assoc), res);
 }
 
 // Run the model on one meme and persist. Returns the saved payload (to seed the
