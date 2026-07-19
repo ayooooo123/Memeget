@@ -33,6 +33,7 @@ import {
   requeueMemeVision,
 } from '../db';
 import { emitLibraryChanged } from '../events';
+import { guessFacet } from '../facetCoverage';
 import { scoreExemplar } from '../learnCore';
 import { buildExemplarHeads, noteInteractive, type ExemplarModel } from '../indexer';
 import { noteCodecInteractive } from '../interactive';
@@ -760,7 +761,7 @@ export const MemeGrid = React.memo(function MemeGrid({
         : [];
       await addExemplar({
         label,
-        category: 'character',
+        category: guessFacet(label),
         vector: Array.from(emb),
         associations,
         sourceUri: selected.uri,
@@ -826,7 +827,7 @@ export const MemeGrid = React.memo(function MemeGrid({
         if (!hit || !emb) continue;
         await addExemplar({
           label: c.label,
-          category: 'character',
+          category: guessFacet(c.label),
           vector: Array.from(emb),
           associations: [], // world-knowledge terms were captured with the first example
           sourceUri: hit.uri,
@@ -856,7 +857,7 @@ export const MemeGrid = React.memo(function MemeGrid({
       }
       await addExemplar({
         label,
-        category: 'character',
+        category: guessFacet(label),
         vector: Array.from(emb),
         associations: [],
         sourceUri: selected.uri,
