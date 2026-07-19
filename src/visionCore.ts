@@ -2,15 +2,12 @@
 // background task (headlessVision.ts / backgroundTask.ts). Nothing here imports
 // React or any react-native-executorch HOOK, so it can run in a background JS
 // context with no component tree.
-import { GEMMA4_E2B_MM, LFM2_5_VL_450M_QUANTIZED } from 'react-native-executorch';
+import { LFM2_5_VL_1_6B_QUANTIZED } from 'react-native-executorch';
 
 import type { NativePower } from '../modules/memeget-bg';
 
-export type VisionQuality = 'fast' | 'max';
-
 // Persisted-setting keys, shared so the provider and the headless task read the
 // exact same values out of the SQLite key/value store.
-export const QUALITY_KEY = 'vision.quality';
 export const ENABLED_KEY = 'vision.enabled';
 export const BG_ENABLED_KEY = 'vision.bg.enabled';
 export const BG_INTENSITY_KEY = 'vision.bg.intensity';
@@ -18,28 +15,23 @@ export const BG_ONLY_CHARGING_KEY = 'vision.bg.onlyCharging';
 export const BG_PAUSE_HOT_KEY = 'vision.bg.pauseHot';
 export const BG_PAUSE_LOW_KEY = 'vision.bg.pauseLowBattery';
 
-// Gemma ships no recommended sampling settings in the library descriptor, so we
-// pin the same near-greedy config the LFM card recommended — this is a cataloging
-// task, not creative writing, and low temperature keeps the four-line format tight.
-const GEMMA_GENERATION_CONFIG = {
+// LFM2.5-VL ships no recommended sampling settings in the library descriptor, so
+// we pin a near-greedy config — this is a cataloging task, not creative writing,
+// and low temperature keeps the four-line format tight.
+const VLM_GENERATION_CONFIG = {
   temperature: 0.1,
   minP: 0.15,
   repetitionPenalty: 1.05,
 } as const;
 
-// fast → LFM2.5-VL 450M (small, snappy — for weaker devices or huge backlogs) ·
-// max → Gemma 4 E2B multimodal (the default: much sharper captions/tags and far
-// better meme-culture knowledge, at a bigger download + slower generation).
-// Each entry is a complete ExecuTorch model descriptor (source + tokenizer +
-// capabilities). On Android the Gemma binary runs on the Vulkan (GPU) backend;
-// LFM stays on XNNPACK (CPU).
-export const MODEL = {
-  fast: LFM2_5_VL_450M_QUANTIZED,
-  max: { ...GEMMA4_E2B_MM, generationConfig: GEMMA_GENERATION_CONFIG },
-} as const;
-
-// Fresh installs (no persisted choice) get Gemma.
-export const DEFAULT_QUALITY: VisionQuality = 'max';
+// The single on-device VLM: LFM2.5-VL 1.6B multimodal (SigLIP2 vision encoder +
+// LFM2 backbone), on the XNNPACK backend. A complete ExecuTorch descriptor
+// (source + tokenizer + capabilities) plus the generation config above. One
+// model, no user-facing tiers: the app's job is to feel like magic, not to make
+// people choose a model. Enrichment only — CLIP stays the fast embedding /
+// similarity / teach-by-example backbone; this reads each meme and writes back a
+// human caption, the literal text, and open-vocabulary tags CLIP can't produce.
+export const MODEL = { ...LFM2_5_VL_1_6B_QUANTIZED, generationConfig: VLM_GENERATION_CONFIG } as const;
 
 // Never hammer the accelerator faster than this between items, even at Extreme.
 export const MIN_BG_INTERVAL_MS = 1200;
