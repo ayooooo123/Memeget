@@ -1038,6 +1038,63 @@ export async function getLibraryTagLabels(limit = 40): Promise<string[]> {
     .map(([label]) => label);
 }
 
+// Full per-meme records for a shareable collection export: metadata + tags +
+// embeddings, plus the uris the caller needs to attach the images. Whole
+// indexed library, so it's one artifact instead of juggling tag + image dumps.
+export interface CollectionRecord {
+  id: number;
+  uri: string;
+  thumbUri: string;
+  name: string;
+  kind: MediaKind;
+  caption: string;
+  ocrText: string;
+  transcript: string;
+  tags: Tag[];
+  extraTerms: string;
+  embedding: number[] | null;
+  captionEmbedding: number[] | null;
+}
+
+export async function getCollectionRecords(): Promise<CollectionRecord[]> {
+  const db = await getDb();
+  const rows = await db.getAllAsync<{
+    id: number;
+    uri: string;
+    thumb_uri: string;
+    name: string;
+    kind: MediaKind;
+    caption: string;
+    ocr_text: string;
+    transcript: string;
+    tags: string;
+    extra_terms: string;
+    embedding: Uint8Array;
+    caption_embedding: Uint8Array | null;
+  }>(
+    `SELECT id, uri, thumb_uri, name, kind, caption, ocr_text, transcript, tags,
+            extra_terms, embedding, caption_embedding
+     FROM memes WHERE pending = 0 ORDER BY id`
+  );
+  return rows.map((r) => ({
+    id: r.id,
+    uri: r.uri,
+    thumbUri: r.thumb_uri ?? '',
+    name: r.name,
+    kind: r.kind,
+    caption: r.caption ?? '',
+    ocrText: r.ocr_text ?? '',
+    transcript: r.transcript ?? '',
+    tags: safeParseTags(r.tags),
+    extraTerms: r.extra_terms ?? '',
+    embedding: r.embedding && r.embedding.byteLength ? Array.from(blobToVec(r.embedding)) : null,
+    captionEmbedding:
+      r.caption_embedding && r.caption_embedding.byteLength
+        ? Array.from(blobToVec(r.caption_embedding))
+        : null,
+  }));
+}
+
 // Export the model-produced tags per described meme, for the facet-coverage
 // prompt-tuning loop (drop into tools/eval/described.json, run `npm run
 // coverage`). Only the VLM's OWN tags (source 'vision') — that's what the

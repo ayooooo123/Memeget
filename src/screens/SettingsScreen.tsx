@@ -3,6 +3,7 @@ import { Alert, Linking, Pressable, ScrollView, StyleSheet, Switch, Text, View }
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
+import { manipulateAsync, SaveFormat } from 'expo-image-manipulator';
 
 import { showToast } from '../components/Toast';
 import { Button, Chip, ProgressBar, Slider, StatusDot } from '../components/ui';
@@ -22,6 +23,8 @@ import {
   deleteExemplarsByPack,
   getExemplars,
   exportDescribedTags,
+  getCollectionRecords,
+  type CollectionRecord,
   getFolders,
   getImportedPacks,
   getIndexErrors,
@@ -52,6 +55,7 @@ import {
 import { importMemesFromZip, type ZipImportPhase } from '../zipImport';
 import { MEME_LABELS } from '../memeLabels';
 import { buildPack, parsePack, serializePack } from '../teachingPack';
+import { buildCollectionZip } from '../collectionExport';
 import { colors, radius, space, TABBAR_CLEARANCE } from '../theme';
 import type { LinkedFolder } from '../types';
 
@@ -279,6 +283,62 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
           dialogTitle: 'Export described tags',
           UTI: 'public.json',
         });
+      } else {
+        showToast(`Saved to ${path}`, 'info');
+      }
+      success();
+    } catch (e) {
+      showToast(`Export failed: ${String(e)}`, 'error');
+    } finally {
+      setTransferBusy(false);
+    }
+  }, [transferBusy]);
+
+  // Export the whole collection as a ZIP: manifest.json (tags + caption + OCR +
+  // embeddings per meme) plus images/<id>.jpg. One artifact carrying everything
+  // needed to re-run tagging, score coverage, and rebuild the eval set.
+  const onExportCollection = useCallback(async () => {
+    if (transferBusy) return;
+    setTransferBusy(true);
+    try {
+      const records = await getCollectionRecords();
+      if (records.length === 0) {
+        showToast('Nothing indexed yet', 'info');
+        return;
+      }
+      // Images: downscale to ~640px via the manipulator (handles content:// SAF
+      // uris); videos fall back to their stored poster. A failure just drops
+      // that one image — metadata is always kept.
+      const loadImage = async (r: CollectionRecord): Promise<string | null> => {
+        if (r.kind === 'image') {
+          try {
+            const out = await manipulateAsync(r.uri, [{ resize: { width: 640 } }], {
+              compress: 0.8,
+              format: SaveFormat.JPEG,
+              base64: true,
+            });
+            if (out.base64) return out.base64;
+          } catch {
+            // fall through to poster
+          }
+        }
+        if (r.thumbUri) {
+          try {
+            return await FileSystem.readAsStringAsync(r.thumbUri, {
+              encoding: FileSystem.EncodingType.Base64,
+            });
+          } catch {
+            return null;
+          }
+        }
+        return null;
+      };
+      const b64 = await buildCollectionZip(records, loadImage, Date.now());
+      const stamp = new Date().toISOString().slice(0, 10);
+      const path = `${FileSystem.cacheDirectory}memeget-collection-${stamp}.zip`;
+      await FileSystem.writeAsStringAsync(path, b64, { encoding: FileSystem.EncodingType.Base64 });
+      if (await Sharing.isAvailableAsync()) {
+        await Sharing.shareAsync(path, { mimeType: 'application/zip', dialogTitle: 'Export collection' });
       } else {
         showToast(`Saved to ${path}`, 'info');
       }
@@ -1049,6 +1109,21 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
           icon="⇪"
           label="Export described tags"
           onPress={onExportDescribedTags}
+          disabled={transferBusy}
+          style={styles.transferBtn}
+        />
+
+        <View style={styles.divider} />
+        <Text style={styles.note}>
+          Export the whole collection as a <Text style={styles.noteStrong}>zip</Text> — every meme's
+          image plus its tags, caption, and embeddings in one file to share.
+        </Text>
+        <Button
+          small
+          variant="secondary"
+          icon="🗜"
+          label="Export collection (zip)"
+          onPress={onExportCollection}
           disabled={transferBusy}
           style={styles.transferBtn}
         />
