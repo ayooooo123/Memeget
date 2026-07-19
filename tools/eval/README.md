@@ -98,8 +98,9 @@ meme's image against every label vector and reports top-1/3/5 + MRR
 const t = evaluateTagging(golden);   // { n, labels, recallAt1/3/5, mrr }
 ```
 
-Baseline on the current 180-meme / 24-format golden set: **top-1 15%, top-3 30%,
-top-5 38%, MRR 0.29** — the number a labels/prompt change has to beat.
+Baseline on the current 180-meme / 24-format golden set (MobileCLIP-S2, the app's
+real model): **top-1 33%, top-3 42%, top-5 47%, MRR 0.41** — the number a
+labels/prompt change has to beat.
 
 ## Aspect search (single-word queries — how the app is really searched)
 
@@ -131,9 +132,10 @@ const a = evaluateAspectSearch(golden);   // { n, avgRelevant, precisionAt5, rec
 
 Two modes: the default runs through the lexical `searchText` channel; `{ lexical:
 false }` is **dense-only** (image + caption, no text match). The gap is the
-finding — on the real set MAP is **0.835 with text** vs **0.084 dense-only**:
-single-word aspect search rides almost entirely on the aspect word being written
-into the meme's tags. **So tag generation is the dominant lever**, which is what
+finding — on the real set (MobileCLIP-S2) MAP is **0.841 with text** vs **0.239
+dense-only**: single-word aspect search rides mostly on the aspect word being
+written into the meme's tags (dense image/caption understanding recovers ~¼ of it
+on its own). **So tag generation is the dominant lever**, which is what
 the loop below tunes.
 
 ## VLM prompt-tuning loop (facet coverage)
