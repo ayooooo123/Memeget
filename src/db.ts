@@ -2,6 +2,7 @@ import * as SQLite from 'expo-sqlite';
 
 import { modelStamp, PRIMARY_EMBEDDING_MODEL, VISUAL_EMBEDDING_MODEL } from './embeddingModels';
 import { scoreEntry } from './searchCore';
+import { assembleSearchText } from './searchText';
 import {
   ensureSearchIndex,
   invalidateSearchIndex,
@@ -1108,22 +1109,18 @@ const SEARCH_CHUNK = 512;
 // "prompt", …) the way matching against the raw JSON string would give.
 const TAG_LABEL_RE = /"label":"((?:[^"\\]|\\.)*)"/g;
 function rowSearchText(row: MemeRow): string {
-  let labels = '';
+  const tagLabels: string[] = [];
   TAG_LABEL_RE.lastIndex = 0;
   let m: RegExpExecArray | null;
-  while ((m = TAG_LABEL_RE.exec(row.tags ?? ''))) labels += ' ' + m[1];
-  return (
-    row.ocr_text +
-    ' ' +
-    row.name +
-    ' ' +
-    (row.caption ?? '') +
-    ' ' +
-    (row.transcript ?? '') +
-    labels +
-    ' ' +
-    (row.extra_terms ?? '')
-  ).toLowerCase();
+  while ((m = TAG_LABEL_RE.exec(row.tags ?? ''))) tagLabels.push(m[1]);
+  return assembleSearchText({
+    ocr: row.ocr_text,
+    name: row.name,
+    caption: row.caption ?? '',
+    transcript: row.transcript ?? '',
+    tagLabels,
+    extraTerms: row.extra_terms ?? '',
+  });
 }
 
 // Materialize only the winners: rowToRecord JSON.parses every meme's tags, and
