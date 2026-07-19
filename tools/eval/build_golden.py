@@ -83,62 +83,69 @@ def meme_image_url(m):
     return (imgs or urls or [None])[0]
 
 
-# Keys that hold a meme's freeform aspect tags. memedepot's exact field name is
-# unknown and the value may be a bare string, a list, or a list of tag OBJECTS
-# ({name|title|slug|...}) — the same shape the harvester's jsonTerm() handles.
-TAG_KEYS = ("tags", "categories", "topics", "labels", "keywords", "hashtags")
-
-
-def _json_term(v):
-    """Pull a display string out of a tag value that may be a string or object."""
-    if isinstance(v, str):
-        return v
-    if isinstance(v, dict):
-        for k in ("name", "title", "label", "slug", "tag", "text", "value"):
-            if isinstance(v.get(k), str) and v[k].strip():
-                return v[k]
-    return ""
+# memedepot has ALREADY dissected each meme with AI. The per-meme object exposes:
+#   tags             — user tags (usually empty)
+#   extracted_labels — ML vision labels: the real per-meme aspects
+#                      ("angry expression", "soccer", "Israeli flag", "cartoon")
+#   ai_template_match— the meme format/template name
+#   ai_description   — a full natural-language caption
+#   ai_cultural_context — what it means / when it's used
+#   extracted_text   — OCR lines
+# The aspect ground truth comes from the label-ish fields; the caption/OCR feed
+# the lexical + dense text channels.
+ASPECT_FIELDS = ("tags", "extracted_labels")
+FORMAT_FIELD = "ai_template_match"
 
 
 def norm_tag(s):
     """Lowercase, de-slug, collapse whitespace; drop junk. Mirrors how the app's
     searchText is normalized (lowercased) so a query 'smug' matches 'Smug'."""
-    t = _json_term(s).replace("-", " ").replace("_", " ").strip().lower()
-    t = " ".join(t.split())
+    if not isinstance(s, str):
+        return ""
+    t = " ".join(s.replace("-", " ").replace("_", " ").strip().lower().split())
     if len(t) < 3 or len(t) > 40:
         return ""
-    if t.split()[0] and len(t.split()) > 5:  # tags are short phrases, not sentences
+    if len(t.split()) > 5:  # tags are short phrases, not sentences
         return ""
     return t
 
 
-def _walk_tags(obj, out):
-    """Collect normalized tag strings from any tag-ish key, anywhere in the meme."""
-    if isinstance(obj, dict):
-        for k, v in obj.items():
-            if k.lower() in TAG_KEYS:
-                vals = v if isinstance(v, list) else [v]
-                for item in vals:
-                    t = norm_tag(item)
-                    if t:
-                        out.append(t)
-            else:
-                _walk_tags(v, out)
-    elif isinstance(obj, list):
-        for v in obj:
-            _walk_tags(v, out)
+def _str_list(v):
+    """Coerce a field into a list of strings (handles str, list, or absent)."""
+    if isinstance(v, str):
+        return [v]
+    if isinstance(v, list):
+        return [x for x in v if isinstance(x, str)]
+    return []
 
 
 def meme_tags(m):
-    """Deduped, order-preserving list of a meme's aspect tags."""
-    found = []
-    _walk_tags(m, found)
+    """Deduped, order-preserving aspect tags from the AI-extracted fields."""
+    raw = []
+    for f in ASPECT_FIELDS:
+        raw += _str_list(m.get(f))
+    fmt = m.get(FORMAT_FIELD)
+    if isinstance(fmt, str):
+        raw.append(fmt)
     seen, uniq = set(), []
-    for t in found:
-        if t not in seen:
+    for s in raw:
+        t = norm_tag(s)
+        if t and t not in seen:
             seen.add(t)
             uniq.append(t)
     return uniq
+
+
+def meme_caption(m):
+    """memedepot's AI caption (+ cultural context) — a real description, so the
+    caption channel measures something independent of the depot-name query."""
+    parts = [m.get("ai_description"), m.get("ai_cultural_context")]
+    return " ".join(p for p in parts if isinstance(p, str) and p.strip()).strip()
+
+
+def meme_ocr(m):
+    """OCR text lines memedepot already extracted."""
+    return " ".join(_str_list(m.get("extracted_text"))).strip()
 
 
 def main():
@@ -200,8 +207,9 @@ def main():
         if items and not getattr(main, "_dumped", False):
             main._dumped = True
             print(f"  [diag] first meme keys: {list(items[0].keys())}")
-            print(f"  [diag] first meme sample: {json.dumps(items[0])[:500]}")
             print(f"  [diag] first meme tags: {meme_tags(items[0])}")
+            print(f"  [diag] first meme caption: {meme_caption(items[0])[:160]!r}")
+            print(f"  [diag] first meme ocr: {meme_ocr(items[0])[:120]!r}")
         got = 0
         for m in items:
             if got >= args.per_depot:
@@ -214,13 +222,17 @@ def main():
                 img = Image.open(io.BytesIO(r.content)).convert("RGB")
                 mid = f"{slug}:{m.get('id', got)}"
                 tags = meme_tags(m)
-                # searchText = the lexical haystack the app builds (name + tags),
-                # lowercased exactly like db.ts's rowSearchText, so single-word
-                # queries hit it via scoreEntry's .includes().
-                search_text = (name + " " + " ".join(tags)).lower()
-                # captionVec = CLIP text vector of the meme's described text
-                # (name + tags) — the app's caption/tag text channel.
-                cap_src = name if not tags else f"{name}. {', '.join(tags)}"
+                caption = meme_caption(m)
+                ocr = meme_ocr(m)
+                title = m.get("title") if isinstance(m.get("title"), str) else ""
+                # searchText = the lexical haystack the app builds (ocr + name +
+                # caption + tags), lowercased exactly like db.ts's rowSearchText,
+                # so single-word queries hit it via scoreEntry's .includes().
+                search_text = " ".join([ocr, title, name, caption, " ".join(tags)]).lower()
+                # captionVec = CLIP text vector of the meme's REAL description
+                # (memedepot's AI caption), independent of the depot-name query so
+                # the dense text channel isn't just grading its own hint.
+                cap_src = caption or (f"{name}. {', '.join(tags)}" if tags else name)
                 memes.append({
                     "id": mid,
                     "imageVec": [round(x, 5) for x in embed_image(img)],
