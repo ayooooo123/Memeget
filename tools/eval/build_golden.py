@@ -2,12 +2,20 @@
 """Build a real search-quality golden set for the eval harness (src/evalCore.ts).
 
 The harness ranks a golden set with the app's own scoreEntry and reports
-Recall@k / MRR — but it needs PRECOMPUTED CLIP vectors, which can't be produced
-in the dev sandbox (no torch, Hugging Face egress-blocked). This script runs
-where CLIP works (CI or Colab): it pulls real memes from memedepot's depots,
-embeds each image + a query with **CLIP ViT-B/32** (the same space the app ships
-via react-native-executorch), and writes `golden.json` in the schema evalCore
-consumes.
+Recall@k / MRR — but it needs PRECOMPUTED vectors in the SAME embedding space the
+app ships, which can't be produced in the dev sandbox (no torch, Hugging Face
+egress-blocked). This script runs where the model works (CI or Colab): it pulls
+real memes from memedepot's depots, embeds each image + a query with
+**MobileCLIP-S2** (`PRIMARY_EMBEDDING_MODEL` — the model the app actually runs
+on-device via react-native-executorch; a teaching-pack export confirmed the
+shipped model is `mobileclip-s2`, dim 512), and writes `golden.json` in the
+schema evalCore consumes.
+
+We use open_clip's MobileCLIP-S2 / datacompdr checkpoint (Apple's official
+weights) as the reproducible stand-in for the app's executorch export. It's the
+correct SPACE — exact parity with the on-device export isn't guaranteed, but it's
+vastly closer than the old ViT-B/32 build, whose vectors were a different model
+entirely and made the eval measure the wrong space.
 
 The eval it encodes: "does searching a format's NAME retrieve that format's
 memes?" — each depot contributes memes (expected results) and its name (the
@@ -17,7 +25,7 @@ PRIVACY: writes vectors + ids only, never the images. Images are downloaded to a
 temp dir and discarded.
 
 Usage (CI or Colab):
-    pip install open_clip_torch torch pillow requests
+    pip install open_clip_torch timm torch pillow requests
     python build_golden.py --out golden.json --depots 25 --per-depot 8
 """
 import argparse, json, io, os, sys, time, urllib.parse
@@ -160,9 +168,9 @@ def main():
     args = ap.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"loading CLIP ViT-B/32 (openai) on {device}…")
-    model, _, preprocess = open_clip.create_model_and_transforms("ViT-B-32", pretrained="openai")
-    tokenizer = open_clip.get_tokenizer("ViT-B-32")
+    print(f"loading MobileCLIP-S2 (datacompdr) on {device}…")
+    model, _, preprocess = open_clip.create_model_and_transforms("MobileCLIP-S2", pretrained="datacompdr")
+    tokenizer = open_clip.get_tokenizer("MobileCLIP-S2")
     model = model.to(device).eval()
 
     def embed_image(img):
@@ -266,7 +274,7 @@ def main():
         })
     print(f"\naspect queries: {len(aspects)} (from {len(tag_memes)} distinct tags)")
 
-    out = {"model": "clip-vit-base-patch32", "memes": memes, "queries": queries, "aspects": aspects}
+    out = {"model": "mobileclip-s2", "memes": memes, "queries": queries, "aspects": aspects}
     with open(args.out, "w") as f:
         json.dump(out, f)
     print(f"wrote {len(memes)} memes / {len(queries)} queries / {len(aspects)} aspects → {args.out}")

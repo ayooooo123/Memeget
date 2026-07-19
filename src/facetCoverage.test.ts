@@ -4,7 +4,7 @@
 
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { tagFacets, facetCoverage, formatCoverage, type DescribedMeme } from './facetCoverage';
+import { tagFacets, guessFacet, facetCoverage, formatCoverage, type DescribedMeme } from './facetCoverage';
 
 describe('tagFacets', () => {
   it('routes a tag into the facet its meaning belongs to', () => {
@@ -26,6 +26,26 @@ describe('tagFacets', () => {
   it('returns nothing for a tag that matches no known facet vocabulary', () => {
     expect(tagFacets('qwzxlkjh')).toEqual([]);
     expect(tagFacets('')).toEqual([]);
+  });
+});
+
+describe('guessFacet (categorize a teaching from its label)', () => {
+  it('files real teachings into their true facet, not always character', () => {
+    // Straight from the user's teaching pack, which the app had filed as
+    // "character" for all of these:
+    expect(guessFacet('Waving')).toBe('action');
+    expect(guessFacet('Excited')).toBe('emotion');
+    expect(guessFacet('Greentext')).toBe('format');
+    expect(guessFacet('Pepe')).toBe('character');
+  });
+
+  it('prefers the identity facet when a label reads as several', () => {
+    expect(guessFacet('smug pepe')).toBe('character'); // character wins over emotion
+  });
+
+  it('falls back to character for an unknown proper noun', () => {
+    expect(guessFacet('Zorblax')).toBe('character');
+    expect(guessFacet('Zorblax', 'topic')).toBe('topic'); // caller can override
   });
 });
 

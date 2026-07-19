@@ -45,6 +45,8 @@ const FACET_LEXICON: Partial<Record<LabelCategory, string[]>> = {
     'laughing', 'crying', 'screaming', 'yelling', 'pointing', 'staring', 'sipping',
     'flexing', 'hugging', 'falling', 'jumping', 'typing', 'sleeping', 'reading',
     'driving', 'fighting', 'hiding', 'chasing', 'waving', 'nodding', 'shrugging',
+    // seen in real teachings the app was mis-filing as "character":
+    'thinking', 'drooling', 'smiling', 'clapping', 'kneeling',
   ],
   situation: [
     'procrastinating', 'procrastination', 'avoiding', 'arguing', 'waiting', 'failing',
@@ -111,6 +113,30 @@ export function tagFacets(tag: string): LabelCategory[] {
     if (wordHit || phraseHit) out.push(f);
   }
   return out;
+}
+
+// Best single facet for a label — used to categorize a teaching/exemplar from
+// its text instead of assuming everything is a character. Identity facets win
+// over aspect facets when a label matches several (a named character that also
+// reads as an emotion is filed as the character); unknown labels keep the
+// caller's fallback.
+const FACET_PRIORITY: LabelCategory[] = [
+  'character',
+  'person',
+  'format',
+  'action',
+  'object',
+  'setting',
+  'situation',
+  'emotion',
+  'tone',
+  'topic',
+];
+
+export function guessFacet(label: string, fallback: LabelCategory = 'character'): LabelCategory {
+  const hits = new Set(tagFacets(label));
+  for (const f of FACET_PRIORITY) if (hits.has(f)) return f;
+  return fallback;
 }
 
 export interface DescribedMeme {

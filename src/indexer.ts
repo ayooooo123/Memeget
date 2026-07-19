@@ -39,6 +39,9 @@ import {
   markVisionFailed,
   markVisualEmbeddingFailed,
   migrateStaleExemplars,
+  refacetExemplars,
+  getSetting,
+  setSetting,
   putLabelVector,
   setMemeCaptionEmbedding,
   setMemeThumb,
@@ -579,6 +582,15 @@ export async function runIndex(
   opts.onProgress?.({ processed: total, total, added, current: 'migrating taught examples…' });
   const { migrated } = await migrateStaleExemplars().catch(() => ({ migrated: 0 }));
 
+  // One-time: re-file exemplars the old teach flow blanket-tagged as 'character'
+  // into their real facet (Waving→action, Excited→emotion, …). Guarded so it
+  // runs once; new teachings already infer their facet at save time.
+  if ((await getSetting(REFACET_EXEMPLARS_KEY).catch(() => null)) !== '1') {
+    await refacetExemplars()
+      .then(() => setSetting(REFACET_EXEMPLARS_KEY, '1'))
+      .catch(() => {});
+  }
+
   // Reclaim posters whose meme rows are gone (deleted memes, a cleared+rebuilt
   // index). Cheap set-difference over one small directory.
   try {
@@ -935,6 +947,10 @@ interface VisionPayload {
 // matches. The OCR check is what makes this SAFE for memes: the same template
 // with different top-text has a high visual cosine but different text, so it is
 // NOT merged — its caption genuinely differs.
+// One-time flag: existing exemplars have been re-filed off the legacy blanket
+// 'character' category into their inferred facet.
+const REFACET_EXEMPLARS_KEY = 'exemplars.refaceted.v1';
+
 const DUP_COSINE = 0.99;
 const normText = (s: string) => s.toLowerCase().replace(/\s+/g, ' ').trim();
 
