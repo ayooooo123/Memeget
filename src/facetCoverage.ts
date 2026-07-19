@@ -46,7 +46,7 @@ const FACET_LEXICON: Partial<Record<LabelCategory, string[]>> = {
     'flexing', 'hugging', 'falling', 'jumping', 'typing', 'sleeping', 'reading',
     'driving', 'fighting', 'hiding', 'chasing', 'waving', 'nodding', 'shrugging',
     // seen in real teachings the app was mis-filing as "character":
-    'thinking', 'drooling', 'smiling', 'clapping', 'kneeling',
+    'thinking', 'drooling', 'smiling', 'clapping', 'kneeling', 'shushing',
   ],
   situation: [
     'procrastinating', 'procrastination', 'avoiding', 'arguing', 'waiting', 'failing',
@@ -59,7 +59,7 @@ const FACET_LEXICON: Partial<Record<LabelCategory, string[]>> = {
     'quitting', 'escaping', 'dodging', 'hiding', 'refusing', 'denying', 'bragging',
     'showing off', 'messing up', 'no messages', "can't reply", 'cant reply', 'slow down',
     'self-affirmation', 'asserting', 'sleep deprivation', 'no explanation', 'wanting',
-    'be quiet', 'shushing', 'keep it a secret', 'keep quiet',
+    'be quiet', 'keep it a secret', 'keep quiet',
   ],
   tone: [
     'ironic', 'irony', 'sarcastic', 'sarcasm', 'absurd', 'surreal', 'wholesome', 'dark',
