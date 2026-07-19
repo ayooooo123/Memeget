@@ -83,12 +83,73 @@ def meme_image_url(m):
     return (imgs or urls or [None])[0]
 
 
+# Keys that hold a meme's freeform aspect tags. memedepot's exact field name is
+# unknown and the value may be a bare string, a list, or a list of tag OBJECTS
+# ({name|title|slug|...}) — the same shape the harvester's jsonTerm() handles.
+TAG_KEYS = ("tags", "categories", "topics", "labels", "keywords", "hashtags")
+
+
+def _json_term(v):
+    """Pull a display string out of a tag value that may be a string or object."""
+    if isinstance(v, str):
+        return v
+    if isinstance(v, dict):
+        for k in ("name", "title", "label", "slug", "tag", "text", "value"):
+            if isinstance(v.get(k), str) and v[k].strip():
+                return v[k]
+    return ""
+
+
+def norm_tag(s):
+    """Lowercase, de-slug, collapse whitespace; drop junk. Mirrors how the app's
+    searchText is normalized (lowercased) so a query 'smug' matches 'Smug'."""
+    t = _json_term(s).replace("-", " ").replace("_", " ").strip().lower()
+    t = " ".join(t.split())
+    if len(t) < 3 or len(t) > 40:
+        return ""
+    if t.split()[0] and len(t.split()) > 5:  # tags are short phrases, not sentences
+        return ""
+    return t
+
+
+def _walk_tags(obj, out):
+    """Collect normalized tag strings from any tag-ish key, anywhere in the meme."""
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if k.lower() in TAG_KEYS:
+                vals = v if isinstance(v, list) else [v]
+                for item in vals:
+                    t = norm_tag(item)
+                    if t:
+                        out.append(t)
+            else:
+                _walk_tags(v, out)
+    elif isinstance(obj, list):
+        for v in obj:
+            _walk_tags(v, out)
+
+
+def meme_tags(m):
+    """Deduped, order-preserving list of a meme's aspect tags."""
+    found = []
+    _walk_tags(m, found)
+    seen, uniq = set(), []
+    for t in found:
+        if t not in seen:
+            seen.add(t)
+            uniq.append(t)
+    return uniq
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default="golden.json")
     ap.add_argument("--depots", type=int, default=25, help="how many depots to sample")
     ap.add_argument("--per-depot", type=int, default=8, help="memes per depot")
     ap.add_argument("--delay", type=float, default=1.0)
+    ap.add_argument("--min-tag-memes", type=int, default=3,
+                    help="a tag becomes an aspect query only if >= this many memes carry it")
+    ap.add_argument("--max-aspects", type=int, default=80, help="cap on aspect (single-word) queries")
     args = ap.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -122,6 +183,7 @@ def main():
     print(f"depots: {len(depots)}")
 
     memes, queries = [], []
+    tag_memes = {}  # normalized tag -> list of meme ids that carry it (aspect ground truth)
     for d in depots:
         slug = d.get("slug")
         name = depot_name(d)
@@ -139,6 +201,7 @@ def main():
             main._dumped = True
             print(f"  [diag] first meme keys: {list(items[0].keys())}")
             print(f"  [diag] first meme sample: {json.dumps(items[0])[:500]}")
+            print(f"  [diag] first meme tags: {meme_tags(items[0])}")
         got = 0
         for m in items:
             if got >= args.per_depot:
@@ -150,18 +213,51 @@ def main():
                 r = requests.get(url, headers={"User-Agent": UA}, timeout=25)
                 img = Image.open(io.BytesIO(r.content)).convert("RGB")
                 mid = f"{slug}:{m.get('id', got)}"
-                memes.append({"id": mid, "imageVec": [round(x, 5) for x in embed_image(img)], "searchText": name})
+                tags = meme_tags(m)
+                # searchText = the lexical haystack the app builds (name + tags),
+                # lowercased exactly like db.ts's rowSearchText, so single-word
+                # queries hit it via scoreEntry's .includes().
+                search_text = (name + " " + " ".join(tags)).lower()
+                # captionVec = CLIP text vector of the meme's described text
+                # (name + tags) — the app's caption/tag text channel.
+                cap_src = name if not tags else f"{name}. {', '.join(tags)}"
+                memes.append({
+                    "id": mid,
+                    "imageVec": [round(x, 5) for x in embed_image(img)],
+                    "captionVec": [round(x, 5) for x in embed_text(cap_src)],
+                    "searchText": search_text,
+                    "tags": tags,
+                })
                 queries.append({"query": name, "queryVec": [round(x, 5) for x in embed_text(name)], "expectedId": mid})
+                for t in tags:
+                    tag_memes.setdefault(t, []).append(mid)
                 got += 1
             except Exception as e:
                 print(f"  ! image {url[:60]}: {e}")
         print(f"  {name}: {got} memes")
         time.sleep(args.delay)
 
-    out = {"model": "clip-vit-base-patch32", "memes": memes, "queries": queries}
+    # Aspect (single-word) queries: every tag carried by >= min-tag-memes memes
+    # becomes a query whose relevant set is exactly those memes. This is the
+    # "type one word, find the memes with that aspect" benchmark.
+    aspects = []
+    common = sorted(
+        ((t, ids) for t, ids in tag_memes.items() if len(ids) >= args.min_tag_memes),
+        key=lambda kv: len(kv[1]),
+        reverse=True,
+    )[: args.max_aspects]
+    for t, ids in common:
+        aspects.append({
+            "query": t,
+            "queryVec": [round(x, 5) for x in embed_text(t)],
+            "relevantIds": ids,
+        })
+    print(f"\naspect queries: {len(aspects)} (from {len(tag_memes)} distinct tags)")
+
+    out = {"model": "clip-vit-base-patch32", "memes": memes, "queries": queries, "aspects": aspects}
     with open(args.out, "w") as f:
         json.dump(out, f)
-    print(f"\nwrote {len(memes)} memes / {len(queries)} queries → {args.out}")
+    print(f"wrote {len(memes)} memes / {len(queries)} queries / {len(aspects)} aspects → {args.out}")
     if not memes:
         print("NO DATA — check meme_image_url() against a sample /api/memes response.", file=sys.stderr)
         sys.exit(1)

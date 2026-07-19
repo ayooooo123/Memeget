@@ -32,9 +32,21 @@ export interface EvalQuery {
   terms?: string[]; // lowercased lexical terms; defaults to splitting `query`
 }
 
+// One single-word (or short) aspect query: "smug", "crying", "pointing",
+// "wojak". Unlike EvalQuery it has a *set* of correct answers — every meme that
+// carries that aspect — because that's how you actually search: one word, many
+// valid hits. relevantIds is that set (from memedepot's per-meme tags).
+export interface AspectQuery {
+  query: string;
+  queryVec: number[];
+  relevantIds: string[];
+  terms?: string[]; // lowercased lexical terms; defaults to splitting `query`
+}
+
 export interface GoldenSet {
   memes: EvalMeme[];
   queries: EvalQuery[];
+  aspects?: AspectQuery[]; // single-word aspect-search set (optional; older golden sets omit it)
 }
 
 export interface RankedHit {
@@ -120,4 +132,165 @@ export function regressions(
     out.push(`MRR: ${baseline.mrr.toFixed(3)} → ${candidate.mrr.toFixed(3)}`);
   }
   return out;
+}
+
+// ---- tagging eval -----------------------------------------------------------
+//
+// The dual of retrieval: given a meme IMAGE, does zero-shot classification pick
+// its right FORMAT? This is the metric that responds to label/prompt quality
+// (retrieval doesn't route through labels). Ground truth is free: each golden
+// meme's depot IS its format, and every depot contributes a text vector (its
+// name query), so the depots ARE the label set. We rank a meme against every
+// label vector and check where its own label lands.
+
+function cosine(a: number[], b: number[]): number {
+  let s = 0;
+  const n = Math.min(a.length, b.length);
+  for (let i = 0; i < n; i++) s += a[i] * b[i];
+  return s; // vectors are L2-normalized, so dot == cosine
+}
+
+export interface TaggingMetrics {
+  n: number; // memes classified
+  labels: number; // size of the label set (classes)
+  recallAt1: number; // top label is the right format
+  recallAt3: number;
+  recallAt5: number;
+  mrr: number;
+}
+
+export function evaluateTagging(golden: GoldenSet): TaggingMetrics {
+  // Distinct labels + their text vectors, and each meme's ground-truth label,
+  // both derived from the (query → expected meme) pairs.
+  const labelVec = new Map<string, number[]>();
+  const memeLabel = new Map<string, string>();
+  for (const q of golden.queries) {
+    if (!labelVec.has(q.query)) labelVec.set(q.query, q.queryVec);
+    memeLabel.set(q.expectedId, q.query);
+  }
+  const labels = [...labelVec.entries()];
+
+  const ranks: number[] = [];
+  for (const m of golden.memes) {
+    const expected = memeLabel.get(m.id);
+    if (!expected) continue;
+    const scored = labels
+      .map(([label, vec]) => ({ label, score: cosine(m.imageVec, vec) }))
+      .sort((a, b) => b.score - a.score);
+    const idx = scored.findIndex((s) => s.label === expected);
+    ranks.push(idx === -1 ? Infinity : idx + 1);
+  }
+  const n = ranks.length;
+  const denom = n || 1;
+  const rAt = (k: number) => ranks.filter((r) => r <= k).length / denom;
+  const mrr = ranks.reduce((s, r) => s + (Number.isFinite(r) ? 1 / r : 0), 0) / denom;
+  return { n, labels: labels.length, recallAt1: rAt(1), recallAt3: rAt(3), recallAt5: rAt(5), mrr };
+}
+
+export function formatTagging(m: TaggingMetrics): string {
+  const pct = (x: number) => `${(x * 100).toFixed(1)}%`;
+  return [
+    `memes:     ${m.n}   (over ${m.labels} format labels)`,
+    `top-1:     ${pct(m.recallAt1)}   (right format is #1)`,
+    `top-3:     ${pct(m.recallAt3)}`,
+    `top-5:     ${pct(m.recallAt5)}`,
+    `MRR:       ${m.mrr.toFixed(3)}`,
+  ].join('\n');
+}
+
+// ---- aspect search (single-word queries) ------------------------------------
+//
+// This is the eval that models how the app is ACTUALLY searched: you type one
+// word — an emotion ("smug"), an action ("pointing"), a character ("wojak"), a
+// format — and expect the memes that carry that aspect to surface. It's the
+// direct test of the north star (every aspect of a meme findable by a plain-word
+// description), and unlike retrieval it runs the query through the real lexical
+// `searchText`/`scoreEntry` channel that single words hit — so it's the metric
+// that moves when tags get deeper or a caption/label changes.
+//
+// A single-word query has MANY correct answers (every meme tagged with it), so
+// this is multi-relevant retrieval: we score every meme, then measure how well
+// the relevant set floats to the top with MAP (the standard multi-relevant
+// metric), precision@5 ("are my top 5 actually on-topic"), recall@10, and the
+// reciprocal rank of the first hit.
+
+export interface AspectMetrics {
+  n: number; // aspect queries scored
+  avgRelevant: number; // mean size of the relevant set
+  precisionAt5: number; // of the top 5, fraction that carry the aspect
+  recallAt10: number; // of the relevant memes, fraction landing in the top 10
+  map: number; // mean average precision (the headline multi-relevant metric)
+  mrr: number; // mean reciprocal rank of the first relevant hit
+}
+
+export function evaluateAspectSearch(golden: GoldenSet): AspectMetrics {
+  const aspects = golden.aspects ?? [];
+  const memes = golden.memes;
+  let pSum = 0;
+  let rSum = 0;
+  let apSum = 0;
+  let rrSum = 0;
+  let relSum = 0;
+  let n = 0;
+
+  for (const a of aspects) {
+    const rel = new Set(a.relevantIds);
+    if (rel.size === 0) continue;
+    const terms = a.terms ?? a.query.toLowerCase().split(/\s+/).filter(Boolean);
+    const ranked = memes
+      .map((m) => ({
+        id: m.id,
+        score: scoreEntry(a.queryVec, terms, {
+          imageVec: m.imageVec,
+          captionVec: m.captionVec ?? null,
+          searchText: m.searchText ?? '',
+        }),
+      }))
+      .sort((x, y) => y.score - x.score);
+
+    const top5 = ranked.slice(0, 5).filter((h) => rel.has(h.id)).length;
+    const top10 = ranked.slice(0, 10).filter((h) => rel.has(h.id)).length;
+
+    // Average precision: precision sampled at each relevant hit, averaged over
+    // the relevant set — rewards ranking ALL the on-topic memes high, not just one.
+    let hits = 0;
+    let ap = 0;
+    let firstRank = Infinity;
+    ranked.forEach((h, i) => {
+      if (rel.has(h.id)) {
+        hits++;
+        ap += hits / (i + 1);
+        if (firstRank === Infinity) firstRank = i + 1;
+      }
+    });
+    ap /= rel.size;
+
+    pSum += top5 / 5;
+    rSum += top10 / rel.size;
+    apSum += ap;
+    rrSum += Number.isFinite(firstRank) ? 1 / firstRank : 0;
+    relSum += rel.size;
+    n++;
+  }
+
+  const d = n || 1;
+  return {
+    n,
+    avgRelevant: relSum / d,
+    precisionAt5: pSum / d,
+    recallAt10: rSum / d,
+    map: apSum / d,
+    mrr: rrSum / d,
+  };
+}
+
+export function formatAspect(m: AspectMetrics): string {
+  const pct = (x: number) => `${(x * 100).toFixed(1)}%`;
+  return [
+    `queries:   ${m.n}   (avg ${m.avgRelevant.toFixed(1)} relevant memes each)`,
+    `MAP:       ${m.map.toFixed(3)}   (headline: relevant memes ranked high)`,
+    `Prec@5:    ${pct(m.precisionAt5)}   (top 5 actually on-topic)`,
+    `Recall@10: ${pct(m.recallAt10)}`,
+    `MRR:       ${m.mrr.toFixed(3)}   (first on-topic hit)`,
+  ].join('\n');
 }
