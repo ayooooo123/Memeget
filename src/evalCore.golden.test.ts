@@ -47,6 +47,14 @@ describe('eval harness — real golden set', () => {
       const aspect = evaluateAspectSearch(golden);
       console.log(`\n--- aspect search (single-word, ${aspect.n} queries) ---\n${formatAspect(aspect)}\n`);
       expect(aspect.n).toBeGreaterThan(0);
+
+      // Leak-free: dense-only (image + AI caption), no lexical searchText hit.
+      // The gap vs. the run above = how much we lean on the exact tag being
+      // written into the text vs. genuine visual/caption understanding.
+      const dense = evaluateAspectSearch(golden, { lexical: false });
+      console.log(
+        `\n--- aspect search — DENSE ONLY (leak-free: image + caption, no text match) ---\n${formatAspect(dense)}\n`
+      );
     } else {
       console.log(
         '\n[eval] this golden set has no aspects[] (per-meme tags) yet — re-run the ' +

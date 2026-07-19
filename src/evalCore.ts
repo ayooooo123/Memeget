@@ -223,7 +223,20 @@ export interface AspectMetrics {
   mrr: number; // mean reciprocal rank of the first relevant hit
 }
 
-export function evaluateAspectSearch(golden: GoldenSet): AspectMetrics {
+// `lexical: false` runs the query through the DENSE channel only (image +
+// caption cosine), with no lexical `searchText` term matching. This is the
+// leak-free aspect test: the golden set writes each meme's ground-truth aspect
+// labels into `searchText`, so the default (lexical) run partly grades a word
+// that's literally in the haystack. Dense-only asks the harder, honest question
+// — is the aspect findable from the IMAGE + AI CAPTION alone, i.e. does our
+// visual/caption understanding (what grounding + a better VLM improve) generalize
+// beyond the exact tag being present as text?
+export interface AspectOptions {
+  lexical?: boolean; // default true; false = dense-only (leak-free)
+}
+
+export function evaluateAspectSearch(golden: GoldenSet, opts: AspectOptions = {}): AspectMetrics {
+  const lexical = opts.lexical !== false;
   const aspects = golden.aspects ?? [];
   const memes = golden.memes;
   let pSum = 0;
@@ -236,7 +249,9 @@ export function evaluateAspectSearch(golden: GoldenSet): AspectMetrics {
   for (const a of aspects) {
     const rel = new Set(a.relevantIds);
     if (rel.size === 0) continue;
-    const terms = a.terms ?? a.query.toLowerCase().split(/\s+/).filter(Boolean);
+    const terms = lexical
+      ? a.terms ?? a.query.toLowerCase().split(/\s+/).filter(Boolean)
+      : []; // dense-only: no lexical searchText matching
     const ranked = memes
       .map((m) => ({
         id: m.id,
