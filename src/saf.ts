@@ -199,6 +199,22 @@ export async function readVideoFrameBase64(uri: string, name: string): Promise<s
   }
 }
 
+// Read a shared source (a file:// cache copy or a content:// provider uri) as
+// base64, staging through the OS cache first because content:// can't always be
+// read directly. This is the robust read that works for every provider/codec —
+// callers that need the bytes' content identity (dedup) hash this string, then
+// hand it to writeBase64ToFolder to persist, so the file is read only once.
+export async function readSourceBase64(src: string): Promise<string> {
+  const norm = src.startsWith('file://') || src.startsWith('content://') ? src : `file://${src}`;
+  const tmp = `${FileSystem.cacheDirectory}import_${Date.now()}`;
+  await FileSystem.copyAsync({ from: norm, to: tmp });
+  try {
+    return await FileSystem.readAsStringAsync(tmp, { encoding: FileSystem.EncodingType.Base64 });
+  } finally {
+    await FileSystem.deleteAsync(tmp, { idempotent: true });
+  }
+}
+
 // Create a new file inside a linked folder (the SAF tree the user granted) and
 // copy `src` — a shared image/video, given as a content:// or file:// uri / path
 // — into it. Returns the new content:// uri + sanitized name so the importer can
@@ -210,18 +226,8 @@ export async function saveToFolder(
   mimeType: string,
   folderUri: string
 ): Promise<{ uri: string; name: string }> {
-  const norm = src.startsWith('file://') || src.startsWith('content://') ? src : `file://${src}`;
-
-  // Stage to a cache file:// first (content:// can't always be read directly),
-  // then write the bytes into the freshly created SAF document.
-  const tmp = `${FileSystem.cacheDirectory}import_${Date.now()}`;
-  await FileSystem.copyAsync({ from: norm, to: tmp });
-  try {
-    const data = await FileSystem.readAsStringAsync(tmp, { encoding: FileSystem.EncodingType.Base64 });
-    return await writeBase64ToFolder(data, fileName, mimeType, folderUri);
-  } finally {
-    await FileSystem.deleteAsync(tmp, { idempotent: true });
-  }
+  const data = await readSourceBase64(src);
+  return await writeBase64ToFolder(data, fileName, mimeType, folderUri);
 }
 
 // Create a new SAF document in a linked folder and write raw base64 bytes into
