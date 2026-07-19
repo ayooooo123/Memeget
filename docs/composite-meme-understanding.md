@@ -19,6 +19,44 @@ structure of situation A (imminent unseen catastrophe, obliviousness) maps onto
 situation B (AI companies)."* Nothing in the pixels states that mapping — it's
 inferred from recognizing both halves.
 
+## There is no list of templates (the load-bearing principle)
+
+The word "template" is a trap. **There is no enumerable set of templates, and
+there never will be — anything can become one, any day.** So no design may hinge
+on matching against a known-template registry; it would be permanently
+incomplete and miss the point.
+
+The real anchor is the definition of the act itself:
+
+> **Memeing is using media to convey an idea/emotion.**
+
+That is the invariant. The atomic thing to capture per meme is therefore not
+*which template* but:
+
+- **the media** — what is shown (objects, people, text, scene); perception, the
+  model can do it;
+- **the idea/emotion it conveys, and the situation you'd deploy it in** — the
+  interpretation; the hard invariant, and *what a person actually recalls by*.
+
+Template identity is **not the backbone** — it is an optional enrichment layered
+on top when recognizable. Two mechanisms replace "template-KB matching":
+
+1. **Open-ended reference naming, not template lookup.** Ask "name any
+   recognizable person, event, brand, or source; say 'unknown' if you can't" —
+   knowledge-backed and **graceful** (an unrecognized reference simply isn't
+   named; nothing breaks). This captures "9/11, Bush, Anthropic, LLMs" with no
+   list.
+2. **Emergent templates, learned not listed.** A template is just media-form that
+   *recurs*. Don't enumerate — **discover**: cluster the collection by visual
+   embedding; a cluster of visually-similar memes with *different* overlays **is**
+   a template, defined by real usage. "Anything can become a template" becomes
+   literally computable — the second variation you save forms the cluster. The
+   embeddings for this already exist.
+
+So the corrected core, which holds regardless of what is famous: **capture the
+idea/emotion + situation (invariant) + whatever media and references the model
+can name (graceful), and let templates emerge from clustering (learned).**
+
 ## Why this is a different beast
 
 A plain reaction meme (a man shushing) is **depictive**: describe what's shown,
@@ -60,14 +98,22 @@ Yields the raw material: OCR text (company names, captions), detected
 logos/faces/objects, and a plain composition description. This is the app's
 current strength (VLM + OCR).
 
-### Stage 2 — Recognize the base template (world knowledge / retrieval)
-> "What well-known image, historical event, or meme format is this a remix,
-> edit, or parody *of*? Name it even if it has been altered, face-swapped, or
-> restyled. If none, say 'original'."
+### Stage 2 — Name references, don't match templates (world knowledge, graceful)
+> "Name any recognizable person, event, brand, logo, artwork, or source in this
+> image — even if altered, face-swapped, or restyled. Say 'unknown' for anything
+> you can't place. Do NOT force it into a known meme format."
 
-Requires template knowledge robust to alteration. **On-device grounding
-(CLIP→VLM) is a weak version of this and fails on disguised templates.** The real
-answer is a **template knowledge base** (see Levers) or a cloud model.
+Note the reframing: **not** "which template is this" (there is no list — see the
+principle above) but "what recognizable references are present," open-ended and
+graceful. Knowledge-backed; degrades to 'unknown' harmlessly. On-device grounding
+(CLIP→VLM) is a weak seed of this; richer references need a **retrieval KB or a
+cloud model**.
+
+**Emergent templates (a separate, offline mechanism, not a prompt):** cluster the
+collection by visual embedding; a cluster of visually-similar memes with
+different overlays is a *learned* template, named from the cluster and confirmable
+by the user. This is how "anything can become a template" is handled — computed
+from usage, never enumerated.
 
 ### Stage 3 — Resolve references (entity knowledge base)
 > "For each name, wordmark, logo, or notable face from Stage 1, identify the
@@ -100,8 +146,8 @@ richer inputs from Stages 2–4 fed in as grounding.
 | Stage | Capability | Lever we have | Gap |
 |---|---|---|---|
 | 1 Perceive | describe + OCR | on-device VLM + OCR | — (works) |
-| 2 Base template | recognize disguised template | CLIP→VLM grounding | can't handle disguise → **needs template KB / fine-tune** |
-| 3 References | entity + domain | harvested corpus, `ai_cultural_context` | no live entity KB → **build one, or cloud** |
+| 2 Name references | open-ended recognition (no list) | CLIP→VLM grounding; **clustering** for emergent templates | richer refs → **retrieval KB / cloud**; clustering is buildable now |
+| 3 References→domain | entity + domain | harvested corpus, `ai_cultural_context` | no live entity KB → **build one, or cloud** |
 | 4 Analogy | relational reasoning | — | **on-device can't; cloud tier or fine-tune** |
 | 5 Two-layer tags | searchable output | tagging path + facet coverage eval | works *if* 2–4 feed it |
 
@@ -116,10 +162,14 @@ fine-tune / cloud-tier work. Pretending otherwise wastes effort.
   concrete VLM prompts. Even without Stages 2–4, splitting perceive-vs-tag and
   demanding two-layer output should lift recall on the *reference* layer the
   model *can* read (OCR'd company names, visible logos).
-- **Next (knowledge base):** mine memedepot's `ai_template_match` +
-  `ai_cultural_context` into a **template + entity KB**, retrieved at describe
-  time to ground Stages 2–3 — the same grounding wire we already ship, fed better
-  data.
+- **Now (emergent templates, no model needed):** cluster the collection by the
+  visual embeddings we already store; surface each cluster as a *learned* recurring
+  format the user can name. This is "anything can become a template" made real —
+  and it needs no template list, just the vectors on hand.
+- **Next (knowledge base):** mine memedepot's `ai_cultural_context` +
+  `extracted_labels` into an **entity/reference KB**, retrieved at describe time
+  to ground Stage 2–3 reference naming — the same grounding wire we already ship,
+  fed better data. (Reference KB, not a template registry — there is no registry.)
 - **Frontier (reasoning):** a **cloud/large-model tier** for Stage 4, and/or a
   **fine-tune** on (image → template + cultural_context) pairs to bake Stages 2–4
   into the encoder. Gated by the eval so we can prove it helps.
