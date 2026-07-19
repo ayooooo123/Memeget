@@ -24,8 +24,7 @@ plumbing). To get a *real* number you supply a real golden set — see below.
 `src/evalCore.ts` is pure and model-free: it takes **precomputed vectors** and
 ranks with `scoreEntry`. It deliberately does not embed anything itself, so the
 benchmark is deterministic and has no native/CLIP dependency. The only rule that
-matters: the vectors you feed it must come from **the same CLIP encoder the app
-ships** (CLIP ViT-B/32, `PRIMARY_EMBEDDING_MODEL`), or the scores are measuring
+matters: the vectors you feed it must come from **the same encoder the app ships** (MobileCLIP-S2, `PRIMARY_EMBEDDING_MODEL`), or the scores are measuring
 the wrong space.
 
 ```
@@ -50,7 +49,7 @@ toolchain, both unavailable in the dev sandbox):
 
 1. Actions → **Build eval golden set** → Run workflow (`depots`, `per_depot`
    inputs). It pulls memes from N memedepot depots, embeds each **image** + the
-   depot **name** (the query) with CLIP ViT-B/32, and opens a PR with
+   depot **name** (the query) with MobileCLIP-S2, and opens a PR with
    `tools/eval/golden.json`. The encoded eval: *does searching a format's name
    retrieve that format's memes?* **Vectors + ids only — never images.**
 2. Merge the PR → `npm run eval` now scores the real set and prints Recall@k /
@@ -59,7 +58,7 @@ toolchain, both unavailable in the dev sandbox):
 Run locally instead (Colab or any box with network + torch):
 
 ```bash
-pip install open_clip_torch torch pillow requests
+pip install open_clip_torch timm torch pillow requests
 python tools/eval/build_golden.py --out tools/eval/golden.json --depots 25 --per-depot 8
 ```
 

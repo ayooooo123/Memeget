@@ -47,7 +47,9 @@ jobs:
           # torchvision from PyPI) yields "operator torchvision::nms does not
           # exist". open_clip is installed after, so it reuses this torchvision.
           pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
-          pip install open_clip_torch pillow requests
+          # timm is required for open_clip's MobileCLIP-S2 (the app's model);
+          # open_clip is installed after so it reuses this CPU torchvision.
+          pip install open_clip_torch timm pillow requests
           python -c "import torch, torchvision; print('torch', torch.__version__, '| torchvision', torchvision.__version__)"
 
       - name: Build golden set

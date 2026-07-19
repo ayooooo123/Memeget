@@ -3,6 +3,7 @@ import * as SQLite from 'expo-sqlite';
 import { modelStamp, PRIMARY_EMBEDDING_MODEL, VISUAL_EMBEDDING_MODEL } from './embeddingModels';
 import { scoreEntry } from './searchCore';
 import { assembleSearchText } from './searchText';
+import { guessFacet } from './facetCoverage';
 import {
   ensureSearchIndex,
   invalidateSearchIndex,
@@ -1465,6 +1466,27 @@ export async function countStaleExemplars(): Promise<number> {
     PRIMARY_EMBEDDING_MODEL.id
   );
   return row?.c ?? 0;
+}
+
+// One-time re-facet: the old teach flow filed EVERY taught exemplar as
+// 'character'. Re-infer the real facet from the label (Waving→action,
+// Excited→emotion, Greentext→format) so existing teachings match how they're
+// used. Idempotent — only touches rows still tagged 'character', and only when
+// the label clearly points elsewhere (true characters + unknowns stay put).
+export async function refacetExemplars(): Promise<{ updated: number }> {
+  const db = await getDb();
+  const rows = await db.getAllAsync<{ id: number; label: string }>(
+    "SELECT id, label FROM exemplars WHERE category = 'character'"
+  );
+  let updated = 0;
+  for (const r of rows) {
+    const facet = guessFacet(r.label);
+    if (facet !== 'character') {
+      await db.runAsync('UPDATE exemplars SET category = ? WHERE id = ?', facet, r.id);
+      updated++;
+    }
+  }
+  return { updated };
 }
 
 export async function migrateStaleExemplars(): Promise<{ migrated: number; unmigratable: number }> {
