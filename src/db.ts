@@ -1196,7 +1196,13 @@ export async function getRecentMemes(
         limit,
         offset
       );
-  return rows.map((r) => ({
+  return rows.map(liteRowToRecord);
+}
+
+function liteRowToRecord(
+  r: Omit<MemeRow, 'embedding' | 'visual_embedding' | 'caption_embedding'>
+): MemeRecord {
+  return {
     id: r.id,
     uri: r.uri,
     name: r.name,
@@ -1212,7 +1218,45 @@ export async function getRecentMemes(
     modifiedAt: r.modified_at ?? r.indexed_at,
     pending: r.pending === 1,
     thumbUri: r.thumb_uri && r.thumb_uri !== THUMB_FAILED ? r.thumb_uri : undefined,
-  }));
+  };
+}
+
+// Keyset page for infinite scroll: the memes strictly AFTER `cursor` in the
+// browse order (modified_at DESC, id DESC). The cursor is the last loaded row's
+// (modifiedAt, id) pair — modified_at is NOT NULL (backfilled from indexed_at),
+// so the compound comparison is total. LIMIT/OFFSET paging was retired here
+// because the offset shifts whenever rows enter or leave above the fold (a
+// share/index landing mid-scroll, a deletion), which re-served or skipped rows
+// and handed the grid duplicate keys — the "glitchy" infinite scroll. A keyset
+// cursor names an absolute position in the sort, so the next page is exact no
+// matter what happened above it.
+export async function getMemesBefore(
+  cursor: { modifiedAt: number; id: number },
+  limit = 90,
+  kind?: MediaKind
+): Promise<MemeRecord[]> {
+  const db = await getDb();
+  const cols = `id, uri, name, kind, ocr_text, caption, transcript, tags, extra_terms, vision_state, audio_state, indexed_at, modified_at, pending, thumb_uri`;
+  const after = `(modified_at < ? OR (modified_at = ? AND id < ?))`;
+  const rows = kind
+    ? await db.getAllAsync<Omit<MemeRow, 'embedding' | 'visual_embedding' | 'caption_embedding'>>(
+        `SELECT ${cols} FROM memes WHERE ${after} AND kind = ?
+         ORDER BY modified_at DESC, id DESC LIMIT ?`,
+        cursor.modifiedAt,
+        cursor.modifiedAt,
+        cursor.id,
+        kind,
+        limit
+      )
+    : await db.getAllAsync<Omit<MemeRow, 'embedding' | 'visual_embedding' | 'caption_embedding'>>(
+        `SELECT ${cols} FROM memes WHERE ${after}
+         ORDER BY modified_at DESC, id DESC LIMIT ?`,
+        cursor.modifiedAt,
+        cursor.modifiedAt,
+        cursor.id,
+        limit
+      );
+  return rows.map(liteRowToRecord);
 }
 
 // Brute-force vector search. Fine for thousands of items; swap for sqlite-vec
@@ -1297,6 +1341,14 @@ const SEARCH_YIELD_THRESHOLD = 20_000;
 // while the text-embed model is busy behind heavy background work. Scores are
 // then purely keyword/OCR/tag/caption-text matches; the caller re-runs with
 // the real vector when it arrives.
+//
+// `limit` may be Infinity: the Library's search passes it to rank the ENTIRE
+// indexed collection (a search re-sorts the library rather than filtering it),
+// then pages the ranked list into the grid itself. Equal scores tiebreak on
+// recency then id, so the unmatched tail reads like the browse grid instead of
+// arbitrary DB order — and so the ranking is deterministic across re-runs of
+// the same query (a lexical-only pass upgrading to the hybrid one must not
+// reshuffle ties under the user).
 export async function searchByVector(
   queryVec: number[] | null,
   queryText: string,
@@ -1335,8 +1387,14 @@ export async function searchByVector(
     }
   }
 
-  scored.sort((a, b) => b.score - a.score);
-  return scored.slice(0, limit).map(({ entry, score }) => ({ ...entry.record, score }) as SearchHit);
+  scored.sort(
+    (a, b) =>
+      b.score - a.score ||
+      (b.entry.record.modifiedAt ?? 0) - (a.entry.record.modifiedAt ?? 0) ||
+      b.entry.id - a.entry.id
+  );
+  const top = Number.isFinite(limit) ? scored.slice(0, limit) : scored;
+  return top.map(({ entry, score }) => ({ ...entry.record, score }) as SearchHit);
 }
 
 // "More like this" for the viewer: rank the library by cosine similarity to one

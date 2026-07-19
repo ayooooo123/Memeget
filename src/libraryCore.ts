@@ -56,6 +56,19 @@ export function mergeRecords(prev: MemeRecord[], next: MemeRecord[]): MemeRecord
   return changed ? merged : prev;
 }
 
+// Append a freshly fetched page to the loaded list, dropping any row already
+// present. Keyset paging makes duplicates unlikely, but a refresh landing
+// between the cursor read and the page fetch can still re-serve a boundary row —
+// and a single duplicated id gives FlatList duplicate keys, which is exactly the
+// cell-flicker/jump glitch infinite scroll had. Returns `prev` unchanged (same
+// reference) when the page brings nothing new, so React bails out entirely.
+export function appendPage<T extends MemeRecord>(prev: T[], next: T[]): T[] {
+  if (next.length === 0) return prev;
+  const seen = new Set(prev.map((m) => m.id));
+  const fresh = next.filter((m) => !seen.has(m.id));
+  return fresh.length === 0 ? prev : [...prev, ...fresh];
+}
+
 // Apply video-poster patches to an existing record list IN PLACE by id: only the
 // rows named in `patches` get a new object identity (with the fresh thumbUri);
 // every other row keeps its exact identity, so its memoized grid cell does NOT
