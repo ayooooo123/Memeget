@@ -130,7 +130,50 @@ eval golden set** workflow to refresh an older set that lacks them).
 const a = evaluateAspectSearch(golden);   // { n, avgRelevant, precisionAt5, recallAt10, map, mrr }
 ```
 
+Two modes: the default runs through the lexical `searchText` channel; `{ lexical:
+false }` is **dense-only** (image + caption, no text match). The gap is the
+finding — on the real set MAP is **0.835 with text** vs **0.084 dense-only**:
+single-word aspect search rides almost entirely on the aspect word being written
+into the meme's tags. **So tag generation is the dominant lever**, which is what
+the loop below tunes.
+
+## VLM prompt-tuning loop (facet coverage)
+
+Since search depends on the facet word being *in the tags*, the question every
+prompt change must answer is: **of the memes the model describes, what fraction
+get a tag in each facet** (an action, an emotion, the situation, …)? That's what
+`src/facetCoverage.ts` scores — it classifies each free tag into a facet using
+the app's `MEME_LABELS` taxonomy plus a small everyday-word lexicon, and reports
+per-facet coverage. A prompt tweak that finally makes the model emit
+situation/action tags shows up as coverage going **up**, measured.
+
+The model only runs on-device, so the loop is human-in-the-loop but tight:
+
+1. **Export** a sample of described memes from a device to
+   `tools/eval/described.json` — an array of `{ "id"?: string, "tags": [...] }`
+   (the tags the VLM produced). Even 20–50 memes is enough to see the shape.
+2. **Score:** `npm run coverage` prints per-facet coverage (weakest facets last —
+   those are the targets). With no export it prints a synthetic sample + this how-to.
+3. **Read the weak facets.** Low `situation`/`action`/`tone` = the prompt isn't
+   eliciting them; high `unclassified` = the model emits words the taxonomy
+   doesn't know (candidates to add to `MEME_LABELS` or `FACET_LEXICON`).
+4. **Tune** the `USER_PROMPT` / `TAGS` line in `src/visionCore.ts` to push the
+   weak facets, rebuild the APK (push to `main`), re-describe, re-export.
+5. **Compare** the new coverage to the last run. Ship the prompt that lifts the
+   weak facets without dropping the strong ones.
+
+```ts
+const c = facetCoverage(describedMemes);   // { n, perFacet, avgFacetsPerMeme, unclassifiedRate }
+```
+
+Note the metric is bounded by the classifier's vocabulary (`MEME_LABELS`
+associations + `FACET_LEXICON`); it's for **relative** comparison across prompt
+versions with the same classifier, not an absolute truth. Expanding the lexicon
+tightens it.
+
 ## Next (not yet built)
 
-- A standalone `npm run eval -- path/to/golden.json` CLI once real golden sets
-  exist (trivial wrapper around `evaluateRetrieval` + `formatMetrics`).
+- A CI-backed **tag-precision** eval: score our produced tags against memedepot's
+  ground-truth `extracted_labels`, embedding-matched to bridge the two
+  vocabularies (needs our label vectors embedded in CI).
+- A standalone `npm run eval -- path/to/golden.json` CLI.
