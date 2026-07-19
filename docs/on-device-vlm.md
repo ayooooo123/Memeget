@@ -1,18 +1,19 @@
-# On-device meme understanding (Gemma 4 E2B)
+# On-device meme understanding (LFM2.5-VL 1.6B)
 
-Memeget describes memes with **Gemma 4 E2B (multimodal)**, Google's on-device
-vision-language model, running fully on-device through the **same
-`react-native-executorch` runtime** that already powers CLIP (on Android it runs
-on the Vulkan GPU backend). CLIP stays the fast embedding / similarity /
-teach-by-example backbone; the VLM is an **enrichment pass** that adds a human
-caption, the literal text, and open-vocabulary tags that CLIP's fixed 97-label
-vocabulary can't produce. Nothing leaves the device.
+Memeget describes memes with **LFM2.5-VL 1.6B (multimodal)**, Liquid AI's
+on-device vision-language model (SigLIP2 vision encoder + LFM2 backbone), running
+fully on-device through the **same `react-native-executorch` runtime** that
+already powers CLIP (LFM runs on the XNNPACK backend). CLIP stays the fast
+embedding / similarity / teach-by-example backbone; the VLM is an **enrichment
+pass** that adds a human caption, the literal text, and open-vocabulary tags that
+CLIP's fixed 97-label vocabulary can't produce. Nothing leaves the device.
 
-**Quality tiers** (Settings → AI descriptions → Model): `max` (the default) is
-Gemma 4 E2B — the sharper captions/tags and far better meme-culture knowledge;
-`fast` keeps the previous **LFM2.5-VL 450M** for weaker devices or grinding
-through a huge backlog quickly. Everything below applies to both — they share
-the prompt, parser, pacing, and background machinery.
+**One model, no tiers.** There is a single VLM and no user-facing model picker —
+the app's job is to feel like magic, not to make people choose. LFM2.5-VL 1.6B
+was chosen as the fastest turnkey option in the RNE catalog that still keeps
+strong caption/OCR quality (helped by the CLIP grounding + ML Kit OCR hints fed
+into the prompt). The rationale, the alternatives weighed, and the ruled-out
+paths are recorded in [`vlm-model-decision.md`](./vlm-model-decision.md).
 
 ## Architecture
 
