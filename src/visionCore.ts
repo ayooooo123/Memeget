@@ -86,16 +86,69 @@ export const USER_PROMPT =
 // Cap the injected OCR so it can't bloat the prompt (prefill cost) — a hint.
 export const OCR_HINT_MAX = 280;
 
-// Build the user turn, optionally grounding it with text ML Kit already read so
-// the small model doesn't have to re-OCR small text from a downscaled frame.
-export function userTurn(ocrHint?: string): string {
-  const hint = (ocrHint ?? '').replace(/\s+/g, ' ').trim();
-  if (!hint) return USER_PROMPT;
+// ---- retrieval-augmented grounding ------------------------------------------
+//
+// The on-device VLM has limited meme knowledge: it can SEE the action/emotion
+// but often can't NAME an obscure template or a niche character ("Milady",
+// "gigachad", a specific format). The CLIP zero-shot pass already guessed those
+// from the harvested label vocabulary — knowledge that otherwise dies in a
+// separate channel the VLM never sees. Feeding the top guesses into the prompt
+// (with a strict "only if it matches" caveat, so a wrong guess is harmless) lets
+// the VLM name what it couldn't recognize on its own.
+
+export interface GroundingLabel {
+  label: string;
+  category: string; // 'format' | 'character' | 'person' | 'topic' | 'emotion' | …
+}
+
+// Facets the small VLM is worst at naming, surfaced first.
+const GROUNDING_PRIORITY = ['format', 'character', 'person'];
+const MAX_GROUNDING_LABELS = 4;
+const MAX_GROUNDING_RELATED = 6;
+
+// Build the grounding sentence from CLIP's format/character guesses (+ their
+// association terms). Returns '' when there's nothing confident to offer.
+export function formatGrounding(labels: GroundingLabel[], related: string[] = []): string {
+  const seen = new Set<string>();
+  const picked: GroundingLabel[] = [];
+  const take = (l: GroundingLabel) => {
+    const key = l.label.trim().toLowerCase();
+    if (key && !seen.has(key)) {
+      seen.add(key);
+      picked.push(l);
+    }
+  };
+  for (const p of GROUNDING_PRIORITY) for (const l of labels) if (l.category === p) take(l);
+  for (const l of labels) take(l); // then everything else, order preserved
+  const top = picked.slice(0, MAX_GROUNDING_LABELS);
+  if (top.length === 0) return '';
+
+  const named = top.map((l) => l.label).join(', ');
+  const rel = [...new Set(related.map((r) => r.trim().toLowerCase()).filter(Boolean))]
+    .slice(0, MAX_GROUNDING_RELATED)
+    .join(', ');
   return (
-    USER_PROMPT +
-    `\nText already extracted from this image by OCR — use it verbatim for the TEXT line and ` +
-    `as a hint for the caption: "${hint.slice(0, OCR_HINT_MAX)}"`
+    `\nA visual recognizer thinks this meme may be: ${named}` +
+    (rel ? ` (related: ${rel})` : '') +
+    `. Use those names in SUBJECTS and TAGS ONLY if they match what you actually see; ` +
+    `if they do not match, ignore them completely.`
   );
+}
+
+// Build the user turn, optionally grounding it with (1) text ML Kit already read
+// so the small model doesn't have to re-OCR a downscaled frame, and (2) the CLIP
+// format/character guess (see formatGrounding).
+export function userTurn(ocrHint?: string, grounding?: string): string {
+  let turn = USER_PROMPT;
+  const hint = (ocrHint ?? '').replace(/\s+/g, ' ').trim();
+  if (hint) {
+    turn +=
+      `\nText already extracted from this image by OCR — use it verbatim for the TEXT line and ` +
+      `as a hint for the caption: "${hint.slice(0, OCR_HINT_MAX)}"`;
+  }
+  const g = (grounding ?? '').trim();
+  if (g) turn += `\n${g}`;
+  return turn;
 }
 
 // Fragments of the prompt's own field descriptions. The small model occasionally
@@ -107,6 +160,7 @@ const HINT_FRAGMENTS = [
   'the situation it is used to react to',
   'the real-life situation you would send it to react to',
   'covering every searchable facet',
+  'a visual recognizer thinks this meme may be',
   'text visible in the image',
   'leave blank if none',
   'main people, characters, or objects',
