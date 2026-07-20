@@ -1,7 +1,7 @@
 """Shared loader for the local basedmemes.lol + KnowYourMeme archive.
 
-The archive is NOT in the repo (developer-only corpus of scraped memes — see
-docs/memedepot-corpus.md on why raw memes stay local). Point `--data-dir` at it.
+The archive is NOT in the repo (large image corpus, kept out of git). Point
+`--data-dir` at it.
 
 Two source files, merged by image *filename*:
   - dataset.jsonl        {"image": "<file>", "suffix": "t1, t2, ..."}
