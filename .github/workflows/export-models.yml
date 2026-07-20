@@ -19,6 +19,15 @@ on:
       - 'tools/model-export/**'
       - '.github/workflows/export-models.yml'
   workflow_dispatch:
+    inputs:
+      ckpt_url:
+        description: 'URL to a fine-tuned merged .pt (folded text_projection). If set, also exports+publishes the fine-tuned TEXT tower to a separate tag.'
+        required: false
+        default: ''
+      model_tag:
+        description: 'Release tag for the fine-tuned text .pte (kept separate from models-v1)'
+        required: false
+        default: 'models-memeft'
 
 concurrency:
   group: export-models
@@ -114,4 +123,61 @@ jobs:
             dist/mobileclip_s2_text_xnnpack_fp32.pte
             dist/mobileclip_s2_tokenizer.json
             dist/dinov2_base_xnnpack_fp32.pte
+            dist/SHA256SUMS
+
+  # Manual, opt-in: export the FINE-TUNED text tower from a provided checkpoint URL
+  # and publish it to a SEPARATE tag under a distinct asset name, so it never
+  # clobbers the stock model in models-v1 (the app opts in via a new MODEL_ID +
+  # a full re-embed). Image tower is unchanged — reuse the stock image .pte.
+  export-finetune:
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.ckpt_url != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Free runner disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+      - name: Install export toolchain
+        env:
+          PIP_NO_CACHE_DIR: '1'
+        run: |
+          python -m pip install --upgrade pip
+          pip install "executorch==${ET_VERSION}" "torch==2.9.*" --extra-index-url https://download.pytorch.org/whl/cpu
+          pip install open_clip_torch timm transformers tokenizers --extra-index-url https://download.pytorch.org/whl/cpu
+          sudo apt-get update && sudo apt-get install -y flatbuffers-compiler || true
+      - name: Download fine-tuned checkpoint
+        run: |
+          curl -fSL "${{ github.event.inputs.ckpt_url }}" -o memeft.pt
+          ls -lh memeft.pt
+      - name: Export fine-tuned text tower (verified cos vs eager in-script)
+        working-directory: tools/model-export
+        run: |
+          FLATC_EXECUTABLE="$(command -v flatc || true)" python export_mobileclip_s2.py \
+            --ckpt ../../memeft.pt --text-only --out-dir ../../dist
+          mv ../../dist/mobileclip_s2_text_xnnpack_fp32.pte ../../dist/mobileclip_s2_text_memeft_xnnpack_fp32.pte
+          (cd ../../dist && sha256sum mobileclip_s2_text_memeft_xnnpack_fp32.pte mobileclip_s2_tokenizer.json | tee SHA256SUMS)
+      - name: Publish fine-tuned text encoder
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.model_tag }}
+          name: Meme fine-tuned text encoder (${{ github.event.inputs.model_tag }})
+          prerelease: true
+          make_latest: false
+          body: |
+            Fine-tuned MobileCLIP-S2 **text** tower (drop-in), built by
+            `export_mobileclip_s2.py --ckpt --text-only` from `${{ github.event.inputs.ckpt_url }}`.
+            In-script verify passed (ExecuTorch output cos(fp32)=1.0 vs eager).
+
+            Opt in: point `EXPO_PUBLIC_MEMEGET_MOBILECLIP_S2_TEXT_MODEL_SOURCE` at
+            `mobileclip_s2_text_memeft_xnnpack_fp32.pte` and set a fresh `…_MODEL_ID`
+            (forces a full library re-embed; invalidates teaching packs). The image
+            tower is unchanged — keep the stock image `.pte` from `models-v1`.
+          files: |
+            dist/mobileclip_s2_text_memeft_xnnpack_fp32.pte
+            dist/mobileclip_s2_tokenizer.json
             dist/SHA256SUMS
