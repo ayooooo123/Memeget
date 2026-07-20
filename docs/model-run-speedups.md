@@ -69,38 +69,37 @@ CI attempts against executorch 1.0's quant stack; the eager cosine-parity gate
 kept broken results from shipping. Do it in `tools/model-export` behind that same
 gate, after B1's fp32 path is proven on device.
 
-### B2 — VLM per-run speedups (SHIPPED in-repo: telemetry, output cap, de-render, A/B seams)
-The captioner is the heaviest run and **opt-in** ("AI descriptions"). Measured
-against the installed runtime (node_modules types), the cost is **prefill-
-dominated**: every `generate()` is stateless and the runtime exposes **no
-prefix/KV cache**, so the full ~540-token instruction block + the image's vision
-tokens are re-prefilled per meme. **Backend, not model size, dominates:** Gemma
-E2B runs on the **GPU** (Vulkan on Android, MLX on iOS — its `modelSource` is a
-two-URL union of exactly those) while **every LFM-VL build is XNNPACK/CPU-only**
-(single `…/xnnpack/…` URL, both 450M and 1.6B). That is why measured ms/meme put
-GPU Gemma E2B ahead of CPU LFM 1.6B. `GenerationConfig` has **no max-token
-field**, but a hard cap is reachable via `getGeneratedTokenCount()` +
-`interrupt()` (both exist on the hook and the class).
+### B2 — VLM: single model (Gemma 4 E2B) + per-run speedups (SHIPPED in-repo)
+The captioner is the heaviest run and **opt-in** ("AI descriptions").
 
-Shipped in-repo (no new export, no default quality change):
+**Model choice (resolved):** the `fast`/`max` tier toggle and the user-facing model
+picker are removed — the app runs a **single** VLM. It is **Gemma 4 E2B multimodal**,
+the only vision model in the RNE 0.9.2 catalog with a **GPU** build (Vulkan on
+Android, MLX on iOS — its `modelSource` is a two-URL union of exactly those). Every
+LFM-VL build is XNNPACK/CPU-only, so "smaller on the GPU" doesn't exist; the GPU
+model is the bigger one. Full alternatives table in
+[`vlm-model-decision.md`](./vlm-model-decision.md). (Caveat: on Tensor-G4-class
+GPUs, ExecuTorch Vulkan can trail XNNPACK — confirm P50/P90 on-device before booking
+a latency number.)
+
+**Per-run speedups (shipped, backend-agnostic):** the cost is **prefill-dominated** —
+every `generate()` is stateless and the runtime exposes **no prefix/KV cache**, so the
+full ~540-token instruction block + the image's vision tokens are re-prefilled per
+meme. `GenerationConfig` has **no max-token field**, but a hard cap is reachable via
+`getGeneratedTokenCount()` + `interrupt()` (both on the hook and the class).
 - **Per-meme telemetry** — `runVision` (`visionCore.ts`) logs prompt vs generated
   tokens + wall time (`[vlm max] 1234p+150g tok in 900ms`) on both the foreground
-  (`vision.tsx`) and headless (`headlessVision.ts`) paths, so the prefill/decode
-  split is finally measurable on device. Read it before flipping either seam.
+  (`vision.tsx`) and headless (`headlessVision.ts`) paths — the prefill/decode split,
+  finally measurable on device. Read it before flipping either seam.
 - **Output cap** — `runVision` interrupts past `MAX_VLM_OUTPUT_TOKENS` (320), a
   runaway safety net; a truncated reply still parses (flat line format degrades).
 - **De-render** — foreground `configure({ outputTokenBatchSize, batchTimeInterval })`
   widens the token-batch window so the `useLLM` hook stops re-running the provider
   ~12×/s during every generation (the describe path never reads the stream).
 - **A/B seams (default OFF):** `EXPO_PUBLIC_MEMEGET_VLM_FRAME_WIDTH` (default 512;
-  lower → fewer LFM vision tokens) and `EXPO_PUBLIC_MEMEGET_VLM_PROMPT=terse`
-  (~140-token prompt; drops the two worked examples). Both cut prefill; gate on an
-  on-device A/B since they touch caption quality.
-
-Tier framing corrected: `max` = Gemma-GPU (faster **and** sharper where the GPU
-path loads), `fast` = LFM-450M-CPU **compatibility fallback** (relabeled "Light"
-in Settings). **LFM-VL 1.6B is intentionally not offered** — Pareto-dominated
-(slower than Gemma on GPU, and weaker than it).
+  lower → fewer vision tokens) and `EXPO_PUBLIC_MEMEGET_VLM_PROMPT=terse` (~140-token
+  prompt; drops the two worked examples). Both cut prefill; gate on an on-device A/B
+  since they touch caption quality.
 
 ### B4 — QNN / Hexagon NPU spike (Snapdragon only)
 Not applicable to the Tensor-G4 test device. Worth a spike **only** if a
@@ -111,10 +110,10 @@ and benchmark NPU vs XNNPACK. Deliver a go/no-go with numbers before committing.
 ## Status summary
 - **B1 (MobileCLIP-S2 swap): shipped to the APK build**, pending on-device
   verification. This IS the model swap — the branch's APK build runs S2 + DINOv2.
-- **B2 (VLM per-run): shipped in-repo** — telemetry, output cap, foreground
-  de-render, and `VLM_FRAME_WIDTH` / terse-prompt A/B seams; no default quality
-  change. Backend (GPU vs CPU), not size, dominates; LFM-VL 1.6B dropped as
-  Pareto-dominated. Verify latency + caption quality on device.
+- **B2 (VLM): single model + per-run speedups shipped.** Tiers/model picker removed
+  (one default = Gemma 4 E2B, the only GPU VLM in the catalog). Plus telemetry, output
+  cap, foreground de-render, and `VLM_FRAME_WIDTH` / terse-prompt A/B seams. Confirm
+  latency (P50/P90 incl. image encode) + caption quality on device.
 - **B3 (quantize custom exports): fp32 ships and works;** int8 stays parked
   behind the cosine gate until a coherent executorch/torch/torchao set passes it.
 - **B4 (QNN/NPU): N/A** on the Tensor-G4 test device; revisit only with a

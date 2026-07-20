@@ -13,7 +13,10 @@
     "diagnose": "node tools/memedepot/diagnose.mjs",
     "eval": "jest evalCore",
     "coverage": "jest facetCoverage --silent=false --verbose",
-    "doctor": "react-doctor"
+    "tagtest": "jest taggingEval --silent=false --verbose",
+    "templates": "jest templateClusters --silent=false --verbose",
+    "doctor": "react-doctor",
+    "agreement": "jest tagAgreement --silent=false --verbose"
   },
   "dependencies": {
     "expo": "~56.0.0",

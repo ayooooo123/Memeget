@@ -2,17 +2,19 @@
 
 Memeget describes memes with **Gemma 4 E2B (multimodal)**, Google's on-device
 vision-language model, running fully on-device through the **same
-`react-native-executorch` runtime** that already powers CLIP (on Android it runs
-on the Vulkan GPU backend). CLIP stays the fast embedding / similarity /
-teach-by-example backbone; the VLM is an **enrichment pass** that adds a human
-caption, the literal text, and open-vocabulary tags that CLIP's fixed 97-label
-vocabulary can't produce. Nothing leaves the device.
+`react-native-executorch` runtime** that already powers CLIP (on Android Gemma
+runs on the Vulkan GPU backend; MLX on iOS). CLIP stays the fast embedding /
+similarity / teach-by-example backbone; the VLM is an **enrichment pass** that
+adds a human caption, the literal text, and open-vocabulary tags that CLIP's
+fixed 97-label vocabulary can't produce. Nothing leaves the device.
 
-**Quality tiers** (Settings → AI descriptions → Model): `max` (the default) is
-Gemma 4 E2B — the sharper captions/tags and far better meme-culture knowledge;
-`fast` keeps the previous **LFM2.5-VL 450M** for weaker devices or grinding
-through a huge backlog quickly. Everything below applies to both — they share
-the prompt, parser, pacing, and background machinery.
+**One model, no tiers.** There is a single VLM and no user-facing model picker —
+the app's job is to feel like magic, not to make people choose. Gemma 4 E2B was
+chosen as the only GPU-backed VLM in the RNE catalog and the strongest on
+caption/tag quality and meme-culture knowledge (helped further by the CLIP
+grounding + ML Kit OCR hints fed into the prompt). The rationale, the alternatives
+weighed, and the ruled-out paths are recorded in
+[`vlm-model-decision.md`](./vlm-model-decision.md).
 
 ## Architecture
 
@@ -43,9 +45,9 @@ background task needs.
 
 ## Efficiency choices
 
-- **512px frames** — both models resample to their vision encoder's working
-  resolution anyway (Gemma to a fixed square, LFM by tiling over 512); capping
-  keeps decode/transcode — and, for LFM, prefill — bounded.
+- **512px frames** — Gemma resamples to its vision encoder's fixed square anyway,
+  so capping the input keeps decode/transcode bounded. (Overridable via
+  `EXPO_PUBLIC_MEMEGET_VLM_FRAME_WIDTH` for on-device A/B.)
 - **OCR hint** — ML Kit's already-extracted text is fed into the prompt so the
   small model doesn't re-read small text; this is what makes the 512 downscale
   safe for text-heavy memes.

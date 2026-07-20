@@ -37,14 +37,11 @@ import {
   BG_ONLY_CHARGING_KEY,
   BG_PAUSE_HOT_KEY,
   BG_PAUSE_LOW_KEY,
-  DEFAULT_QUALITY,
   ENABLED_KEY,
   MODEL,
   POWER_CACHE_MS,
-  QUALITY_KEY,
   SYSTEM_PROMPT,
   type BgThrottles,
-  type VisionQuality,
   type VisionResult,
 } from './visionCore';
 import { registerBackgroundDescribe, unregisterBackgroundDescribe } from './backgroundTask';
@@ -52,14 +49,14 @@ import { useEmbeddings } from './embeddings';
 
 // Re-export the pure helpers/types screens import from this module.
 export { memesPerHour, intensityLabel } from './visionCore';
-export type { VisionQuality, VisionResult, BgThrottles } from './visionCore';
+export type { VisionResult, BgThrottles } from './visionCore';
 
 // Gemma 4 E2B (multimodal), on-device, via ExecuTorch — the SAME runtime that
-// already runs CLIP, so there's no second engine to ship. Used purely as an
-// *enrichment* pass: CLIP stays the fast embedding/similarity + teach-by-example
-// backbone; the VLM reads each meme and writes back a human caption, the literal
-// text, and open-vocabulary tags CLIP's fixed 97-label vocabulary can never
-// produce. A smaller LFM2.5-VL 450M stays available as the "fast" tier.
+// already runs CLIP, so there's no second engine to ship. One model, no tiers.
+// Used purely as an *enrichment* pass: CLIP stays the fast embedding/similarity +
+// teach-by-example backbone; the VLM reads each meme and writes back a human
+// caption, the literal text, and open-vocabulary tags CLIP's fixed 97-label
+// vocabulary can never produce.
 //
 // This module owns the FOREGROUND path (the React hook + in-app paced loop).
 // The headless, OS-scheduled background path lives in backgroundTask.ts and
@@ -67,14 +64,12 @@ export type { VisionQuality, VisionResult, BgThrottles } from './visionCore';
 
 export interface VisionApi {
   enabled: boolean; // user has opted in (model is allowed to download/load)
-  quality: VisionQuality;
   ready: boolean; // model loaded and able to describe
   modelIdle: boolean; // enabled but demand-unloaded (no describe work right now)
   progress: number; // 0..1 model download/load progress
   busy: boolean; // a generation is currently running
   error: string | null;
   setEnabled: (on: boolean) => void;
-  setQuality: (q: VisionQuality) => void;
   describe: (jpegPath: string, ocrHint?: string, grounding?: string) => Promise<VisionResult | null>;
 
   // Background processing — a paced trickle that describes the library while the
@@ -101,7 +96,6 @@ const Ctx = createContext<VisionApi | null>(null);
 export function VisionProvider({ children }: { children: React.ReactNode }) {
   const embeddings = useEmbeddings();
   const [enabled, setEnabledState] = useState(false);
-  const [quality, setQualityState] = useState<VisionQuality>(DEFAULT_QUALITY);
   const [bgEnabled, setBgEnabledState] = useState(false);
   const [bgIntensity, setBgIntensityState] = useState(0.25);
   const [throttles, setThrottles] = useState<BgThrottles>({
@@ -122,16 +116,14 @@ export function VisionProvider({ children }: { children: React.ReactNode }) {
   // loading (preventLoad) so a re-install never auto-downloads ~hundreds of MB.
   useEffect(() => {
     (async () => {
-      const [en, q, bg, bi, oc, ph, pl] = await Promise.all([
+      const [en, bg, bi, oc, ph, pl] = await Promise.all([
         getSetting(ENABLED_KEY),
-        getSetting(QUALITY_KEY),
         getSetting(BG_ENABLED_KEY),
         getSetting(BG_INTENSITY_KEY),
         getSetting(BG_ONLY_CHARGING_KEY),
         getSetting(BG_PAUSE_HOT_KEY),
         getSetting(BG_PAUSE_LOW_KEY),
       ]);
-      if (q === 'max' || q === 'fast') setQualityState(q);
       setEnabledState(en === '1');
       setBgEnabledState(bg === '1');
       const parsed = bi != null ? Number(bi) : NaN;
@@ -153,7 +145,7 @@ export function VisionProvider({ children }: { children: React.ReactNode }) {
   // the model when preventLoad flips true, freeing the RAM.
   const [modelWanted, setModelWanted] = useState(false);
   const llm = useLLM({
-    model: MODEL[quality],
+    model: MODEL,
     preventLoad: !(hydrated && enabled && modelWanted),
   });
 
@@ -216,10 +208,6 @@ export function VisionProvider({ children }: { children: React.ReactNode }) {
     setEnabledState(on);
     setSetting(ENABLED_KEY, on ? '1' : '0').catch(() => {});
   };
-  const setQuality = (q: VisionQuality) => {
-    setQualityState(q);
-    setSetting(QUALITY_KEY, q).catch(() => {});
-  };
   const setBackgroundEnabled = (on: boolean) => {
     setBgEnabledState(on);
     setSetting(BG_ENABLED_KEY, on ? '1' : '0').catch(() => {});
@@ -272,7 +260,7 @@ export function VisionProvider({ children }: { children: React.ReactNode }) {
         { role: 'system', content: SYSTEM_PROMPT },
         { role: 'user', content: userTurn(ocrHint, grounding), mediaPath: jpegPath },
       ],
-      quality
+      'foreground'
     );
   };
   const enricherRef = useRef<VisionEnricher>({ ready: false, describe });
@@ -625,14 +613,12 @@ export function VisionProvider({ children }: { children: React.ReactNode }) {
   const api = useMemo<VisionApi>(() => {
     return {
       enabled,
-      quality,
       ready: enabled && llm.isReady,
       modelIdle: enabled && !modelWanted && !llm.isReady,
       progress: llm.downloadProgress ?? 0,
       busy: llm.isGenerating,
       error: llm.error ? String(llm.error.message ?? llm.error) : null,
       setEnabled,
-      setQuality,
       describe,
       backgroundEnabled: bgEnabled,
       backgroundIntensity: bgIntensity,
@@ -648,7 +634,6 @@ export function VisionProvider({ children }: { children: React.ReactNode }) {
     // llm identity changes as state updates; depend on the fields we read.
   }, [
     enabled,
-    quality,
     bgEnabled,
     bgIntensity,
     throttles,

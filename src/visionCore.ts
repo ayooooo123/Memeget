@@ -2,15 +2,12 @@
 // background task (headlessVision.ts / backgroundTask.ts). Nothing here imports
 // React or any react-native-executorch HOOK, so it can run in a background JS
 // context with no component tree.
-import { GEMMA4_E2B_MM, LFM2_5_VL_450M_QUANTIZED, type Message } from 'react-native-executorch';
+import { GEMMA4_E2B_MM, type Message } from 'react-native-executorch';
 
 import type { NativePower } from '../modules/memeget-bg';
 
-export type VisionQuality = 'fast' | 'max';
-
 // Persisted-setting keys, shared so the provider and the headless task read the
 // exact same values out of the SQLite key/value store.
-export const QUALITY_KEY = 'vision.quality';
 export const ENABLED_KEY = 'vision.enabled';
 export const BG_ENABLED_KEY = 'vision.bg.enabled';
 export const BG_INTENSITY_KEY = 'vision.bg.intensity';
@@ -18,34 +15,23 @@ export const BG_ONLY_CHARGING_KEY = 'vision.bg.onlyCharging';
 export const BG_PAUSE_HOT_KEY = 'vision.bg.pauseHot';
 export const BG_PAUSE_LOW_KEY = 'vision.bg.pauseLowBattery';
 
-// Gemma ships no recommended sampling settings in the library descriptor, so we
-// pin the same near-greedy config the LFM card recommended — this is a cataloging
-// task, not creative writing, and low temperature keeps the four-line format tight.
-const GEMMA_GENERATION_CONFIG = {
+// Gemma 4 E2B ships no recommended sampling settings in the library descriptor, so
+// we pin a near-greedy config — this is a cataloging task, not creative writing,
+// and low temperature keeps the four-line format tight.
+const VLM_GENERATION_CONFIG = {
   temperature: 0.1,
   minP: 0.15,
   repetitionPenalty: 1.05,
 } as const;
 
-// Two quality tiers, distinguished by BACKEND, not just parameter count:
-//   max  → Gemma 4 E2B multimodal (default). Runs on the GPU — Vulkan on Android,
-//          MLX on iOS (its .pte modelSource is a per-platform union of exactly
-//          those two; there is NO multimodal XNNPACK build). GPU + a fixed-square
-//          vision encoder make it BOTH faster and sharper than LFM wherever the
-//          GPU path loads.
-//   fast → LFM2.5-VL 450M. XNNPACK (CPU) ONLY — no GPU build exists in the catalog
-//          for any LFM-VL size. So this is the light / low-RAM COMPATIBILITY
-//          fallback for devices where the GPU path is unavailable — NOT a "faster
-//          than Gemma" tier. (LFM-VL 1.6B is intentionally not offered: it is
-//          Pareto-dominated — slower than Gemma on GPU, and weaker than it.)
-// Each entry is a complete ExecuTorch model descriptor (source + tokenizer + caps).
-export const MODEL = {
-  fast: LFM2_5_VL_450M_QUANTIZED,
-  max: { ...GEMMA4_E2B_MM, generationConfig: GEMMA_GENERATION_CONFIG },
-} as const;
-
-// Fresh installs (no persisted choice) get Gemma.
-export const DEFAULT_QUALITY: VisionQuality = 'max';
+// The single on-device VLM: Gemma 4 E2B multimodal, on the GPU backend — Vulkan
+// on Android, MLX on iOS (its .pte modelSource is a per-platform union of exactly
+// those two; there is no multimodal XNNPACK build, so it is GPU-only). One model,
+// no user-facing tiers: the app should feel like magic, not make people choose a
+// model. Enrichment only — CLIP stays the fast embedding / similarity / teach-by-
+// example backbone; this reads each meme and writes back a human caption, the
+// literal text, and open-vocabulary tags CLIP can't produce.
+export const MODEL = { ...GEMMA4_E2B_MM, generationConfig: VLM_GENERATION_CONFIG } as const;
 
 // Never hammer the accelerator faster than this between items, even at Extreme.
 export const MIN_BG_INTERVAL_MS = 1200;
@@ -106,7 +92,7 @@ export const USER_PROMPT =
 // A stripped prompt (~140 tokens vs ~470) that drops the two worked examples and
 // compresses the tag guidance. Every generate() re-prefills the whole instruction
 // block — generate() is stateless and the runtime exposes no prefix/KV cache — so
-// on the CPU LFM tier the prompt is pure per-meme prefill cost. Opt in with
+// the prompt is pure per-meme prefill cost re-paid every image. Opt in with
 // EXPO_PUBLIC_MEMEGET_VLM_PROMPT=terse and A/B format adherence on-device.
 export const USER_PROMPT_TERSE =
   'Describe this meme for search. Reply with EXACTLY these four lines, each ' +

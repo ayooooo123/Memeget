@@ -1,0 +1,16 @@
+[
+  {
+    "id": "shush",
+    "file": "images/shush.jpg",
+    "note": "man holds a finger to his lips (be quiet)",
+    "mustFind": ["shush", "quiet", "be quiet", "shhh"],
+    "expectFacets": ["situation", "action"]
+  },
+  {
+    "id": "this-is-fine",
+    "file": "images/this-is-fine.jpg",
+    "note": "dog sipping coffee in a burning room",
+    "mustFind": ["this is fine", "everything is fine", "denial", "pretending"],
+    "expectFacets": ["situation", "object", "format"]
+  }
+]
