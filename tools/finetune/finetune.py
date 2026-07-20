@@ -97,6 +97,7 @@ def load_coco_anchors(n: int, skip: int) -> list[str]:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--data-dir", default=dataset.DEFAULT_DATA_DIR)
+    ap.add_argument("--extra-dir", action="append", default=[], help="additional source dir(s), e.g. the memedepot corpus")
     ap.add_argument("--out", default=os.path.join(os.path.dirname(__file__), "mobileclip_s2_memeft.pt"))
     ap.add_argument("--train-size", type=int, default=6000)
     ap.add_argument("--epochs", type=int, default=300)
@@ -108,7 +109,7 @@ def main() -> int:
     random.seed(a.seed)
     torch.manual_seed(a.seed)
 
-    recs = dataset.load_records(a.data_dir)
+    recs = dataset.load_records(a.data_dir, extra_dirs=a.extra_dir)
     train, held = dataset.split(recs)
     random.shuffle(train)
     if a.train_size:

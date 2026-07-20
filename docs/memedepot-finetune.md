@@ -6,16 +6,18 @@ eval harness in that doc exists — without it you cannot tell whether a fine-tu
 helped, and a meme fine-tune is very easy to *silently* make worse (see
 Risks). Label mining + eval are the high-ROI work; this is the shiny object.
 
-> **Implemented (local corpus, MPS):** a working version of the "Linear adapter"
-> alternative below now ships as `tools/finetune/` — a residual text→image adapter
-> (anchored on real COCO captions to protect generic queries) trained on the local
-> basedmemes.lol + KnowYourMeme corpus, folded into `text.text_projection` for a
-> drop-in re-export. Measured through `npm run eval` on a 595-meme disjoint holdout
-> (MobileCLIP-S2): retrieval Recall@5 66.2%→72.8%, Recall@10 72.4%→79.7%,
-> MRR 0.563→0.621; aspect MAP 0.159→0.219. A definitive generic COCO
-> caption→image forgetting check holds R@5 flat (91.3%) with R@1 −2.7pt. Still owed
-> before shipping: the `.pte` re-export and clearing the generic R@1 gate outright
-> (raise the anchor λ, or a low-rank Δ) — see that dir's README.
+> **Implemented (local 3-source corpus, MPS):** a working version of the "Linear
+> adapter" alternative below now ships as `tools/finetune/` — a residual text→image
+> adapter (COCO-anchored to protect generic queries) trained on the local
+> basedmemes.lol + KnowYourMeme + **memedepot** corpus, folded into
+> `text.text_projection` for a drop-in re-export. Measured through `npm run eval` on
+> a 595-meme disjoint holdout (MobileCLIP-S2): retrieval Recall@5 66.2%→73.3%,
+> Recall@10 72.4%→79.3%, MRR 0.563→0.621; aspect MAP 0.159→0.237. A definitive
+> generic COCO caption→image forgetting check holds R@5 91.3%→92.0% (MRR −0.008,
+> R@1 −2.0). An RL/DPO preference variant (`preference.py`, hard-negative reward +
+> stock reference) was also built; it did NOT beat the contrastive fine-tune here
+> (single-hard-neg pairwise < full contrastive). Owed before shipping: the `.pte`
+> re-export; clearing the generic R@1 gate outright (low-rank Δ) — see that dir's README.
 
 ## Goal
 
