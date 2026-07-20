@@ -1,14 +1,19 @@
 import React, { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import * as FileSystem from 'expo-file-system/legacy';
-import { useSpeechToText } from 'react-native-executorch';
+import { ScalarType, useExecutorchModule, useTokenizer, type TensorPtr } from 'react-native-executorch';
 
 import {
   AUDIO_ENABLED_KEY,
   AUDIO_MAX_SECONDS,
   AUDIO_MIN_SAMPLES,
-  AUDIO_MODEL,
+  MOONSHINE_DECODER,
+  MOONSHINE_DECODER_BYTES,
+  MOONSHINE_ENCODER,
+  MOONSHINE_ENCODER_BYTES,
+  MOONSHINE_TOKENIZER,
   cleanTranscript,
   pcmBase64ToWaveform,
+  runMoonshine,
 } from './audioCore';
 import {
   getMemesNeedingAudio,
@@ -24,14 +29,14 @@ import { acquireKeepAlive } from './keepAlive';
 import { audioNativeAvailable, extractAudio } from '../modules/memeget-bg';
 import { deleteCache, materialize } from './saf';
 
-// Audio analysis: on-device Whisper (via ExecuTorch — the SAME runtime that
+// Audio analysis: on-device Moonshine (via ExecuTorch — the SAME runtime that
 // already runs CLIP and the VLM) transcribes the speech in video memes so
 // "what was that clip where the guy says X" becomes a text search. Like the
 // vision pass this is an *enrichment*: videos are already indexed and
 // searchable by their keyframe; this adds what's SAID in them.
 //
 // Pipeline per video: native MediaCodec decode of the audio track to mono
-// 16 kHz PCM (modules/memeget-bg) → Whisper transcription → transcript stored
+// 16 kHz PCM (modules/memeget-bg) → Moonshine transcription → transcript stored
 // on the meme row and folded into the lexical side of search.
 
 export interface TranscribeProgress {
@@ -65,7 +70,7 @@ export interface AudioApi {
 const Ctx = createContext<AudioApi | null>(null);
 
 // Transcribe ONE video: materialize the SAF file, decode its audio natively,
-// run Whisper, persist. Cleans up its temp files whatever happens.
+// run Moonshine, persist. Cleans up its temp files whatever happens.
 async function transcribeOne(
   stt: { transcribe: (waveform: Float32Array) => Promise<{ text: string }> },
   m: MemeNeedingAudioRow
@@ -116,21 +121,70 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
       .finally(() => setHydrated(true));
   }, []);
 
-  const stt = useSpeechToText({ model: AUDIO_MODEL, preventLoad: !(hydrated && enabled) });
+  const encoder = useExecutorchModule({
+    modelSource: MOONSHINE_ENCODER,
+    preventLoad: !(hydrated && enabled),
+  });
+  const decoder = useExecutorchModule({
+    modelSource: MOONSHINE_DECODER,
+    preventLoad: !(hydrated && enabled),
+  });
+  const tokenizer = useTokenizer({
+    tokenizer: { tokenizerSource: MOONSHINE_TOKENIZER },
+    preventLoad: !(hydrated && enabled),
+  });
 
   const setEnabled = (on: boolean) => {
     setEnabledState(on);
     setSetting(AUDIO_ENABLED_KEY, on ? '1' : '0').catch(() => {});
   };
 
-  // Latest transcribe fn for the pass below (stt gets a new identity per render).
-  const sttRef = useRef(stt);
-  sttRef.current = stt;
-  const ready = enabled && audioNativeAvailable && stt.isReady;
+  // Moonshine runs as three separate ExecuTorch resources we drive by hand:
+  // encoder (waveform → hidden states), decoder (greedy autoregressive loop),
+  // and the tokenizer for detokenizing. transcribeOne only needs a
+  // { transcribe(waveform) } shape, so adapt the raw forwards behind one.
+  const transcribe = async (waveform: Float32Array): Promise<{ text: string }> => {
+    const text = await runMoonshine<TensorPtr>(waveform, {
+      encode: async (w) => {
+        const out = await encoder.forward([
+          { dataPtr: w, sizes: [1, w.length], scalarType: ScalarType.FLOAT },
+        ]);
+        return out[0];
+      },
+      decode: async (tokens, encoderOutput) => {
+        const ids = BigInt64Array.from(tokens, (t) => BigInt(t));
+        const out = await decoder.forward([
+          { dataPtr: ids, sizes: [1, tokens.length], scalarType: ScalarType.LONG },
+          encoderOutput,
+        ]);
+        const o = out[0];
+        return {
+          data: o.dataPtr as ArrayLike<number> | BigInt64Array,
+          sizes: o.sizes,
+          isTokenIds: o.scalarType === ScalarType.LONG || o.scalarType === ScalarType.INT,
+        };
+      },
+      detokenize: (genIds) => tokenizer.decode(genIds, true),
+    });
+    return { text };
+  };
+  // The stt-like handle gets a new identity per render (the hooks do); keep the
+  // latest for the long-running pass below.
+  const sttRef = useRef({ transcribe });
+  sttRef.current = { transcribe };
+  const ready =
+    enabled && audioNativeAvailable && encoder.isReady && decoder.isReady && tokenizer.isReady;
   const readyRef = useRef(ready);
   readyRef.current = ready;
+  // Size-weighted download progress — the decoder binary dwarfs the encoder, so
+  // a plain average of the two bars would lurch.
+  const downloadProgress =
+    (encoder.downloadProgress * MOONSHINE_ENCODER_BYTES +
+      decoder.downloadProgress * MOONSHINE_DECODER_BYTES) /
+    (MOONSHINE_ENCODER_BYTES + MOONSHINE_DECODER_BYTES);
+  const loadError = encoder.error ?? decoder.error ?? tokenizer.error;
 
-  // One pass at a time — Whisper shares the accelerator with the other models,
+  // One pass at a time — Moonshine shares the accelerator with the other models,
   // and a second concurrent pass would double-process the same queue anyway.
   const busyRef = useRef(false);
 
@@ -153,7 +207,7 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
       const result: TranscribeResult = { transcribed: 0, silent: 0, failed: 0 };
       for (let i = 0; i < queue.length; i++) {
         if (opts.shouldCancel?.() || !readyRef.current) break;
-        // Whisper shares the accelerator with the CLIP text embed a search
+        // Moonshine shares the accelerator with the CLIP text embed a search
         // needs; a full transcription pass runs generations back-to-back, so
         // stand down between clips while the user is searching and let their
         // query vector land instead of starving behind the whole queue.
@@ -183,15 +237,14 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
     () => ({
       enabled,
       ready,
-      progress: stt.downloadProgress ?? 0,
+      progress: downloadProgress,
       running,
-      error: stt.error ? String((stt.error as any).message ?? stt.error) : null,
+      error: loadError ? loadError.message : null,
       nativeAvailable: audioNativeAvailable,
       setEnabled,
       runTranscription,
     }),
-    // stt identity changes as its state updates; depend on the fields we read.
-    [enabled, ready, running, stt.isReady, stt.downloadProgress, stt.error]
+    [enabled, ready, running, downloadProgress, loadError]
   );
 
   return <Ctx.Provider value={api}>{children}</Ctx.Provider>;

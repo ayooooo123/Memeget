@@ -17,7 +17,7 @@ No accounts. No servers. No uploads.
 | Quick filters | A slim chip row under the search box: tap **▦ Images / ▶ Videos** to narrow by media type, or tap a known meme tag (the formats/characters actually present in your library, plus your taught labels) to filter without typing. Filters apply to both browse and search. |
 | Words in the meme | On-device **OCR** ([`expo-text-extractor`](https://github.com/pchalupa/expo-text-extractor) → ML Kit on Android). |
 | Video | Multiple frames are sampled across the clip (`expo-video-thumbnails`), visually-identical frames collapsed, and each distinct moment analyzed — the primary embeddings mean-pooled into one "gist" vector, OCR text unioned, and tags merged. So a caption or character that only appears partway through is still found. The heavier VLM caption pass describes each distinct scene (stopping once frames stop changing) and folds them together. |
-| Words *said* in the meme | Opt-in **audio analysis** (Settings): a native decoder (MediaCodec) pulls each video's audio track as 16 kHz PCM and on-device **Whisper** (via the same ExecuTorch runtime) transcribes it. The transcript shows in the viewer and is searchable — find a clip by the line you remember hearing. |
+| Words *said* in the meme | Opt-in **audio analysis** (Settings): a native decoder (MediaCodec) pulls each video's audio track as 16 kHz PCM and on-device **Moonshine** (its encoder/decoder driven over the same ExecuTorch runtime) transcribes it. Moonshine's compute scales with clip length instead of Whisper's fixed 30 s window, so short meme audio transcribes faster. The transcript shows in the viewer and is searchable — find a clip by the line you remember hearing. |
 | Similar memes | Open any meme → **More like this**: the library ranked by stored visual vectors. By default this uses CLIP cosine similarity; if a custom DINOv2 visual model is configured, DINO vectors are stored/backfilled and used for this flow. Tap a thumbnail to hop to it — great for finding the other variants of a template. |
 | Bulk actions | **Long-press** a thumbnail to enter selection mode, tap to add/remove memes (or **All**), then act on the whole set from the bottom bar: **Tag** them all with one label at once, or **Delete** them together. A bulk tag is a first-class user tag — it's searchable and survives re-tagging. The tag sheet's **Spread to look-alikes** toggle (on by default) also propagates the tag to the library's near-identical memes — other crops/variants of the same template, matched by the stored visual vectors (DINOv2 when configured, else CLIP) above a strict same-template similarity bar. |
 | Index storage | `expo-sqlite`; image and caption embeddings stored as float32 blobs, brute-force cosine search. |
@@ -85,7 +85,7 @@ There are exactly two times the app reaches out, both download-only:
    (ExecuTorch fetches it, then caches it locally at
    `{documentDirectory}/react-native-executorch/`). Opting in to AI descriptions
    or audio analysis (Settings) likewise triggers a one-time download of that
-   model (Gemma 4 E2B / Whisper), cached the same way. After that, you can stay
+   model (Gemma 4 E2B / Moonshine), cached the same way. After that, you can stay
    airplane-mode forever. To make it *truly* zero-network from install, the model
    can be bundled into the APK assets — see "Next steps". Developer builds can
    also point Memeget at custom MobileCLIP-S2 and DINOv2 ExecuTorch exports via
@@ -154,8 +154,8 @@ App.tsx                 # tab shell
 src/embeddings.tsx      # CLIP/custom primary hooks + optional DINO visual hook
 src/searchCore.ts       # Hybrid image/caption retrieval scoring
 src/indexer.ts          # SAF -> copy -> (thumbnail) -> embed -> OCR -> tag -> store
-src/audio.tsx           # Whisper transcription pass over video memes (opt-in)
-src/audioCore.ts        # React-free audio helpers: PCM decode, transcript cleanup
+src/audio.tsx           # Moonshine transcription pass over video memes (opt-in)
+src/audioCore.ts        # React-free audio core: model sources, greedy decode loop, PCM decode, cleanup
 src/db.ts               # SQLite schema, vector storage, cosine search
 src/saf.ts              # Storage Access Framework folder linking
 src/linkResolver.ts     # shared X/Tenor/social links -> resolve + download media

@@ -71,7 +71,7 @@ class MemegetBgModule : Module() {
 
     // Decode the first audio track of a video to mono 16 kHz float32 PCM,
     // written as a raw little-endian file in the cache dir (the JS side reads
-    // it and hands the waveform to on-device Whisper). Async because a two-
+    // it and hands the waveform to the on-device STT model). Async because a two-
     // minute clip takes real decode time — expo runs this off the main thread
     // and resolves a Promise in JS. Resolves null when there is no audio track;
     // decode errors reject and the caller marks the video failed.

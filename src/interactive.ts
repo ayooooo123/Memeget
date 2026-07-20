@@ -1,5 +1,5 @@
 // Interactive-priority coordination between a live search and the on-device
-// model loops that identify memes (VLM describe, Whisper transcribe, DINO/
+// model loops that identify memes (VLM describe, Moonshine transcribe, DINO/
 // caption backfills). They all share one accelerator, so a text-query embed —
 // the one native call a search is waiting on — can end up stuck behind a
 // back-to-back train of enrichment generations. That's what made search feel
