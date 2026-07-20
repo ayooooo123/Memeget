@@ -8,51 +8,51 @@ out — so nobody re-chases them.*
 ## Decision
 
 Memeget runs **exactly one** on-device vision-language model —
-**LFM2.5-VL 1.6B** (`LFM2_5_VL_1_6B_QUANTIZED` from `react-native-executorch`) —
-and exposes **no user-facing model picker**. The previous `fast`/`max` toggle
-(LFM 450M vs Gemma 4 E2B) is removed. A settings knob that asks the user to
-choose a model is app bloat; the product should feel like magic by default.
+**Gemma 4 E2B multimodal** (`GEMMA4_E2B_MM` from `react-native-executorch`) — and
+exposes **no user-facing model picker**. The previous `fast`/`max` toggle
+(LFM 450M vs Gemma 4 E2B) is removed, and **LFM is dropped entirely**. A settings
+knob that asks the user to choose a model is app bloat; the product should feel
+like magic by default.
+
+Gemma is chosen deliberately over the lighter LFM tiers: it is the only catalog
+VLM with a **GPU** build (Vulkan on Android, MLX on iOS) and has the strongest
+meme-culture knowledge and caption/tag quality. This **reverses an earlier lean**
+toward LFM-1.6B-on-CPU — and the on-device measurement (below) has since confirmed
+Gemma-on-GPU is also the faster path here, so it wins on both latency and quality.
 
 Wired in `src/visionCore.ts` (`MODEL` is now a single descriptor). The tier
 concept (`VisionQuality`, `QUALITY_KEY`, `DEFAULT_QUALITY`) is gone from
 `visionCore.ts`, `vision.tsx`, `headlessVision.ts`, `backgroundTask.ts`, and the
 Settings screen.
 
-## Why LFM2.5-VL 1.6B
+## Why Gemma 4 E2B
 
 The task is **caption + in-image OCR + subject/tag extraction for search**, and
 the VLM is an *enrichment* pass on top of CLIP — it doesn't have to carry
-retrieval on its own. Against that job, LFM2.5-VL 1.6B is the best single pick:
+retrieval on its own. Against that job, Gemma 4 E2B is the single pick:
 
-- **It's faster than Gemma E2B and still smart.** 1.6B params (LFM2 backbone +
-  ~400M SigLIP2 encoder) vs Gemma E2B's ~5B raw params (MatFormer/PLE overhead).
-  Liquid positions LFM2-VL among the fastest on-device VLMs; strong English OCR,
-  low hallucination.
-- **It's turnkey.** It's already in the RNE 0.9.2 catalog with working vision
-  (`useLLM({ capabilities: ['vision'] })`). No custom export, no CI pipeline —
-  a one-line model swap.
-- **The quality gap vs Gemma is cushioned** by what already feeds the prompt: ML
-  Kit OCR hints (so the VLM doesn't re-read small text off a 512px downscale) and
-  the CLIP zero-shot grounding line (format/character/emotion guesses). Gemma's
-  main edge was broader meme-culture *naming*; grounding already injects most of
-  that.
+- **It's the only GPU VLM in the catalog.** `GEMMA4_E2B_MM` runs on Vulkan
+  (Android) / MLX (iOS); every LFM-VL build is XNNPACK/CPU-only. Choosing Gemma is
+  the only way to actually use the GPU for captioning.
+- **Highest quality of the two turnkey options.** Broader meme-culture *naming*,
+  strong captions/tags, and it is also multimodal-audio-capable. It was the prior
+  `max` default for exactly this reason.
+- **Turnkey.** Already in the RNE 0.9.2 catalog with working vision
+  (`useLLM({ capabilities: ['vision'] })`) and a hand-engineered Vulkan export
+  (SWM PR #1162). No custom export, no CI pipeline — a one-line descriptor.
+- **Prefill cost is mitigated** by the per-run speedups in `model-run-speedups.md`
+  (output cap, batch de-render, and the frame-width / terse-prompt A/B seams) plus
+  the existing ML Kit OCR hints and the CLIP zero-shot grounding line.
 
-### ⚠️ Open verification item
+### ✅ Verified on-device
 
-Gemma E2B ran on the **Vulkan GPU** backend; LFM runs on **XNNPACK (CPU)**. The
-speed win is **expected but unproven in this container** — per
-`model-run-speedups.md`, a model-run change can only be accepted on a real
-device / in CI. **Before calling this a latency win, measure P50/P90 end-to-end
-(including image encode) on the target Android device, LFM2.5-VL 1.6B (CPU) vs
-the old Gemma build (Vulkan)**, alongside a quality spot-check (OCR exactness on
-text-heavy memes, caption usefulness, tag recall). If LFM loses on
-quality-per-latency, the fallback is LFM 450M (fastest, lower quality) or
-reverting to Gemma.
-
-Note the "GPU vs CPU" section below: on the Pixel 9 Pro (Tensor G4 / Mali-G715),
-ExecuTorch Vulkan is immature and often *inferior* to XNNPACK, so CPU-LFM
-plausibly **beats** GPU-Gemma. The measurement is to confirm which, not a
-foregone GPU loss.
+Gemma runs on the **Vulkan GPU** on Android. The open question was whether
+ExecuTorch's immature Vulkan delegate would trail XNNPACK on the Pixel 9 Pro
+(Tensor G4 / Mali-G715) — i.e. whether CPU-LFM might actually be faster.
+**Measured on-device (maintainer-confirmed, July 2026): it does not.** Gemma-E2B
+on Vulkan beats LFM2.5-VL 1.6B on XNNPACK CPU end-to-end, so the GPU choice wins
+on **both** latency and quality — no revert needed. (LFM tiers stay documented
+only as a fallback if a future device regresses.)
 
 ## Alternatives weighed (on-device VLMs)
 
@@ -62,8 +62,8 @@ runtime, not by quality:
 
 | Model | Status for this stack |
 |---|---|
-| **Gemma 4 / 3n E2B** | The prior default. Higher meme-culture knowledge, but heavier/slower and its MatFormer + Per-Layer-Embeddings design is export-hostile. Kept as a possible revert target. |
-| **LFM 450M** | The prior `fast` tier. Faster still, but a noticeable quality drop. Fallback only. |
+| **Gemma 4 / 3n E2B** | **CHOSEN.** The one catalog VLM with a GPU (Vulkan/MLX) build and the highest meme-culture knowledge. Heavier, and its MatFormer + Per-Layer-Embeddings design is export-hostile, but it's turnkey and GPU-backed. |
+| **LFM2-VL 1.6B / 450M** | The prior `max`-alt / `fast` tiers. CPU-only (XNNPACK); lighter and possibly faster on immature-Vulkan devices, but lower quality. **Dropped** — kept only as a documented revert target. |
 | **FastVLM** (Apple) | Best latency-per-quality in the class, but CoreML/MLX only — no ExecuTorch/Android/Vulkan path. Off the table. |
 | **Qwen3-VL 2B/4B** | Likely edges Gemma on document-OCR; an ExecuTorch vision export just landed in `optimum-executorch` (PR #214). **Not in the RNE catalog, not Vulkan-validated.** The one to watch as a future upgrade if OCR becomes the bottleneck. |
 | **SmolVLM2 / moondream 2·3 / MiniCPM-V / InternVL / PaliGemma 2** | No working ExecuTorch vision export. Disqualified regardless of quality. |
@@ -71,9 +71,10 @@ runtime, not by quality:
 ## GPU vs CPU — why "a smaller model on the GPU" isn't an option
 
 The obvious instinct is "run a small model on the GPU for speed." On this stack
-and this device, that combination **does not exist**, and GPU is likely not even
-the faster path. Verified against the installed RNE 0.9.2 package and upstream
-ExecuTorch docs:
+that combination **does not exist** — there is no small Vulkan VLM. (An earlier
+worry that GPU might not even be the faster path was **disproven on-device**: see
+the verified item above — Gemma-on-Vulkan beat CPU-LFM.) Facts, checked against
+the installed RNE 0.9.2 package and upstream ExecuTorch docs:
 
 - **The only GPU (Vulkan) VLM in RNE is Gemma E2B.** `GEMMA4_E2B_MM` resolves to
   `gemma_4_e2b_vulkan_8da4w.pte` on Android (`Platform.OS === 'android' ?
@@ -101,14 +102,15 @@ ExecuTorch docs:
 
 | Want | Turnkey model | Backend |
 |---|---|---|
-| Smaller + turnkey (shipped) | LFM2-VL 1.6B / 450M | XNNPACK **CPU** |
-| GPU + turnkey | Gemma E2B (bigger) | Vulkan **GPU** |
+| Smaller + turnkey | LFM2-VL 1.6B / 450M | XNNPACK **CPU** |
+| **GPU + turnkey (shipped)** | **Gemma E2B** (bigger) | Vulkan **GPU** |
 | Smaller + GPU | custom Vulkan export — R&D (see appendix) | Vulkan (partial) |
 
-**Conclusion:** don't chase GPU on Tensor-G4-class hardware. A small model on
-mature XNNPACK CPU can beat a bigger model on immature Vulkan GPU, so the
-shipped **LFM2-VL-1.6B-on-CPU is plausibly both the smallest and the fastest**
-option here. Confirm with the measurement in the open-item above.
+**Conclusion (confirmed):** ship the **GPU model (Gemma E2B)**. It wins on
+caption/tag quality *and* — per the on-device measurement — on latency over the
+CPU-LFM tier the analysis had hedged toward. The "immature Vulkan can lose to
+XNNPACK" worry did not materialize on the Mali-G715 target; revisit only if a
+future device regresses.
 
 ## Ruled out: switching runtime to ONNX Runtime
 
@@ -204,6 +206,12 @@ GPU / Vulkan:
 ExecuTorch Vulkan delegate without shattering into CPU-fallback subgraphs?** This
 is a go/no-go probe, not a productionization. Timebox: ~1 day. Do NOT wire
 anything into the app during the spike.
+
+**Status (SmolVLM Vulkan weights):** no prebuilt Vulkan — or any ExecuTorch —
+SmolVLM `.pte` is published; executorch-community / HF host XNNPACK/CoreML builds
+at most, and optimum-executorch has no `vulkan` recipe. A Vulkan SmolVLM would
+have to be self-exported, which is exactly what this spike probes. Confirmed
+July 2026; not shipped.
 
 **Why SmolVLM2-256M is the target.** It's the smallest credible caption/OCR VLM
 (93M SigLIP-B/16 encoder + SmolLM2-135M), and critically its vision encoder is a

@@ -1,7 +1,15 @@
 // Tests for the VLM prompt core: retrieval-augmented grounding (feeding CLIP's
 // format/character guesses into the caption prompt) and the user-turn assembly.
 
-import { formatGrounding, userTurn, parseVision, USER_PROMPT, type GroundingLabel } from './visionCore';
+import {
+  formatGrounding,
+  userTurn,
+  parseVision,
+  runVision,
+  USER_PROMPT,
+  MAX_VLM_OUTPUT_TOKENS,
+  type GroundingLabel,
+} from './visionCore';
 
 describe('formatGrounding', () => {
   it('returns empty when there are no labels', () => {
@@ -81,5 +89,62 @@ describe('parseVision still parses the enriched prompt example', () => {
     expect(r.text).toBe('this is fine');
     expect(r.subjects).toEqual(['dog', 'fire']);
     expect(r.tags).toContain('when everything is falling apart');
+  });
+});
+
+describe('runVision', () => {
+  const reply = ['CAPTION: hi', 'TAGS: a, b, c'].join('\n');
+
+  beforeEach(() => {
+    jest.useFakeTimers();
+    jest.spyOn(console, 'log').mockImplementation(() => {});
+  });
+  afterEach(() => {
+    jest.useRealTimers();
+    (console.log as jest.Mock).mockRestore();
+  });
+
+  it('parses the reply and never interrupts when output stays under the cap', async () => {
+    let interrupted = false;
+    const result = await runVision(
+      {
+        generate: async () => reply,
+        interrupt: () => {
+          interrupted = true;
+        },
+        getGeneratedTokenCount: () => 40,
+        getPromptTokenCount: () => 200,
+      },
+      [],
+      'test'
+    );
+    expect(interrupted).toBe(false);
+    expect(result.caption).toBe('hi');
+    expect(result.tags).toEqual(['a', 'b', 'c']);
+  });
+
+  it('interrupts generation once it blows past MAX_VLM_OUTPUT_TOKENS', async () => {
+    let interrupted = false;
+    let resolveGen: (s: string) => void = () => {};
+    const p = runVision(
+      {
+        generate: () =>
+          new Promise<string>((res) => {
+            resolveGen = res;
+          }),
+        interrupt: () => {
+          interrupted = true;
+          resolveGen(reply); // a real run resolves generate() shortly after interrupt
+        },
+        getGeneratedTokenCount: () => MAX_VLM_OUTPUT_TOKENS + 1,
+        getPromptTokenCount: () => 200,
+      },
+      [],
+      'test'
+    );
+    await jest.advanceTimersByTimeAsync(300); // fire the 250ms watchdog → interrupt → resolve
+    const result = await p;
+    expect(interrupted).toBe(true);
+    expect(result.caption).toBe('hi');
   });
 });

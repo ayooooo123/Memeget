@@ -2,7 +2,7 @@
 // background task (headlessVision.ts / backgroundTask.ts). Nothing here imports
 // React or any react-native-executorch HOOK, so it can run in a background JS
 // context with no component tree.
-import { LFM2_5_VL_1_6B_QUANTIZED } from 'react-native-executorch';
+import { GEMMA4_E2B_MM, type Message } from 'react-native-executorch';
 
 import type { NativePower } from '../modules/memeget-bg';
 
@@ -15,7 +15,7 @@ export const BG_ONLY_CHARGING_KEY = 'vision.bg.onlyCharging';
 export const BG_PAUSE_HOT_KEY = 'vision.bg.pauseHot';
 export const BG_PAUSE_LOW_KEY = 'vision.bg.pauseLowBattery';
 
-// LFM2.5-VL ships no recommended sampling settings in the library descriptor, so
+// Gemma 4 E2B ships no recommended sampling settings in the library descriptor, so
 // we pin a near-greedy config — this is a cataloging task, not creative writing,
 // and low temperature keeps the four-line format tight.
 const VLM_GENERATION_CONFIG = {
@@ -24,14 +24,14 @@ const VLM_GENERATION_CONFIG = {
   repetitionPenalty: 1.05,
 } as const;
 
-// The single on-device VLM: LFM2.5-VL 1.6B multimodal (SigLIP2 vision encoder +
-// LFM2 backbone), on the XNNPACK backend. A complete ExecuTorch descriptor
-// (source + tokenizer + capabilities) plus the generation config above. One
-// model, no user-facing tiers: the app's job is to feel like magic, not to make
-// people choose a model. Enrichment only — CLIP stays the fast embedding /
-// similarity / teach-by-example backbone; this reads each meme and writes back a
-// human caption, the literal text, and open-vocabulary tags CLIP can't produce.
-export const MODEL = { ...LFM2_5_VL_1_6B_QUANTIZED, generationConfig: VLM_GENERATION_CONFIG } as const;
+// The single on-device VLM: Gemma 4 E2B multimodal, on the GPU backend — Vulkan
+// on Android, MLX on iOS (its .pte modelSource is a per-platform union of exactly
+// those two; there is no multimodal XNNPACK build, so it is GPU-only). One model,
+// no user-facing tiers: the app should feel like magic, not make people choose a
+// model. Enrichment only — CLIP stays the fast embedding / similarity / teach-by-
+// example backbone; this reads each meme and writes back a human caption, the
+// literal text, and open-vocabulary tags CLIP can't produce.
+export const MODEL = { ...GEMMA4_E2B_MM, generationConfig: VLM_GENERATION_CONFIG } as const;
 
 // Never hammer the accelerator faster than this between items, even at Extreme.
 export const MIN_BG_INTERVAL_MS = 1200;
@@ -58,8 +58,10 @@ export const SYSTEM_PROMPT =
 // truncation there loses the whole object. Line-delimited output has no nesting
 // to corrupt and degrades gracefully: a reply cut off early still yields every
 // line that finished. One filled-in example anchors the format and stops the
-// model echoing the field hints back verbatim. (react-native-executorch has no
-// hard max-token knob, so brevity is enforced via the prompt.)
+// model echoing the field hints back verbatim. Brevity is steered by the prompt;
+// there is no generationConfig max-token field, but runVision enforces a hard
+// ceiling (MAX_VLM_OUTPUT_TOKENS) via getGeneratedTokenCount() + interrupt() as a
+// runaway safety net.
 export const USER_PROMPT =
   'Describe this meme so it can be found later by search. People search with a SINGLE ' +
   'word for any aspect — a feeling, an action, a character, a format, or the situation ' +
@@ -86,6 +88,23 @@ export const USER_PROMPT =
   'SUBJECTS: man, girlfriend, other woman\n' +
   'TAGS: distracted boyfriend, temptation, tempted by something new, jealousy, choosing the exciting new thing\n' +
   '\nNow describe the image. If it is not a meme, still describe it the same way. Be concise.';
+
+// A stripped prompt (~140 tokens vs ~470) that drops the two worked examples and
+// compresses the tag guidance. Every generate() re-prefills the whole instruction
+// block — generate() is stateless and the runtime exposes no prefix/KV cache — so
+// the prompt is pure per-meme prefill cost re-paid every image. Opt in with
+// EXPO_PUBLIC_MEMEGET_VLM_PROMPT=terse and A/B format adherence on-device.
+export const USER_PROMPT_TERSE =
+  'Describe this meme for search. Reply with EXACTLY these four lines, each ' +
+  'starting with the label in caps, and nothing else:\n' +
+  'CAPTION: one sentence <=20 words: the action, the mood, the situation it reacts to, and why it is funny\n' +
+  'TEXT: text visible in the image, verbatim; leave blank if none\n' +
+  'SUBJECTS: comma-separated main people, characters, or objects\n' +
+  'TAGS: 6-12 lowercase keywords for how a person would SEARCH for this. Lead with the ' +
+  'real-life situation or feeling; tag what a gesture MEANS not how it looks; include the ' +
+  'emotion, the action, the meme format/template name if known, and named characters. ' +
+  'Never generic appearance words like "serious face" or "direct gaze".\n' +
+  'If it is not a meme, describe it the same way. Be concise.';
 
 // Cap the injected OCR so it can't bloat the prompt (prefill cost) — a hint.
 export const OCR_HINT_MAX = 280;
@@ -173,7 +192,8 @@ export function formatGrounding(labels: GroundingLabel[], related: string[] = []
 // so the small model doesn't have to re-OCR a downscaled frame, and (2) the CLIP
 // format/character guess (see formatGrounding).
 export function userTurn(ocrHint?: string, grounding?: string): string {
-  let turn = USER_PROMPT;
+  let turn =
+    process.env.EXPO_PUBLIC_MEMEGET_VLM_PROMPT === 'terse' ? USER_PROMPT_TERSE : USER_PROMPT;
   const hint = (ocrHint ?? '').replace(/\s+/g, ' ').trim();
   if (hint) {
     turn +=
@@ -183,6 +203,70 @@ export function userTurn(ocrHint?: string, grounding?: string): string {
   const g = (grounding ?? '').trim();
   if (g) turn += `\n${g}`;
   return turn;
+}
+
+// ---- guarded run (output cap + timing telemetry) ----------------------------
+
+// A hard ceiling on generated tokens. There is no generationConfig max-token knob,
+// so this is enforced manually (see runVision). Set well ABOVE a normal four-line
+// reply (~150 tokens): it is a safety net that stops a small model looping for
+// hundreds of tokens, not a length trimmer.
+export const MAX_VLM_OUTPUT_TOKENS = 320;
+
+// The subset of the ExecuTorch LLM surface runVision needs. Both the useLLM hook
+// and the LLMModule class satisfy it — EXCEPT the prompt-token getter, whose name
+// differs (hook: getPromptTokenCount; class: getPromptTokensCount), so callers
+// adapt it when constructing the runner.
+export interface VisionRunner {
+  generate(messages: Message[]): Promise<string>;
+  interrupt(): void;
+  getGeneratedTokenCount(): number;
+  getPromptTokenCount(): number;
+}
+
+function safeCount(read: () => number): number {
+  try {
+    const n = read();
+    return Number.isFinite(n) ? n : 0;
+  } catch {
+    return 0;
+  }
+}
+
+// Run one stateless describe with a hard output cap and per-meme telemetry. A
+// watchdog polls the live generated-token count and interrupt()s if the model
+// blows past MAX_VLM_OUTPUT_TOKENS; a truncated reply still parses (the flat line
+// format degrades gracefully). Logs prompt vs generated tokens + wall time so the
+// prefill/decode split is visible on-device: `[vlm max] 1234p+150g tok in 900ms`.
+export async function runVision(
+  run: VisionRunner,
+  messages: Message[],
+  tag: string
+): Promise<VisionResult> {
+  const t0 = Date.now();
+  let capped = false;
+  const watchdog = setInterval(() => {
+    if (safeCount(run.getGeneratedTokenCount) >= MAX_VLM_OUTPUT_TOKENS) {
+      capped = true;
+      try {
+        run.interrupt();
+      } catch {
+        // ignore — generate() still resolves with the partial reply
+      }
+    }
+  }, 250);
+  let reply: string;
+  try {
+    reply = await run.generate(messages);
+  } finally {
+    clearInterval(watchdog);
+  }
+  const ms = Date.now() - t0;
+  const pin = safeCount(run.getPromptTokenCount);
+  const out = safeCount(run.getGeneratedTokenCount);
+  const tps = ms > 0 && out > 0 ? ` · ${(out / (ms / 1000)).toFixed(1)} tok/s` : '';
+  console.log(`[vlm ${tag}] ${pin}p+${out}g tok in ${ms}ms${tps}${capped ? ' · CAPPED' : ''}`);
+  return parseVision(reply);
 }
 
 // Fragments of the prompt's own field descriptions. The small model occasionally
