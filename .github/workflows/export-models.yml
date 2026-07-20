@@ -47,6 +47,9 @@ env:
 
 jobs:
   export:
+    # Skip the stock export (which publishes to the live models-v1) when this is a
+    # fine-tune dispatch (ckpt_url set) — then only export-finetune runs.
+    if: github.event.inputs.ckpt_url == ''
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
