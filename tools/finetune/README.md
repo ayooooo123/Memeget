@@ -2,7 +2,7 @@
 
 Realizes the fine-tune thread of `docs/memedepot-finetune.md` on a **local**
 3-source corpus — **basedmemes.lol + KnowYourMeme + memedepot** — trained on Apple
-**MPS** (M1); no cloud, corpus never leaves disk (copyrighted memes stay local).
+**MPS** (M1); no cloud. The image corpus lives outside the repo (large binaries), not in git.
 
 ## What ships
 A residual text→image adapter `W = I + Δ` folded into `text.text_projection`

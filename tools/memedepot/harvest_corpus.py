@@ -11,7 +11,7 @@ Writes a source dir in the multi-source loader's schema:
     <out>/collection.json   # [{ "file": "<cf_asset_id>.jpg", "tags": [...], "ai_description": ... }]
 so tools/finetune/dataset.load_records(extra_dirs=[<out>]) folds it in.
 
-Corpus stays LOCAL (copyrighted user memes — docs/memedepot-corpus.md); never shipped.
+Images are written to a local dir outside the repo (large binaries), not into git.
 """
 from __future__ import annotations
 
