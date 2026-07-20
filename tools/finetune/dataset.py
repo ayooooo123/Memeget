@@ -43,17 +43,25 @@ def _coerce_tag(v) -> str:
     return ""
 
 
-def _resolve_image(data_dir: str, filename: str) -> str | None:
-    for sub in IMAGE_SUBDIRS:
-        p = os.path.join(data_dir, sub, filename)
-        if os.path.isfile(p):
-            return p
+def _resolve_image(dirs: list[str], filename: str) -> str | None:
+    for d in dirs:
+        for sub in IMAGE_SUBDIRS:
+            p = os.path.join(d, sub, filename)
+            if os.path.isfile(p):
+                return p
     return None
 
 
-def load_records(data_dir: str = DEFAULT_DATA_DIR) -> list[MemeRecord]:
-    tags_by_image: dict[str, set[str]] = {}
+# Recognized collection files per source dir: KYM, and a generic drop-in for any
+# other source (e.g. a memedepot export) — an array of {file|image, tags|suffix}.
+_COLLECTION_JSON = ("meme_dataset_kym.json", "collection.json")
 
+
+def _ingest_dir(data_dir: str, tags_by_image: dict[str, set[str]]) -> None:
+    """Fold one source dir into the tag map: the line-delimited dataset.jsonl
+    ({image, suffix}) plus recognized collection JSON arrays. Explicit filenames
+    (not a blind *.json scan) so unrelated json in a dir can't corrupt the corpus;
+    drop a memedepot/other export in as `collection.json` to add it."""
     jsonl = os.path.join(data_dir, "dataset.jsonl")
     if os.path.isfile(jsonl):
         with open(jsonl, encoding="utf-8") as f:
@@ -74,28 +82,47 @@ def load_records(data_dir: str = DEFAULT_DATA_DIR) -> list[MemeRecord]:
                     if t:
                         bag.add(t)
 
-    kym = os.path.join(data_dir, "meme_dataset_kym.json")
-    if os.path.isfile(kym):
-        with open(kym, encoding="utf-8") as f:
-            try:
-                arr = json.load(f)
-            except json.JSONDecodeError:
-                arr = []
+    for name in _COLLECTION_JSON:
+        path = os.path.join(data_dir, name)
+        if not os.path.isfile(path):
+            continue
+        try:
+            arr = json.load(open(path, encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
         for m in arr if isinstance(arr, list) else []:
+            if not isinstance(m, dict):
+                continue
             img = _basename(m.get("file", "")) or _basename(m.get("image", ""))
             if not img:
                 continue
             bag = tags_by_image.setdefault(img, set())
-            for t in m.get("tags", []) or []:
-                t = _coerce_tag(t).lower()
+            raw = m.get("tags")
+            if isinstance(raw, list):
+                for t in raw:
+                    t = _coerce_tag(t).lower()
+                    if t:
+                        bag.add(t)
+            for t in (m.get("suffix") or "").split(","):
+                t = t.strip().lower()
                 if t:
                     bag.add(t)
+
+
+def load_records(data_dir: str = DEFAULT_DATA_DIR, extra_dirs: list[str] | None = None) -> list[MemeRecord]:
+    """Merge one or more source dirs (basedmemes + KYM today; add memedepot etc.
+    via `extra_dirs`). Records are keyed by image filename; tags union across
+    sources; the image must exist on disk in one of the dirs."""
+    dirs = [data_dir] + list(extra_dirs or [])
+    tags_by_image: dict[str, set[str]] = {}
+    for d in dirs:
+        _ingest_dir(d, tags_by_image)
 
     records: list[MemeRecord] = []
     for img, bag in tags_by_image.items():
         if not bag:
             continue
-        path = _resolve_image(data_dir, img)
+        path = _resolve_image(dirs, img)
         if path:
             records.append(MemeRecord(id=img, path=path, tags=sorted(bag)))
     records.sort(key=lambda r: r.id)
