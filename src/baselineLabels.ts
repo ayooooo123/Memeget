@@ -21,6 +21,7 @@
 // against the search-quality eval harness (see docs/memedepot-corpus.md).
 
 import baseline from './data/memedepotBaseline.json';
+import basedmemesBaseline from './data/basedmemesBaseline.json';
 import type { LabelDef } from './memeLabels';
 
 // One harvested tag as it appears in the generated JSON. `prompt` is a
@@ -61,6 +62,7 @@ const VALID_CATEGORIES: readonly LabelDef['category'][] = [
 export const MAX_BASELINE_LABELS = 150;
 
 const file = baseline as BaselineFile;
+const basedmemesFile = basedmemesBaseline as BaselineFile;
 
 export const BASELINE_META = {
   source: file.source ?? 'memedepot.com',
@@ -110,4 +112,32 @@ export function buildBaselineLabels(
     });
   }
   return out;
+}
+
+// Cap on the SECOND machine-generated tier — mined from the local basedmemes.lol
+// + Know Your Meme archive (see tools/basedmemes). Same bounding rationale as
+// MAX_BASELINE_LABELS: breadth without swamping the curated core. This tier is
+// deduped AGAINST both the curated core and the memedepot tier, so it only
+// contributes vocabulary neither of those already covers.
+export const MAX_BASEDMEMES_LABELS = 150;
+
+export const BASEDMEMES_META = {
+  source: basedmemesFile.source ?? 'basedmemes.lol + knowyourmeme.com',
+  generatedAt: basedmemesFile.generatedAt ?? null,
+  total: Array.isArray(basedmemesFile.labels) ? basedmemesFile.labels.length : 0,
+} as const;
+
+// Compose BOTH machine-generated breadth tiers under a curated core, with a
+// single shared dedup so no label is emitted twice. The memedepot tier leads
+// (higher-signal, human-adjacent depot vocabulary); the basedmemes tier fills in
+// behind it, deduped against curated + the first tier. Order is preserved:
+// [...memedepot, ...basedmemes].
+export function buildAllBaselineLabels(curated: LabelDef[]): LabelDef[] {
+  const firstTier = buildBaselineLabels(curated, file.labels ?? [], MAX_BASELINE_LABELS);
+  const secondTier = buildBaselineLabels(
+    [...curated, ...firstTier],
+    basedmemesFile.labels ?? [],
+    MAX_BASEDMEMES_LABELS
+  );
+  return [...firstTier, ...secondTier];
 }

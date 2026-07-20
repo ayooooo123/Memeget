@@ -11,7 +11,7 @@
 // the user's taught exemplars ARE the curation surface of the app.
 
 import type { Tag } from './types';
-import { buildBaselineLabels } from './baselineLabels';
+import { buildAllBaselineLabels } from './baselineLabels';
 
 // Facets a meme is dissected into — so any aspect is findable by a plain-word
 // description. The first five are the identity/topic core; the rest capture
@@ -158,13 +158,15 @@ export const CURATED_MEME_LABELS: LabelDef[] = [
   { label: 'Wholesome Tone', prompt: 'a wholesome heartwarming positive meme', category: 'tone', associations: ['wholesome', 'heartwarming', 'sweet', 'positive'] },
 ];
 
-// The active label vocabulary: curated core + the harvested memedepot baseline
-// (breadth). The baseline ships empty and is filled by CI, so today this equals
-// `CURATED_MEME_LABELS`; a merged harvest just makes it longer. `ASSOCIATIONS`
-// below is derived from this, so baseline association terms flow into search too.
+// The active label vocabulary: curated core + TWO machine-generated breadth
+// tiers (the CI-harvested memedepot baseline, then the local basedmemes.lol +
+// Know Your Meme archive), composed with a shared dedup so nothing repeats. Both
+// baselines ship as generated data files; when empty this equals
+// `CURATED_MEME_LABELS`. `ASSOCIATIONS` below is derived from this, so baseline
+// association terms flow into search too.
 export const MEME_LABELS: LabelDef[] = [
   ...CURATED_MEME_LABELS,
-  ...buildBaselineLabels(CURATED_MEME_LABELS),
+  ...buildAllBaselineLabels(CURATED_MEME_LABELS),
 ];
 
 // Generic "not a recognizable format" anchors so weak matches don't get forced

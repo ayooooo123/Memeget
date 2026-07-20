@@ -10,6 +10,8 @@
     "test": "jest",
     "harvest": "node tools/memedepot/harvest.mjs",
     "harvest:test": "node --test tools/memedepot/*.test.mjs",
+    "mine:basedmemes": "node tools/basedmemes/mine_labels.mjs",
+    "mine:basedmemes:test": "node --test tools/basedmemes/*.test.mjs",
     "diagnose": "node tools/memedepot/diagnose.mjs",
     "eval": "jest evalCore",
     "coverage": "jest facetCoverage --silent=false --verbose",
