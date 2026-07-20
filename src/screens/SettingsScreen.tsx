@@ -6,7 +6,7 @@ import * as Sharing from 'expo-sharing';
 import { manipulateAsync, SaveFormat } from 'expo-image-manipulator';
 
 import { showToast } from '../components/Toast';
-import { Button, Chip, ProgressBar, Slider, StatusDot } from '../components/ui';
+import { Button, ProgressBar, Slider, StatusDot } from '../components/ui';
 import { useAudio } from '../audio';
 import { useEmbeddings } from '../embeddings';
 import { useVision, intensityLabel, memesPerHour } from '../vision';
@@ -36,7 +36,6 @@ import {
   removeFolder,
   resetAudioFailures,
   resetFailedThumbs,
-  resetVisionState,
   type ImportedPack,
   type IndexError,
   type TaughtLabelStat,
@@ -556,21 +555,6 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
     showToast(`Re-queued ${n} failed video${n === 1 ? '' : 's'} for transcription`, 'info');
   }, [refresh]);
 
-  const onSwitchQuality = useCallback(
-    (q: 'fast' | 'max') => {
-      if (q === vision.quality) return;
-      vision.setQuality(q);
-      // Re-queue everything so the sharper/faster model re-describes it.
-      resetVisionState()
-        .then(refresh)
-        .catch(() => {});
-      showToast(
-        `Switched to ${q === 'max' ? 'Best · Gemma E2B' : 'Light · LFM 450M'} — re-run Describe to apply`,
-        'info'
-      );
-    },
-    [vision, refresh]
-  );
 
   // Re-base old-space taught examples onto the current index (see
   // migrateStaleExemplars), then re-tag so the labels actually reappear.
@@ -693,7 +677,7 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
       </Section>
 
       <Section glyph="👁" title="AI descriptions" tint={colors.volt}>
-        <Row label="Gemma 4 (vision-language)">
+        <Row label="Gemma 4 E2B (vision-language)">
           <StatusDot tone={visionTone} label={visionLabel} />
         </Row>
         {vision.enabled && !vision.ready && !vision.modelIdle && !vision.error && (
@@ -719,23 +703,6 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
 
         {vision.enabled && (
           <>
-            <Text style={[styles.note, { marginTop: 2 }]}>Model</Text>
-            <View style={styles.qualityRow}>
-              <Chip
-                label="Best · Gemma E2B"
-                active={vision.quality === 'max'}
-                onPress={() => onSwitchQuality('max')}
-              />
-              <Chip
-                label="Light · LFM 450M"
-                active={vision.quality === 'fast'}
-                onPress={() => onSwitchQuality('fast')}
-              />
-            </View>
-            <Text style={[styles.note, { marginTop: 6 }]}>
-              Gemma runs on the GPU (faster and sharper where supported); LFM is a
-              lighter CPU-only fallback for low-RAM or no-GPU devices.
-            </Text>
 
             <Row label="Described" value={`${described} / ${describedTotal}`} />
             {tele.avgMs > 0 && (
@@ -1294,7 +1261,6 @@ const styles = StyleSheet.create({
   rowLabel: { color: colors.text, fontSize: 14, flexShrink: 1 },
   rowValue: { color: colors.accent, fontSize: 14, fontWeight: '700' },
   note: { color: colors.muted, fontSize: 12, lineHeight: 18 },
-  qualityRow: { flexDirection: 'row', gap: 8 },
   enrichTopRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   stopText: { color: colors.danger, fontSize: 13, fontWeight: '700' },
   bgDivider: { height: 1, backgroundColor: colors.border, marginVertical: 4 },

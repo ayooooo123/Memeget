@@ -12,10 +12,7 @@ import {
   BG_ONLY_CHARGING_KEY,
   BG_PAUSE_HOT_KEY,
   BG_PAUSE_LOW_KEY,
-  DEFAULT_QUALITY,
   ENABLED_KEY,
-  QUALITY_KEY,
-  type VisionQuality,
 } from './visionCore';
 
 // OS-scheduled background indexing. expo-background-task runs a registered JS
@@ -61,9 +58,7 @@ async function runTask(): Promise<BackgroundTask.BackgroundTaskResult> {
     );
     if (powerBlockReason(getPower(), throttles)) return BackgroundTask.BackgroundTaskResult.Success;
 
-    const q = await getSetting(QUALITY_KEY);
-    const quality: VisionQuality = q === 'max' || q === 'fast' ? q : DEFAULT_QUALITY;
-    await loadHeadless(quality);
+    await loadHeadless();
 
     const started = Date.now();
     await runBackgroundSession(headlessEnricher(), {

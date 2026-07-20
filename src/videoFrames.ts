@@ -23,7 +23,7 @@ import type { VisionResult } from './visionCore';
 // (slightly heavier) OCR step, so the real work is usually well under this.
 export const MAX_VIDEO_FRAMES = 8;
 
-// Distinct frames the heavy on-device VLM (LFM2-VL) will caption. Far smaller
+// Distinct frames the heavy on-device VLM (Gemma 4 E2B) will caption. Far smaller
 // because each is a full generation — the dominant cost of the whole app. A
 // static clip stops after the first non-repeating frame, so most videos cost 1.
 export const MAX_VLM_FRAMES = 3;

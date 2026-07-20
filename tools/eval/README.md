@@ -172,6 +172,75 @@ associations + `FACET_LEXICON`); it's for **relative** comparison across prompt
 versions with the same classifier, not an absolute truth. Expanding the lexicon
 tightens it.
 
+## Tagging test (findable-by-search gate)
+
+The coverage loop measures *how much* the model tags; this measures whether it
+tags a meme with the words you'd actually **search**. A hand-labeled set states,
+per meme, the search terms it must be findable by and the facets it must carry:
+
+```jsonc
+// tools/eval/tagging-cases.json   (see tagging-cases.sample.json)
+{ "id": "shush", "file": "images/shush.jpg",
+  "mustFind": ["shush", "quiet", "be quiet"],   // findable by ANY of these
+  "expectFacets": ["situation", "action"] }      // and tagged in these facets
+```
+
+`scoreTagging(cases, predictions)` (`src/taggingEval.ts`) joins those against
+predicted tags — a device export (`described.json`) or a CI proxy-VLM run — and
+reports **findable %** (a search term hits the meme, matched with the app's own
+lexical `.includes`), **facet recall**, and a per-meme list of what failed. The
+shush meme becomes a literal pass/fail. `taggingRegressions(base, cand)` is the
+A/B gate so a prompt change can't silently make tagging worse.
+
+```bash
+npm run tagtest    # scores tools/eval/tagging-cases.json vs described.json
+```
+
+Model-free and deterministic — it scores *given* predictions. Producing the
+predictions is the model step: either a device export, or (planned) a CI action
+that runs the app's prompt through a proxy VLM on the committed test images so
+the prompt can be A/B'd in a PR without a device.
+
+## Emergent templates (npm run templates)
+
+There is no list of meme templates — anything can become one
+(`docs/composite-meme-understanding.md`). So templates are **discovered, not
+enumerated**: `src/templateClusters.ts` single-links the collection by embedding
+cosine (primary space — the same vectors the collection zip carries), and a
+cluster of visually-linked memes with **different overlay text** is a learned
+template: the same base media reused to convey different ideas. Clusters are
+named from the dominant shared tag when one exists.
+
+```bash
+npm run templates   # clusters tools/eval/collection-manifest.json when present
+```
+
+Drop the `manifest.json` from a Settings → "Export collection (zip)" export at
+`tools/eval/collection-manifest.json` to see a real library's learned formats.
+Tunables: link threshold (default 0.86 — above noise, below the 0.99 twin-dedup
+bar), min size 2 ("the second variation is the moment a template is born"),
+min distinct texts 2 (a dupe pile is not a template).
+
+## Tag agreement (npm run agreement) — free ground truth from your own tags
+
+Coverage measures the *shape* of the model's output; it can't know what's TRUE.
+But every manual tag and taught exemplar is a labeled example: the user asserted
+"this meme IS X." `src/tagAgreement.ts` grades the model against those — on any
+meme carrying a user-truth tag (source `manual`/`exemplar`), does the model's
+OWN description (its `vision` tags + caption) surface that label? Agreement =
+the model sees what you see; each miss is a named recognition gap. Zero labeling
+effort — the user already did the work by using the app.
+
+```bash
+npm run agreement   # grades tools/eval/collection-manifest.json when present
+```
+
+Scope, honestly: user truth skews toward IDENTITY labels (characters, people,
+formats), so this grades **recognition**; the hand-labeled tagging cases grade
+**recall-by-meaning** (situations, reactions). Complements, not substitutes.
+Memes the model never described are reported as `undescribed` and skipped — a
+coverage gap, not a wrong answer.
+
 ## Next (not yet built)
 
 - A CI-backed **tag-precision** eval: score our produced tags against memedepot's

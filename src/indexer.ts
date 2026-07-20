@@ -153,13 +153,11 @@ async function ocr(uri: string): Promise<string> {
   }
 }
 
-// Width fed to the VLM. Both supported models resample the input to their
-// vision encoder's working resolution anyway (Gemma to a fixed square, LFM by
-// tiling over 512), so feeding more pixels only inflates decode/transcode cost —
-// and for LFM, prefill time, the dominant cost of a caption. Capping at 512
-// keeps that bounded (the ML Kit OCR hint covers any small text we'd lose).
-// Overridable for on-device A/B: lowering it cuts LFM's tiled vision-token count
-// (the biggest per-meme prefill driver on the CPU tier). Falls back to 512.
+// Width fed to the VLM. Gemma resamples to its vision encoder's fixed square
+// anyway, so feeding more pixels only inflates decode/transcode cost. Capping at
+// 512 keeps that bounded (the ML Kit OCR hint covers any small text we'd lose).
+// Overridable for on-device A/B: lowering it trims the per-meme prefill. Falls
+// back to 512.
 const VLM_FRAME_WIDTH_ENV = Number(process.env.EXPO_PUBLIC_MEMEGET_VLM_FRAME_WIDTH);
 const VLM_FRAME_WIDTH =
   Number.isFinite(VLM_FRAME_WIDTH_ENV) && VLM_FRAME_WIDTH_ENV > 0
@@ -938,7 +936,7 @@ function unionTerms(a: string, b: string): string {
   return [...set].join(' ');
 }
 
-// ---- VLM enrichment pass (Gemma 4 / LFM2.5-VL) --------------------------------
+// ---- VLM enrichment pass (Gemma 4 E2B) --------------------------------------
 
 export interface EnrichProgress {
   done: number;
