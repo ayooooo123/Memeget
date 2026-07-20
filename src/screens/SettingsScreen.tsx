@@ -812,7 +812,7 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
       </Section>
 
       <Section glyph="🎙" title="Audio analysis" tint={colors.volt}>
-        <Row label="Whisper (speech-to-text)">
+        <Row label="Moonshine (speech-to-text)">
           <StatusDot tone={audioTone} label={audioLabel} />
         </Row>
         {audio.enabled && !audio.ready && !audio.error && (

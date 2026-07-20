@@ -28,7 +28,7 @@ export interface MemeRecord {
   kind: MediaKind;
   ocrText: string;
   caption: string; // one-line scene/joke description from the VLM ('' until enriched)
-  transcript: string; // speech heard in a video, via on-device Whisper ('' until analyzed)
+  transcript: string; // speech heard in a video, via on-device Moonshine ('' until analyzed)
   tags: Tag[];
   extraTerms: string; // association/world-knowledge terms, for search
   visionState: VisionState;
