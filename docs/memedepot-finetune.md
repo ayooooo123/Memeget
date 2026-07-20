@@ -16,8 +16,10 @@ Risks). Label mining + eval are the high-ROI work; this is the shiny object.
 > generic COCO caption→image forgetting check holds R@5 91.3%→92.0% (MRR −0.008,
 > R@1 −2.0). An RL/DPO preference variant (`preference.py`, hard-negative reward +
 > stock reference) was also built; it did NOT beat the contrastive fine-tune here
-> (single-hard-neg pairwise < full contrastive). Owed before shipping: the `.pte`
-> re-export; clearing the generic R@1 gate outright (low-rank Δ) — see that dir's README.
+> (single-hard-neg pairwise < full contrastive). The text tower is exported to a
+> drop-in ExecuTorch `.pte` (`export_mobileclip_s2.py --ckpt --text-only`, verified
+> cos(fp32)=1.0000). Owed before shipping: publish the `.pte` to the models release
+> + bump `…_MODEL_ID`; clearing the generic R@1 gate outright (low-rank Δ) — see that dir's README.
 
 ## Goal
 

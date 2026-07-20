@@ -204,6 +204,8 @@ def write_tokenizer(out_path: pathlib.Path) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out-dir", type=pathlib.Path, default=pathlib.Path("dist"))
+    ap.add_argument("--ckpt", type=pathlib.Path, default=None, help="fine-tuned merged state_dict to load before export")
+    ap.add_argument("--text-only", action="store_true", help="export only the (fine-tuned) text tower + tokenizer")
     args = ap.parse_args()
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -213,6 +215,11 @@ def main() -> None:
         "MobileCLIP-S2", pretrained="datacompdr"
     )
     model.eval()
+    if args.ckpt:
+        state = torch.load(args.ckpt, map_location="cpu")
+        state = state.get("model", state)
+        miss, unexp = model.load_state_dict(state, strict=False)
+        print(f"loaded fine-tuned ckpt {args.ckpt}: missing {len(miss)} unexpected {len(unexp)}")
 
     # Fold FastViT's train-time branches into inference form before export.
     try:
@@ -229,11 +236,12 @@ def main() -> None:
     mean, std = list(norm.mean), list(norm.std)
     print(f"baking normalization mean={mean} std={std}")
 
-    image_tower = ImageTower(model, mean, std)
-    image_inputs = (torch.rand(1, 3, IMAGE_SIZE, IMAGE_SIZE),)
-    image_path = args.out_dir / "mobileclip_s2_image_xnnpack_fp32.pte"
-    export_pte(image_tower, image_inputs, image_path)
-    verify_pte(image_path, image_inputs, EMBED_DIM, reference=image_tower)
+    if not args.text_only:
+        image_tower = ImageTower(model, mean, std)
+        image_inputs = (torch.rand(1, 3, IMAGE_SIZE, IMAGE_SIZE),)
+        image_path = args.out_dir / "mobileclip_s2_image_xnnpack_fp32.pte"
+        export_pte(image_tower, image_inputs, image_path)
+        verify_pte(image_path, image_inputs, EMBED_DIM, reference=image_tower)
     # NO int8 image tower: the eager quantization gate measured cos 0.34 vs
     # fp32 — reparameterized FastViT does not survive dynamic int8. It ships
     # fp32 (the smallest of the three files anyway); a static-quant export with

@@ -89,7 +89,22 @@ python3 tools/finetune/preference.py --extra-dir $MD --train-size 8000 --beta 1.
 ```
 Deps: `torch open_clip_torch timm pillow datasets`. Merged `.pt` (~400 MB) git-ignored.
 
+## Export to .pte (drop-in ExecuTorch text encoder) — DONE
+`tools/model-export/export_mobileclip_s2.py` takes `--ckpt` (the merged fine-tune)
+and `--text-only`; it bakes normalization, exports the text tower via XNNPACK
+(fp32), and verifies the on-device output against the eager model:
+```bash
+# needs a py3.10+ venv: pip install "executorch==1.0.0" "torch==2.9.*" open_clip_torch timm transformers tokenizers
+#   and a matching flatc on PATH / $FLATC_EXECUTABLE (brew install flatbuffers)
+FLATC_EXECUTABLE=$(which flatc) python tools/model-export/export_mobileclip_s2.py \
+  --ckpt tools/finetune/mobileclip_s2_memeft.pt --text-only --out-dir dist-memeft
+```
+Verified locally: `mobileclip_s2_text_xnnpack_fp32.pte` (243 MB), output (1,512),
+**cos(fp32)=1.0000** — the `.pte` is identical to the fine-tuned eager tower, so it
+carries the full retrieval gain. Ships via the `models-v1` release (git-ignored,
+not committed); the image `.pte` is unchanged from stock.
+
 ## Owed before bumping the shipped model
-- Export text tower to `.pte` (`tools/model-export` + `export-models.yml`); image `.pte` unchanged.
+- Publish the `.pte` to the `models-v1` release + point `…_TEXT_MODEL_SOURCE` at it,
+  bump `…_MODEL_ID` (forces a full re-embed + invalidates teaching packs — communicate first).
 - Clear generic R@1 gate outright (low-rank/subspace Δ) if strict parity is required.
-- New `…_MODEL_ID` forces a full re-embed + invalidates teaching packs — communicate first.
