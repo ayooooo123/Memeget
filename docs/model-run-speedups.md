@@ -78,9 +78,10 @@ the only vision model in the RNE 0.9.2 catalog with a **GPU** build (Vulkan on
 Android, MLX on iOS — its `modelSource` is a two-URL union of exactly those). Every
 LFM-VL build is XNNPACK/CPU-only, so "smaller on the GPU" doesn't exist; the GPU
 model is the bigger one. Full alternatives table in
-[`vlm-model-decision.md`](./vlm-model-decision.md). (Caveat: on Tensor-G4-class
-GPUs, ExecuTorch Vulkan can trail XNNPACK — confirm P50/P90 on-device before booking
-a latency number.)
+[`vlm-model-decision.md`](./vlm-model-decision.md). **Confirmed on-device (July
+2026):** Gemma-E2B on Vulkan beats LFM-1.6B on XNNPACK CPU end-to-end — the
+"immature Vulkan can lose to XNNPACK on Tensor-G4" worry did not materialize, so
+GPU wins on latency as well as quality.
 
 **Per-run speedups (shipped, backend-agnostic):** the cost is **prefill-dominated** —
 every `generate()` is stateless and the runtime exposes **no prefix/KV cache**, so the
@@ -110,10 +111,11 @@ and benchmark NPU vs XNNPACK. Deliver a go/no-go with numbers before committing.
 ## Status summary
 - **B1 (MobileCLIP-S2 swap): shipped to the APK build**, pending on-device
   verification. This IS the model swap — the branch's APK build runs S2 + DINOv2.
-- **B2 (VLM): single model + per-run speedups shipped.** Tiers/model picker removed
-  (one default = Gemma 4 E2B, the only GPU VLM in the catalog). Plus telemetry, output
-  cap, foreground de-render, and `VLM_FRAME_WIDTH` / terse-prompt A/B seams. Confirm
-  latency (P50/P90 incl. image encode) + caption quality on device.
+- **B2 (VLM): single model + per-run speedups shipped; GPU win confirmed on-device.**
+  Tiers/model picker removed (one default = Gemma 4 E2B, the only GPU VLM in the
+  catalog). Plus telemetry, output cap, foreground de-render, and `VLM_FRAME_WIDTH` /
+  terse-prompt A/B seams. On-device measurement (July 2026) confirms Gemma-on-Vulkan
+  beats LFM-1.6B-on-CPU — GPU wins on latency and quality.
 - **B3 (quantize custom exports): fp32 ships and works;** int8 stays parked
   behind the cosine gate until a coherent executorch/torch/torchao set passes it.
 - **B4 (QNN/NPU): N/A** on the Tensor-G4 test device; revisit only with a

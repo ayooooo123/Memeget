@@ -17,8 +17,8 @@ like magic by default.
 Gemma is chosen deliberately over the lighter LFM tiers: it is the only catalog
 VLM with a **GPU** build (Vulkan on Android, MLX on iOS) and has the strongest
 meme-culture knowledge and caption/tag quality. This **reverses an earlier lean**
-toward LFM-1.6B-on-CPU — see the GPU-vs-CPU section for the tradeoff and the
-on-device measurement that still needs to confirm it.
+toward LFM-1.6B-on-CPU — and the on-device measurement (below) has since confirmed
+Gemma-on-GPU is also the faster path here, so it wins on both latency and quality.
 
 Wired in `src/visionCore.ts` (`MODEL` is now a single descriptor). The tier
 concept (`VisionQuality`, `QUALITY_KEY`, `DEFAULT_QUALITY`) is gone from
@@ -44,16 +44,15 @@ retrieval on its own. Against that job, Gemma 4 E2B is the single pick:
   (output cap, batch de-render, and the frame-width / terse-prompt A/B seams) plus
   the existing ML Kit OCR hints and the CLIP zero-shot grounding line.
 
-### ⚠️ Open verification item
+### ✅ Verified on-device
 
-Gemma runs on the **Vulkan GPU** on Android — but ExecuTorch's Vulkan delegate is
-immature, and on the Pixel 9 Pro (Tensor G4 / Mali-G715) it can trail XNNPACK (see
-the GPU-vs-CPU section). So the **GPU choice is a quality-first call whose latency
-must be confirmed on-device**: measure P50/P90 end-to-end (including image encode)
-for Gemma-E2B (Vulkan) and, as a control, LFM2.5-VL 1.6B (CPU), plus a quality
-spot-check (OCR exactness on text-heavy memes, caption usefulness, tag recall). If
-Gemma loses badly on latency without a quality edge that justifies it, the
-fallback is reverting to an LFM tier.
+Gemma runs on the **Vulkan GPU** on Android. The open question was whether
+ExecuTorch's immature Vulkan delegate would trail XNNPACK on the Pixel 9 Pro
+(Tensor G4 / Mali-G715) — i.e. whether CPU-LFM might actually be faster.
+**Measured on-device (maintainer-confirmed, July 2026): it does not.** Gemma-E2B
+on Vulkan beats LFM2.5-VL 1.6B on XNNPACK CPU end-to-end, so the GPU choice wins
+on **both** latency and quality — no revert needed. (LFM tiers stay documented
+only as a fallback if a future device regresses.)
 
 ## Alternatives weighed (on-device VLMs)
 
@@ -72,9 +71,10 @@ runtime, not by quality:
 ## GPU vs CPU — why "a smaller model on the GPU" isn't an option
 
 The obvious instinct is "run a small model on the GPU for speed." On this stack
-and this device, that combination **does not exist**, and GPU is likely not even
-the faster path. Verified against the installed RNE 0.9.2 package and upstream
-ExecuTorch docs:
+that combination **does not exist** — there is no small Vulkan VLM. (An earlier
+worry that GPU might not even be the faster path was **disproven on-device**: see
+the verified item above — Gemma-on-Vulkan beat CPU-LFM.) Facts, checked against
+the installed RNE 0.9.2 package and upstream ExecuTorch docs:
 
 - **The only GPU (Vulkan) VLM in RNE is Gemma E2B.** `GEMMA4_E2B_MM` resolves to
   `gemma_4_e2b_vulkan_8da4w.pte` on Android (`Platform.OS === 'android' ?
@@ -102,16 +102,15 @@ ExecuTorch docs:
 
 | Want | Turnkey model | Backend |
 |---|---|---|
-| Smaller + turnkey (shipped) | LFM2-VL 1.6B / 450M | XNNPACK **CPU** |
-| GPU + turnkey | Gemma E2B (bigger) | Vulkan **GPU** |
+| Smaller + turnkey | LFM2-VL 1.6B / 450M | XNNPACK **CPU** |
+| **GPU + turnkey (shipped)** | **Gemma E2B** (bigger) | Vulkan **GPU** |
 | Smaller + GPU | custom Vulkan export — R&D (see appendix) | Vulkan (partial) |
 
-**Conclusion (updated):** the maintainer's call is to ship the **GPU model
-(Gemma E2B)** — prioritizing caption/tag quality and actually exercising the GPU —
-rather than the CPU-LFM tier the analysis above leaned toward. The caveat stands:
-on immature Vulkan (Mali-G715) a CPU model *can* win on latency, so the open-item
-measurement decides whether this holds; if Gemma's GPU latency is unacceptable
-without a matching quality win, revert to an LFM tier.
+**Conclusion (confirmed):** ship the **GPU model (Gemma E2B)**. It wins on
+caption/tag quality *and* — per the on-device measurement — on latency over the
+CPU-LFM tier the analysis had hedged toward. The "immature Vulkan can lose to
+XNNPACK" worry did not materialize on the Mali-G715 target; revisit only if a
+future device regresses.
 
 ## Ruled out: switching runtime to ONNX Runtime
 
