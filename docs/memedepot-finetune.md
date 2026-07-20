@@ -6,6 +6,14 @@ eval harness in that doc exists — without it you cannot tell whether a fine-tu
 helped, and a meme fine-tune is very easy to *silently* make worse (see
 Risks). Label mining + eval are the high-ROI work; this is the shiny object.
 
+> **Implemented (local corpus, MPS):** a working version of the "Linear adapter"
+> alternative below now ships as `tools/finetune/` — a residual text→image adapter
+> trained on the local basedmemes.lol + KnowYourMeme corpus, folded into
+> `text.text_projection` for a drop-in re-export. Measured through `npm run eval`
+> on a 595-meme disjoint holdout (MobileCLIP-S2): retrieval Recall@5 66.2%→71.3%,
+> Recall@10 72.4%→78.7%, MRR 0.563→0.593; aspect MAP 0.159→0.207. Still owed before
+> shipping: the `.pte` re-export and the generic-query forgetting guard (see that dir's README).
+
 ## Goal
 
 Memeget's semantic search runs on **CLIP ViT-B/32** (`PRIMARY_EMBEDDING_MODEL`

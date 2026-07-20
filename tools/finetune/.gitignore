@@ -1,0 +1,6 @@
+# Merged model checkpoints (hundreds of MB) — regenerate with finetune.py
+*.pt
+*.pte
+*.npy
+*.npz
+__pycache__/
