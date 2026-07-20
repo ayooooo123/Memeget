@@ -555,6 +555,7 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
     showToast(`Re-queued ${n} failed video${n === 1 ? '' : 's'} for transcription`, 'info');
   }, [refresh]);
 
+
   // Re-base old-space taught examples onto the current index (see
   // migrateStaleExemplars), then re-tag so the labels actually reappear.
   const onMigrateExemplars = useCallback(async () => {
@@ -676,7 +677,7 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
       </Section>
 
       <Section glyph="👁" title="AI descriptions" tint={colors.volt}>
-        <Row label="LFM2.5-VL (vision-language)">
+        <Row label="Gemma 4 E2B (vision-language)">
           <StatusDot tone={visionTone} label={visionLabel} />
         </Row>
         {vision.enabled && !vision.ready && !vision.modelIdle && !vision.error && (
@@ -702,6 +703,7 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
 
         {vision.enabled && (
           <>
+
             <Row label="Described" value={`${described} / ${describedTotal}`} />
             {tele.avgMs > 0 && (
               <Text style={styles.faintSmall}>

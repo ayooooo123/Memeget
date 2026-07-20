@@ -1,9 +1,9 @@
 import { LLMModule } from 'react-native-executorch';
 
-import { MODEL, SYSTEM_PROMPT, parseVision, userTurn, type VisionResult } from './visionCore';
+import { MODEL, SYSTEM_PROMPT, runVision, userTurn, type VisionResult } from './visionCore';
 import type { VisionEnricher } from './indexer';
 
-// Headless (no-React) VLM (LFM2.5-VL 1.6B) via the LLMModule CLASS — the same model the
+// Headless (no-React) VLM (Gemma 4 E2B multimodal) via the LLMModule CLASS — same model the
 // useLLM hook drives, but instantiable OUTSIDE a component tree. That is the one
 // capability that makes true background indexing possible: the OS-scheduled task
 // (backgroundTask.ts) has no React provider, so it can't use the hook, but it
@@ -22,9 +22,16 @@ export async function loadHeadless(): Promise<void> {
   if (loading) return loading;
   loading = (async () => {
     const mod = await LLMModule.fromModelName(MODEL);
-    // Apply the model card's recommended generation settings (temp 0.1 etc.),
-    // which the hook applies automatically but the class does not.
-    mod.configure({ generationConfig: MODEL.generationConfig });
+    // The class does NOT auto-apply the model card's sampling config (the hook
+    // does), so set it here; also widen the token-batch window to trim needless
+    // native→JS callbacks during background generation.
+    mod.configure({
+      generationConfig: {
+        ...MODEL.generationConfig,
+        outputTokenBatchSize: 64,
+        batchTimeInterval: 500,
+      },
+    });
     instance = { mod };
   })().finally(() => {
     loading = null;
@@ -55,12 +62,23 @@ export function headlessEnricher(): VisionEnricher {
       ocrHint?: string,
       grounding?: string
     ): Promise<VisionResult | null> => {
-      if (!instance) return null;
-      const reply = await instance.mod.generate([
-        { role: 'system', content: SYSTEM_PROMPT },
-        { role: 'user', content: userTurn(ocrHint, grounding), mediaPath: jpegPath },
-      ]);
-      return parseVision(reply);
+      const inst = instance;
+      if (!inst) return null;
+      // runVision adds the hard output cap + prefill/decode telemetry. The class
+      // exposes getPromptTokensCount (plural) — adapted to the runner's getter.
+      return runVision(
+        {
+          generate: (m) => inst.mod.generate(m),
+          interrupt: () => inst.mod.interrupt(),
+          getGeneratedTokenCount: () => inst.mod.getGeneratedTokenCount(),
+          getPromptTokenCount: () => inst.mod.getPromptTokensCount(),
+        },
+        [
+          { role: 'system', content: SYSTEM_PROMPT },
+          { role: 'user', content: userTurn(ocrHint, grounding), mediaPath: jpegPath },
+        ],
+        'headless'
+      );
     },
   };
 }

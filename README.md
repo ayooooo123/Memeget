@@ -85,7 +85,7 @@ There are exactly two times the app reaches out, both download-only:
    (ExecuTorch fetches it, then caches it locally at
    `{documentDirectory}/react-native-executorch/`). Opting in to AI descriptions
    or audio analysis (Settings) likewise triggers a one-time download of that
-   model (LFM2.5-VL / Whisper), cached the same way. After that, you can stay
+   model (Gemma 4 E2B / Whisper), cached the same way. After that, you can stay
    airplane-mode forever. To make it *truly* zero-network from install, the model
    can be bundled into the APK assets — see "Next steps". Developer builds can
    also point Memeget at custom MobileCLIP-S2 and DINOv2 ExecuTorch exports via
