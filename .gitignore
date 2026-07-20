@@ -4,6 +4,10 @@ node_modules/
 # Expo
 .expo/
 dist/
+dist-memeft/
+
+# ExecuTorch model exports (ship via the models-v1 release, not git)
+*.pte
 web-build/
 expo-env.d.ts
 
