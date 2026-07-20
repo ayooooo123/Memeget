@@ -151,7 +151,11 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install "executorch==${ET_VERSION}" "torch==2.9.*" --extra-index-url https://download.pytorch.org/whl/cpu
-          pip install open_clip_torch timm transformers tokenizers --extra-index-url https://download.pytorch.org/whl/cpu
+          # Keep torch pinned to 2.9 here too — a bare install lets open_clip drag
+          # torch to 2.13, which breaks the executorch pybindings runtime and
+          # silently SKIPS the on-runner cos verify (the .pte is still correct —
+          # deterministic export — but the in-CI gate goes dark).
+          pip install open_clip_torch timm transformers tokenizers "torch==2.9.*" --extra-index-url https://download.pytorch.org/whl/cpu
           sudo apt-get update && sudo apt-get install -y flatbuffers-compiler || true
       - name: Download fine-tuned checkpoint
         run: |
