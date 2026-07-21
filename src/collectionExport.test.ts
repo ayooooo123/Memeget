@@ -1,5 +1,5 @@
 // Tests for the pure part of the collection export — the manifest builder. The
-// zip assembly (buildCollectionZip) is thin IO over this and jszip, so the value
+// zip assembly (writeCollectionZip) is thin IO over this and jszip, so the value
 // worth locking is the manifest shape callers/consumers depend on.
 
 import { buildManifest, COLLECTION_FORMAT } from './collectionExport';
