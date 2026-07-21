@@ -89,10 +89,12 @@ export async function writeCollectionZip(
   records: CollectionRecord[],
   loadImageBase64: (r: CollectionRecord) => Promise<string | null>,
   exportedAt: number,
-  onChunk: (chunk: Uint8Array) => void
+  onChunk: (chunk: Uint8Array) => void,
+  onProgress?: (done: number, total: number) => void
 ): Promise<void> {
   const zip = new ZipWriter(onChunk, new Date(exportedAt));
   const withImage = new Set<number>();
+  let done = 0;
   for (const r of records) {
     let b64: string | null = null;
     try {
@@ -104,6 +106,7 @@ export async function writeCollectionZip(
       zip.add(`images/${r.id}.jpg`, base64Decode(b64));
       withImage.add(r.id);
     }
+    onProgress?.(++done, records.length);
   }
 
   // Stream manifest.json meme-by-meme. The envelope is built from an empty-memes
