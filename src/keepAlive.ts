@@ -23,6 +23,11 @@ import { startKeepAlive, stopKeepAlive } from '../modules/memeget-bg';
 const holders = new Map<number, string>();
 let seq = 0;
 
+// Optional determinate progress for the current long task (e.g. a collection
+// export), drawn as an X-of-Y bar on the foreground notification; null hides it.
+let progress: { done: number; total: number } | null = null;
+let lastPct = -1;
+
 // Android 13+ suppresses the foreground-service notification unless the user
 // grants POST_NOTIFICATIONS at runtime — nothing ever asked, so the service
 // ran invisibly and "the background process is missing" as far as anyone
@@ -40,13 +45,36 @@ function ensureNotificationPermission(): void {
 
 function refresh(): void {
   if (holders.size === 0) {
+    progress = null;
+    lastPct = -1;
     stopKeepAlive();
     return;
   }
   const labels = [...holders.values()];
   const text =
     labels[labels.length - 1] + (labels.length > 1 ? ` (+${labels.length - 1} more)` : '');
-  startKeepAlive('Memeget is working', text);
+  startKeepAlive('Memeget is working', text, progress?.done ?? -1, progress?.total ?? -1);
+}
+
+// Push determinate progress onto the keep-alive notification. Callers report per
+// item freely; updates coalesce to whole-percent changes (plus the final one) so
+// a 2000-item loop doesn't re-issue the foreground intent thousands of times.
+// No-op when nothing currently holds the service.
+export function reportKeepAliveProgress(done: number, total: number): void {
+  if (holders.size === 0) return;
+  if (total <= 0) {
+    if (progress !== null) {
+      progress = null;
+      lastPct = -1;
+      refresh();
+    }
+    return;
+  }
+  const pct = Math.floor((done / total) * 100);
+  if (pct === lastPct && done < total) return;
+  lastPct = pct;
+  progress = { done, total };
+  refresh();
 }
 
 // Hold the service for one unit of work. Returns the release function; calling

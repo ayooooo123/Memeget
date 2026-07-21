@@ -28,8 +28,14 @@ class KeepAliveService : Service() {
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
     val title = intent?.getStringExtra(EXTRA_TITLE) ?: "Memeget"
     val text = intent?.getStringExtra(EXTRA_TEXT) ?: "Indexing in the background"
+    // Optional determinate progress: total > 0 draws an X-of-Y bar; otherwise the
+    // notification is a plain "working" line. Re-issuing the start intent with new
+    // values is how the JS side pushes progress updates (onStartCommand updates
+    // the existing NOTIFICATION_ID in place).
+    val progress = intent?.getIntExtra(EXTRA_PROGRESS, -1) ?: -1
+    val total = intent?.getIntExtra(EXTRA_MAX, -1) ?: -1
 
-    val notification = buildNotification(title, text)
+    val notification = buildNotification(title, text, progress, total)
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
       startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
     } else {
@@ -52,7 +58,7 @@ class KeepAliveService : Service() {
     super.onDestroy()
   }
 
-  private fun buildNotification(title: String, text: String): Notification {
+  private fun buildNotification(title: String, text: String, progress: Int, total: Int): Notification {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
       val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
       if (nm.getNotificationChannel(CHANNEL_ID) == null) {
@@ -61,18 +67,23 @@ class KeepAliveService : Service() {
         )
       }
     }
-    return NotificationCompat.Builder(this, CHANNEL_ID)
+    val builder = NotificationCompat.Builder(this, CHANNEL_ID)
       .setContentTitle(title)
       .setContentText(text)
       .setSmallIcon(android.R.drawable.ic_menu_search)
       .setOngoing(true)
       .setPriority(NotificationCompat.PRIORITY_LOW)
-      .build()
+    if (total > 0) {
+      builder.setProgress(total, progress.coerceIn(0, total), false)
+    }
+    return builder.build()
   }
 
   companion object {
     const val EXTRA_TITLE = "title"
     const val EXTRA_TEXT = "text"
+    const val EXTRA_PROGRESS = "progress"
+    const val EXTRA_MAX = "max"
     private const val CHANNEL_ID = "memeget_bg"
     private const val NOTIFICATION_ID = 4242
     private const val MAX_WAKE_MS = 6L * 60L * 60L * 1000L // 6h, matching the FGS cap

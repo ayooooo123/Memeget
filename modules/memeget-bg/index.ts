@@ -22,7 +22,7 @@ export interface ExtractedAudio {
 
 interface MemegetBgNative {
   getPower(): NativePower;
-  startForeground(title: string, text: string): void;
+  startForeground(title: string, text: string, progress: number, total: number): void;
   stopForeground(): void;
   getModifiedTime(uri: string): number | null;
   extractAudio(source: string, maxSeconds: number): Promise<ExtractedAudio | null>;
@@ -53,9 +53,9 @@ export function getPower(): NativePower | null {
 // Start/stop a foreground service (Android) that keeps the process alive so the
 // in-app description loop survives backgrounding. No-op without the native
 // module; on iOS it only requests a short background-execution extension.
-export function startKeepAlive(title: string, text: string): void {
+export function startKeepAlive(title: string, text: string, progress = -1, total = -1): void {
   try {
-    native?.startForeground(title, text);
+    native?.startForeground(title, text, progress, total);
   } catch {
     // ignore — keep-alive is best-effort
   }

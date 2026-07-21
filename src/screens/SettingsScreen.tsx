@@ -44,7 +44,7 @@ import {
 } from '../db';
 import { emitLibraryChanged } from '../events';
 import { success, warn } from '../haptics';
-import { acquireKeepAlive } from '../keepAlive';
+import { acquireKeepAlive, reportKeepAliveProgress } from '../keepAlive';
 import {
   backfillVideoThumbs,
   clearThumbSkips,
@@ -109,6 +109,7 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
   const [zipImport, setZipImport] = useState<{ done: number; total: number; phase: ZipImportPhase } | null>(
     null
   );
+  const [exportProgress, setExportProgress] = useState<{ done: number; total: number } | null>(null);
 
   const refresh = useCallback(async () => {
     setFolders(await getFolders());
@@ -302,12 +303,23 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
   const onExportCollection = useCallback(async () => {
     if (transferBusy) return;
     setTransferBusy(true);
+    const release = acquireKeepAlive('Exporting collection');
     try {
       const records = await getCollectionRecords();
       if (records.length === 0) {
         showToast('Nothing indexed yet', 'info');
         return;
       }
+      setExportProgress({ done: 0, total: records.length });
+      let lastShownPct = -1;
+      const onProgress = (done: number, total: number) => {
+        reportKeepAliveProgress(done, total);
+        const pct = total ? Math.floor((done / total) * 100) : 0;
+        if (pct !== lastShownPct || done === total) {
+          lastShownPct = pct;
+          setExportProgress({ done, total });
+        }
+      };
       // Images: downscale to ~640px via the manipulator (handles content:// SAF
       // uris); videos fall back to their stored poster. A failure just drops
       // that one image — metadata is always kept.
@@ -346,7 +358,7 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
       file.create({ overwrite: true });
       const handle = file.open(FileMode.WriteOnly);
       try {
-        await writeCollectionZip(records, loadImage, Date.now(), (chunk) => handle.writeBytes(chunk));
+        await writeCollectionZip(records, loadImage, Date.now(), (chunk) => handle.writeBytes(chunk), onProgress);
       } finally {
         handle.close();
       }
@@ -355,6 +367,8 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
     } catch (e) {
       showToast(`Export failed: ${String(e)}`, 'error');
     } finally {
+      release();
+      setExportProgress(null);
       setTransferBusy(false);
     }
   }, [transferBusy]);
@@ -1099,15 +1113,26 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
           Export the whole collection as a <Text style={styles.noteStrong}>zip</Text> — every meme's
           image plus its tags, caption, and embeddings in one file to share.
         </Text>
-        <Button
-          small
-          variant="secondary"
-          icon="🗜"
-          label="Export collection (zip)"
-          onPress={onExportCollection}
-          disabled={transferBusy}
-          style={styles.transferBtn}
-        />
+        {exportProgress ? (
+          <View style={{ gap: 8 }}>
+            <Text style={styles.note}>
+              {`Exporting ${exportProgress.done}/${exportProgress.total || '…'} — saving to Downloads`}
+            </Text>
+            <ProgressBar
+              value={exportProgress.total ? exportProgress.done / exportProgress.total : 0}
+            />
+          </View>
+        ) : (
+          <Button
+            small
+            variant="secondary"
+            icon="🗜"
+            label="Export collection (zip)"
+            onPress={onExportCollection}
+            disabled={transferBusy}
+            style={styles.transferBtn}
+          />
+        )}
 
         {importedPacks.length > 0 && (
           <>
