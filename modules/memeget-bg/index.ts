@@ -29,6 +29,7 @@ interface MemegetBgNative {
   extractVideoFrame(source: string, seconds: number): Promise<string | null>;
   extractVideoFramePlayer(source: string, seconds: number): Promise<string | null>;
   copyFileToClipboard(uri: string, name: string, mimeType: string): Promise<void>;
+  saveToDownloads(srcPath: string, name: string, mimeType: string): Promise<string>;
 }
 
 // Optional on purpose: in Expo Go, in the JS-only dev flow, or before a native
@@ -147,4 +148,18 @@ export async function copyFileToClipboard(
   if (!native || typeof native.copyFileToClipboard !== 'function') return false;
   await native.copyFileToClipboard(uri, name, mimeType);
   return true;
+}
+
+// Copy a file (a finished export in the app cache) into the public Downloads
+// folder via native MediaStore, returning the destination label (e.g.
+// "Download/foo.zip"). The copy streams in native code, so a large export never
+// passes through JS memory. Resolves null when the native module isn't built
+// in, so callers can fall back to the share sheet.
+export async function saveToDownloads(
+  srcPath: string,
+  name: string,
+  mimeType: string
+): Promise<string | null> {
+  if (!native || typeof native.saveToDownloads !== 'function') return null;
+  return native.saveToDownloads(srcPath, name, mimeType);
 }
