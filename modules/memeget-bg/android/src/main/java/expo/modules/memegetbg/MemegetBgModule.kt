@@ -175,11 +175,13 @@ class MemegetBgModule : Module() {
       )
     }
 
-    Function("startForeground") { title: String, text: String ->
+    Function("startForeground") { title: String, text: String, progress: Int, total: Int ->
       val ctx = appContext.reactContext ?: return@Function null
       val intent = Intent(ctx, KeepAliveService::class.java).apply {
         putExtra(KeepAliveService.EXTRA_TITLE, title)
         putExtra(KeepAliveService.EXTRA_TEXT, text)
+        putExtra(KeepAliveService.EXTRA_PROGRESS, progress)
+        putExtra(KeepAliveService.EXTRA_MAX, total)
       }
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
         ctx.startForegroundService(intent)
