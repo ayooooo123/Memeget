@@ -2,12 +2,15 @@ package expo.modules.memegetbg
 
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.BatteryManager
 import android.os.Build
+import android.os.Environment
 import android.os.PowerManager
+import android.provider.MediaStore
 import androidx.core.content.FileProvider
 import androidx.documentfile.provider.DocumentFile
 import expo.modules.kotlin.modules.Module
@@ -49,6 +52,45 @@ class MemegetBgModule : Module() {
       val clip = ClipData(name, arrayOf(mime), ClipData.Item(contentUri))
       val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
       cm.setPrimaryClip(clip)
+    }
+
+    // Copy a finished export file (written to the app cache) into the public
+    // Downloads folder so it lands there directly, no share-sheet round trip.
+    // Uses MediaStore on API 29+ (scoped storage — no permission needed) and the
+    // legacy public dir below that. The copy streams through a native buffer, so
+    // even a large collection zip never passes through JS/RN memory. Returns the
+    // human-readable destination (e.g. "Download/foo.zip").
+    AsyncFunction("saveToDownloads") { srcPath: String, name: String, mimeType: String ->
+      val ctx = appContext.reactContext ?: throw IllegalStateException("React context unavailable")
+      val safe = name.replace(Regex("[^a-zA-Z0-9._-]"), "_").ifBlank { "export.bin" }
+      val mime = mimeType.ifBlank { "application/octet-stream" }
+      val src = if (srcPath.contains("://")) Uri.parse(srcPath) else Uri.fromFile(File(srcPath))
+      val resolver = ctx.contentResolver
+      val input = resolver.openInputStream(src) ?: throw IOException("Could not open $srcPath")
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        val values = ContentValues().apply {
+          put(MediaStore.Downloads.DISPLAY_NAME, safe)
+          put(MediaStore.Downloads.MIME_TYPE, mime)
+          put(MediaStore.Downloads.IS_PENDING, 1)
+        }
+        val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+          ?: throw IOException("MediaStore insert failed")
+        input.use { i ->
+          val out = resolver.openOutputStream(uri) ?: throw IOException("Could not open output stream")
+          out.use { o -> i.copyTo(o) }
+        }
+        values.clear()
+        values.put(MediaStore.Downloads.IS_PENDING, 0)
+        resolver.update(uri, values, null, null)
+        "Download/$safe"
+      } else {
+        @Suppress("DEPRECATION")
+        val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+        dir.mkdirs()
+        val out = File(dir, safe)
+        input.use { i -> FileOutputStream(out).use { o -> i.copyTo(o) } }
+        out.absolutePath
+      }
     }
 
     // Last-modified time (ms since epoch) of a SAF content:// document, read
