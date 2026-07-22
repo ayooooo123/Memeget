@@ -182,10 +182,35 @@ describe('runMoonshine', () => {
       }),
       detokenize: async (ids) => ids.map((i) => `w${i}`).join(' '),
     };
-    // length 10 with chunk size 4 → windows [0,4],[4,8],[8,10].
-    const text = await runMoonshine(new Float32Array(10), ops, { chunkSamples: 4 });
+    // length 10 with chunk size 4 → windows [0,4],[4,8],[8,10]; minChunkSamples:0
+    // keeps the tiny synthetic tail so this exercises pure windowing.
+    const text = await runMoonshine(new Float32Array(10), ops, { chunkSamples: 4, minChunkSamples: 0 });
     expect(encodeCalls).toBe(3);
     expect(text).toBe('w20 w20 w20');
+  });
+
+  it('skips a degenerate trailing chunk that would segfault the encoder', async () => {
+    // A ~120s clip capped at AUDIO_MAX_SECONDS comes back a few samples over a
+    // whole number of 30s windows, leaving an ~11-sample tail (real case: id 5326,
+    // 1_920_011 samples). Feeding that to the encoder null-derefs ExecuTorch, so
+    // runMoonshine must skip sub-min chunks under the default floor.
+    const fed: number[] = [];
+    const ops: MoonshineOps<string> = {
+      encode: async (w) => {
+        fed.push(w.length);
+        return 'enc';
+      },
+      decode: async () => ({ data: [MOONSHINE_EOS], sizes: [1, 1], isTokenIds: true }),
+      detokenize: async (ids) => ids.join(','),
+    };
+    await runMoonshine(new Float32Array(4 * MOONSHINE_MAX_CHUNK_SAMPLES + 11), ops);
+    // four full windows encoded; the 11-sample tail skipped, never encoded.
+    expect(fed).toEqual([
+      MOONSHINE_MAX_CHUNK_SAMPLES,
+      MOONSHINE_MAX_CHUNK_SAMPLES,
+      MOONSHINE_MAX_CHUNK_SAMPLES,
+      MOONSHINE_MAX_CHUNK_SAMPLES,
+    ]);
   });
 });
 
