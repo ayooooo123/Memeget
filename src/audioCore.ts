@@ -60,10 +60,20 @@ export const AUDIO_MIN_SAMPLES = Math.round(AUDIO_SAMPLE_RATE * 0.4);
 
 // ---- Moonshine greedy decode ---------------------------------------------------
 
-// The most tokens Moonshine should emit for a clip of `numSamples` at 16 kHz —
-// a hard stop for the autoregressive loop when EOS never arrives.
+// The SWM v0.4.0 Moonshine export bounds the decoder's token_ids input (input 0)
+// at 178 elements. We decode cache-less — re-feeding the whole token prefix each
+// step — so the sequence length IS that input's size; if it ever exceeds the
+// bound ExecuTorch aborts the forward ("resize a bounded tensor ... to 179").
+export const MOONSHINE_MAX_DECODE_TOKENS = 178;
+
+// The most tokens Moonshine should emit for a clip of `numSamples` at 16 kHz — a
+// hard stop for the autoregressive loop when EOS never arrives. Clamped to the
+// decoder's bounded input length so a long or looping clip can't overflow it:
+// the loop feeds at most `maxTokens` tokens in a single decode (bos + the tokens
+// generated so far), so `maxTokens ≤ 178` keeps every forward within capacity.
 export function moonshineMaxTokens(numSamples: number, sampleRate = AUDIO_SAMPLE_RATE): number {
-  return Math.max(1, Math.floor((numSamples / sampleRate) * MOONSHINE_TOKENS_PER_SEC));
+  const cap = Math.floor((numSamples / sampleRate) * MOONSHINE_TOKENS_PER_SEC);
+  return Math.max(1, Math.min(MOONSHINE_MAX_DECODE_TOKENS, cap));
 }
 
 // One decoder forward pass, normalized so the pure loop doesn't care how the
