@@ -16,14 +16,17 @@ export interface EmbeddingModelSpec {
 
 type Env = Record<string, string | undefined>;
 
-const CLIP_PRIMARY: EmbeddingModelSpec = {
-  id: 'clip-vit-base-patch32',
-  label: 'CLIP ViT-B/32',
-  dim: 512,
-  space: 'primary',
-  available: true,
-  notes: 'Current react-native-executorch image/text embedding pair.',
-};
+// MobileCLIP-S2 is the app's primary image/text embedding space. The fp32
+// XNNPACK .pte pair + tokenizer are hosted on the models-v1 release and pulled
+// once on first launch (same react-native-executorch runtime as the VLM and
+// Moonshine). These baked defaults mean a build with no env overrides still
+// ships S2 — the app must never silently fall back to a different vector space.
+const MOBILECLIP_S2_BASE =
+  'https://github.com/ayooooo123/Memeget/releases/download/models-v1';
+const DEFAULT_S2_IMAGE = `${MOBILECLIP_S2_BASE}/mobileclip_s2_image_xnnpack_fp32.pte`;
+const DEFAULT_S2_TEXT = `${MOBILECLIP_S2_BASE}/mobileclip_s2_text_xnnpack_fp32.pte`;
+const DEFAULT_S2_TOKENIZER = `${MOBILECLIP_S2_BASE}/mobileclip_s2_tokenizer.json`;
+const MOBILECLIP_S2_DIM = 512;
 
 const MOBILECLIP_S2_ID = 'mobileclip-s2';
 const DINO_ID = 'dinov2';
@@ -60,21 +63,27 @@ function envNumber(env: Env, key: string, fallback: number): number {
 }
 
 export function primaryEmbeddingModelFromEnv(env: Env = currentEnv()): EmbeddingModelSpec {
-  const imageModelSource = env.EXPO_PUBLIC_MEMEGET_MOBILECLIP_S2_IMAGE_MODEL_SOURCE;
-  const textModelSource = env.EXPO_PUBLIC_MEMEGET_MOBILECLIP_S2_TEXT_MODEL_SOURCE;
-  const tokenizerSource = env.EXPO_PUBLIC_MEMEGET_MOBILECLIP_S2_TOKENIZER_SOURCE;
-  if (!imageModelSource || !textModelSource || !tokenizerSource) return CLIP_PRIMARY;
-
+  const envImage = env.EXPO_PUBLIC_MEMEGET_MOBILECLIP_S2_IMAGE_MODEL_SOURCE;
+  const envText = env.EXPO_PUBLIC_MEMEGET_MOBILECLIP_S2_TEXT_MODEL_SOURCE;
+  const envTokenizer = env.EXPO_PUBLIC_MEMEGET_MOBILECLIP_S2_TOKENIZER_SOURCE;
+  // All three env sources must be set to override the baked defaults; a partial
+  // override is ignored entirely, so a custom image encoder can never be paired
+  // with the default text encoder (that would be a different vector space).
+  const custom = !!(envImage && envText && envTokenizer);
   return {
-    id: env.EXPO_PUBLIC_MEMEGET_MOBILECLIP_S2_MODEL_ID || MOBILECLIP_S2_ID,
+    id: (custom && env.EXPO_PUBLIC_MEMEGET_MOBILECLIP_S2_MODEL_ID) || MOBILECLIP_S2_ID,
     label: 'MobileCLIP-S2',
-    dim: envNumber(env, 'EXPO_PUBLIC_MEMEGET_MOBILECLIP_S2_DIM', 512),
+    dim: custom
+      ? envNumber(env, 'EXPO_PUBLIC_MEMEGET_MOBILECLIP_S2_DIM', MOBILECLIP_S2_DIM)
+      : MOBILECLIP_S2_DIM,
     space: 'primary',
     available: true,
-    notes: 'Custom react-native-executorch image/text embedding pair supplied by environment.',
-    imageModelSource,
-    textModelSource,
-    tokenizerSource,
+    notes: custom
+      ? 'Custom MobileCLIP-S2 image/text export supplied by environment.'
+      : 'MobileCLIP-S2 image/text embedding pair (react-native-executorch).',
+    imageModelSource: custom ? envImage : DEFAULT_S2_IMAGE,
+    textModelSource: custom ? envText : DEFAULT_S2_TEXT,
+    tokenizerSource: custom ? envTokenizer : DEFAULT_S2_TOKENIZER,
   };
 }
 
@@ -106,15 +115,6 @@ export const PRIMARY_EMBEDDING_MODEL: EmbeddingModelSpec = primaryEmbeddingModel
 
 export const VISUAL_EMBEDDING_MODEL: EmbeddingModelSpec = visualEmbeddingModelFromEnv();
 
-const MOBILECLIP_S2_CANDIDATE: EmbeddingModelSpec = {
-  id: MOBILECLIP_S2_ID,
-  label: 'MobileCLIP-S2',
-  dim: 512,
-  space: 'primary',
-  available: false,
-  notes: 'Candidate replacement primary text/image space once a compatible export exists.',
-};
-
 const DINO_CANDIDATE: EmbeddingModelSpec = {
   id: 'dinov2',
   label: 'DINOv2 visual',
@@ -125,10 +125,7 @@ const DINO_CANDIDATE: EmbeddingModelSpec = {
 };
 
 export const FUTURE_EMBEDDING_MODELS = {
-  mobileClipS2:
-    PRIMARY_EMBEDDING_MODEL.id === MOBILECLIP_S2_ID
-      ? PRIMARY_EMBEDDING_MODEL
-      : MOBILECLIP_S2_CANDIDATE,
+  mobileClipS2: PRIMARY_EMBEDDING_MODEL,
   dinov2: VISUAL_EMBEDDING_MODEL.available ? VISUAL_EMBEDDING_MODEL : DINO_CANDIDATE,
 } as const satisfies Record<string, EmbeddingModelSpec>;
 
