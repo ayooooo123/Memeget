@@ -207,6 +207,22 @@ export async function initDb(): Promise<void> {
       `INSERT OR REPLACE INTO settings (key, value) VALUES ('thumb_retry_v4', '1')`
     );
   }
+  // One-time re-queue (audio v1): the first Moonshine decoder read its output
+  // tensor as a raw ArrayBuffer instead of a typed array, so every clip
+  // "transcribed" to nothing (argmax always landed on token 0) yet was still
+  // marked done. Re-queue every already-analyzed video so the fixed decoder
+  // re-transcribes the library once; genuinely silent clips just come back empty.
+  const audioRequeue = await db.getFirstAsync<{ value: string }>(
+    `SELECT value FROM settings WHERE key = 'audio_requeue_v1'`
+  );
+  if (!audioRequeue) {
+    await db.execAsync(
+      `UPDATE memes SET audio_state = 'pending', transcript = '' WHERE kind = 'video' AND audio_state IN ('done', 'failed');`
+    );
+    await db.runAsync(
+      `INSERT OR REPLACE INTO settings (key, value) VALUES ('audio_requeue_v1', '1')`
+    );
+  }
   // Migrate exemplar tables that predate negative ("not this") teaching.
   const exCols = await db.getAllAsync<{ name: string }>('PRAGMA table_info(exemplars)');
   if (!exCols.some((c) => c.name === 'is_positive')) {
