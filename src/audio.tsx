@@ -69,6 +69,31 @@ export interface AudioApi {
 
 const Ctx = createContext<AudioApi | null>(null);
 
+// react-native-executorch's generic `forward` hands each output tensor's dataPtr
+// back as a raw ArrayBuffer (see JsiConversions.h getJsiValue(JSTensorViewOut)),
+// NOT a typed array — an ArrayBuffer has no `.length` and no element access, so
+// feeding it straight to the decode loop's argmax makes every read NaN and the
+// model "transcribes" nothing but token 0. View it as the typed array its
+// scalarType implies before the pure loop indexes it.
+function tensorData(o: TensorPtr): ArrayLike<number> | BigInt64Array {
+  const buf = o.dataPtr;
+  if (!(buf instanceof ArrayBuffer)) return buf as ArrayLike<number> | BigInt64Array;
+  switch (o.scalarType) {
+    case ScalarType.FLOAT:
+      return new Float32Array(buf);
+    case ScalarType.DOUBLE:
+      return new Float64Array(buf);
+    case ScalarType.LONG:
+      return new BigInt64Array(buf);
+    case ScalarType.INT:
+      return new Int32Array(buf);
+    case ScalarType.SHORT:
+      return new Int16Array(buf);
+    default:
+      throw new Error(`Unsupported decoder output scalarType ${o.scalarType}`);
+  }
+}
+
 // Transcribe ONE video: materialize the SAF file, decode its audio natively,
 // run Moonshine, persist. Cleans up its temp files whatever happens.
 async function transcribeOne(
@@ -159,7 +184,7 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
         ]);
         const o = out[0];
         return {
-          data: o.dataPtr as ArrayLike<number> | BigInt64Array,
+          data: tensorData(o),
           sizes: o.sizes,
           isTokenIds: o.scalarType === ScalarType.LONG || o.scalarType === ScalarType.INT,
         };
