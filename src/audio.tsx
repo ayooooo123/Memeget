@@ -101,6 +101,12 @@ async function transcribeOne(
   m: MemeNeedingAudioRow
 ): Promise<'done' | 'silent' | 'failed'> {
   const temp: string[] = [];
+  // Checkpoint this clip as failed BEFORE any native work. ExecuTorch can hard-
+  // crash (SIGSEGV in libexecutorch_jni) on certain clips, killing the whole
+  // process before we can persist a result. Pre-marking means such a clip is left
+  // 'failed' — skipped on the next pass — instead of stuck 'pending' and crashing
+  // the pass on the same clip forever. Overwritten to done/silent on success.
+  await markAudioFailed(m.id).catch(() => {});
   try {
     // Copy out of SAF first — MediaExtractor is happier with a plain file
     // path, and this matches how the indexer/thumbnailer treat content:// uris.
@@ -119,12 +125,18 @@ async function transcribeOne(
       encoding: FileSystem.EncodingType.Base64,
     });
     const waveform = pcmBase64ToWaveform(b64);
+    // Breadcrumb right before the native forward: if ExecuTorch segfaults, this is
+    // the last line in logcat, naming the clip (and its length) that crashed it.
+    console.log(`[stt] transcribe id=${m.id} samples=${waveform.length} ${m.name}`);
     const res = await stt.transcribe(waveform);
     const text = cleanTranscript(res.text);
 
     await setMemeTranscript(m.id, text);
     return text ? 'done' : 'silent';
-  } catch {
+  } catch (e) {
+    // Pre-marked failed above; re-assert in case that initial write didn't land,
+    // so a caught exception can never leave the row 'pending'. Record why too.
+    console.log(`[stt] error id=${m.id} ${String(e)}`);
     await markAudioFailed(m.id).catch(() => {});
     return 'failed';
   } finally {
