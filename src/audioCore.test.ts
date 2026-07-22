@@ -8,6 +8,8 @@ import {
   AUDIO_SAMPLE_RATE,
   MOONSHINE_BOS,
   MOONSHINE_EOS,
+  MOONSHINE_MAX_CHUNK_SAMPLES,
+  MOONSHINE_MAX_DECODE_TOKENS,
   base64ToBytes,
   cleanTranscript,
   moonshineMaxTokens,
@@ -65,6 +67,13 @@ describe('moonshineMaxTokens', () => {
   it('never returns less than one token', () => {
     expect(moonshineMaxTokens(100)).toBe(1);
     expect(moonshineMaxTokens(0)).toBe(1);
+  });
+
+  it('clamps to the decoder bounded input length for long clips', () => {
+    // A 30s window's raw cap is floor(30 * 6.5) = 195, but the decoder's
+    // token_ids input is bounded at 178 — the cap must not exceed it.
+    expect(moonshineMaxTokens(MOONSHINE_MAX_CHUNK_SAMPLES)).toBe(MOONSHINE_MAX_DECODE_TOKENS);
+    expect(moonshineMaxTokens(AUDIO_SAMPLE_RATE * 600)).toBe(MOONSHINE_MAX_DECODE_TOKENS);
   });
 });
 
@@ -138,6 +147,23 @@ describe('runMoonshine', () => {
     const text = await runMoonshine(new Float32Array(AUDIO_SAMPLE_RATE), ops);
     expect(ops.detokenizeArgs[0]).toHaveLength(6);
     expect(text).toBe('w7 w7 w7 w7 w7 w7');
+  });
+
+  it('never feeds the decoder more than its bounded token_ids length', async () => {
+    // Regression: the SWM export bounds decoder input 0 at 178. Cache-less decode
+    // re-feeds the whole prefix, so an EOS-less 30s clip must stop feeding at 178
+    // — one more and the native forward aborts ("resize a bounded tensor ... 179").
+    let maxFed = 0;
+    const ops: MoonshineOps<string> = {
+      encode: async () => 'enc',
+      decode: async (tokens) => {
+        maxFed = Math.max(maxFed, tokens.length);
+        return { data: [7], sizes: [1, 1], isTokenIds: true }; // never EOS
+      },
+      detokenize: async (ids) => ids.join(','),
+    };
+    await runMoonshine(new Float32Array(MOONSHINE_MAX_CHUNK_SAMPLES), ops);
+    expect(maxFed).toBe(MOONSHINE_MAX_DECODE_TOKENS);
   });
 
   it('windows long audio and joins the pieces', async () => {
