@@ -136,12 +136,19 @@ export interface MoonshineOps<E = unknown> {
 export async function runMoonshine<E>(
   waveform: Float32Array,
   ops: MoonshineOps<E>,
-  opts: { chunkSamples?: number; sampleRate?: number } = {}
+  opts: { chunkSamples?: number; sampleRate?: number; minChunkSamples?: number } = {}
 ): Promise<string> {
   const sampleRate = opts.sampleRate ?? AUDIO_SAMPLE_RATE;
   const chunkSamples = opts.chunkSamples ?? MOONSHINE_MAX_CHUNK_SAMPLES;
+  const minChunkSamples = opts.minChunkSamples ?? AUDIO_MIN_SAMPLES;
   const pieces: string[] = [];
   for (const [start, end] of planChunks(waveform.length, chunkSamples)) {
+    // A clip that isn't a whole number of windows leaves a short trailing chunk.
+    // Anything below the min-speech floor is not just unintelligible but
+    // degenerate input that segfaults ExecuTorch's encoder — its conv front-end
+    // collapses a near-empty waveform to a zero-length feature map, and the
+    // decoder then cross-attends over nothing. Skip it (loss is <0.4s at the end).
+    if (end - start < minChunkSamples) continue;
     const chunk = waveform.subarray(start, end);
     const encoderOutput = await ops.encode(chunk);
     const maxTokens = moonshineMaxTokens(chunk.length, sampleRate);
