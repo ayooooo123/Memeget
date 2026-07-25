@@ -155,6 +155,8 @@ Export the non-LM VoxCeleb CAM++ checkpoint because the official WeSpeaker model
 
 If the frontend cannot lower to the bundled ExecuTorch runtime, stop the feature and amend the spec with the observed unsupported operators. Do not add ONNX Runtime or hand-written fbank as an unreviewed fallback.
 
+**Gate result (2026-07-24): BLOCKED.** The official non-LM checkpoint and exact Kaldi fbank frontend load and capture with `torch.export`, but ExecuTorch 1.0.0 Edge validation rejects `aten._fft_r2c.default` (`float32` to `complex64`) and the following `aten.abs.default` (`complex64` to `float32`). No `.pte` exists. Per this stop condition, Steps 5–11 and Tasks 2–15 were not started. Resume only after an amended, reviewed model boundary passes the complete Task 1 gate.
+
 - [ ] **Step 5: Add deterministic same/different-speaker evaluation**
 
 `verify_speaker_encoder.py` downloads LibriSpeech `test-clean`, selects the first twelve sorted speaker IDs and two sorted utterances per speaker, creates 3-second crops, and evaluates all 12 same-speaker pairs plus all cross-speaker pairs. It also treats utterance A as each profile enrollment and utterance B as its query. `dist/speaker_eval.json` contains typed fields for model ID, same/different score distributions, equal-error threshold/rate, enrollment top-1 accuracy/margins, and recommended thresholds.

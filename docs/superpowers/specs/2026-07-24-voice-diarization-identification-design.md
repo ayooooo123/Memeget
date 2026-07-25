@@ -69,6 +69,14 @@ Use a modular on-device pipeline rather than a single end-to-end diarization mod
 
 This mirrors the standard segmentation, embedding, and clustering boundaries used by diarization toolkits such as [pyannote.audio](https://github.com/pyannote/pyannote-audio), while allowing Memeget to choose mobile-sized components independently. Candidate model families include [Silero VAD](https://github.com/snakers4/silero-vad) for voice activity and [WeSpeaker](https://github.com/wenet-e2e/wespeaker) speaker encoders. These are candidates, not preselected dependencies. The implementation plan must begin with an Android benchmark and license/export check, then choose either compatible ExecuTorch exports or a narrowly scoped mobile runtime integration.
 
+### Runtime gate result — blocked
+
+The 2026-07-24 CAM++ gate stopped before product implementation. The official non-LM `Wespeaker/wespeaker-voxceleb-campplus` checkpoint and config loaded successfully, and `torch.export` captured the exact inference frontend: waveform scaling, 80-bin Kaldi fbank with 25 ms frames, 10 ms shift, Hamming window and zero inference dither, mean-only CMVN, CAM++ inference, and L2 normalization.
+
+ExecuTorch 1.0.0 could not lower that raw-waveform graph to its Edge dialect. After decomposing the Hamming-window operator, validation rejected `aten._fft_r2c.default` because it changes `float32` input to `complex64` output and rejected the following `aten.abs.default` because it changes `complex64` input to `float32` output. Both failures originate inside `torchaudio.compliance.kaldi.fbank`. No `.pte` was produced, so no release artifact, Android probe, calibration, persistence, learning, search, or UI work is approved.
+
+Implementation remains blocked until a revised model boundary passes the same offline and Android gates. Acceptable candidates are either a reviewed, parity-proven real-valued/mobile implementation of the checkpoint's exact frontend or a speaker encoder whose supported graph consumes raw waveform directly. ONNX Runtime, guessed calibration values, and an unreviewed hand-written fbank remain rejected.
+
 A hosted diarization API was rejected because audio upload, network dependency, accounts, and retention policy would contradict Memeget's product contract. A full pyannote-style on-device pipeline was rejected for the first version because overlap-aware segmentation and model porting add substantial size and runtime risk beyond the core workflow.
 
 ## Domain model
