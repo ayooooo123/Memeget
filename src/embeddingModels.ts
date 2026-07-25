@@ -19,7 +19,7 @@ type Env = Record<string, string | undefined>;
 // MobileCLIP-S2 is the app's primary image/text embedding space. The fp32
 // XNNPACK .pte pair + tokenizer are hosted on the models-v1 release and pulled
 // once on first launch (same react-native-executorch runtime as the VLM and
-// Moonshine). These baked defaults mean a build with no env overrides still
+// Whisper). These baked defaults mean a build with no env overrides still
 // ships S2 — the app must never silently fall back to a different vector space.
 const MOBILECLIP_S2_BASE =
   'https://github.com/ayooooo123/Memeget/releases/download/models-v1';

@@ -49,8 +49,8 @@ export interface VisionResult {
 
 export const SYSTEM_PROMPT =
   'You are a meme cataloging engine. You look at a single image and describe it for ' +
-  'search using four labeled lines. Tag what the meme MEANS and the moment someone would ' +
-  'send it — never how it merely looks. Output ONLY those lines — no prose, no JSON, no ' +
+  'search using four labeled lines. Tag both what is literally happening and what the meme ' +
+  'MEANS and the moment someone would send it. Output ONLY those lines — no prose, no JSON, no ' +
   'markdown, no code fences.';
 
 // A flat "LABEL: value" format instead of JSON. A small on-device model frequently
@@ -71,17 +71,18 @@ export const USER_PROMPT =
   'TEXT: text visible in the image, verbatim; leave blank if none\n' +
   'SUBJECTS: comma-separated main people, characters, or objects\n' +
   'TAGS: 6-12 comma-separated lowercase keywords for how a person would SEARCH for this meme. ' +
-  'Lead with the real-life situation or feeling you would send it to react to. For any gesture, ' +
-  'tag what it MEANS, not how it looks (a finger to the lips = "shushing, be quiet"; a palm on the ' +
-  'face = "facepalm, disbelief"; a pointing hand = "pointing, look at this"). Also include the ' +
-  'emotion, the action, the meme format/template name if known, and named characters or people. ' +
-  'Do NOT tag generic appearance — never "facial expression", "intense look", "serious face", ' +
-  '"cute animal", "direct gaze"; nobody searches those. Name the meaning instead.\n' +
+  'Lead with the real-life situation or feeling you would send it to react to. For any gesture or ' +
+  'pose, tag BOTH the literal action AND what it means (a finger to the lips = "shushing, finger to ' +
+  'lips, be quiet"; a palm on the face = "facepalm, hand on face, disbelief"; arms wrapped around ' +
+  'someone = "hugging, hug, comfort"; arms folded across the chest = "arms crossed, annoyed, ' +
+  'unimpressed"). Also include the emotion, the action, the meme format/template name if known, ' +
+  'and named characters or people. Do NOT tag STATIC appearance with no action — never "facial ' +
+  'expression", "intense look", "serious face", "cute animal", "direct gaze"; nobody searches those.\n' +
   '\nExample 1 (a gesture meme):\n' +
   'CAPTION: a man holds a finger to his lips, telling you to keep something quiet\n' +
   'TEXT: \n' +
   'SUBJECTS: man\n' +
-  'TAGS: shushing, be quiet, keep it a secret, quiet, shhh, telling someone to hush, knowing look\n' +
+  'TAGS: shushing, finger to lips, be quiet, keep it a secret, quiet, shhh, telling someone to hush\n' +
   '\nExample 2 (a format meme with text):\n' +
   'CAPTION: a man turns to admire another woman while his girlfriend glares, used when tempted by something new\n' +
   'TEXT: me, new framework, the project i should be working on\n' +
@@ -101,9 +102,9 @@ export const USER_PROMPT_TERSE =
   'TEXT: text visible in the image, verbatim; leave blank if none\n' +
   'SUBJECTS: comma-separated main people, characters, or objects\n' +
   'TAGS: 6-12 lowercase keywords for how a person would SEARCH for this. Lead with the ' +
-  'real-life situation or feeling; tag what a gesture MEANS not how it looks; include the ' +
+  'real-life situation or feeling; for a gesture or pose tag BOTH the literal action and what it means; include the ' +
   'emotion, the action, the meme format/template name if known, and named characters. ' +
-  'Never generic appearance words like "serious face" or "direct gaze".\n' +
+  'Never static appearance words like "serious face" or "direct gaze".\n' +
   'If it is not a meme, describe it the same way. Be concise.';
 
 // Cap the injected OCR so it can't bloat the prompt (prefill cost) — a hint.

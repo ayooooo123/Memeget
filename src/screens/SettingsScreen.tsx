@@ -10,6 +10,7 @@ import { saveToDownloads } from '../../modules/memeget-bg';
 import { showToast } from '../components/Toast';
 import { Button, ProgressBar, Slider, StatusDot } from '../components/ui';
 import { useAudio } from '../audio';
+import { AUDIO_MODEL_INFO } from '../audioCore';
 import { useEmbeddings } from '../embeddings';
 import { useVision, intensityLabel, memesPerHour } from '../vision';
 import {
@@ -36,6 +37,7 @@ import {
   importExemplars,
   migrateStaleExemplars,
   removeFolder,
+  resetAllAudio,
   resetAudioFailures,
   resetFailedThumbs,
   type ImportedPack,
@@ -579,6 +581,41 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
     showToast(`Re-queued ${n} failed video${n === 1 ? '' : 's'} for transcription`, 'info');
   }, [refresh]);
 
+  // Wipe every video transcript and transcribe the whole library again — for
+  // when the current speech model's output is poor and the user wants a clean
+  // retry (e.g. after switching models). Guarded: don't clear transcripts unless
+  // the model can actually run, or search loses all speech terms until a later
+  // pass. Kicks the pass right after re-queueing.
+  const onRegenerateAllAudio = useCallback(() => {
+    if (!audio.ready) {
+      showToast('Speech model still loading — try again shortly', 'info');
+      return;
+    }
+    // A per-meme retry from the Library sets AudioApi.running without touching this
+    // screen's `transcribing`, so check the shared flag before wiping the table.
+    if (audio.running) {
+      showToast('Already transcribing — try again in a moment', 'info');
+      return;
+    }
+    Alert.alert(
+      'Regenerate all transcriptions?',
+      'Clears every video transcript and transcribes the whole library again on-device. This can take a while.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Regenerate',
+          style: 'destructive',
+          onPress: async () => {
+            const n = await resetAllAudio();
+            await refresh();
+            showToast(`Re-queued ${n} video${n === 1 ? '' : 's'} — transcribing…`, 'info');
+            await onRunTranscribe();
+          },
+        },
+      ]
+    );
+  }, [audio.ready, audio.running, refresh, onRunTranscribe]);
+
 
   // Re-base old-space taught examples onto the current index (see
   // migrateStaleExemplars), then re-tag so the labels actually reappear.
@@ -836,7 +873,7 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
       </Section>
 
       <Section glyph="🎙" title="Audio analysis" tint={colors.volt}>
-        <Row label="Moonshine (speech-to-text)">
+        <Row label={`${AUDIO_MODEL_INFO.label} (speech-to-text)`}>
           <StatusDot tone={audioTone} label={audioLabel} />
         </Row>
         {audio.enabled && !audio.ready && !audio.error && (
@@ -908,6 +945,15 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
                 variant="secondary"
                 label={`Retry ${audioFailed} failed`}
                 onPress={onRetryAudioFailures}
+              />
+            )}
+            {audioStats.analyzed > 0 && !transcribing && (
+              <Button
+                small
+                variant="secondary"
+                label="Regenerate all transcriptions"
+                onPress={onRegenerateAllAudio}
+                disabled={!audio.ready || audio.running}
               />
             )}
           </>

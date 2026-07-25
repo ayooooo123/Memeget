@@ -210,11 +210,20 @@ object VideoFrameExtractor {
   // file (JS crash between extract and cleanup) inside the launch sweep's net.
   private fun writeJpeg(ctx: Context, image: Image): String? {
     return try {
-      val nv21 = yuv420ToNv21(image)
+      // Clamp to EVEN dimensions. YuvImage.compressToJpeg drops into native
+      // libjpeg, which for NV21 reads w*h + 2*ceil(w/2)*ceil(h/2) bytes; an odd
+      // width/height makes that exceed the w*h*3/2 buffer below by up to ~w/2
+      // bytes — a native heap over-read that GrapheneOS's hardened_malloc/MTE
+      // aborts on (scudo tolerates it). Even dims keep buffer, YuvImage, and the
+      // crop Rect mutually consistent, so the encoder never reads past the array.
+      val w = image.width and 1.inv()
+      val h = image.height and 1.inv()
+      if (w <= 0 || h <= 0) return null
+      val nv21 = yuv420ToNv21(image, w, h)
       val out = File(ctx.cacheDir, "meme_work_frame_${System.currentTimeMillis()}_${image.hashCode()}.jpg")
       FileOutputStream(out).use { fos ->
-        YuvImage(nv21, ImageFormat.NV21, image.width, image.height, null)
-          .compressToJpeg(Rect(0, 0, image.width, image.height), 85, fos)
+        YuvImage(nv21, ImageFormat.NV21, w, h, null)
+          .compressToJpeg(Rect(0, 0, w, h), 85, fos)
       }
       "file://${out.absolutePath}"
     } catch (e: Exception) {
@@ -225,10 +234,10 @@ object VideoFrameExtractor {
   }
 
   // Copies the three flexible-YUV planes into NV21 (Y then interleaved VU),
-  // honoring each plane's row/pixel stride — decoders pad rows freely.
-  private fun yuv420ToNv21(image: Image): ByteArray {
-    val w = image.width
-    val h = image.height
+  // honoring each plane's row/pixel stride — decoders pad rows freely. w/h are
+  // the even-clamped output dimensions (see writeJpeg); the source planes are
+  // always at least this large, so every read stays in bounds.
+  private fun yuv420ToNv21(image: Image, w: Int, h: Int): ByteArray {
     val ySize = w * h
     val out = ByteArray(ySize + ySize / 2)
 
