@@ -22,13 +22,14 @@ export interface ExtractedAudio {
 
 interface MemegetBgNative {
   getPower(): NativePower;
-  startForeground(title: string, text: string): void;
+  startForeground(title: string, text: string, progress: number, total: number): void;
   stopForeground(): void;
   getModifiedTime(uri: string): number | null;
   extractAudio(source: string, maxSeconds: number): Promise<ExtractedAudio | null>;
   extractVideoFrame(source: string, seconds: number): Promise<string | null>;
   extractVideoFramePlayer(source: string, seconds: number): Promise<string | null>;
   copyFileToClipboard(uri: string, name: string, mimeType: string): Promise<void>;
+  saveToDownloads(srcPath: string, name: string, mimeType: string): Promise<string>;
 }
 
 // Optional on purpose: in Expo Go, in the JS-only dev flow, or before a native
@@ -52,9 +53,9 @@ export function getPower(): NativePower | null {
 // Start/stop a foreground service (Android) that keeps the process alive so the
 // in-app description loop survives backgrounding. No-op without the native
 // module; on iOS it only requests a short background-execution extension.
-export function startKeepAlive(title: string, text: string): void {
+export function startKeepAlive(title: string, text: string, progress = -1, total = -1): void {
   try {
-    native?.startForeground(title, text);
+    native?.startForeground(title, text, progress, total);
   } catch {
     // ignore — keep-alive is best-effort
   }
@@ -147,4 +148,18 @@ export async function copyFileToClipboard(
   if (!native || typeof native.copyFileToClipboard !== 'function') return false;
   await native.copyFileToClipboard(uri, name, mimeType);
   return true;
+}
+
+// Copy a file (a finished export in the app cache) into the public Downloads
+// folder via native MediaStore, returning the destination label (e.g.
+// "Download/foo.zip"). The copy streams in native code, so a large export never
+// passes through JS memory. Resolves null when the native module isn't built
+// in, so callers can fall back to the share sheet.
+export async function saveToDownloads(
+  srcPath: string,
+  name: string,
+  mimeType: string
+): Promise<string | null> {
+  if (!native || typeof native.saveToDownloads !== 'function') return null;
+  return native.saveToDownloads(srcPath, name, mimeType);
 }

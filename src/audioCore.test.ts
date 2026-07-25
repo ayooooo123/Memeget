@@ -1,14 +1,26 @@
 // Tests for the pure audio-transcription helpers: the base64 → PCM waveform
 // path (which must exactly reverse what the native extractor writes — raw
-// little-endian float32) and the Whisper transcript cleanup.
+// little-endian float32), model identity, cleanup, and diagnostics. audioCore
+// stays free of native bindings so these run under plain Node.
 
-// audioCore only imports a model descriptor constant from the executorch
-// package; stub it so the test never loads native bindings.
-jest.mock('react-native-executorch', () => ({
-  WHISPER_TINY_EN: { modelName: 'whisper-tiny-en' },
-}));
+import {
+  AUDIO_MODEL_INFO,
+  base64ToBytes,
+  cleanTranscript,
+  pcmBase64ToWaveform,
+  waveformLevel,
+} from './audioCore';
 
-import { base64ToBytes, cleanTranscript, pcmBase64ToWaveform } from './audioCore';
+describe('audio model selection', () => {
+  it('uses the supported Whisper tiny English runner and a model-specific requeue key', () => {
+    expect(AUDIO_MODEL_INFO).toEqual({
+      id: 'whisper-tiny-en',
+      label: 'Whisper tiny (English)',
+      requeueKey: 'audio_requeue_whisper_tiny_en_v1',
+    });
+  });
+});
+
 
 describe('base64ToBytes', () => {
   it('decodes plain payloads', () => {
@@ -47,6 +59,10 @@ describe('pcmBase64ToWaveform', () => {
   });
 });
 
+
+
+
+
 describe('cleanTranscript', () => {
   it('trims and collapses whitespace', () => {
     expect(cleanTranscript('  why are you   running  ')).toBe('why are you running');
@@ -63,5 +79,29 @@ describe('cleanTranscript', () => {
     expect(cleanTranscript('')).toBe('');
     expect(cleanTranscript(null)).toBe('');
     expect(cleanTranscript(undefined)).toBe('');
+  });
+});
+
+describe('waveformLevel', () => {
+  it('reports ~0 for a silent (all-zero) waveform', () => {
+    const { rms, peak } = waveformLevel(new Float32Array(16000));
+    expect(rms).toBe(0);
+    expect(peak).toBe(0);
+  });
+
+  it('reports the peak amplitude regardless of sign', () => {
+    const { peak } = waveformLevel(new Float32Array([0.1, -0.8, 0.3]));
+    expect(peak).toBeCloseTo(0.8, 6);
+  });
+
+  it('computes RMS of a full-scale square wave as 1', () => {
+    const { rms } = waveformLevel(new Float32Array([1, -1, 1, -1]));
+    expect(rms).toBeCloseTo(1, 6);
+  });
+
+  it('ignores non-finite samples so a corrupt decode cannot poison the figure', () => {
+    const { rms, peak } = waveformLevel([0.5, NaN, Infinity, -0.5]);
+    expect(rms).toBeCloseTo(0.5, 6);
+    expect(peak).toBeCloseTo(0.5, 6);
   });
 });

@@ -1,10 +1,5 @@
 import React, { createContext, useContext, useMemo, useState } from 'react';
-import {
-  useImageEmbeddings,
-  useTextEmbeddings,
-  CLIP_VIT_BASE_PATCH32_IMAGE_QUANTIZED,
-  CLIP_VIT_BASE_PATCH32_TEXT,
-} from 'react-native-executorch';
+import { useImageEmbeddings, useTextEmbeddings } from 'react-native-executorch';
 
 import { normalize } from './db';
 import {
@@ -13,40 +8,40 @@ import {
   type EmbeddingModelSpec,
 } from './embeddingModels';
 
-// NOTE: image and text MUST come from the same CLIP model so their vectors
-// share a space. If react-native-executorch ever renames these constants,
-// this is the only place to change.
-//
-// The image encoder is the int8-quantized build: ~4x smaller to download and
-// markedly lighter on RAM than the fp32 one (which competed with the rest of the
-// app at launch). It targets the same 512-dim CLIP space as the fp32 text
-// encoder, so text-query↔image search still works. There is no quantized text
-// build, and the text side must stay CLIP to share the vector space, so it
-// remains fp32. Switching the image encoder changes embedding values slightly,
-// so a one-time re-index (Settings → Clear index, then Index) keeps old and new
-// images consistent.
-const IMAGE_MODEL = CLIP_VIT_BASE_PATCH32_IMAGE_QUANTIZED;
-const TEXT_MODEL = CLIP_VIT_BASE_PATCH32_TEXT;
+// The primary image + text encoders (MobileCLIP-S2) and the optional visual
+// encoder (DINOv2) are all react-native-executorch custom models resolved from
+// embeddingModels.ts. Image and text MUST come from the same primary export so
+// their vectors share one space; switching that export moves the space, so a
+// one-time re-index (Settings → Clear index, then Index) is needed to keep old
+// and new vectors consistent.
+// react-native-executorch's public model type only enumerates its built-in
+// model names, but the native runtime also accepts a { modelName: 'custom',
+// modelSource, tokenizerSource? } descriptor to load an arbitrary .pte export
+// (how MobileCLIP-S2 and DINOv2 load). That shape is unexpressible in the
+// shipped types, so cast through unknown at this single boundary.
+type ImageModelProp = Parameters<typeof useImageEmbeddings>[0]['model'];
+type TextModelProp = Parameters<typeof useTextEmbeddings>[0]['model'];
 
-function customImageModel(spec: EmbeddingModelSpec) {
-  return spec.imageModelSource
-    ? ({ modelName: 'custom' as const, modelSource: spec.imageModelSource } as any)
-    : IMAGE_MODEL;
+function customImageModel(spec: EmbeddingModelSpec): ImageModelProp {
+  return { modelName: 'custom', modelSource: spec.imageModelSource } as unknown as ImageModelProp;
 }
 
-function customTextModel(spec: EmbeddingModelSpec) {
-  return spec.textModelSource && spec.tokenizerSource
-    ? ({
-        modelName: 'custom' as const,
-        modelSource: spec.textModelSource,
-        tokenizerSource: spec.tokenizerSource,
-      } as any)
-    : TEXT_MODEL;
+function customTextModel(spec: EmbeddingModelSpec): TextModelProp {
+  return {
+    modelName: 'custom',
+    modelSource: spec.textModelSource,
+    tokenizerSource: spec.tokenizerSource,
+  } as unknown as TextModelProp;
 }
 
 const PRIMARY_IMAGE_MODEL = customImageModel(PRIMARY_EMBEDDING_MODEL);
 const PRIMARY_TEXT_MODEL = customTextModel(PRIMARY_EMBEDDING_MODEL);
-const VISUAL_IMAGE_MODEL = customImageModel(VISUAL_EMBEDDING_MODEL);
+// DINOv2 is optional. When it isn't configured its hook is never loaded
+// (preventLoad below), but useImageEmbeddings still needs a descriptor — reuse
+// the primary image model as an inert placeholder instead of a second export.
+const VISUAL_IMAGE_MODEL = VISUAL_EMBEDDING_MODEL.imageModelSource
+  ? customImageModel(VISUAL_EMBEDDING_MODEL)
+  : PRIMARY_IMAGE_MODEL;
 
 export interface EmbeddingsApi {
   ready: boolean;

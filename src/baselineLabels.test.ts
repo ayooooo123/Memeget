@@ -3,8 +3,14 @@
 // capped, junk is dropped, and categories are sanitized — so a bad harvest can't
 // quietly corrupt or bloat the zero-shot tagging set.
 
-import { buildBaselineLabels, type BaselineTag } from './baselineLabels';
-import type { LabelDef } from './memeLabels';
+import {
+  buildBaselineLabels,
+  buildAllBaselineLabels,
+  MAX_BASELINE_LABELS,
+  MAX_BASEDMEMES_LABELS,
+  type BaselineTag,
+} from './baselineLabels';
+import { CURATED_MEME_LABELS, type LabelDef } from './memeLabels';
 
 const curated: LabelDef[] = [
   { label: 'Gigachad', prompt: 'a Gigachad meme', category: 'character', associations: ['chad'] },
@@ -59,5 +65,50 @@ describe('buildBaselineLabels', () => {
       tag('Good'),
     ];
     expect(buildBaselineLabels(curated, bad).map((d) => d.label)).toEqual(['Good']);
+  });
+});
+
+// buildAllBaselineLabels composes the two committed machine-generated tiers
+// (memedepot + basedmemes) under the curated core with a shared de-dupe pass.
+// It reads the real committed data files, so these assert composition INVARIANTS
+// that must hold for any data rather than exact contents.
+describe('buildAllBaselineLabels', () => {
+  const norm = (s: string) => s.trim().toLowerCase();
+
+  it('produces breadth from the committed baselines', () => {
+    const out = buildAllBaselineLabels(CURATED_MEME_LABELS);
+    expect(Array.isArray(out)).toBe(true);
+    expect(out.length).toBeGreaterThan(0); // basedmemes tier is committed non-empty
+  });
+
+  it('never re-emits a curated label and never duplicates within itself', () => {
+    const out = buildAllBaselineLabels(CURATED_MEME_LABELS);
+    const curated = new Set(CURATED_MEME_LABELS.map((d) => norm(d.label)));
+    const seen = new Set<string>();
+    for (const d of out) {
+      const key = norm(d.label);
+      expect(curated.has(key)).toBe(false); // curated always wins
+      expect(seen.has(key)).toBe(false); // cross-tier + intra-tier de-dupe
+      seen.add(key);
+      expect(d.prompt.length).toBeGreaterThan(0);
+    }
+  });
+
+  it('respects both per-tier caps', () => {
+    const out = buildAllBaselineLabels(CURATED_MEME_LABELS);
+    expect(out.length).toBeLessThanOrEqual(MAX_BASELINE_LABELS + MAX_BASEDMEMES_LABELS);
+  });
+
+  it('leads with the memedepot tier, then appends the basedmemes tier', () => {
+    const out = buildAllBaselineLabels(CURATED_MEME_LABELS);
+    const firstTier = buildBaselineLabels(
+      CURATED_MEME_LABELS,
+      undefined, // defaults to the memedepot baseline file
+      MAX_BASELINE_LABELS
+    );
+    // The composed list starts with exactly the memedepot tier.
+    expect(out.slice(0, firstTier.length).map((d) => d.label)).toEqual(
+      firstTier.map((d) => d.label)
+    );
   });
 });

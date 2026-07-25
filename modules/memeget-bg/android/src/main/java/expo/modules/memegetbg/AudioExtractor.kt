@@ -14,7 +14,7 @@ import kotlin.math.min
 
 // Decodes the first audio track of a video/audio file to mono 16 kHz float32
 // PCM and writes it as a raw little-endian file in the app cache dir, ready for
-// the JS side to hand to on-device Whisper (which wants a 16 kHz mono
+// the JS side to hand to the on-device STT model (which wants a 16 kHz mono
 // waveform). Exists because nothing in the Expo/JS layer can decode AAC/Opus
 // audio — MediaExtractor + MediaCodec is the platform way.
 object AudioExtractor {
@@ -161,8 +161,8 @@ object AudioExtractor {
     return Pair(mono, sampleRate)
   }
 
-  // Linear-interpolation resample. Plenty for speech feeding Whisper (which
-  // mel-filters the signal anyway); avoids shipping a DSP library.
+  // Linear-interpolation resample. Plenty for feeding a speech model at 16 kHz;
+  // avoids shipping a DSP library.
   private fun resample(src: FloatArray, n: Int, srcRate: Int, dstRate: Int): FloatArray {
     if (n == 0) return FloatArray(0)
     if (srcRate == dstRate) return src.copyOf(n)

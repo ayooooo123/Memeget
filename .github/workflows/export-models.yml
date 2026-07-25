@@ -1,7 +1,8 @@
-name: Export embedding models
+name: Export models
 
 # Exports MobileCLIP-S2 (image+text) and DINOv2-base to ExecuTorch .pte and
-# publishes them as assets on the fixed "models-v1" release. The APK workflow
+# publishes them as assets on the fixed "models-v1"
+# release. The APK workflow
 # points the app's EXPO_PUBLIC_MEMEGET_* model sources at these assets; the app
 # downloads them once on first launch, same as every other model it uses.
 #
@@ -82,6 +83,7 @@ jobs:
       - name: Export DINOv2-base
         working-directory: tools/model-export
         run: python export_dinov2.py --out-dir ../../dist
+
 
       - name: Checksums
         working-directory: dist
