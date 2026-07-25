@@ -74,7 +74,7 @@ import {
 } from './saf';
 import { hashBase64 } from './contentHash';
 import { formatGrounding, type GroundingLabel, type VisionResult } from './visionCore';
-import { captionSearchText, memeExtraTerms } from './searchText';
+import { captionSearchText, classificationContextTerms, memeExtraTerms } from './searchText';
 import {
   dedupeFrames,
   flattenFrameTags,
@@ -524,7 +524,7 @@ function extraTermsFor(tags: Tag[], assoc: Map<string, string[]>): string {
     terms.add(t.label.toLowerCase());
     for (const a of assoc.get(t.label) ?? []) terms.add(a.toLowerCase());
   }
-  return [...terms].join(' ');
+  return [...terms, classificationContextTerms({ tags: [...terms] })].join(' ');
 }
 
 // Walk every linked folder and index any media not already in the DB.

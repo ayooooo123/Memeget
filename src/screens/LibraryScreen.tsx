@@ -12,16 +12,18 @@ import {
 import { MemeGrid } from '../components/MemeGrid';
 import { showToast } from '../components/Toast';
 import { Button, Chip, ProgressBar, StatusDot } from '../components/ui';
-import { useEmbeddings } from '../embeddings';
+import { type EmbeddingsApi, useEmbeddings } from '../embeddings';
 import {
   addFolder,
   countMemes,
   countMemesWithLabel,
   getFolders,
   getLabels,
+  getLabelVectors,
   getLibraryTagLabels,
   getMemesBefore,
   getRecentMemes,
+  putLabelVector,
   searchByVector,
 } from '../db';
 import { noteInteractive, runIndex, retagAll, type IndexProgress } from '../indexer';
@@ -30,9 +32,61 @@ import { appendPage, mergeRecords, patchThumbs } from '../libraryCore';
 import { success, tap, thud } from '../haptics';
 import { pickFolder } from '../saf';
 import { colors, radius, space, type } from '../theme';
+import {
+  buildExpandedLexicalQuery,
+  buildLabelExpansionCandidates,
+  rankSemanticLabels,
+  searchLabelPrompt,
+  searchTermsForText,
+} from '../searchExpansion';
 import type { LinkedFolder, MediaKind, MemeRecord, SearchHit } from '../types';
 
 const PAGE = 90;
+
+const SEARCH_LABEL_VECTOR_LIMIT = 120;
+const SEARCH_LABEL_SYNC_SEED_LIMIT = 8;
+
+
+let searchLabelSeed: Promise<void> | null = null;
+
+async function seedSearchLabelVectors(
+  api: Pick<EmbeddingsApi, 'embedText' | 'primaryModel'>,
+  labels: readonly string[],
+  cache: Map<string, Float32Array>,
+  maxNew: number
+): Promise<void> {
+  const seen = new Set<string>();
+  let added = 0;
+  for (const label of labels) {
+    const key = label.trim();
+    const low = key.toLowerCase();
+    if (!key || seen.has(low)) continue;
+    seen.add(low);
+    if (cache.has(key) || cache.has(low)) continue;
+    const vec = await api.embedText(searchLabelPrompt(key));
+    await putLabelVector(key, vec, api.primaryModel.id);
+    const arr = Float32Array.from(vec);
+    cache.set(key, arr);
+    cache.set(low, arr);
+    added += 1;
+    if (added >= maxNew || seen.size >= SEARCH_LABEL_VECTOR_LIMIT) break;
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  }
+}
+
+async function seedMissingSearchLabelVectors(
+  api: Pick<EmbeddingsApi, 'embedText' | 'primaryModel'>,
+  labels: readonly string[],
+  cache: Map<string, Float32Array>
+): Promise<void> {
+  if (searchLabelSeed) return searchLabelSeed;
+  searchLabelSeed = seedSearchLabelVectors(api, labels, cache, SEARCH_LABEL_VECTOR_LIMIT).finally(
+    () => {
+      searchLabelSeed = null;
+    }
+  );
+  return searchLabelSeed;
+}
 
 export function LibraryScreen() {
   const emb = useEmbeddings();
@@ -49,6 +103,10 @@ export function LibraryScreen() {
   const [count, setCount] = useState(0);
   const [taughtLabels, setTaughtLabels] = useState<string[]>([]);
   const [libraryTags, setLibraryTags] = useState<string[]>([]);
+  const taughtLabelsRef = useRef<string[]>([]);
+  taughtLabelsRef.current = taughtLabels;
+  const libraryTagsRef = useRef<string[]>([]);
+  libraryTagsRef.current = libraryTags;
   const [indexing, setIndexing] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [progress, setProgress] = useState<IndexProgress | null>(null);
@@ -275,7 +333,26 @@ export function LibraryScreen() {
         }
         const vec = await vecPromise;
         if (stale()) return;
-        const hits = await searchByVector(vec, q, Infinity, kindArg(), stale);
+        const exactTerms = searchTermsForText(q);
+        let expanded = buildExpandedLexicalQuery(exactTerms, []);
+        try {
+          const labels = [...taughtLabelsRef.current, ...libraryTagsRef.current].slice(
+            0,
+            SEARCH_LABEL_VECTOR_LIMIT
+          );
+          const vectors = await getLabelVectors(emb.primaryModel.id);
+          await seedSearchLabelVectors(emb, labels, vectors, SEARCH_LABEL_SYNC_SEED_LIMIT);
+          void seedMissingSearchLabelVectors(emb, labels, vectors).catch(() => {});
+          if (stale()) return;
+          const semanticHits = rankSemanticLabels(
+            vec,
+            buildLabelExpansionCandidates(vectors, libraryTagsRef.current, taughtLabelsRef.current)
+          );
+          expanded = buildExpandedLexicalQuery(exactTerms, semanticHits);
+        } catch {
+          // Semantic expansion is a relevance upgrade, not a search dependency.
+        }
+        const hits = await searchByVector(vec, q, Infinity, kindArg(), stale, expanded);
         // Embedding + brute-force search are async and on-device, so they can
         // resolve long after the box was cleared or retyped. If the current
         // query no longer matches what we searched for, drop these results —
@@ -427,6 +504,10 @@ export function LibraryScreen() {
     ];
   }, [taughtLabels, libraryTags]);
 
+  const relaxedSearchScope =
+    isSearch && kind !== 'all' && results.some((result) => result.kind !== kind);
+
+
   // Scrolling part of the page (lives inside the grid as its header). Memoized
   // so an unrelated re-render (notably the CLIP model's load-progress ticks on a
   // post-update launch) doesn't hand the FlatList a brand-new header element to
@@ -445,7 +526,9 @@ export function LibraryScreen() {
           ) : (
             <Text style={styles.resultText}>
               <Text style={styles.resultCount}>{results.length}</Text>
-              {` meme${results.length === 1 ? '' : 's'} · best matches for “${query.trim()}” first`}
+              {` meme${results.length === 1 ? '' : 's'} · best matches${
+                relaxedSearchScope ? ' across all media' : ''
+              } for “${query.trim()}” first`}
             </Text>
           )}
         </View>
@@ -494,7 +577,7 @@ export function LibraryScreen() {
       )}
     </View>
     ),
-    [isSearch, searching, results, query, indexing, progress, hasLibrary, count, folders, emb.ready, onLink, onIndex]
+    [isSearch, searching, results, query, indexing, progress, hasLibrary, count, folders, emb.ready, onLink, onIndex, kind, relaxedSearchScope]
   );
 
   const onTaught = useCallback(
