@@ -23,12 +23,12 @@ Memeget already has the foundations needed for this feature:
 
 - `modules/memeget-bg` extracts video audio as normalized 16 kHz mono float32 PCM.
 - `src/audio.tsx` runs an opt-in, manual audio-analysis queue.
-- `src/audioCore.ts` drives Moonshine transcription and returns a flat transcript.
+- `src/audioCore.ts` defines the active STT model contract and transcript cleanup; `src/audio.tsx` drives Whisper through `react-native-executorch` and returns a flat transcript.
 - `src/db.ts` stores `transcript` and `audio_state` on each meme.
 - `src/components/MemeGrid.tsx` shows the transcript in the video viewer and hosts visual teach-by-example flows.
 - `src/searchText.ts` and `src/searchCore.ts` fold transcript and tags into hybrid search.
 
-The existing Moonshine runner does not emit timestamps or speaker attribution. Structured turns therefore require a separate diarization stage and per-turn transcription for turns long enough to transcribe reliably. The existing whole-video transcript remains the stable searchable and copyable fallback.
+The existing `useSpeechToText` API returns plain text without exposing segment timestamps or speaker attribution. Structured turns therefore require a separate diarization stage and per-turn transcription for turns long enough to transcribe reliably. The existing whole-video transcript remains the stable searchable and copyable fallback.
 
 ## Goals
 
@@ -63,7 +63,7 @@ Use a modular on-device pipeline rather than a single end-to-end diarization mod
 5. Cluster embeddings within the video.
 6. Merge adjacent windows assigned to the same speaker into turns.
 7. Order speakers by the start time of their first valid turn.
-8. Transcribe each sufficiently long turn with the existing Moonshine runner.
+8. Transcribe each sufficiently long turn with the existing Whisper STT runner.
 9. Aggregate each detected speaker's valid embeddings.
 10. Compare the aggregate with confirmed global voice profiles.
 
@@ -257,7 +257,7 @@ A rejection vetoes that exact observation/profile suggestion. It is not a global
 3. VAD returns speech regions. No valid regions is a successful `done` result with no speakers.
 4. Valid regions are windowed for the speaker encoder. Windows that are too short, overlap, or fail quality checks remain representable but are not learning eligible.
 5. `DiarizationCore` clusters clean embeddings, merges adjacent same-speaker windows, computes aggregate embeddings, and assigns ordinals.
-6. If Moonshine is enabled and ready, it transcribes each sufficiently long merged turn independently. A short turn or unavailable transcription model keeps `transcript = ''` and `transcript_state = not_requested`. A failed turn call keeps the diarization result, stores `transcript_state = failed` for that turn, and continues with later turns. The existing whole-video transcription continues to populate `memes.transcript`; its success or failure does not determine `voice_state`. A later transcription pass may fill `speech_turns` whose state is `not_requested` or `failed` without rerunning diarization.
+6. If Whisper STT is enabled and ready, it transcribes each sufficiently long merged turn independently. A short turn or unavailable transcription model keeps `transcript = ''` and `transcript_state = not_requested`. A failed turn call keeps the diarization result, stores `transcript_state = failed` for that turn, and continues with later turns. The existing whole-video transcription continues to populate `memes.transcript`; its success or failure does not determine `voice_state`. A later transcription pass may fill `speech_turns` whose state is `not_requested` or `failed` without rerunning diarization.
 7. The service prepares new speaker aggregates without profile assignments.
 8. One transaction removes the old video's dependent samples and rejections, rebuilds affected centroids, loads the resulting post-removal compatible profile set, runs `VoiceProfileMatcher` against that set, and commits every durable replacement: new `video_speakers` and `speech_turns`, suggested associations, rebuilt centroids, `memes.voice_model`, `memes.voice_state = done`, `voice_last_error = ''`, and any denormalized search fields introduced by implementation.
    - Before deleting old speakers, remove their `voice_samples` and `voice_rejections` and record every affected profile.
@@ -268,7 +268,7 @@ A rejection vetoes that exact observation/profile suggestion. It is not a global
 9. After the transaction commits, the service invalidates the derived in-memory search cache and emits the existing library-change event. Confirmed and suggested voice search text is rebuilt from the committed normalized associations; cache invalidation and event emission are not part of the durable transaction.
 10. Temporary PCM files are removed through the existing cleanup path.
 
-Extraction, VAD, speaker-embedding, clustering, or persistence failure sets `voice_state = failed` and `voice_last_error` for a first analysis. A failed reanalysis leaves `voice_state = done` and every prior successful speaker, turn, sample, rejection, and centroid unchanged, but stores `voice_last_error` in a separate transaction so the viewer can show `Refresh failed` and the retry action can include it. `Retry failed voice analyses` selects both `voice_state = failed` rows and `done` rows with a non-empty `voice_last_error`. Moonshine being disabled, unavailable, or failing for one or more turns does not fail voice analysis; the per-turn `transcript_state` records that optional enrichment outcome.
+Extraction, VAD, speaker-embedding, clustering, or persistence failure sets `voice_state = failed` and `voice_last_error` for a first analysis. A failed reanalysis leaves `voice_state = done` and every prior successful speaker, turn, sample, rejection, and centroid unchanged, but stores `voice_last_error` in a separate transaction so the viewer can show `Refresh failed` and the retry action can include it. `Retry failed voice analyses` selects both `voice_state = failed` rows and `done` rows with a non-empty `voice_last_error`. Whisper STT being disabled, unavailable, or failing for one or more turns does not fail voice analysis; the per-turn `transcript_state` records that optional enrichment outcome.
 
 ## Viewer UX
 
@@ -337,7 +337,7 @@ A `Fix speakers` action supports the minimum corrections needed to protect train
 
 A correction transaction rebuilds affected aggregate embeddings, durations, ordinals, profile samples, and centroids. It clears suggestions that depended on the changed aggregates and reruns matching for affected unconfirmed speakers.
 
-Splitting a turn runs through `AudioAnalysisCoordinator.runExclusive`, re-materializes the video, extracts the waveform, and generates fresh embeddings for both time ranges. Neither half is committed if extraction or embedding fails. Eligibility and transcription-duration gates are evaluated independently for each half. A half below either gate remains visible, is ineligible for learning, and stores `transcript = ''` with `transcript_state = not_requested`. For a sufficiently long half, Moonshine transcribes it independently when ready; when unavailable the half stores `not_requested`, and an individual call failure stores an empty transcript with `failed` without aborting the split. The old attributed transcript is never copied or divided because Moonshine supplies no word timestamps. The existing whole-video `memes.transcript` is unchanged.
+Splitting a turn runs through `AudioAnalysisCoordinator.runExclusive`, re-materializes the video, extracts the waveform, and generates fresh embeddings for both time ranges. Neither half is committed if extraction or embedding fails. Eligibility and transcription-duration gates are evaluated independently for each half. A half below either gate remains visible, is ineligible for learning, and stores `transcript = ''` with `transcript_state = not_requested`. For a sufficiently long half, Whisper transcribes it independently when ready; when unavailable the half stores `not_requested`, and an individual call failure stores an empty transcript with `failed` without aborting the split. The old attributed transcript is never copied or divided because the current STT API supplies no segment timestamps. The existing whole-video `memes.transcript` is unchanged.
 
 Merging speakers is an explicit identity decision. If neither speaker is confirmed, suggestions are cleared and the merged aggregate is matched again. If one speaker is confirmed, the merge sheet asks the user to keep that profile or clear identity. If both are confirmed to the same profile, the merged observation remains confirmed. If they are confirmed to different profiles, the merge is blocked until the user chooses one profile or clears both. The transaction removes both old samples, creates at most one eligible sample for the explicitly chosen resulting profile, and rebuilds every affected centroid; it never silently chooses an identity.
 
@@ -454,7 +454,7 @@ Voice and transcription may share one combined per-video pass after the pipeline
 1. Benchmark and select VAD/speaker-embedding models on the target Android device; establish model stamp, input contract, size, latency, and thresholds.
 2. Add pure diarization, matching, and centroid modules with synthetic contract tests.
 3. Add normalized storage, migrations, atomic replacement, and deletion lifecycle.
-4. Integrate the on-device analysis service with the existing PCM and Moonshine paths, replacing the private transcription mutex with the shared `AudioAnalysisCoordinator`.
+4. Integrate the on-device analysis service with the existing PCM and Whisper paths, replacing the private transcription mutex with the shared `AudioAnalysisCoordinator`.
 5. Add viewer summaries, timeline, attributed turns, and seek/play behavior.
 6. Add identify, confirm, reject, and correction workflows.
 7. Add tag scope and known-voices management.
