@@ -29,6 +29,7 @@ import {
   getLabels,
   getLibraryTagLabels,
   getMemeEmbedding,
+  getMemeTranscript,
   getSimilarMemes,
   propagateTagToSimilarMemes,
   requeueMemeThumb,
@@ -47,6 +48,7 @@ import { colors, radius, shadow, space, TABBAR_CLEARANCE } from '../theme';
 import { useConst } from '../reactUtils';
 import type { MemeRecord, SearchHit, Tag } from '../types';
 
+import { useAudio } from '../audio';
 import { showToast } from './Toast';
 import { Chip, PressableScale } from './ui';
 
@@ -71,6 +73,24 @@ type Item = MemeRecord | SearchHit;
 // uri. Falls back to the original uri for everything without a poster.
 function thumbSource(item: Pick<Item, 'kind' | 'uri' | 'thumbUri'>): string {
   return item.thumbUri || item.uri;
+}
+
+// Autocomplete for a tag/label text input: given the known labels and what's
+// been typed, surface prefix matches first, then other substring matches. An
+// empty query keeps the caller's ordering (e.g. most-common-first). Case is
+// ignored — tags are stored lower-case, but suggestions may come from mixed
+// sources, so match loosely.
+function filterTagSuggestions(labels: string[], query: string, limit = 12): string[] {
+  const q = query.trim().toLowerCase();
+  if (!q) return labels;
+  const prefix: string[] = [];
+  const substr: string[] = [];
+  for (const l of labels) {
+    const low = l.toLowerCase();
+    if (low.startsWith(q)) prefix.push(l);
+    else if (low.includes(q)) substr.push(l);
+  }
+  return [...prefix, ...substr].slice(0, limit);
 }
 
 // Ordered source candidates for a grid cell. Real GIFs skip their persisted
@@ -277,6 +297,7 @@ export const MemeGrid = React.memo(function MemeGrid({
     picked: number[]; // meme ids the user has tapped
   } | null>(null);
   const [confirmSaving, setConfirmSaving] = useState(false);
+  const audio = useAudio();
   const [busy, setBusy] = useState(false);
   const [matchInfo, setMatchInfo] = useState<
     { label: string; score: number; matched: boolean }[] | null
@@ -476,11 +497,11 @@ export const MemeGrid = React.memo(function MemeGrid({
           const already = it.tags.some((t) => t.label.toLowerCase() === lower);
           const tags: Tag[] = already
             ? it.tags
-            : [...it.tags, { label, category: 'user', score: 1, source: 'manual' as const }];
+            : [...it.tags, { label: lower, category: 'user', score: 1, source: 'manual' as const }];
           return {
             id: it.id,
             tags,
-            extraTerms: already ? it.extraTerms : termsWithLabel(it.extraTerms, label),
+            extraTerms: already ? it.extraTerms : termsWithLabel(it.extraTerms, lower),
           };
         });
       await bulkUpdateMemeTags(updates);
@@ -491,7 +512,7 @@ export const MemeGrid = React.memo(function MemeGrid({
       if (bulkSpread) {
         spread = await propagateTagToSimilarMemes(
           updates.map((u) => u.id),
-          label
+          lower
         )
           .then((r) => r.propagated)
           .catch(() => 0);
@@ -500,7 +521,7 @@ export const MemeGrid = React.memo(function MemeGrid({
       setBulkTagging(false);
       exitSelection();
       success();
-      const tagged = `Tagged ${updates.length} meme${updates.length === 1 ? '' : 's'} “${label}”`;
+      const tagged = `Tagged ${updates.length} meme${updates.length === 1 ? '' : 's'} “${lower}”`;
       showToast(
         spread > 0 ? `${tagged} · spread to ${spread} look-alike${spread === 1 ? '' : 's'}` : tagged,
         'success'
@@ -715,6 +736,56 @@ export const MemeGrid = React.memo(function MemeGrid({
     }
   };
 
+  // Retranscribe just this video's speech (the "re-run transcription" action).
+  // Unlike caption/poster — background loops that pick up a re-queued row — the
+  // audio pass is manual, so this runs the single clip inline via the AudioApi
+  // and reports the outcome. Awaited so the transcript refreshes in place.
+  const onRegenerateTranscript = async () => {
+    if (!selected || busy) return;
+    setBusy(true);
+    const id = selected.id;
+    try {
+      const r = await audio.regenerateMeme(id);
+      switch (r) {
+        case 'done':
+        case 'silent': {
+          // regenerateMeme already emitted a library change; the open detail view
+          // reads from `selected` (a copy), so refresh its transcript in place.
+          const transcript = await getMemeTranscript(id);
+          setSelected((prev) => (prev && prev.id === id ? { ...prev, transcript } : prev));
+          success();
+          showToast(
+            r === 'done' ? 'Transcription updated' : 'Re-listened — no speech found in this video',
+            r === 'done' ? 'success' : 'info'
+          );
+          break;
+        }
+        case 'busy':
+          showToast('Already transcribing — try again in a moment', 'info');
+          break;
+        case 'not-ready':
+          showToast('Enable audio analysis and let the speech model load first', 'info');
+          break;
+        case 'missing':
+          showToast('Nothing to transcribe for this item', 'info');
+          break;
+        case 'failed':
+        default: {
+          // requeueMemeAudio cleared the stored transcript before the pass ran, so
+          // the row is now empty even though STT errored — refresh so the viewer
+          // doesn't keep showing the stale text.
+          const transcript = await getMemeTranscript(id);
+          setSelected((prev) => (prev && prev.id === id ? { ...prev, transcript } : prev));
+          showToast('Could not transcribe this video', 'error');
+        }
+      }
+    } catch (e) {
+      showToast(`Could not transcribe: ${String(e)}`, 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
   // Backdrop / back button on the teach modal. During the confirm step this is
   // a "skip": the first exemplar is already saved, so the deferred apply must
   // still run — only the extra picks are dropped.
@@ -729,9 +800,14 @@ export const MemeGrid = React.memo(function MemeGrid({
   // Label ideas for the teach sheet: the open meme's own tags first (you're
   // usually naming something the indexer already half-recognized — one tap
   // promotes the guess to ground truth), then every previously taught label.
-  const suggestions = selected
-    ? [...new Set([...selected.tags.map((t) => t.label), ...labels])]
-    : labels;
+  // As you type, narrow to matches so the row acts as an autocomplete.
+  const suggestions = filterTagSuggestions(
+    selected ? [...new Set([...selected.tags.map((t) => t.label), ...labels])] : labels,
+    labelInput
+  );
+
+  // Autocomplete for the bulk-tag input, drawn from the library's own tags.
+  const bulkSuggestions = filterTagSuggestions(bulkLabels, bulkLabelInput);
 
   const openTeach = (asPositive: boolean, preset?: string) => {
     tap();
@@ -1018,6 +1094,7 @@ export const MemeGrid = React.memo(function MemeGrid({
         onDelete={onDelete}
         onRecaption={onRecaption}
         onRethumb={onRethumb}
+        onRegenerateTranscript={onRegenerateTranscript}
         onTeach={openTeach}
         onConfirmTag={confirmTag}
         onShowConfidence={computeMatchInfo}
@@ -1200,14 +1277,14 @@ export const MemeGrid = React.memo(function MemeGrid({
               placeholderTextColor={colors.muted}
               autoFocus
             />
-            {bulkLabels.length > 0 && (
+            {bulkSuggestions.length > 0 && (
               <ScrollView
                 horizontal
                 showsHorizontalScrollIndicator={false}
                 contentContainerStyle={styles.suggestRow}
                 keyboardShouldPersistTaps="handled"
               >
-                {bulkLabels.map((l) => (
+                {bulkSuggestions.map((l) => (
                   <Chip key={l} label={l} active={bulkLabelInput.trim() === l} onPress={() => setBulkLabelInput(l)} />
                 ))}
               </ScrollView>
@@ -1270,6 +1347,7 @@ function ViewerSheet({
   onDelete,
   onRecaption,
   onRethumb,
+  onRegenerateTranscript,
   onTeach,
   onConfirmTag,
   onShowConfidence,
@@ -1288,6 +1366,8 @@ function ViewerSheet({
   // Re-run the vision model / regenerate the poster for just this meme.
   onRecaption: () => void;
   onRethumb: () => void;
+  // Retranscribe just this video's speech (videos only).
+  onRegenerateTranscript: () => void;
   onTeach: (positive: boolean, preset?: string) => void;
   // One-tap "this tag is right" — saves a positive exemplar for the open meme.
   onConfirmTag: (label: string) => void;
@@ -1572,6 +1652,15 @@ function ViewerSheet({
                     label="Regenerate the thumbnail"
                     hint="Extract a new poster frame for the grid"
                     onPress={closeMoreThen(onRethumb)}
+                    disabled={busy}
+                  />
+                )}
+                {item.kind === 'video' && (
+                  <MoreRow
+                    glyph="🎙"
+                    label="Re-run the transcription"
+                    hint="Transcribe this video's speech again on-device"
+                    onPress={closeMoreThen(onRegenerateTranscript)}
                     disabled={busy}
                   />
                 )}

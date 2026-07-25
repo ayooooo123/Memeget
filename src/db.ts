@@ -1,5 +1,7 @@
 import * as SQLite from 'expo-sqlite';
 
+import { AUDIO_MODEL_INFO } from './audioCore';
+
 import { modelStamp, PRIMARY_EMBEDDING_MODEL, VISUAL_EMBEDDING_MODEL } from './embeddingModels';
 import { scoreEntry } from './searchCore';
 import { assembleSearchText } from './searchText';
@@ -223,6 +225,43 @@ export async function initDb(): Promise<void> {
       `INSERT OR REPLACE INTO settings (key, value) VALUES ('audio_requeue_v1', '1')`
     );
   }
+  // One-time re-queue (audio v2): ~1/3 of the library came back with an empty
+  // transcript ('done' + transcript = '') and some clips that plainly contain
+  // speech ("the female cop clip") were among them. We can't yet tell from here
+  // whether those empties are genuine silence, over-aggressive transcript
+  // cleanup, or the decoder emitting EOS immediately — so re-queue exactly the
+  // suspect set (empty 'done' videos + 'failed' ones) for a pass that now logs
+  // audio level + raw-vs-cleaned text per clip (see transcribeOne). Videos that
+  // really are silent just come back empty again cheaply; the logs classify the
+  // rest. Untouched: 'done' videos that already carry a transcript.
+  const audioRequeue2 = await db.getFirstAsync<{ value: string }>(
+    `SELECT value FROM settings WHERE key = 'audio_requeue_v2'`
+  );
+  if (!audioRequeue2) {
+    await db.execAsync(
+      `UPDATE memes SET audio_state = 'pending', transcript = '' WHERE kind = 'video' AND (audio_state = 'failed' OR (audio_state = 'done' AND transcript = ''));`
+    );
+    await db.runAsync(
+      `INSERT OR REPLACE INTO settings (key, value) VALUES ('audio_requeue_v2', '1')`
+    );
+  }
+  // Model cutover: Moonshine's unsupported generic-module decoder returned empty
+  // text for nearly the whole real library. Requeue every indexed video once for
+  // the supported native Whisper runner, including rows Moonshine marked done.
+  const whisperRequeue = await db.getFirstAsync<{ value: string }>(
+    'SELECT value FROM settings WHERE key = ?',
+    AUDIO_MODEL_INFO.requeueKey
+  );
+  if (!whisperRequeue) {
+    await db.execAsync(
+      `UPDATE memes SET audio_state = 'pending', transcript = '' WHERE kind = 'video' AND pending = 0;`
+    );
+    invalidateSearchIndex();
+    await db.runAsync(
+      `INSERT OR REPLACE INTO settings (key, value) VALUES (?, '1')`,
+      AUDIO_MODEL_INFO.requeueKey
+    );
+  }
   // Migrate exemplar tables that predate negative ("not this") teaching.
   const exCols = await db.getAllAsync<{ name: string }>('PRAGMA table_info(exemplars)');
   if (!exCols.some((c) => c.name === 'is_positive')) {
@@ -424,7 +463,7 @@ export async function insertMeme(args: {
     // retries a file the pipeline already couldn't read.
     args.degraded ? visualFailureStamp(VISUAL_EMBEDDING_MODEL.id) : args.visualEmbedding ? (args.visualModel ?? '') : '',
     args.ocrText,
-    JSON.stringify(args.tags),
+    JSON.stringify(normalizeTags(args.tags)),
     args.extraTerms,
     now,
     args.modifiedAt ?? now,
@@ -588,7 +627,7 @@ export async function updateMemeTags(id: number, tags: Tag[], extraTerms: string
   const db = await getDb();
   await db.runAsync(
     'UPDATE memes SET tags = ?, extra_terms = ? WHERE id = ?',
-    JSON.stringify(tags),
+    JSON.stringify(normalizeTags(tags)),
     extraTerms,
     id
   );
@@ -608,7 +647,7 @@ export async function bulkUpdateMemeTags(
   try {
     await db.withTransactionAsync(async () => {
       for (const u of updates) {
-        await stmt.executeAsync(JSON.stringify(u.tags), u.extraTerms, u.id);
+        await stmt.executeAsync(JSON.stringify(normalizeTags(u.tags)), u.extraTerms, u.id);
       }
     });
   } finally {
@@ -701,7 +740,7 @@ export async function setMemeVision(
     "UPDATE memes SET caption = ?, caption_embedding = ?, tags = ?, extra_terms = ?, vision_state = 'done' WHERE id = ?",
     args.caption,
     args.captionEmbedding ? vecToBlob(args.captionEmbedding) : null,
-    JSON.stringify(args.tags),
+    JSON.stringify(normalizeTags(args.tags)),
     args.extraTerms,
     id
   );
@@ -963,6 +1002,42 @@ export async function getMemesNeedingAudio(limit = 10000): Promise<MemeNeedingAu
   );
 }
 
+// One video's transcriber inputs by id — for the per-meme "regenerate
+// transcription" action, which retranscribes a single clip rather than draining
+// the whole pending queue. Null when the id isn't a (non-pending) video.
+export async function getMemeForAudio(id: number): Promise<MemeNeedingAudioRow | null> {
+  const db = await getDb();
+  const row = await db.getFirstAsync<MemeNeedingAudioRow>(
+    "SELECT id, uri, name FROM memes WHERE id = ? AND kind = 'video' AND pending = 0",
+    id
+  );
+  return row ?? null;
+}
+
+// The current stored transcript for one meme — lets the viewer refresh its open
+// snapshot in place after a per-meme retranscription (the row in `selected` is a
+// copy, not re-fetched automatically). '' for a silent clip or a missing row.
+export async function getMemeTranscript(id: number): Promise<string> {
+  const db = await getDb();
+  const row = await db.getFirstAsync<{ transcript: string }>(
+    'SELECT transcript FROM memes WHERE id = ?',
+    id
+  );
+  return row?.transcript ?? '';
+}
+
+// Re-queue ONE video for transcription: drop its stale transcript (so the old
+// terms leave search immediately) and flip it back to 'pending'. The caller
+// (AudioApi.regenerateMeme) runs the single-clip pass right after.
+export async function requeueMemeAudio(id: number): Promise<void> {
+  const db = await getDb();
+  await db.runAsync(
+    "UPDATE memes SET audio_state = 'pending', transcript = '' WHERE id = ? AND kind = 'video'",
+    id
+  );
+  invalidateSearchIndex(); // the cleared transcript is part of the lexical haystack
+}
+
 // Persist a finished analysis. transcript = '' is a valid result — the video
 // was listened to and had no audio track / no recognizable speech — and still
 // flips audio_state to 'done' so it isn't re-analyzed.
@@ -1019,6 +1094,19 @@ export async function resetAudioFailures(): Promise<number> {
   return res.changes ?? 0;
 }
 
+// Re-queue EVERY indexed video for a fresh transcription pass and drop their
+// stale transcripts — for the settings "Regenerate all transcriptions" action
+// (e.g. after a model change). Covers already-pending rows too so no video keeps
+// stale transcript text. Returns the number re-queued.
+export async function resetAllAudio(): Promise<number> {
+  const db = await getDb();
+  const res = await db.runAsync(
+    "UPDATE memes SET audio_state = 'pending', transcript = '' WHERE kind = 'video' AND pending = 0"
+  );
+  invalidateSearchIndex(); // cleared transcripts are part of the lexical haystack
+  return res.changes ?? 0;
+}
+
 // ---- settings (small key/value store) ----------------------------------------
 
 export async function getSetting(key: string): Promise<string | null> {
@@ -1039,9 +1127,26 @@ export async function setSetting(key: string, value: string): Promise<void> {
   );
 }
 
+// Every tag label is stored lower-case so search, dedupe, and the tag UI treat
+// "Pepe" and "pepe" as one tag. Normalizing at the write/read boundary means no
+// pipeline (curated labels, vision, OCR, or manual entry) can persist mixed
+// case, and legacy rows written before this render lower-case too. Dedupes by
+// the normalized label, keeping the first (already highest-ranked upstream).
+export function normalizeTags(tags: Tag[]): Tag[] {
+  const seen = new Set<string>();
+  const out: Tag[] = [];
+  for (const t of tags) {
+    const label = t.label.trim().toLowerCase();
+    if (!label || seen.has(label)) continue;
+    seen.add(label);
+    out.push(t.label === label ? t : { ...t, label });
+  }
+  return out;
+}
+
 function safeParseTags(s: string): Tag[] {
   try {
-    return JSON.parse(s) as Tag[];
+    return normalizeTags(JSON.parse(s) as Tag[]);
   } catch {
     return [];
   }
@@ -1079,6 +1184,7 @@ export async function getLibraryTagLabels(limit = 40): Promise<string[]> {
           // keep the raw capture
         }
       }
+      label = label.toLowerCase();
       counts.set(label, (counts.get(label) ?? 0) + 1);
     }
   }
