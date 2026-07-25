@@ -152,12 +152,14 @@ runExclusive<T>(
 
 `AudioWorkSignal` exposes cooperative cancellation and the existing opportunity to yield to interactive search. `runExclusive` is the only owner of the busy state and keep-alive lease; it acquires both before model or decoder work and releases both in `finally`. A per-video request returns `busy` when another audio job owns the coordinator. A bulk request holds the same lease across its queue but checks cancellation and yields between videos. The existing transcription entry points migrate to this coordinator rather than keeping a private `busyRef`, so voice analysis cannot create a second independent lock.
 
+The coordinator is not reentrant. `VoiceAnalysisService.analyzeOne(id)` acquires a lease and delegates to an internal `analyzeOneWithLease(id, signal)`. `analyzePending()` acquires one bulk lease and calls only `analyzeOneWithLease` for each video; it never calls the public lease-acquiring method from inside the lease. The transcription service follows the same public-wrapper/internal-worker pattern. Only the coordinator creates `AudioWorkSignal`.
+
 ### `VoiceAnalysisService`
 
 **Input:** a video meme identifier.  
 **Output:** a complete voice-analysis result persisted atomically.
 
-It coordinates materialization, PCM extraction, VAD, speaker embeddings, diarization, optional per-turn transcription, profile matching, persistence, and search-index invalidation. It performs all decoder and model work inside `AudioAnalysisCoordinator.runExclusive`; it does not own an independent mutex or keep-alive lease.
+It coordinates materialization, PCM extraction, VAD, speaker embeddings, diarization, optional per-turn transcription, profile matching, persistence, and search-index invalidation. Its public single-video entry point acquires `AudioAnalysisCoordinator.runExclusive`; its internal lease-aware worker requires the coordinator-created `AudioWorkSignal` and cannot be called without one. It does not own an independent mutex or keep-alive lease.
 
 ### `VoiceTeachingService`
 
@@ -256,12 +258,12 @@ A rejection vetoes that exact observation/profile suggestion. It is not a global
 4. Valid regions are windowed for the speaker encoder. Windows that are too short, overlap, or fail quality checks remain representable but are not learning eligible.
 5. `DiarizationCore` clusters clean embeddings, merges adjacent same-speaker windows, computes aggregate embeddings, and assigns ordinals.
 6. If Moonshine is enabled and ready, it transcribes each sufficiently long merged turn independently. A short turn or unavailable transcription model keeps `transcript = ''` and `transcript_state = not_requested`. A failed turn call keeps the diarization result, stores `transcript_state = failed` for that turn, and continues with later turns. The existing whole-video transcription continues to populate `memes.transcript`; its success or failure does not determine `voice_state`. A later transcription pass may fill `speech_turns` whose state is `not_requested` or `failed` without rerunning diarization.
-7. `VoiceProfileMatcher` evaluates each aggregate against compatible confirmed profiles.
-8. The service prepares a complete replacement, then commits all durable changes in one transaction: new `video_speakers` and `speech_turns`, dependent samples and rejections, rebuilt centroids, `memes.voice_model`, `memes.voice_state = done`, `voice_last_error = ''`, and any denormalized search fields introduced by implementation.
+7. The service prepares new speaker aggregates without profile assignments.
+8. One transaction removes the old video's dependent samples and rejections, rebuilds affected centroids, loads the resulting post-removal compatible profile set, runs `VoiceProfileMatcher` against that set, and commits every durable replacement: new `video_speakers` and `speech_turns`, suggested associations, rebuilt centroids, `memes.voice_model`, `memes.voice_state = done`, `voice_last_error = ''`, and any denormalized search fields introduced by implementation.
    - Before deleting old speakers, remove their `voice_samples` and `voice_rejections` and record every affected profile.
    - Rebuild affected profile centroids from their remaining confirmed samples.
    - Do not transfer an old confirmed identity or rejection to a newly clustered speaker automatically. The user's old confirmation named the old observation; carrying it onto changed audio would create training data the user did not confirm.
-   - Match the new speakers only against profiles that still have compatible confirmed samples. Profiles with no remaining samples keep their names and aliases but cannot produce suggestions until the user confirms a new sample.
+   - Match new speakers only against the post-removal centroids computed in this transaction. A profile whose only sample came from the replaced video has no active centroid and cannot suggest itself back onto the new observation.
    - The reanalysis confirmation warns that identities taught from this video may need reconfirmation.
 9. After the transaction commits, the service invalidates the derived in-memory search cache and emits the existing library-change event. Confirmed and suggested voice search text is rebuilt from the committed normalized associations; cache invalidation and event emission are not part of the durable transaction.
 10. Temporary PCM files are removed through the existing cleanup path.
@@ -335,7 +337,7 @@ A `Fix speakers` action supports the minimum corrections needed to protect train
 
 A correction transaction rebuilds affected aggregate embeddings, durations, ordinals, profile samples, and centroids. It clears suggestions that depended on the changed aggregates and reruns matching for affected unconfirmed speakers.
 
-Splitting a turn runs through `AudioAnalysisCoordinator.runExclusive`, re-materializes the video, extracts the waveform, and generates fresh embeddings for both time ranges. Neither half is committed if extraction or embedding fails. A half that is too short remains visible but is marked ineligible for learning. The old attributed transcript is never copied or divided because Moonshine supplies no word timestamps. If Moonshine is ready, each half is transcribed independently before commit; otherwise each receives `transcript = ''` and `transcript_state = not_requested`. An individual half's transcription failure stores an empty transcript with `transcript_state = failed` without aborting the split. The existing whole-video `memes.transcript` is unchanged.
+Splitting a turn runs through `AudioAnalysisCoordinator.runExclusive`, re-materializes the video, extracts the waveform, and generates fresh embeddings for both time ranges. Neither half is committed if extraction or embedding fails. Eligibility and transcription-duration gates are evaluated independently for each half. A half below either gate remains visible, is ineligible for learning, and stores `transcript = ''` with `transcript_state = not_requested`. For a sufficiently long half, Moonshine transcribes it independently when ready; when unavailable the half stores `not_requested`, and an individual call failure stores an empty transcript with `failed` without aborting the split. The old attributed transcript is never copied or divided because Moonshine supplies no word timestamps. The existing whole-video `memes.transcript` is unchanged.
 
 Merging speakers is an explicit identity decision. If neither speaker is confirmed, suggestions are cleared and the merged aggregate is matched again. If one speaker is confirmed, the merge sheet asks the user to keep that profile or clear identity. If both are confirmed to the same profile, the merged observation remains confirmed. If they are confirmed to different profiles, the merge is blocked until the user chooses one profile or clears both. The transaction removes both old samples, creates at most one eligible sample for the explicitly chosen resulting profile, and rebuilds every affected centroid; it never silently chooses an identity.
 
@@ -434,6 +436,9 @@ Voice and transcription may share one combined per-video pass after the pipeline
 9. Incompatible model spaces never compare.
 10. The existing concatenated transcript remains searchable.
 11. Splitting a turn never copies the old attributed text; each half records `done`, `not_requested`, or `failed` from its own transcription outcome.
+12. Reanalysis cannot suggest a profile whose only confirmed sample was removed with the replaced observation.
+13. A bulk queue acquires one coordinator lease and processes multiple videos through the lease-aware worker without a nested acquisition.
+14. A split that creates one sub-threshold half leaves that half untranscribed and learning-ineligible while independently processing the eligible half.
 
 ### End-to-end device scenarios
 
