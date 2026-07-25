@@ -21,6 +21,7 @@
 // against the search-quality eval harness (see docs/memedepot-corpus.md).
 
 import baseline from './data/memedepotBaseline.json';
+import basedmemesBaseline from './data/basedmemesBaseline.json';
 import type { LabelDef } from './memeLabels';
 
 // One harvested tag as it appears in the generated JSON. `prompt` is a
@@ -60,12 +61,25 @@ const VALID_CATEGORIES: readonly LabelDef['category'][] = [
 // the eval harness before raising.
 export const MAX_BASELINE_LABELS = 150;
 
+// Cap on the SECOND (basedmemes.lol + KYM) breadth tier. Separate from the
+// memedepot cap so each source can be tuned independently against the eval
+// harness. Kept modest for the same reason: every label is another embedding
+// and another false-positive chance.
+export const MAX_BASEDMEMES_LABELS = 150;
+
 const file = baseline as BaselineFile;
+const basedmemesFile = basedmemesBaseline as BaselineFile;
 
 export const BASELINE_META = {
   source: file.source ?? 'memedepot.com',
   generatedAt: file.generatedAt ?? null,
   total: Array.isArray(file.labels) ? file.labels.length : 0,
+} as const;
+
+export const BASEDMEMES_META = {
+  source: basedmemesFile.source ?? 'basedmemes.lol + knowyourmeme.com',
+  generatedAt: basedmemesFile.generatedAt ?? null,
+  total: Array.isArray(basedmemesFile.labels) ? basedmemesFile.labels.length : 0,
 } as const;
 
 const normLabel = (s: string): string => s.trim().toLowerCase();
@@ -110,4 +124,25 @@ export function buildBaselineLabels(
     });
   }
   return out;
+}
+
+// Compose BOTH machine-generated breadth tiers under the curated core, sharing
+// one de-dupe pass so a term can appear in at most one place. The trick is to
+// reuse the pure `buildBaselineLabels` for each tier: the first tier de-dupes
+// against `curated`; the second de-dupes against `curated` PLUS the first tier
+// (passed as the `curated` arg), so memedepot always wins over basedmemes on a
+// shared term and neither collides with the curated labels. Order is memedepot
+// breadth first, then basedmemes breadth.
+export function buildAllBaselineLabels(curated: LabelDef[]): LabelDef[] {
+  const memedepotTags = file.labels ?? [];
+  const basedmemesTags = basedmemesFile.labels ?? [];
+
+  const firstTier = buildBaselineLabels(curated, memedepotTags, MAX_BASELINE_LABELS);
+  const secondTier = buildBaselineLabels(
+    [...curated, ...firstTier],
+    basedmemesTags,
+    MAX_BASEDMEMES_LABELS
+  );
+
+  return [...firstTier, ...secondTier];
 }

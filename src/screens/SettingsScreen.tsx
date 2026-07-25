@@ -2,12 +2,15 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Alert, Linking, Pressable, ScrollView, StyleSheet, Switch, Text, View } from 'react-native';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
+import { File, FileMode } from 'expo-file-system';
 import * as Sharing from 'expo-sharing';
 import { manipulateAsync, SaveFormat } from 'expo-image-manipulator';
+import { saveToDownloads } from '../../modules/memeget-bg';
 
 import { showToast } from '../components/Toast';
 import { Button, ProgressBar, Slider, StatusDot } from '../components/ui';
 import { useAudio } from '../audio';
+import { AUDIO_MODEL_INFO } from '../audioCore';
 import { useEmbeddings } from '../embeddings';
 import { useVision, intensityLabel, memesPerHour } from '../vision';
 import {
@@ -34,6 +37,7 @@ import {
   importExemplars,
   migrateStaleExemplars,
   removeFolder,
+  resetAllAudio,
   resetAudioFailures,
   resetFailedThumbs,
   type ImportedPack,
@@ -42,7 +46,7 @@ import {
 } from '../db';
 import { emitLibraryChanged } from '../events';
 import { success, warn } from '../haptics';
-import { acquireKeepAlive } from '../keepAlive';
+import { acquireKeepAlive, reportKeepAliveProgress } from '../keepAlive';
 import {
   backfillVideoThumbs,
   clearThumbSkips,
@@ -54,9 +58,26 @@ import {
 import { importMemesFromZip, type ZipImportPhase } from '../zipImport';
 import { MEME_LABELS } from '../memeLabels';
 import { buildPack, parsePack, serializePack } from '../teachingPack';
-import { buildCollectionZip } from '../collectionExport';
+import { writeCollectionZip } from '../collectionExport';
 import { colors, radius, space, TABBAR_CLEARANCE } from '../theme';
 import type { LinkedFolder } from '../types';
+
+// Deliver a finished export: drop it straight into the public Downloads folder
+// (native MediaStore copy — streams in native code, so a large zip never hits
+// JS memory) and toast where it landed. Falls back to the share sheet only when
+// the native module isn't built in.
+async function deliverExport(path: string, fileName: string, mimeType: string): Promise<void> {
+  const dest = await saveToDownloads(path, fileName, mimeType).catch(() => null);
+  if (dest) {
+    showToast(`Saved to ${dest}`, 'info');
+    return;
+  }
+  if (await Sharing.isAvailableAsync()) {
+    await Sharing.shareAsync(path, { mimeType, dialogTitle: 'Export' });
+  } else {
+    showToast(`Saved to ${path}`, 'info');
+  }
+}
 
 export function SettingsScreen({ active = true }: { active?: boolean }) {
   const emb = useEmbeddings();
@@ -90,6 +111,7 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
   const [zipImport, setZipImport] = useState<{ done: number; total: number; phase: ZipImportPhase } | null>(
     null
   );
+  const [exportProgress, setExportProgress] = useState<{ done: number; total: number } | null>(null);
 
   const refresh = useCallback(async () => {
     setFolders(await getFolders());
@@ -243,15 +265,7 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
       });
       const path = `${FileSystem.cacheDirectory}memeget-teachings-${stamp}.json`;
       await FileSystem.writeAsStringAsync(path, serializePack(pack));
-      if (await Sharing.isAvailableAsync()) {
-        await Sharing.shareAsync(path, {
-          mimeType: 'application/json',
-          dialogTitle: 'Share teaching pack',
-          UTI: 'public.json',
-        });
-      } else {
-        showToast(`Saved pack to ${path}`, 'info');
-      }
+      await deliverExport(path, `memeget-teachings-${stamp}.json`, 'application/json');
       success();
     } catch (e) {
       showToast(`Export failed: ${String(e)}`, 'error');
@@ -276,15 +290,7 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
       const stamp = new Date().toISOString().slice(0, 10);
       const path = `${FileSystem.cacheDirectory}memeget-described-tags-${stamp}.json`;
       await FileSystem.writeAsStringAsync(path, JSON.stringify(memes));
-      if (await Sharing.isAvailableAsync()) {
-        await Sharing.shareAsync(path, {
-          mimeType: 'application/json',
-          dialogTitle: 'Export described tags',
-          UTI: 'public.json',
-        });
-      } else {
-        showToast(`Saved to ${path}`, 'info');
-      }
+      await deliverExport(path, `memeget-described-tags-${stamp}.json`, 'application/json');
       success();
     } catch (e) {
       showToast(`Export failed: ${String(e)}`, 'error');
@@ -299,12 +305,23 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
   const onExportCollection = useCallback(async () => {
     if (transferBusy) return;
     setTransferBusy(true);
+    const release = acquireKeepAlive('Exporting collection');
     try {
       const records = await getCollectionRecords();
       if (records.length === 0) {
         showToast('Nothing indexed yet', 'info');
         return;
       }
+      setExportProgress({ done: 0, total: records.length });
+      let lastShownPct = -1;
+      const onProgress = (done: number, total: number) => {
+        reportKeepAliveProgress(done, total);
+        const pct = total ? Math.floor((done / total) * 100) : 0;
+        if (pct !== lastShownPct || done === total) {
+          lastShownPct = pct;
+          setExportProgress({ done, total });
+        }
+      };
       // Images: downscale to ~640px via the manipulator (handles content:// SAF
       // uris); videos fall back to their stored poster. A failure just drops
       // that one image — metadata is always kept.
@@ -332,19 +349,28 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
         }
         return null;
       };
-      const b64 = await buildCollectionZip(records, loadImage, Date.now());
       const stamp = new Date().toISOString().slice(0, 10);
       const path = `${FileSystem.cacheDirectory}memeget-collection-${stamp}.zip`;
-      await FileSystem.writeAsStringAsync(path, b64, { encoding: FileSystem.EncodingType.Base64 });
-      if (await Sharing.isAvailableAsync()) {
-        await Sharing.shareAsync(path, { mimeType: 'application/zip', dialogTitle: 'Export collection' });
-      } else {
-        showToast(`Saved to ${path}`, 'info');
+      // Stream the archive straight to disk in chunks. Building the whole zip as
+      // one base64 string in memory (then decoding it again on write) OOM'd the
+      // JS runtime on large libraries — the export would churn ~30s, then die
+      // with no file and no error. A file handle + chunked writes keeps peak
+      // memory flat.
+      const file = new File(path);
+      file.create({ overwrite: true });
+      const handle = file.open(FileMode.WriteOnly);
+      try {
+        await writeCollectionZip(records, loadImage, Date.now(), (chunk) => handle.writeBytes(chunk), onProgress);
+      } finally {
+        handle.close();
       }
+      await deliverExport(path, `memeget-collection-${stamp}.zip`, 'application/zip');
       success();
     } catch (e) {
       showToast(`Export failed: ${String(e)}`, 'error');
     } finally {
+      release();
+      setExportProgress(null);
       setTransferBusy(false);
     }
   }, [transferBusy]);
@@ -554,6 +580,41 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
     await refresh();
     showToast(`Re-queued ${n} failed video${n === 1 ? '' : 's'} for transcription`, 'info');
   }, [refresh]);
+
+  // Wipe every video transcript and transcribe the whole library again — for
+  // when the current speech model's output is poor and the user wants a clean
+  // retry (e.g. after switching models). Guarded: don't clear transcripts unless
+  // the model can actually run, or search loses all speech terms until a later
+  // pass. Kicks the pass right after re-queueing.
+  const onRegenerateAllAudio = useCallback(() => {
+    if (!audio.ready) {
+      showToast('Speech model still loading — try again shortly', 'info');
+      return;
+    }
+    // A per-meme retry from the Library sets AudioApi.running without touching this
+    // screen's `transcribing`, so check the shared flag before wiping the table.
+    if (audio.running) {
+      showToast('Already transcribing — try again in a moment', 'info');
+      return;
+    }
+    Alert.alert(
+      'Regenerate all transcriptions?',
+      'Clears every video transcript and transcribes the whole library again on-device. This can take a while.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Regenerate',
+          style: 'destructive',
+          onPress: async () => {
+            const n = await resetAllAudio();
+            await refresh();
+            showToast(`Re-queued ${n} video${n === 1 ? '' : 's'} — transcribing…`, 'info');
+            await onRunTranscribe();
+          },
+        },
+      ]
+    );
+  }, [audio.ready, audio.running, refresh, onRunTranscribe]);
 
 
   // Re-base old-space taught examples onto the current index (see
@@ -812,7 +873,7 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
       </Section>
 
       <Section glyph="🎙" title="Audio analysis" tint={colors.volt}>
-        <Row label="Whisper (speech-to-text)">
+        <Row label={`${AUDIO_MODEL_INFO.label} (speech-to-text)`}>
           <StatusDot tone={audioTone} label={audioLabel} />
         </Row>
         {audio.enabled && !audio.ready && !audio.error && (
@@ -884,6 +945,15 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
                 variant="secondary"
                 label={`Retry ${audioFailed} failed`}
                 onPress={onRetryAudioFailures}
+              />
+            )}
+            {audioStats.analyzed > 0 && !transcribing && (
+              <Button
+                small
+                variant="secondary"
+                label="Regenerate all transcriptions"
+                onPress={onRegenerateAllAudio}
+                disabled={!audio.ready || audio.running}
               />
             )}
           </>
@@ -1089,15 +1159,26 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
           Export the whole collection as a <Text style={styles.noteStrong}>zip</Text> — every meme's
           image plus its tags, caption, and embeddings in one file to share.
         </Text>
-        <Button
-          small
-          variant="secondary"
-          icon="🗜"
-          label="Export collection (zip)"
-          onPress={onExportCollection}
-          disabled={transferBusy}
-          style={styles.transferBtn}
-        />
+        {exportProgress ? (
+          <View style={{ gap: 8 }}>
+            <Text style={styles.note}>
+              {`Exporting ${exportProgress.done}/${exportProgress.total || '…'} — saving to Downloads`}
+            </Text>
+            <ProgressBar
+              value={exportProgress.total ? exportProgress.done / exportProgress.total : 0}
+            />
+          </View>
+        ) : (
+          <Button
+            small
+            variant="secondary"
+            icon="🗜"
+            label="Export collection (zip)"
+            onPress={onExportCollection}
+            disabled={transferBusy}
+            style={styles.transferBtn}
+          />
+        )}
 
         {importedPacks.length > 0 && (
           <>

@@ -11,7 +11,7 @@
 // the user's taught exemplars ARE the curation surface of the app.
 
 import type { Tag } from './types';
-import { buildBaselineLabels } from './baselineLabels';
+import { buildAllBaselineLabels } from './baselineLabels';
 
 // Facets a meme is dissected into — so any aspect is findable by a plain-word
 // description. The first five are the identity/topic core; the rest capture
@@ -125,6 +125,8 @@ export const CURATED_MEME_LABELS: LabelDef[] = [
   { label: 'Crying', prompt: 'a meme of someone crying with tears', category: 'action', associations: ['crying', 'sobbing', 'tears', 'wojak crying'] },
   { label: 'Pressing a Button', prompt: 'a meme of a hand pressing or choosing a button', category: 'action', associations: ['button', 'pressing', 'two buttons', 'red button'] },
   { label: 'Explosion', prompt: 'a meme with a big explosion or something blowing up', category: 'action', associations: ['explosion', 'exploding', 'boom', 'mind blown'] },
+  { label: 'Hug', prompt: 'a meme of people hugging or embracing, or someone wrapping their arms around themselves', category: 'action', associations: ['hug', 'hugging', 'self-hug', 'embrace', 'comfort', 'wholesome'] },
+  { label: 'Arms Crossed', prompt: 'a meme of a person with arms folded across the chest, annoyed or defensive', category: 'action', associations: ['arms crossed', 'crossed arms', 'annoyed', 'defensive', 'unimpressed', 'waiting'] },
 
   // --- Objects / props (a thing on screen you'd search for) ---
   { label: 'Fire / Burning', prompt: 'a meme with fire or a room on fire', category: 'object', associations: ['fire', 'burning', 'flames', 'this is fine'] },
@@ -158,13 +160,15 @@ export const CURATED_MEME_LABELS: LabelDef[] = [
   { label: 'Wholesome Tone', prompt: 'a wholesome heartwarming positive meme', category: 'tone', associations: ['wholesome', 'heartwarming', 'sweet', 'positive'] },
 ];
 
-// The active label vocabulary: curated core + the harvested memedepot baseline
-// (breadth). The baseline ships empty and is filled by CI, so today this equals
-// `CURATED_MEME_LABELS`; a merged harvest just makes it longer. `ASSOCIATIONS`
-// below is derived from this, so baseline association terms flow into search too.
+// The active label vocabulary: curated core + two machine-generated breadth
+// tiers (the CI-harvested memedepot baseline and the locally-mined
+// basedmemes.lol + KYM baseline), composed and cross-deduped by
+// `buildAllBaselineLabels`. The memedepot tier ships empty until a harvest PR
+// lands; the basedmemes tier is committed. `ASSOCIATIONS` below is derived from
+// this, so baseline association terms flow into search too.
 export const MEME_LABELS: LabelDef[] = [
   ...CURATED_MEME_LABELS,
-  ...buildBaselineLabels(CURATED_MEME_LABELS),
+  ...buildAllBaselineLabels(CURATED_MEME_LABELS),
 ];
 
 // Generic "not a recognizable format" anchors so weak matches don't get forced
