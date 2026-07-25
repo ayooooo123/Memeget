@@ -4,13 +4,21 @@ import { AUDIO_MODEL_INFO } from './audioCore';
 
 import { modelStamp, PRIMARY_EMBEDDING_MODEL, VISUAL_EMBEDDING_MODEL } from './embeddingModels';
 import { scoreEntry } from './searchCore';
-import { assembleSearchText } from './searchText';
+import { assembleSearchText, classificationContextTerms } from './searchText';
 import { guessFacet } from './facetCoverage';
 import {
   ensureSearchIndex,
-  invalidateSearchIndex,
+  invalidateSearchIndex as invalidateResidentSearchIndex,
   type SearchCacheEntry,
 } from './searchIndexCache';
+import {
+  ftsMatchQuery,
+  fuseDenseAndLexicalRanks,
+  searchTermsForText,
+  searchScopeEntries,
+  tagTermScore,
+  type LexicalQuery,
+} from './searchExpansion';
 import {
   propagatedTag,
   rankPropagationHits,
@@ -31,6 +39,14 @@ let dbPromise: Promise<SQLite.SQLiteDatabase> | null = null;
 let vecReady = false;
 export function sqliteVecReady(): boolean {
   return vecReady;
+}
+
+let ftsAvailable: boolean | null = null;
+let ftsDirty = true;
+
+function invalidateSearchIndex(): void {
+  invalidateResidentSearchIndex();
+  ftsDirty = true;
 }
 
 function getDb(): Promise<SQLite.SQLiteDatabase> {
@@ -1453,6 +1469,79 @@ async function loadSearchIndex(): Promise<SearchCacheEntry[]> {
   });
 }
 
+async function ensureFtsSearchIndex(
+  db: SQLite.SQLiteDatabase,
+  entries: readonly SearchCacheEntry[]
+): Promise<boolean> {
+  if (ftsAvailable === false) return false;
+  try {
+    await db.execAsync(`
+      CREATE VIRTUAL TABLE IF NOT EXISTS meme_search_fts USING fts5(
+        name,
+        ocr,
+        caption,
+        transcript,
+        tags,
+        extra_terms,
+        tokenize='unicode61'
+      );
+    `);
+    ftsAvailable = true;
+    if (!ftsDirty) return true;
+
+    await db.withTransactionAsync(async () => {
+      await db.execAsync('DELETE FROM meme_search_fts;');
+      const stmt = await db.prepareAsync(
+        `INSERT INTO meme_search_fts(rowid, name, ocr, caption, transcript, tags, extra_terms)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`
+      );
+      try {
+        for (const entry of entries) {
+          const r = entry.record;
+          await stmt.executeAsync(
+            entry.id,
+            r.name,
+            r.ocrText,
+            r.caption,
+            r.transcript,
+            r.tags.map((t) => t.label).join(' '),
+            `${r.extraTerms} ${classificationContextTerms({ tags: r.tags.map((t) => t.label) })}`.trim()
+          );
+        }
+      } finally {
+        await stmt.finalizeAsync();
+      }
+    });
+    ftsDirty = false;
+    return true;
+  } catch {
+    ftsAvailable = false;
+    return false;
+  }
+}
+
+async function ftsRankedIds(
+  db: SQLite.SQLiteDatabase,
+  allEntries: readonly SearchCacheEntry[],
+  eligibleEntries: readonly SearchCacheEntry[],
+  lexicalQuery: LexicalQuery,
+  shouldAbort?: () => boolean
+): Promise<number[]> {
+  const match = ftsMatchQuery(lexicalQuery);
+  if (!match || !(await ensureFtsSearchIndex(db, allEntries)) || shouldAbort?.()) return [];
+  const eligible = new Set(eligibleEntries.map((e) => e.id));
+  const rows = await db.getAllAsync<{ id: number }>(
+    `SELECT rowid AS id
+     FROM meme_search_fts
+     WHERE meme_search_fts MATCH ?
+     ORDER BY bm25(meme_search_fts, 1.0, 1.2, 2.0, 1.8, 5.0, 4.0)
+     LIMIT ?`,
+    match,
+    allEntries.length
+  );
+  return rows.map((r) => r.id).filter((id) => eligible.has(id));
+}
+
 // With vectors already decoded, scoring a few thousand memes is a few ms — score
 // them in one synchronous pass. Only past this size does a single pass risk being
 // felt mid-type, so only then do we hand the event loop a macrotask between
@@ -1476,30 +1565,55 @@ export async function searchByVector(
   queryText: string,
   limit = 40,
   kind?: MediaKind,
-  shouldAbort?: () => boolean
+  shouldAbort?: () => boolean,
+  expandedQuery?: LexicalQuery
 ): Promise<SearchHit[] | null> {
   // The resident index replaces the per-keystroke `SELECT *` + re-decode: it
   // rebuilds only when searchable content/membership changed (see
   // invalidateSearchIndex), so a keystroke pays for scoring alone.
   const all = await ensureSearchIndex(loadSearchIndex);
   if (shouldAbort?.()) return null;
-  const entries = kind ? all.filter((e) => e.kind === kind) : all;
+  const entries = searchScopeEntries(all, kind, queryText);
+  const scopeRelaxed =
+    !!kind &&
+    queryText.trim().length > 0 &&
+    entries === all &&
+    all.length > 0 &&
+    !all.some((e) => e.kind === kind);
+  if (scopeRelaxed) {
+    console.log(
+      `[memeget/search] relaxed empty ${kind} filter for "${queryText.trim()}" to ${all.length} all-media candidates`
+    );
+  }
 
-  let terms = queryText
-    .toLowerCase()
-    .split(/\s+/)
-    .filter((t) => t.length > 2);
+  let terms = searchTermsForText(queryText);
   // Lexical-only mode has no dense channel to fall back on; keep short words
   // rather than handing back an unranked list.
   if (!queryVec && terms.length === 0) {
-    terms = queryText.toLowerCase().split(/\s+/).filter(Boolean);
+    terms = searchTermsForText(queryText, true);
   }
+  const lexicalQuery = expandedQuery ?? { exactTerms: terms };
+
+  const db = await getDb();
+  const lexicalIds = await ftsRankedIds(db, all, entries, lexicalQuery, shouldAbort);
+  if (shouldAbort?.()) return null;
+  // If FTS5 is available, lexical ranking is handled as its own BM25/RRF signal;
+  // otherwise scoreEntry falls back to the historical JS lexical boost.
+  const scoreTerms = lexicalIds.length ? { exactTerms: [] } : lexicalQuery;
 
   const yielding = entries.length > SEARCH_YIELD_THRESHOLD;
   const scored: { entry: SearchCacheEntry; score: number }[] = [];
   for (let i = 0; i < entries.length; i++) {
     const entry = entries[i];
-    scored.push({ entry, score: scoreEntry(queryVec, terms, entry) });
+    scored.push({
+      entry,
+      score:
+        scoreEntry(queryVec, scoreTerms, entry) +
+        tagTermScore(
+          entry.record.tags.map((tag) => tag.label),
+          lexicalQuery
+        ),
+    });
 
     // Only huge libraries chunk-yield; below the threshold this branch never
     // runs and the whole scan stays synchronous.
@@ -1515,8 +1629,37 @@ export async function searchByVector(
       (b.entry.record.modifiedAt ?? 0) - (a.entry.record.modifiedAt ?? 0) ||
       b.entry.id - a.entry.id
   );
-  const top = Number.isFinite(limit) ? scored.slice(0, limit) : scored;
-  return top.map(({ entry, score }) => ({ ...entry.record, score }) as SearchHit);
+  const fused = fuseDenseAndLexicalRanks(
+    scored.map(({ entry, score }) => ({
+      id: entry.id,
+      score,
+      modifiedAt: entry.record.modifiedAt ?? entry.record.indexedAt,
+    })),
+    lexicalIds
+  );
+  const byId = new Map(scored.map((s) => [s.entry.id, s.entry]));
+  const ranked = fused
+    .map(({ id, score }) => {
+      const entry = byId.get(id);
+      return entry ? ({ ...entry.record, score } as SearchHit) : null;
+    })
+    .filter((h): h is SearchHit => h !== null);
+  const hits = Number.isFinite(limit) ? ranked.slice(0, limit) : ranked;
+  if (queryText.trim().length > 0) {
+    console.log(
+      `[memeget/search] query="${queryText.trim()}" candidates=${entries.length} lexical=${lexicalIds.length} hits=${hits.length} top=${hits
+        .slice(0, 5)
+        .map((hit) => {
+          const labels = hit.tags
+            .slice(0, 3)
+            .map((tag) => tag.label)
+            .join('|');
+          return `${hit.name}:${hit.score.toFixed(3)}:${labels}`;
+        })
+        .join('; ')}`
+    );
+  }
+  return hits;
 }
 
 // "More like this" for the viewer: rank the library by cosine similarity to one
