@@ -139,12 +139,25 @@ A suggestion requires:
 
 It returns unknown when evidence is weak or ambiguous. Raw cosine similarity is not presented as a probability. The UI may display a percentage only after a calibration maps scores to an empirically measured probability; otherwise it uses qualitative confidence language.
 
+### `AudioAnalysisCoordinator`
+
+The audio provider owns one shared coordinator for transcription and voice work. Both bulk and per-video operations enter through:
+
+```ts
+runExclusive<T>(
+  kind: 'transcription' | 'voice-analysis',
+  work: (signal: AudioWorkSignal) => Promise<T>
+): Promise<T | 'busy'>
+```
+
+`AudioWorkSignal` exposes cooperative cancellation and the existing opportunity to yield to interactive search. `runExclusive` is the only owner of the busy state and keep-alive lease; it acquires both before model or decoder work and releases both in `finally`. A per-video request returns `busy` when another audio job owns the coordinator. A bulk request holds the same lease across its queue but checks cancellation and yields between videos. The existing transcription entry points migrate to this coordinator rather than keeping a private `busyRef`, so voice analysis cannot create a second independent lock.
+
 ### `VoiceAnalysisService`
 
 **Input:** a video meme identifier.  
 **Output:** a complete voice-analysis result persisted atomically.
 
-It coordinates materialization, PCM extraction, VAD, speaker embeddings, diarization, per-turn transcription, profile matching, persistence, and search-index invalidation. It shares the existing audio-analysis mutex and keep-alive behavior so transcription and voice analysis do not race for the model runtime.
+It coordinates materialization, PCM extraction, VAD, speaker embeddings, diarization, optional per-turn transcription, profile matching, persistence, and search-index invalidation. It performs all decoder and model work inside `AudioAnalysisCoordinator.runExclusive`; it does not own an independent mutex or keep-alive lease.
 
 ### `VoiceTeachingService`
 
@@ -203,11 +216,12 @@ Profile names need not be globally unique. Selection UI disambiguates duplicate 
 - `start_ms INTEGER NOT NULL`
 - `end_ms INTEGER NOT NULL`
 - `transcript TEXT NOT NULL DEFAULT ''`
+- `transcript_state TEXT NOT NULL DEFAULT 'not_requested'` constrained to `not_requested | done | failed`
 - `embedding BLOB`
 - `quality TEXT NOT NULL` constrained to `clean | short | overlap | noisy`
 - `learning_eligible INTEGER NOT NULL DEFAULT 1`
 
-A nullable speaker allows an overlap/ambiguous turn to remain on the timeline without contaminating a cluster. Per-turn embeddings allow correction operations to rebuild speaker aggregates without decoding the video again.
+A nullable speaker allows an overlap/ambiguous turn to remain on the timeline without contaminating a cluster. Per-turn embeddings allow merge, move, reassignment, and aggregate rebuilding without decoding the video again. Splitting inside an existing turn is the exception: it requires waveform access and fresh embeddings for the two new time ranges.
 
 ### `voice_samples`
 
@@ -239,13 +253,18 @@ A rejection vetoes that exact observation/profile suggestion. It is not a global
 3. VAD returns speech regions. No valid regions is a successful `done` result with no speakers.
 4. Valid regions are windowed for the speaker encoder. Windows that are too short, overlap, or fail quality checks remain representable but are not learning eligible.
 5. `DiarizationCore` clusters clean embeddings, merges adjacent same-speaker windows, computes aggregate embeddings, and assigns ordinals.
-6. Moonshine transcribes each sufficiently long merged turn. A short turn may have an empty attributed transcript while still contributing timing. The existing whole-video transcription continues to populate `memes.transcript`.
+6. If Moonshine is enabled and ready, it transcribes each sufficiently long merged turn independently. A short turn or unavailable transcription model keeps `transcript = ''` and `transcript_state = not_requested`. A failed turn call keeps the diarization result, stores `transcript_state = failed` for that turn, and continues with later turns. The existing whole-video transcription continues to populate `memes.transcript`; its success or failure does not determine `voice_state`. A later transcription pass may fill `speech_turns` whose state is `not_requested` or `failed` without rerunning diarization.
 7. `VoiceProfileMatcher` evaluates each aggregate against compatible confirmed profiles.
-8. The service replaces the video's prior `video_speakers` and `speech_turns` in one transaction only after the complete new result is ready.
+8. The service prepares a complete replacement for the video's prior `video_speakers` and `speech_turns`, then commits the replacement and every dependent-record change in one transaction.
+   - Before deleting old speakers, remove their `voice_samples` and `voice_rejections` and record every affected profile.
+   - Rebuild affected profile centroids from their remaining confirmed samples.
+   - Do not transfer an old confirmed identity or rejection to a newly clustered speaker automatically. The user's old confirmation named the old observation; carrying it onto changed audio would create training data the user did not confirm.
+   - Match the new speakers only against profiles that still have compatible confirmed samples. Profiles with no remaining samples keep their names and aliases but cannot produce suggestions until the user confirms a new sample.
+   - The reanalysis confirmation warns that identities taught from this video may need reconfirmation.
 9. The service marks `voice_state = done`, updates search fields, invalidates the search cache, and emits the existing library-change event.
 10. Temporary PCM files are removed through the existing cleanup path.
 
-If extraction or inference fails, `voice_state` becomes `failed` for a first analysis. A failed reanalysis preserves the last successful speakers and turns; failure metadata is recorded separately from the retained result.
+Extraction, VAD, speaker-embedding, clustering, or persistence failure sets `voice_state = failed` for a first analysis. A failed reanalysis preserves the last successful speakers, turns, samples, rejections, and centroids because no replacement transaction commits. Moonshine being disabled, unavailable, or failing for one or more turns does not fail voice analysis; the per-turn `transcript_state` records that optional enrichment outcome.
 
 ## Viewer UX
 
@@ -308,10 +327,15 @@ A `Fix speakers` action supports the minimum corrections needed to protect train
 - Merge two detected speakers.
 - Move a turn to another speaker.
 - Create a new speaker from a turn.
+- Split one turn at a user-selected playback timestamp, then assign either half to an existing or new speaker.
 - Exclude a turn from learning.
 - Change or remove an identity association.
 
 A correction transaction rebuilds affected aggregate embeddings, durations, ordinals, profile samples, and centroids. It clears suggestions that depended on the changed aggregates and reruns matching for affected unconfirmed speakers.
+
+Splitting a turn re-materializes the video, extracts the waveform, and generates fresh embeddings for both time ranges. Neither half is committed if extraction or embedding fails. A half that is too short remains visible but is marked ineligible for learning.
+
+Merging speakers is an explicit identity decision. If neither speaker is confirmed, suggestions are cleared and the merged aggregate is matched again. If one speaker is confirmed, the merge sheet asks the user to keep that profile or clear identity. If both are confirmed to the same profile, the merged observation remains confirmed. If they are confirmed to different profiles, the merge is blocked until the user chooses one profile or clears both. The transaction removes both old samples, creates at most one eligible sample for the explicitly chosen resulting profile, and rebuilds every affected centroid; it never silently chooses an identity.
 
 ## Tagging UX
 
@@ -422,7 +446,7 @@ Voice and transcription may share one combined per-video pass after the pipeline
 1. Benchmark and select VAD/speaker-embedding models on the target Android device; establish model stamp, input contract, size, latency, and thresholds.
 2. Add pure diarization, matching, and centroid modules with synthetic contract tests.
 3. Add normalized storage, migrations, atomic replacement, and deletion lifecycle.
-4. Integrate the on-device analysis service with the existing PCM, mutex, keep-alive, and Moonshine paths.
+4. Integrate the on-device analysis service with the existing PCM and Moonshine paths, replacing the private transcription mutex with the shared `AudioAnalysisCoordinator`.
 5. Add viewer summaries, timeline, attributed turns, and seek/play behavior.
 6. Add identify, confirm, reject, and correction workflows.
 7. Add tag scope and known-voices management.
