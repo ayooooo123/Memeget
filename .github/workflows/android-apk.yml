@@ -81,7 +81,14 @@ jobs:
           fi
           # Android requires a monotonically increasing integer versionCode for
           # every installable build; the run number gives us that for free.
-          VERSION_CODE="${GITHUB_RUN_NUMBER}"
+          #
+          # Offset by 1000 so a CI build always outranks a hand-built local APK
+          # (app.json carries a plain three-digit code). Android refuses to
+          # install a lower versionCode over a higher one, and the only way past
+          # that is an uninstall — which wipes the app's sandbox, i.e. the whole
+          # index and every taught example. Keeping CI permanently ahead means
+          # the next release always installs *over* whatever is on the device.
+          VERSION_CODE="$((1000 + GITHUB_RUN_NUMBER))"
           {
             echo "version_name=${VERSION_NAME}"
             echo "version_code=${VERSION_CODE}"
@@ -92,6 +99,22 @@ jobs:
             echo "make_latest=${MAKE_LATEST}"
           } >> "$GITHUB_OUTPUT"
           echo "Building ${RELEASE_NAME} -> ${APK_NAME} (versionName ${VERSION_NAME}, versionCode ${VERSION_CODE})"
+
+      # Android scopes an app's private storage to its package name, so shipping
+      # under a different applicationId does not rename the app — it installs an
+      # unrelated one with an empty sandbox, and the user's whole index and every
+      # taught example appear to be gone. This has happened. No APK leaves this
+      # workflow unless the id is exactly right.
+      - name: Verify Android applicationId
+        run: |
+          EXPECTED='com.memeget.app'
+          ACTUAL="$(node -p "require('./app.json').expo.android.package")"
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "::error::Refusing to build. applicationId is '$ACTUAL', must be '$EXPECTED'."
+            echo "Changing it strands every user's library in the old package's sandbox."
+            exit 1
+          fi
+          echo "applicationId OK: $ACTUAL"
 
       - name: Stamp version into app config
         env:
