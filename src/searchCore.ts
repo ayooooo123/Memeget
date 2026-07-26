@@ -1,3 +1,5 @@
+import type { LexicalQuery } from './searchExpansion';
+
 // Hybrid retrieval scoring: the query vector against the meme's image embedding
 // (cross-modal) plus, when present, against the CLIP TEXT embedding of the
 // meme's VLM caption+tags (text↔text).
@@ -40,6 +42,11 @@ export function hybridSearchScore(
 // literal match could be buried past the result cap.
 const LEXICAL_WEIGHT = 0.35;
 const ALL_TERMS_BOOST = 0.6;
+const EXPANDED_LEXICAL_WEIGHT = 0.22;
+
+function normalizeLexicalQuery(terms: string[] | LexicalQuery): LexicalQuery {
+  return Array.isArray(terms) ? { exactTerms: terms } : terms;
+}
 
 // One meme's full search score: the dense hybrid channel (image + optional
 // caption text) plus the lexical channel. `queryVec` may be null (lexical-only
@@ -49,20 +56,27 @@ const ALL_TERMS_BOOST = 0.6;
 // exactly as the previous inline scan did.
 export function scoreEntry(
   queryVec: Float32Array | number[] | null,
-  terms: string[],
+  terms: string[] | LexicalQuery,
   entry: {
     imageVec: Float32Array | number[];
     captionVec: Float32Array | number[] | null;
     searchText: string;
   }
 ): number {
+  const lexical = normalizeLexicalQuery(terms);
   let score = queryVec ? hybridSearchScore(queryVec, entry.imageVec, entry.captionVec) : 0;
-  if (terms.length) {
+  if (lexical.exactTerms.length) {
     const hay = entry.searchText;
     let matched = 0;
-    for (const t of terms) if (hay.includes(t)) matched++;
-    score += LEXICAL_WEIGHT * (matched / terms.length);
-    if (matched === terms.length) score += ALL_TERMS_BOOST;
+    for (const t of lexical.exactTerms) if (hay.includes(t)) matched++;
+    score += LEXICAL_WEIGHT * (matched / lexical.exactTerms.length);
+    if (matched === lexical.exactTerms.length) score += ALL_TERMS_BOOST;
+  }
+  if (lexical.expandedTerms?.length) {
+    const hay = entry.searchText;
+    let matched = 0;
+    for (const t of lexical.expandedTerms) if (hay.includes(t)) matched++;
+    if (matched > 0) score += EXPANDED_LEXICAL_WEIGHT * Math.min(1, matched / 2);
   }
   return score;
 }

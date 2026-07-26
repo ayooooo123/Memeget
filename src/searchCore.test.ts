@@ -82,6 +82,15 @@ describe('scoreEntry', () => {
     expect(scoreEntry(query, ['distracted', 'boyfriend'], e)).toBeCloseTo(1 + 0.35 + 0.6);
   });
 
+  it('adds a bounded boost for semantic expansion terms without triggering exact all-term boost', () => {
+    const query = v(0, 1);
+    const image = v(0, 1);
+    const e = entry(image, null, 'angry rage wojak');
+    expect(
+      scoreEntry(query, { exactTerms: ['mad'], expandedTerms: ['angry', 'rage'] }, e)
+    ).toBeCloseTo(1 + 0.22);
+  });
+
   it('scores by lexical alone in null-query (lexical-only) mode', () => {
     const e = entry(v(1, 0), v(1, 0), 'crying wojak');
     // No dense channel; both terms hit → 0.35 + 0.6.
