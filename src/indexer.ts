@@ -74,6 +74,7 @@ import {
   type SafFile,
 } from './saf';
 import { hashBase64 } from './contentHash';
+import { syncAllSidecars } from './sidecarSync';
 import { formatGrounding, type GroundingLabel, type VisionResult } from './visionCore';
 import { captionSearchText, classificationContextTerms, memeExtraTerms } from './searchText';
 import {
@@ -608,6 +609,18 @@ export async function runIndex(
     await sweepOrphanThumbs(await getAllThumbUris());
   } catch {
     // best-effort; orphans get another chance next index
+  }
+
+  // Mirror the freshly-earned knowledge into each folder's .memeget sidecar.
+  // An index pass is the natural checkpoint: it's the only moment a large batch
+  // of new embeddings, tags and OCR lands at once, and the user is already
+  // waiting on a long job so the extra second is invisible. Best-effort — a
+  // folder we can't write to must never fail the index that just succeeded.
+  try {
+    status('saving knowledge to your folder…');
+    await syncAllSidecars();
+  } catch {
+    // next pass tries again; the DB remains the live copy either way
   }
 
   opts.onProgress?.({ processed: total, total, added, current: '' });

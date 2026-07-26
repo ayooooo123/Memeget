@@ -79,6 +79,29 @@ export function utf8Encode(str: string): Uint8Array {
   return buf.subarray(0, p);
 }
 
+// UTF-8 byte length of a string without building the bytes. The sidecar needs
+// this to pad an overwrite up to the previous file's size (SAF writes don't
+// truncate), and allocating a multi-hundred-KB Uint8Array just to read
+// `.length` off it would be pure waste.
+export function utf8Length(str: string): number {
+  let n = 0;
+  for (let i = 0; i < str.length; i++) {
+    const c = str.charCodeAt(i);
+    if (c < 0x80) n += 1;
+    else if (c < 0x800) n += 2;
+    else if (c >= 0xd800 && c <= 0xdbff && i + 1 < str.length) {
+      const next = str.charCodeAt(i + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        n += 4; // surrogate pair -> one 4-byte code point
+        i++;
+        continue;
+      }
+      n += 3; // lone surrogate, encoded as the replacement char
+    } else n += 3;
+  }
+  return n;
+}
+
 const B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
 const B64_LOOKUP: Int16Array = (() => {
   const l = new Int16Array(256).fill(-1);
@@ -109,6 +132,41 @@ export function base64Decode(b64: string): Uint8Array {
     }
   }
   return out;
+}
+
+// Encode bytes to a standard-alphabet base64 string with padding — the inverse
+// of base64Decode, and the same Hermes-safe contract (no btoa/Buffer). The
+// sidecar writes float32 vectors through here: SAF only takes a string, and
+// base64 of the raw bytes is a quarter the size of a JSON `number[]` while
+// staying bit-exact.
+export function base64Encode(bytes: Uint8Array): string {
+  // Build in bounded slices: one 8k-char String.fromCharCode.apply blows the
+  // argument limit, and per-byte `+=` on a multi-MB payload thrashes Hermes'
+  // rope strings. Whole 3-byte groups per slice keeps each piece self-contained.
+  const parts: string[] = [];
+  const GROUPS = 4096; // 12KB in -> 16KB of base64 out per slice
+  for (let start = 0; start < bytes.length; start += GROUPS * 3) {
+    const end = Math.min(start + GROUPS * 3, bytes.length);
+    let piece = '';
+    let i = start;
+    for (; i + 2 < end; i += 3) {
+      const n = (bytes[i] << 16) | (bytes[i + 1] << 8) | bytes[i + 2];
+      piece += B64[(n >> 18) & 63] + B64[(n >> 12) & 63] + B64[(n >> 6) & 63] + B64[n & 63];
+    }
+    // Trailing 1–2 bytes exist only on the final slice (every earlier slice is a
+    // whole number of groups), so the padding is emitted exactly once.
+    if (i < end) {
+      const rem = end - i;
+      const n = (bytes[i] << 16) | (rem === 2 ? bytes[i + 1] << 8 : 0);
+      piece +=
+        B64[(n >> 18) & 63] +
+        B64[(n >> 12) & 63] +
+        (rem === 2 ? B64[(n >> 6) & 63] : '=') +
+        '=';
+    }
+    parts.push(piece);
+  }
+  return parts.join('');
 }
 
 interface CentralEntry {

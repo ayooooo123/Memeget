@@ -4,7 +4,7 @@
 // elsewhere in the app) — plus the byte-primitive helpers it relies on.
 import JSZip from 'jszip';
 
-import { ZipWriter, crc32, utf8Encode, base64Decode } from './zipWriter';
+import { ZipWriter, crc32, utf8Encode, utf8Length, base64Decode, base64Encode } from './zipWriter';
 
 function collect(build: (w: ZipWriter) => void): Uint8Array {
   const chunks: Uint8Array[] = [];
@@ -40,6 +40,22 @@ describe('utf8Encode', () => {
   });
 });
 
+describe('utf8Length', () => {
+  // The sidecar pads an overwrite up to the previous file's BYTE length, so a
+  // wrong count here leaves part of the stale tail exposed and the JSON invalid.
+  it('agrees with utf8Encode on every class of code point', () => {
+    for (const s of ['', 'A', 'é', '€', '😀', 'pepe 🐸 wojak', 'ascii only', '中文字']) {
+      expect(utf8Length(s)).toBe(utf8Encode(s).length);
+    }
+  });
+
+  it('counts a lone surrogate the way the encoder writes it', () => {
+    const lone = '\ud83d';
+    expect(utf8Length(lone)).toBe(utf8Encode(lone).length);
+    expect(utf8Length(`a${lone}b`)).toBe(utf8Encode(`a${lone}b`).length);
+  });
+});
+
 describe('base64Decode', () => {
   it('round-trips arbitrary bytes and tolerates padding/whitespace', () => {
     const bytes = Uint8Array.from({ length: 256 }, (_, i) => i);
@@ -48,6 +64,30 @@ describe('base64Decode', () => {
     // embedded newlines (as some encoders wrap) must not corrupt the output
     const wrapped = b64.replace(/(.{20})/g, '$1\n');
     expect(Array.from(base64Decode(wrapped))).toEqual(Array.from(bytes));
+  });
+});
+
+describe('base64Encode', () => {
+  // The sidecar stores every embedding as base64 of its float32 bytes, so a
+  // padding or slice-boundary bug here is silent vector corruption in a backup
+  // that only gets read back after the original is gone.
+  it('matches the platform encoder across every padding remainder', () => {
+    for (let len = 0; len <= 8; len++) {
+      const bytes = Uint8Array.from({ length: len }, (_, i) => (i * 37 + 11) & 0xff);
+      expect(base64Encode(bytes)).toBe(Buffer.from(bytes).toString('base64'));
+    }
+  });
+
+  it('handles high bytes and payloads spanning many internal slices', () => {
+    // 4096 groups per slice: go well past the boundary, and land off it.
+    const bytes = Uint8Array.from({ length: 4096 * 3 * 2 + 5 }, (_, i) => (i * 251) & 0xff);
+    expect(base64Encode(bytes)).toBe(Buffer.from(bytes).toString('base64'));
+    expect(base64Encode(Uint8Array.of(0xff, 0xff, 0xff))).toBe('////');
+  });
+
+  it('round-trips through base64Decode', () => {
+    const bytes = Uint8Array.from({ length: 257 }, (_, i) => (i * 13) & 0xff);
+    expect(Array.from(base64Decode(base64Encode(bytes)))).toEqual(Array.from(bytes));
   });
 });
 

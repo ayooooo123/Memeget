@@ -31,6 +31,7 @@ import { emitLibraryChanged, onLibraryChanged, onThumbsUpdated } from '../events
 import { appendPage, mergeRecords, patchThumbs } from '../libraryCore';
 import { success, tap, thud } from '../haptics';
 import { pickFolder } from '../saf';
+import { restoreFolderSidecar } from '../sidecarSync';
 import { colors, radius, space, type } from '../theme';
 import {
   buildExpandedLexicalQuery,
@@ -425,9 +426,32 @@ export function LibraryScreen() {
       const picked = await pickFolder();
       if (!picked) return;
       await addFolder(picked.uri, picked.name);
+      // Linking is the moment a fresh install meets a folder it may have known
+      // before — after a reinstall, a package rename, or on a new phone. If the
+      // folder carries a .memeget sidecar, its tags, captions, transcripts,
+      // embeddings and taught examples come straight back, before a single
+      // model pass runs. Purely additive, so linking a folder can never cost
+      // knowledge; a folder with no sidecar just reports nothing.
+      const restored = await restoreFolderSidecar(picked.uri, picked.name).catch(() => null);
       await refresh();
       success();
-      showToast(`Linked “${picked.name}” — tap Index to scan it`, 'success');
+      if (restored?.unreadable) {
+        // The folder HAS a backup and part of it is damaged. Say so plainly
+        // rather than letting a half-restore read as a fresh, empty link.
+        showToast(
+          `Restored ${restored.added} memes from “${picked.name}”, but ${restored.unreadable} records were unreadable`,
+          'error'
+        );
+      } else if (restored && (restored.added || restored.teachingsAdded)) {
+        const bits = [`${restored.added} memes`];
+        if (restored.teachingsAdded) bits.push(`${restored.teachingsAdded} taught examples`);
+        showToast(
+          `Restored ${bits.join(' and ')} from “${picked.name}”${restored.vectorsDropped ? ' — tap Index to re-embed' : ''}`,
+          'success'
+        );
+      } else {
+        showToast(`Linked “${picked.name}” — tap Index to scan it`, 'success');
+      }
     } catch (e) {
       showToast(`Could not link folder: ${String(e)}`, 'error');
     }

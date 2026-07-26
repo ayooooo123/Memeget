@@ -103,8 +103,47 @@ existing app (don't uninstall first). To guarantee the key never drifts between
 builds, the Android signing key is pinned: a fixed `signing/debug.keystore` (the
 standard Android debug key) is copied into the generated project on every
 `prebuild` by `plugins/withFixedDebugKeystore.js`. So updating the app never
-re-downloads the model or re-indexes your library. (Uninstalling or "Clear data"
-*will* wipe both — that's the only thing that forces a re-download.)
+re-downloads the model or re-indexes your library. Uninstalling, "Clear data",
+or installing a build with a **different `applicationId`** (Android treats that
+as an unrelated app with an empty sandbox) wipes the app's own copy — which is
+exactly why the knowledge is also mirrored into your meme folder:
+
+## The `.memeget` folder (your knowledge, in your folder)
+
+Everything Memeget works out about your memes — tags, taught examples, VLM
+captions, OCR, transcripts, and every embedding — is mirrored into a `.memeget`
+directory **inside each folder you link**:
+
+```
+<your meme folder>/.memeget/
+  manifest.json        format/model stamp, per-chunk digests + byte lengths
+  teachings.json       your taught exemplars, in the normal teaching-pack format
+  library-00.json …    per-meme knowledge, split across 64 chunks
+```
+
+Why it exists: the SQLite index lives in the app's private sandbox, so it dies
+with an uninstall, a "Clear data", a new phone, or a package rename. The memes
+themselves were never at risk (they're your files). Keeping the *knowledge* next
+to them means a fresh install only has to be pointed at the same folder.
+
+* **Written automatically** at the end of every index pass, and on a 30-second
+  debounce after any knowledge change (teaching a tag, a manual edit, a new
+  caption), plus whenever the app leaves the foreground. `Settings → Folder
+  backup → Back up now` forces one.
+* **Restored automatically** when you link a folder that has one, or on demand
+  via `Settings → Folder backup → Restore from linked folders`.
+* **Strictly additive.** Restoring only fills in knowledge a meme is missing; it
+  never overwrites something newer. Running it twice is a no-op.
+* **Model-aware.** Vectors carry the embedding-space stamp. A sidecar written
+  under a different primary model still restores its tags, captions and
+  transcripts; only the vectors are dropped, and the indexer re-embeds.
+* Only chunks whose content actually changed are rewritten, so a routine backup
+  of a 2000-meme library touches a handful of files, not 23 MB.
+* `teachings.json` is the same format `Settings → Export` produces, so it can be
+  imported into any install directly.
+
+The indexer never scans `.memeget` — folder scans are non-recursive and only
+match media extensions.
 
 ## Getting the APK
 

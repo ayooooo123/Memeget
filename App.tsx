@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { StatusBar } from 'expo-status-bar';
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
-import { Animated, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Animated, AppState, Pressable, StyleSheet, Text, View } from 'react-native';
 import { Image } from 'expo-image';
 import { initExecutorch } from 'react-native-executorch';
 import { ExpoResourceFetcher } from 'react-native-executorch-expo-resource-fetcher';
@@ -11,6 +11,7 @@ import { EmbeddingsProvider } from './src/embeddings';
 import { VisionProvider } from './src/vision';
 import { initDb, getSetting, setSetting } from './src/db';
 import { sweepStaleCache } from './src/saf';
+import { flushSidecarSync, startSidecarAutoSync } from './src/sidecarSync';
 import { useConst } from './src/reactUtils';
 import { LibraryScreen } from './src/screens/LibraryScreen';
 import { SettingsScreen } from './src/screens/SettingsScreen';
@@ -80,6 +81,22 @@ function Shell() {
         maintainCaches();
       })
       .catch((e) => console.warn('DB init failed', e));
+  }, []);
+
+  // Keep the `.memeget` sidecar in each linked folder current: a debounced
+  // write after any knowledge change (a taught example, a manual tag, a fresh
+  // caption), plus a forced write when the app leaves the foreground — the
+  // debounce window would otherwise never elapse for someone who teaches a few
+  // tags and immediately switches away.
+  useEffect(() => {
+    const stop = startSidecarAutoSync();
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state !== 'active') flushSidecarSync();
+    });
+    return () => {
+      stop();
+      sub.remove();
+    };
   }, []);
 
   return (
