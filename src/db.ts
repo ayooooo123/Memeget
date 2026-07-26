@@ -291,6 +291,22 @@ export async function initDb(): Promise<void> {
       `ALTER TABLE exemplars ADD COLUMN model TEXT NOT NULL DEFAULT 'clip-vit-base-patch32';`
     );
   }
+  // Tag labels are stored lower-case everywhere (normalizeTags), but taught
+  // exemplar labels were persisted verbatim. A "Milady" example therefore
+  // produced a "milady" tag it could never be matched back to, so every taught
+  // tag in Settings reported "0 memes tagged". Fold existing rows into the same
+  // normal form once; writes are normalized at the boundary from here on.
+  const exLower = await db.getFirstAsync<{ value: string }>(
+    `SELECT value FROM settings WHERE key = 'exemplars_lowercase_v1'`
+  );
+  if (!exLower) {
+    await db.execAsync(
+      `UPDATE exemplars SET label = lower(trim(label)) WHERE label != lower(trim(label));`
+    );
+    await db.runAsync(
+      `INSERT OR REPLACE INTO settings (key, value) VALUES ('exemplars_lowercase_v1', '1')`
+    );
+  }
 }
 
 // ---- primary-space guard -------------------------------------------------------
@@ -658,8 +674,11 @@ export async function bulkUpdateMemeTags(
 
 // ---- VLM enrichment ----------------------------------------------------------
 
-// Memes still awaiting (or due to retry) a VLM description. Returns just
-// the fields the enricher needs to re-materialize the image and write back.
+// Memes still awaiting a VLM description. Placeholder rows (pending = 1) are
+// excluded: they have no embedding yet, so the duplicate-skip twin match would
+// run against a zero vector and their file may not even be indexable yet.
+// Returns just the fields the enricher needs to re-materialize the image and
+// write back.
 export interface MemeNeedingVisionRow {
   id: number;
   uri: string;
@@ -681,7 +700,9 @@ export async function getMemesNeedingVision(limit = 10000): Promise<MemeNeedingV
     ocr_text: string;
     embedding: Uint8Array;
   }>(
-    "SELECT id, uri, name, kind, tags, ocr_text, embedding FROM memes WHERE vision_state = 'pending' ORDER BY indexed_at DESC, id DESC LIMIT ?",
+    `SELECT id, uri, name, kind, tags, ocr_text, embedding FROM memes
+     WHERE vision_state = 'pending' AND pending = 0 AND length(embedding) > 0
+     ORDER BY indexed_at DESC, id DESC LIMIT ?`,
     limit
   );
   return rows.map((r) => ({
@@ -961,10 +982,13 @@ export async function markVisionFailed(id: number): Promise<void> {
   await db.runAsync("UPDATE memes SET vision_state = 'failed' WHERE id = ?", id);
 }
 
+// Describable memes still queued: 'pending' state, already indexed. Mirrors
+// getMemesNeedingVision exactly, so the count can never promise work the queue
+// won't hand out.
 export async function countMemesNeedingVision(): Promise<number> {
   const db = await getDb();
   const row = await db.getFirstAsync<{ c: number }>(
-    "SELECT COUNT(*) as c FROM memes WHERE vision_state = 'pending'"
+    "SELECT COUNT(*) as c FROM memes WHERE vision_state = 'pending' AND pending = 0 AND length(embedding) > 0"
   );
   return row?.c ?? 0;
 }
@@ -978,10 +1002,52 @@ export async function countMemesDescribed(): Promise<number> {
 }
 
 // Re-queue everything (failed + already-done) for a fresh description pass —
-// e.g. after switching to the higher-quality model.
+// e.g. after switching to the higher-quality model. Degraded rows (no
+// embedding: the indexer could never read the file) stay 'failed'; the model
+// has nothing to read either, so re-queueing them only pads the queue.
 export async function resetVisionState(): Promise<void> {
   const db = await getDb();
-  await db.execAsync("UPDATE memes SET vision_state = 'pending';");
+  await db.execAsync("UPDATE memes SET vision_state = 'pending' WHERE length(embedding) > 0;");
+}
+
+// Every meme in the library, split by what the describe pass can do with it.
+// The buckets partition the table, so `total` is the honest denominator for
+// "Described x / y" — done + queued alone silently drops failures, degraded
+// files, and rows still being indexed, which is what made the number wrong.
+export interface VisionStats {
+  total: number; // every row in the library
+  described: number; // has a caption
+  queued: number; // ready for the model right now
+  indexing: number; // placeholder rows — describable once indexed
+  failed: number; // the model errored; retryable
+  unsupported: number; // the indexer could not read the file at all
+}
+
+export async function getVisionStats(): Promise<VisionStats> {
+  const db = await getDb();
+  const row = await db.getFirstAsync<VisionStats>(
+    `SELECT COUNT(*) AS total,
+            COALESCE(SUM(vision_state = 'done'), 0) AS described,
+            COALESCE(SUM(pending = 1), 0) AS indexing,
+            COALESCE(SUM(pending = 0 AND vision_state = 'pending' AND length(embedding) > 0), 0) AS queued,
+            COALESCE(SUM(pending = 0 AND vision_state = 'failed' AND length(embedding) > 0), 0) AS failed,
+            COALESCE(SUM(pending = 0 AND vision_state != 'done' AND length(embedding) = 0), 0) AS unsupported
+     FROM memes`
+  );
+  return (
+    row ?? { total: 0, described: 0, queued: 0, indexing: 0, failed: 0, unsupported: 0 }
+  );
+}
+
+// Re-queue memes the model errored on. Degraded rows (empty embedding — the
+// indexer could never read the file) share the 'failed' state but are NOT
+// retryable: re-queueing them would fail again on every pass forever.
+export async function resetVisionFailures(): Promise<number> {
+  const db = await getDb();
+  const res = await db.runAsync(
+    "UPDATE memes SET vision_state = 'pending' WHERE vision_state = 'failed' AND pending = 0 AND length(embedding) > 0"
+  );
+  return res.changes ?? 0;
 }
 
 // ---- audio transcription -------------------------------------------------------
@@ -1128,15 +1194,21 @@ export async function setSetting(key: string, value: string): Promise<void> {
 }
 
 // Every tag label is stored lower-case so search, dedupe, and the tag UI treat
-// "Pepe" and "pepe" as one tag. Normalizing at the write/read boundary means no
-// pipeline (curated labels, vision, OCR, or manual entry) can persist mixed
-// case, and legacy rows written before this render lower-case too. Dedupes by
-// the normalized label, keeping the first (already highest-ranked upstream).
+// "Pepe" and "pepe" as one tag. Taught exemplar labels go through the same
+// normal form (they become meme tags verbatim), so the two sides always match.
+export function normalizeLabel(label: string): string {
+  return label.trim().toLowerCase();
+}
+
+// Normalizing at the write/read boundary means no pipeline (curated labels,
+// vision, OCR, or manual entry) can persist mixed case, and legacy rows written
+// before this render lower-case too. Dedupes by the normalized label, keeping
+// the first (already highest-ranked upstream).
 export function normalizeTags(tags: Tag[]): Tag[] {
   const seen = new Set<string>();
   const out: Tag[] = [];
   for (const t of tags) {
-    const label = t.label.trim().toLowerCase();
+    const label = normalizeLabel(t.label);
     if (!label || seen.has(label)) continue;
     seen.add(label);
     out.push(t.label === label ? t : { ...t, label });
@@ -1280,8 +1352,8 @@ export async function exportDescribedTags(): Promise<{ id: string; tags: string[
 export async function countMemesWithLabel(label: string): Promise<number> {
   const db = await getDb();
   const row = await db.getFirstAsync<{ c: number }>(
-    'SELECT COUNT(*) as c FROM memes WHERE tags LIKE ?',
-    `%"label":"${label}"%`
+    "SELECT COUNT(*) as c FROM memes WHERE pending = 0 AND tags LIKE ?",
+    `%"label":"${normalizeLabel(label)}"%`
   );
   return row?.c ?? 0;
 }
@@ -1787,7 +1859,7 @@ export async function addExemplar(args: {
   await db.runAsync(
     `INSERT INTO exemplars (label, category, vector, associations, source_uri, is_positive, origin, pack, model, created_at)
      VALUES (?, ?, ?, ?, ?, ?, 'self', '', ?, ?)`,
-    args.label,
+    normalizeLabel(args.label),
     args.category,
     vecToBlob(args.vector),
     JSON.stringify(args.associations),
@@ -1905,7 +1977,7 @@ export async function migrateStaleExemplars(): Promise<{ migrated: number; unmig
     const dup = await db.getFirstAsync<{ id: number }>(
       'SELECT id FROM exemplars WHERE model = ? AND label = ? AND source_uri = ? AND is_positive = ?',
       PRIMARY_EMBEDDING_MODEL.id,
-      e.label,
+      normalizeLabel(e.label),
       e.source_uri,
       e.is_positive
     );
@@ -1913,7 +1985,7 @@ export async function migrateStaleExemplars(): Promise<{ migrated: number; unmig
       await db.runAsync(
         `INSERT INTO exemplars (label, category, vector, associations, source_uri, is_positive, origin, pack, model, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        e.label,
+        normalizeLabel(e.label),
         e.category,
         meme.embedding,
         e.associations,
@@ -1963,7 +2035,7 @@ export async function deleteExemplar(id: number): Promise<void> {
 // stops matching (no head to train) and falls off.
 export async function deleteExemplarsByLabel(label: string): Promise<number> {
   const db = await getDb();
-  const res = await db.runAsync('DELETE FROM exemplars WHERE label = ?', label);
+  const res = await db.runAsync('DELETE FROM exemplars WHERE label = ?', normalizeLabel(label));
   return res.changes ?? 0;
 }
 
@@ -2008,14 +2080,16 @@ export async function getTaughtLabelStats(): Promise<TaughtLabelStat[]> {
 
   const byLabel = new Map<string, TaughtLabelStat & { packSet: Set<string> }>();
   for (const r of exRows) {
+    // Match the tag side's normal form — an exemplar label IS the tag label.
+    const label = normalizeLabel(r.label);
     const stat =
-      byLabel.get(r.label) ??
+      byLabel.get(label) ??
       {
-        label: r.label,
+        label,
         category: r.category,
         positives: 0,
         negatives: 0,
-        tagged: taggedCounts.get(r.label) ?? 0,
+        tagged: taggedCounts.get(label) ?? 0,
         fromSelf: false,
         fromPack: false,
         packs: [],
@@ -2029,7 +2103,7 @@ export async function getTaughtLabelStats(): Promise<TaughtLabelStat[]> {
     } else {
       stat.fromSelf = true;
     }
-    byLabel.set(r.label, stat);
+    byLabel.set(label, stat);
   }
 
   return [...byLabel.values()]
@@ -2095,7 +2169,7 @@ export async function importExemplars(
   const sig = (label: string, positive: boolean, vec: number[]) =>
     // First few components rounded are a cheap, collision-safe fingerprint for
     // a 512-dim normalized vector; exact equality across devices is unreliable.
-    `${label} ${positive ? 1 : 0} ${vec.slice(0, 8).map((v) => v.toFixed(5)).join(',')}`;
+    `${normalizeLabel(label)} ${positive ? 1 : 0} ${vec.slice(0, 8).map((v) => v.toFixed(5)).join(',')}`;
 
   // On replace we drop everything below, so there's nothing to dedupe against.
   const existing = mode === 'replace' ? [] : await getExemplars();
@@ -2124,7 +2198,7 @@ export async function importExemplars(
         }
         seen.add(s);
         await stmt.executeAsync(
-          e.label,
+          normalizeLabel(e.label),
           e.category,
           vecToBlob(e.vector),
           JSON.stringify(e.associations),

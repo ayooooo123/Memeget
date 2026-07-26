@@ -18,6 +18,7 @@ import {
   clearIndexErrors,
   clearIndexErrorsFor,
   countMemesDescribed,
+  countMemesNeedingVision,
   dot,
   getAllMemeEmbeddings,
   getAllThumbUris,
@@ -1171,6 +1172,13 @@ async function enrichOne(
 // Settings "Describe N now" button). Runs AFTER the fast CLIP pass so the
 // library is browsable immediately; this just makes it smarter. Strictly
 // sequential — the on-device LLM does one generation at a time.
+//
+// The queue is re-read in small chunks rather than slurped whole: a big library
+// meant thousands of rows (each with a 512-float embedding) materialized in JS
+// before the first generation started, which is dead time the user watches at
+// "Describing 0/…". Chunking also lets memes indexed mid-run join this pass.
+const ENRICH_CHUNK = 24;
+
 export async function enrichLibrary(
   vision: VisionEnricher,
   opts: { onProgress?: (p: EnrichProgress) => void; shouldCancel?: () => boolean } = {}
@@ -1179,29 +1187,59 @@ export async function enrichLibrary(
 
   const assoc = await buildAssociations();
   const twins = await getTwinIndex();
-  const queue = await getMemesNeedingVision();
-  const total = queue.length;
+  let total = 0;
 
+  let done = 0;
   let described = 0;
   let deduped = 0;
   let failed = 0;
-  for (let i = 0; i < queue.length; i++) {
+  let stopped = false;
+  while (!stopped) {
     if (opts.shouldCancel?.()) break;
-    // Let a live search through: this burst runs generations back-to-back, and
-    // without a break between them the query's text embed never reaches the
-    // accelerator until the whole queue drains. Stand down while the user is
-    // searching so their vector lands and results upgrade past lexical-only.
-    await yieldToSearch(opts.shouldCancel);
-    if (opts.shouldCancel?.()) break;
-    opts.onProgress?.({ done: i, total, current: queue[i].name });
-    const r = await enrichOne(vision, queue[i], assoc, twins);
-    if (r === 'unready') break;
-    if (r === 'done') described++;
-    else if (r === 'deduped') deduped++;
-    else failed++;
+    // Re-count at each chunk boundary (~24 generations apart, so the cost is
+    // noise): memes indexed while this pass runs extend the queue, and a
+    // denominator frozen at the start pins the bar at 100% while work remains.
+    const remaining = await countMemesNeedingVision();
+    if (remaining === 0) break;
+    total = done + remaining;
+    // Every processed row leaves the queue (done/deduped/failed all move
+    // vision_state off 'pending'), so re-reading from the top never re-serves
+    // the same meme — no OFFSET to drift under the mutations.
+    const queue = await getMemesNeedingVision(ENRICH_CHUNK);
+    if (queue.length === 0) break;
+
+    for (const m of queue) {
+      if (opts.shouldCancel?.()) {
+        stopped = true;
+        break;
+      }
+      // Let a live search through: this burst runs generations back-to-back, and
+      // without a break between them the query's text embed never reaches the
+      // accelerator until the whole queue drains. Stand down while the user is
+      // searching so their vector lands and results upgrade past lexical-only.
+      await yieldToSearch(opts.shouldCancel);
+      if (opts.shouldCancel?.()) {
+        stopped = true;
+        break;
+      }
+      opts.onProgress?.({ done, total, current: m.name });
+      const r = await enrichOne(vision, m, assoc, twins);
+      if (r === 'unready') {
+        // The model went away mid-pass; the row is still 'pending', so looping
+        // would spin on it forever.
+        stopped = true;
+        break;
+      }
+      done++;
+      if (r === 'done') described++;
+      else if (r === 'deduped') deduped++;
+      else failed++;
+    }
   }
 
-  opts.onProgress?.({ done: total, total, current: '' });
+  // Report what actually happened. Snapping to done === total on cancel drew a
+  // full bar for a pass the user just stopped.
+  opts.onProgress?.({ done, total: Math.max(total, done), current: '' });
   return { described, deduped, failed };
 }
 
