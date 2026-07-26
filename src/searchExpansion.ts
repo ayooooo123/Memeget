@@ -1,4 +1,4 @@
-import { ASSOCIATIONS, MEME_LABELS } from './memeLabels';
+import { ASSOCIATIONS, MEME_LABELS, labelVectorKey } from './memeLabels';
 
 export interface LexicalQuery {
   exactTerms: string[];
@@ -60,6 +60,19 @@ export function searchLabelPrompt(label: string): string {
   return `a meme about ${label}`;
 }
 
+// Search expansion's own slice of the `label_vectors` cache. Namespaced so it
+// can never collide with the classifier's prompt vectors for the same label —
+// they embed different text and mean different things (see memeLabels.ts).
+const SEARCH_KEY_PREFIX = 'search::';
+
+export function searchVectorKey(label: string): string {
+  return `${SEARCH_KEY_PREFIX}${label}`;
+}
+
+export function isSearchVectorKey(key: string): boolean {
+  return key.startsWith(SEARCH_KEY_PREFIX);
+}
+
 export function labelTerms(label: string): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
@@ -68,6 +81,11 @@ export function labelTerms(label: string): string[] {
   return out;
 }
 
+// Curated labels resolve to the CLASSIFIER's prompt vector ("a Pepe the Frog
+// meme, a green cartoon frog"), which buildKnowledge already caches for the
+// whole vocabulary — a richer expansion vector than "a meme about X", and it
+// spares the device 399 extra text embeds. Taught and library labels have no
+// curated prompt, so they use the lazily-seeded search vectors.
 export function buildLabelExpansionCandidates(
   vectors: Map<string, Float32Array>,
   libraryLabels: readonly string[] = [],
@@ -75,15 +93,16 @@ export function buildLabelExpansionCandidates(
 ): LabelExpansionCandidate[] {
   const out: LabelExpansionCandidate[] = [];
   const seen = new Set<string>();
-  const push = (label: string, source: LabelExpansionSource) => {
+  const push = (label: string, source: LabelExpansionSource, vec?: Float32Array) => {
     const key = label.trim();
-    const vec = vectors.get(key) ?? vectors.get(key.toLowerCase());
-    if (!key || !vec || seen.has(key.toLowerCase())) return;
+    const found =
+      vec ?? vectors.get(searchVectorKey(key)) ?? vectors.get(searchVectorKey(key.toLowerCase()));
+    if (!key || !found || seen.has(key.toLowerCase())) return;
     seen.add(key.toLowerCase());
-    out.push({ label: key, terms: labelTerms(key), vec, source });
+    out.push({ label: key, terms: labelTerms(key), vec: found, source });
   };
 
-  for (const def of MEME_LABELS) push(def.label, 'curated');
+  for (const def of MEME_LABELS) push(def.label, 'curated', vectors.get(labelVectorKey(def)));
   for (const label of taughtLabels) push(label, 'taught');
   for (const label of libraryLabels) push(label, 'library');
   return out;

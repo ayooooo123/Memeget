@@ -45,6 +45,7 @@ import {
   refacetExemplars,
   getSetting,
   setSetting,
+  pruneLabelVectors,
   putLabelVector,
   setMemeCaptionEmbedding,
   setMemeThumb,
@@ -61,7 +62,17 @@ import { extractVideoFrame, extractVideoFramePlayer } from '../modules/memeget-b
 import type { ThumbPatch } from './events';
 import { acquireKeepAlive } from './keepAlive';
 import { codecInteractiveActive, interactiveActive, yieldToSearch } from './interactive';
-import { ASSOCIATIONS, MEME_LABELS, NEGATIVE_ANCHORS, ocrTags } from './memeLabels';
+import {
+  ASSOCIATIONS,
+  MEME_LABELS,
+  NEGATIVE_ANCHORS,
+  anchorVectorKey,
+  labelVectorKey,
+  ocrTags,
+} from './memeLabels';
+import { isSearchVectorKey } from './searchExpansion';
+import { recognitionTier } from './recognition';
+import { guessFacet } from './facetCoverage';
 import {
   copyToCache,
   deleteCache,
@@ -125,8 +136,6 @@ function dedupeRankTags(tags: Tag[], cap = 6): Tag[] {
 function mergeTags(visual: Tag[], fromOcr: Tag[]): Tag[] {
   return dedupeRankTags([...visual, ...fromOcr], 4);
 }
-
-const NEG_PREFIX = 'neg::';
 
 // On-device OCR (Google ML Kit on Android). Imported lazily/defensively so a
 // missing module never breaks the whole index run.
@@ -467,40 +476,50 @@ export async function buildKnowledge(
   const modelId = api.primaryModel.id;
   const cache = await getLabelVectors(modelId);
 
-  const missingLabels = MEME_LABELS.filter((d) => !cache.has(d.label));
-  const missingAnchors = NEGATIVE_ANCHORS.map((_, i) => i).filter(
-    (i) => !cache.has(`${NEG_PREFIX}${i}`)
-  );
+  const labelKeys = MEME_LABELS.map((d) => labelVectorKey(d));
+  const anchorKeys = NEGATIVE_ANCHORS.map((a) => anchorVectorKey(a));
+  const missingLabels = MEME_LABELS.filter((_, i) => !cache.has(labelKeys[i]));
+  const missingAnchors = NEGATIVE_ANCHORS.map((_, i) => i).filter((i) => !cache.has(anchorKeys[i]));
   const vocabTotal = missingLabels.length + missingAnchors.length;
   let vocabDone = 0;
+  // A changed MODEL isn't the only reason to be here any more: an edited prompt
+  // or a new anchor changes the vector's cache key too, so keep the copy honest.
   const noteVocab = () => {
     vocabDone++;
     if (vocabDone % 10 === 0 || vocabDone === vocabTotal) {
-      onStatus?.(`embedding label vocabulary ${vocabDone}/${vocabTotal} (model changed)…`);
+      onStatus?.(`embedding label vocabulary ${vocabDone}/${vocabTotal}…`);
     }
   };
-  if (vocabTotal > 0) onStatus?.(`embedding label vocabulary 0/${vocabTotal} (model changed)…`);
+  if (vocabTotal > 0) onStatus?.(`embedding label vocabulary 0/${vocabTotal}…`);
 
-  for (const def of missingLabels) {
-    const vec = await api.embedText(def.prompt);
-    await putLabelVector(def.label, vec, modelId);
-    cache.set(def.label, Float32Array.from(vec));
+  for (let i = 0; i < MEME_LABELS.length; i++) {
+    if (cache.has(labelKeys[i])) continue;
+    const vec = await api.embedText(MEME_LABELS[i].prompt);
+    await putLabelVector(labelKeys[i], vec, modelId);
+    cache.set(labelKeys[i], Float32Array.from(vec));
     noteVocab();
   }
   for (const i of missingAnchors) {
-    const key = `${NEG_PREFIX}${i}`;
     const vec = await api.embedText(NEGATIVE_ANCHORS[i]);
-    await putLabelVector(key, vec, modelId);
-    cache.set(key, Float32Array.from(vec));
+    await putLabelVector(anchorKeys[i], vec, modelId);
+    cache.set(anchorKeys[i], Float32Array.from(vec));
     noteVocab();
   }
 
-  const labelVecs: LabelVec[] = MEME_LABELS.filter((d) => cache.has(d.label)).map((d) => ({
-    label: d.label,
-    category: d.category,
-    vec: cache.get(d.label)!,
-  }));
-  const negativeVecs = NEGATIVE_ANCHORS.map((_, i) => cache.get(`${NEG_PREFIX}${i}`)!).filter(Boolean);
+  // Anything left in this model's cache that isn't a live classifier key or a
+  // search-expansion vector is a leftover: an edited prompt, a dropped anchor,
+  // or a row from before the two keyspaces were separated.
+  if (vocabTotal > 0) {
+    const live = new Set([...labelKeys, ...anchorKeys]);
+    await pruneLabelVectors((k) => live.has(k) || isSearchVectorKey(k), modelId).catch(() => 0);
+  }
+
+  const labelVecs: LabelVec[] = [];
+  for (let i = 0; i < MEME_LABELS.length; i++) {
+    const vec = cache.get(labelKeys[i]);
+    if (vec) labelVecs.push({ label: MEME_LABELS[i].label, category: MEME_LABELS[i].category, vec });
+  }
+  const negativeVecs = anchorKeys.map((k) => cache.get(k)!).filter(Boolean);
 
   const exemplars = await getExemplars();
   onStatus?.('training taught labels…');
@@ -601,6 +620,24 @@ export async function runIndex(
     await refacetExemplars()
       .then(() => setSetting(REFACET_EXEMPLARS_KEY, '1'))
       .catch(() => {});
+  }
+
+  // One-time: rows tagged before the classifier was calibrated carry the old
+  // softmax scores, which mean something different (see ./recognition) — a
+  // stale row reads as a low-confidence "weak" match, so the VLM hedges on
+  // memes we may actually recognize. Re-tagging rewrites every prompt score in
+  // the calibrated scale. Free-ish: `know` is already built and it is pure
+  // vector math over stored embeddings.
+  if ((await getSetting(RECALIBRATED_TAGS_KEY).catch(() => null)) !== '1') {
+    opts.onProgress?.({ processed: total, total, added, current: 'recalibrating tags…' });
+    try {
+      const res = await retagWithKnowledge(know, { shouldCancel: opts.shouldCancel });
+      // A stopped pass wrote partial progress, so leave the flag off and let
+      // the next index finish the rest.
+      if (!res.cancelled) await setSetting(RECALIBRATED_TAGS_KEY, '1');
+    } catch {
+      // Tags stay on the old scale until the next index or an explicit re-tag.
+    }
   }
 
   // Reclaim posters whose meme rows are gone (deleted memes, a cleared+rebuilt
@@ -864,6 +901,7 @@ export async function indexPendingMemes(
 
 export interface RetagResult {
   updated: number; // rows whose tags/terms actually changed (unchanged rows are skipped)
+  cancelled: boolean; // stopped early — the remaining rows still hold their old tags
 }
 
 // Zero-shot prompt tags are a pure function of (embedding, curated labels) —
@@ -878,15 +916,15 @@ function embSig(e: Float32Array): number {
   return n ? n + e[0] + e[n >> 1] * 3 + e[n - 1] * 7 : 0;
 }
 
-// Re-run tagging over every already-indexed meme using current knowledge
-// (new exemplars, edited associations). Reuses stored embeddings, so there is
-// no image re-embedding — only cheap vector math.
-export async function retagAll(
-  api: EmbeddingsApi,
+// Re-run tagging over every already-indexed meme using the given knowledge.
+// Reuses stored embeddings, so there is no image re-embedding — only cheap
+// vector math. Split out from `retagAll` so a caller that already holds a built
+// Knowledge (runIndex) doesn't pay to rebuild the vocabulary and retrain every
+// taught head just to re-tag.
+async function retagWithKnowledge(
+  know: Knowledge,
   opts: { onProgress?: (done: number, total: number) => void; shouldCancel?: () => boolean } = {}
 ): Promise<RetagResult> {
-  return withHeavyPass(async () => {
-  const know = await buildKnowledge(api);
   const rows = await getAllMemeEmbeddings();
 
   // Classify every meme up front. This is pure JS vector math over the whole
@@ -896,10 +934,14 @@ export async function retagAll(
   // responsive whether the library is 100 memes or 100,000.
   const updates: { id: number; tags: Tag[]; extraTerms: string }[] = [];
   const tick = createYielder();
+  let cancelled = false;
   for (let i = 0; i < rows.length; i++) {
     // Cancellable (the Stop button reaches this now): rows classified so far
     // are still written below, so a stopped re-tag makes partial progress.
-    if (opts.shouldCancel?.()) break;
+    if (opts.shouldCancel?.()) {
+      cancelled = true;
+      break;
+    }
     const row = rows[i];
     // Degraded rows (files the pipeline couldn't process) have no embedding.
     if (row.embedding.length === 0) {
@@ -936,8 +978,16 @@ export async function retagAll(
 
   // Single transaction for all the writes — fast even on a big library.
   await bulkUpdateMemeTags(updates);
-  return { updated: updates.length };
-  });
+  return { updated: updates.length, cancelled };
+}
+
+// Re-tag the library with current knowledge (new exemplars, edited
+// associations). The entry point for the UI's "Re-tag" actions.
+export async function retagAll(
+  api: EmbeddingsApi,
+  opts: { onProgress?: (done: number, total: number) => void; shouldCancel?: () => boolean } = {}
+): Promise<RetagResult> {
+  return withHeavyPass(async () => retagWithKnowledge(await buildKnowledge(api), opts));
 }
 
 // Merge two whitespace-separated term strings into a de-duplicated bag.
@@ -992,6 +1042,11 @@ interface VisionPayload {
 // facet vocabulary grows so the re-facet pass runs again and catches labels it
 // now recognizes (v2: added a public-figure person list + topic words).
 const REFACET_EXEMPLARS_KEY = 'exemplars.refaceted.v2';
+
+// One-time flag: every stored prompt-tag score has been rewritten in the
+// calibrated scale (./recognition). Bump the version if the calibration curve
+// or the negative anchors change, so the library is re-scored against them.
+const RECALIBRATED_TAGS_KEY = 'tags.calibrated.v1';
 
 const DUP_COSINE = 0.99;
 const normText = (s: string) => s.toLowerCase().replace(/\s+/g, ' ').trim();
@@ -1076,12 +1131,15 @@ async function describeAndSave(
     // Retrieval-augmented grounding: the fast CLIP pass already tagged this meme
     // (m.tags) from the harvested label vocabulary — knowledge the small VLM
     // often lacks. Hand it the top format/character guesses (+ their association
-    // terms) so it can NAME templates/characters it couldn't recognize alone.
+    // terms) so it can NAME templates/characters it couldn't recognize alone —
+    // but only as strongly as the recognizer's own confidence warrants, which
+    // for a non-standard meme means telling it we matched nothing at all.
+    const tier = recognitionTier(m.tags);
     const groundLabels: GroundingLabel[] = [...m.tags]
       .sort((a, b) => b.score - a.score)
       .map((t) => ({ label: t.label, category: t.category }));
     const related = m.tags.flatMap((t) => assoc.get(t.label) ?? []);
-    const grounding = formatGrounding(groundLabels, related);
+    const grounding = formatGrounding(groundLabels, related, tier);
 
     // Describe each distinct frame, stopping as soon as a frame says essentially
     // the same thing as the previous one — a static clip pays for one generation,
@@ -1098,10 +1156,14 @@ async function describeAndSave(
     const res = mergeVisionResults(results);
 
     // The VLM's open-vocabulary tags join the existing CLIP/OCR/exemplar tags,
-    // ranked between them (above CLIP guesses, below the user's truth).
+    // ranked between them (above CLIP guesses, below the user's truth). Each is
+    // filed into the facet its words imply instead of a blanket 'topic': on an
+    // unrecognized meme these are the ONLY tags, so if they all say 'topic' the
+    // meme reads as having no character, action, emotion or situation at all —
+    // to the grounding line, to facet coverage, and to anything facet-aware.
     const visionTags: Tag[] = res.tags.map((label) => ({
       label,
-      category: 'topic',
+      category: guessFacet(label, 'topic'),
       score: 0.9,
       source: 'vision' as const,
     }));

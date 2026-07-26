@@ -201,6 +201,58 @@ predictions is the model step: either a device export, or (planned) a CI action
 that runs the app's prompt through a proxy VLM on the committed test images so
 the prompt can be A/B'd in a PR without a device.
 
+## Recognition (npm run recognition) — does the classifier know when it doesn't know?
+
+Every eval above asks whether the right label ranks first. This one asks the
+question that decides how a **non-standard** meme is handled: given an image,
+can we tell "I recognize this format" from "I have never seen this"? Most of a
+real library is the second case — there is no enumerable set of templates
+(`docs/composite-meme-understanding.md`) — and a classifier that names something
+anyway does real damage: the guess becomes the VLM's grounding, and the VLM
+writes it into the caption, the tags and the search text.
+
+```bash
+npm run recognition   # scores golden.json against label-vectors.json
+```
+
+Ground truth is free, as everywhere else here: each golden meme carries its own
+corpus tags, and a predicted label counts as correct when the label or one of
+its associations appears among them. Both inputs are committed
+(`label-vectors.json` = the app's 399 label prompts + 14 negative anchors,
+embedded with MobileCLIP-S2 by `build_label_vectors.py`), so it runs in CI with
+no torch and no device. Re-run the builder after editing a prompt or an anchor —
+the eval refuses to grade a stale vocabulary rather than measuring the wrong one.
+
+What it prints, on the 595-meme holdout:
+
+```
+rule (up to 3 labels emitted per meme):
+  calibrated (shipped)       coverage  75.5%   top-1  45.7%   tag-precision  46.3%   546 right / 632 wrong
+  softmax + 3 anchors (was)  coverage  92.6%   top-1  38.1%   tag-precision  43.3%   510 right / 669 wrong
+  softmax + all anchors      coverage  88.2%   top-1  39.4%   tag-precision  45.4%   503 right / 604 wrong
+
+ranking signal (AUC: orders a correct top-1 above a wrong one):
+  cos - 0.5*anchor (shipped) 0.853
+  cos alone                  0.834
+  cos - anchor               0.829
+  softmax probability        0.732
+  cos top1 - top2            0.495
+
+tiers (what the app tells the VLM):
+  recognized   26.2% of memes   top label right 80.8%   (n=156)
+  weak         49.2% of memes   top label right 27.0%   (n=293)
+  unknown      24.5% of memes   top label right 4.8%   (n=146)
+```
+
+(plus a calibration table: claimed confidence vs measured precision per band.)
+
+Read it as: a quarter of a real library matches nothing, and on that quarter we
+would have been right 5% of the time — so `src/recognition.ts` abstains there and
+`formatGrounding` tells the VLM outright that nothing matched. The tier
+thresholds and the score→probability calibration in that file were read straight
+off this table; the assertions in `src/recognitionEval.test.ts` are the A/B gate
+that keeps a future change from quietly going back to naming everything.
+
 ## Emergent templates (npm run templates)
 
 There is no list of meme templates — anything can become one

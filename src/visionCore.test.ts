@@ -12,8 +12,25 @@ import {
 } from './visionCore';
 
 describe('formatGrounding', () => {
-  it('returns empty when there are no labels', () => {
-    expect(formatGrounding([])).toBe('');
+  // The whole point of the tier: on a meme nothing matched, saying "no known
+  // format, don't invent one" is what keeps a wrong guess out of the caption.
+  it('states that nothing matched instead of going silent', () => {
+    const g = formatGrounding([]);
+    expect(g.toLowerCase()).toContain('matched none');
+    expect(g.toLowerCase()).toContain('do not force it into a famous template');
+  });
+
+  it('says the same when the recognizer has labels but no confidence in them', () => {
+    const g = formatGrounding([{ label: 'drake', category: 'format' }], [], 'unknown');
+    expect(g).not.toContain('drake');
+    expect(g.toLowerCase()).toContain('matched none');
+  });
+
+  it('hedges a weak match instead of asserting it', () => {
+    const g = formatGrounding([{ label: 'drake', category: 'format' }], [], 'weak');
+    expect(g).toContain('format: drake');
+    expect(g.toUpperCase()).toContain('UNSURE');
+    expect(g.toLowerCase()).toContain('do not name a format');
   });
 
   it('groups every facet by name and keeps emotion/action (does not drop them)', () => {

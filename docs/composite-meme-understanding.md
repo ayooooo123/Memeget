@@ -151,6 +151,17 @@ richer inputs from Stages 2–4 fed in as grounding.
 | 4 Analogy | relational reasoning | — | **on-device can't; cloud tier or fine-tune** |
 | 5 Two-layer tags | searchable output | tagging path + facet coverage eval | works *if* 2–4 feed it |
 
+**Shipped for Stage 2 (the "do NOT force it into a known meme format" half):**
+the classifier now abstains instead of guessing. `src/recognition.ts` scores each
+label as `cos(image, label) − 0.5·max cos(image, anchor)`, maps that margin to a
+calibrated P(correct), and sorts every meme into `recognized` / `weak` /
+`unknown`; `formatGrounding` says something different in each case, and on
+`unknown` it tells the model outright that nothing matched and asks for
+open-ended reference naming. Measured on the 595-meme holdout
+(`npm run recognition`): 24.5% of memes land in `unknown`, where the old rule's
+forced label was right 4.8% of the time. That is the failure this doc predicted —
+a wrong template name laundered into the caption — closed with a number.
+
 **The boundary, stated for real:** no prompt tweak makes a ~2B on-device model
 reliably do Stages 2–4 on a novel AI-gen remix. Prompt work maximizes Stages 1
 and 5 (perceive + tag what it's told). Closing 2–4 is the knowledge-base /

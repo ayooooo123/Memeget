@@ -4,6 +4,7 @@
 // context with no component tree.
 import { GEMMA4_E2B_MM, type Message } from 'react-native-executorch';
 
+import type { RecognitionTier } from './recognition';
 import type { NativePower } from '../modules/memeget-bg';
 
 // Persisted-setting keys, shared so the provider and the headless task read the
@@ -145,10 +146,37 @@ const MAX_PER_FACET = 2; // keep one loud facet from crowding out the rest
 const MAX_GROUNDING_LABELS = 8;
 const MAX_GROUNDING_RELATED = 6;
 
+// What we say when the recognizer has nothing. Not silence: an explicit "this
+// is not a known format" is itself information, and it is what stops the model
+// reaching for the nearest famous template it half-remembers. The follow-up ask
+// is deliberately open-ended and graceful — name what you can actually place,
+// say nothing about what you can't.
+const NO_FORMAT_GROUNDING =
+  `\nA visual recognizer checked this against a library of known meme formats and matched NONE of them. ` +
+  `Do not force it into a famous template and do not name a format you are not sure of — most memes are ` +
+  `not a known template. Instead name any real person, brand, logo, artwork, show, game or event you ` +
+  `actually recognize, and describe what is happening and the situation it would be sent in. If you ` +
+  `cannot place a reference, leave it out.`;
+
 // Build the grounding line from CLIP's per-facet guesses (+ their association
 // terms), grouped and labeled by facet: "format: drake; emotion: smug; action:
-// pointing". Returns '' when there's nothing to offer.
-export function formatGrounding(labels: GroundingLabel[], related: string[] = []): string {
+// pointing".
+//
+// `tier` is how much the recognizer actually believes itself (see
+// ../recognition). It matters more than the labels: a 2B model treats a
+// confident-sounding suggestion as a fact, so on the ~25% of a real library
+// that matches nothing (the AI-gen remixes, screenshots and originals — the
+// class this whole grounding line was never able to help), naming a template
+// here is how a wrong CLIP guess gets laundered into the caption, the tags and
+// the search text. There we say so, and ask for open-ended reference naming
+// instead — Stage 2 of docs/composite-meme-understanding.md.
+export function formatGrounding(
+  labels: GroundingLabel[],
+  related: string[] = [],
+  tier: RecognitionTier = 'recognized'
+): string {
+  if (tier === 'unknown' || labels.length === 0) return NO_FORMAT_GROUNDING;
+
   const byFacet = new Map<string, string[]>();
   const seen = new Set<string>();
   for (const l of labels) {
@@ -177,16 +205,20 @@ export function formatGrounding(labels: GroundingLabel[], related: string[] = []
     segments.push(`${facet}: ${take.join(', ')}`);
     total += take.length;
   }
-  if (segments.length === 0) return '';
+  if (segments.length === 0) return NO_FORMAT_GROUNDING;
 
   const rel = [...new Set(related.map((r) => r.trim().toLowerCase()).filter(Boolean))]
     .slice(0, MAX_GROUNDING_RELATED)
     .join(', ');
-  return (
-    `\nA visual recognizer suggests — ${segments.join('; ')}` +
-    (rel ? ` (related: ${rel})` : '') +
-    `. Use any that match what you actually see in SUBJECTS and TAGS; ignore any that do not.`
-  );
+  const lead =
+    tier === 'weak'
+      ? `\nA visual recognizer is UNSURE and offers only low-confidence guesses — ${segments.join('; ')}`
+      : `\nA visual recognizer suggests — ${segments.join('; ')}`;
+  const close =
+    tier === 'weak'
+      ? `. Use one ONLY if it is obviously right in front of you; otherwise ignore all of them and do not name a format.`
+      : `. Use any that match what you actually see in SUBJECTS and TAGS; ignore any that do not.`;
+  return lead + (rel ? ` (related: ${rel})` : '') + close;
 }
 
 // Build the user turn, optionally grounding it with (1) text ML Kit already read
