@@ -6,7 +6,7 @@
 // — that Gemma actually emits these words — is a separate on-device check.)
 
 import { parseVision, formatGrounding, userTurn, type GroundingLabel } from './visionCore';
-import { memeExtraTerms, captionSearchText, assembleSearchText } from './searchText';
+import { assembleSearchText, captionSearchText, classificationContextTerms, memeExtraTerms } from './searchText';
 
 // A representative reply in the exact shape the enriched USER_PROMPT requests,
 // covering every facet the taxonomy added.
@@ -61,6 +61,22 @@ describe('a facet-rich VLM reply becomes searchable by every facet', () => {
     const junk = searchTextFor('TAGS: 4-8 comma-separated lowercase keywords');
     expect(junk.includes('comma-separated')).toBe(false);
   });
+
+  it('adds bounded context phrases from the whole classification without creating tags', () => {
+    const extra = memeExtraTerms('', {
+      caption: 'a furious worker reacts in a meeting',
+      text: '',
+      subjects: ['office worker'],
+      tags: ['angry reaction', 'work meeting', 'frustration'],
+    });
+
+    expect(extra).toContain('angry reaction office worker');
+    expect(extra).toContain('angry reaction work meeting');
+    expect(extra).toContain('furious worker');
+    expect(classificationContextTerms({ tags: ['Angry Reaction', 'Office / Work'] })).toContain(
+      'angry reaction office work'
+    );
+  });
 });
 
 describe('the model is actually asked for facets, grounded by the CLIP guess', () => {
@@ -73,11 +89,27 @@ describe('the model is actually asked for facets, grounded by the CLIP guess', (
     const turn = userTurn('this is fine', formatGrounding(clipGuess));
     // The prompt requests the new facets…
     expect(turn).toMatch(/how a person would search/i);
+
     expect(turn).toMatch(/real-life situation/);
     expect(turn).toMatch(/be quiet/); // the gesture-meaning teaching example
     // …and hands the model CLIP's facet guess to confirm/expand.
     expect(turn).toContain('format: This Is Fine');
     expect(turn).toContain('situation: False Confidence');
+  });
+});
+
+describe('already-indexed rows gain context without a DB backfill', () => {
+  it('adds classification context at search assembly time', () => {
+    const text = assembleSearchText({
+      ocr: '',
+      name: '',
+      caption: '',
+      transcript: '',
+      tagLabels: ['Angry Reaction', 'Office / Work'],
+      extraTerms: '',
+    });
+
+    expect(text).toContain('angry reaction office work');
   });
 });
 
