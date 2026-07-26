@@ -12,6 +12,7 @@
 
 import type { Tag } from './types';
 import { buildAllBaselineLabels } from './baselineLabels';
+import { hashText } from './contentHash';
 
 // Facets a meme is dissected into — so any aspect is findable by a plain-word
 // description. The first five are the identity/topic core; the rest capture
@@ -213,22 +214,12 @@ export const NEGATIVE_ANCHORS: string[] = [
 const CLASSIFIER_KEY_PREFIX = 'clip::';
 const ANCHOR_KEY_PREFIX = 'neg::';
 
-// FNV-1a, base36. Not cryptographic — it only has to change when the text does.
-function textHash(s: string): string {
-  let h = 0x811c9dc5;
-  for (let i = 0; i < s.length; i++) {
-    h ^= s.charCodeAt(i);
-    h = Math.imul(h, 0x01000193);
-  }
-  return (h >>> 0).toString(36);
-}
-
 export function labelVectorKey(def: LabelDef): string {
-  return `${CLASSIFIER_KEY_PREFIX}${textHash(def.prompt)}:${def.label}`;
+  return `${CLASSIFIER_KEY_PREFIX}${hashText(def.prompt)}:${def.label}`;
 }
 
 export function anchorVectorKey(text: string): string {
-  return `${ANCHOR_KEY_PREFIX}${textHash(text)}`;
+  return `${ANCHOR_KEY_PREFIX}${hashText(text)}`;
 }
 
 // label -> associations lookup, built once.

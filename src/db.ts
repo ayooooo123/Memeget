@@ -7,6 +7,7 @@ import { scoreEntry } from './searchCore';
 import { assembleSearchText, classificationContextTerms } from './searchText';
 import { guessFacet } from './facetCoverage';
 import { INSERT_MEME_SQL, MEMES_TABLE_SQL, RESTORE_SIDECAR_MEME_SQL } from './memeSql';
+import { hashText } from './contentHash';
 // Knowledge mutations announce themselves here so the `.memeget` sidecar backup
 // picks them up. Emitting from the write helpers rather than the screens means
 // no UI path — present or future — can silently skip the backup.
@@ -624,7 +625,9 @@ export async function getKnowledgeVersion(): Promise<string> {
     PRIMARY_EMBEDDING_MODEL.id
   );
   const counts = row ? `${row.ec}:${row.es}:${row.mc}` : '0:0:0';
-  return `${PRIMARY_EMBEDDING_MODEL.id}:${counts}`;
+  // Hand-applied tags train heads too (see getManualTagVectors), so a bulk tag
+  // added or renamed has to invalidate the cached heads just like a teach does.
+  return `${PRIMARY_EMBEDDING_MODEL.id}:${counts}:${await getManualTagStamp()}`;
 }
 
 // A random sample of library embeddings, used as the negative/background set
@@ -2257,6 +2260,94 @@ export async function refacetExemplars(): Promise<{ updated: number }> {
     }
   }
   return { updated };
+}
+
+// One-time re-facet: every VLM tag was filed as a blanket 'topic', so a whole
+// described library reads as having no character, action, emotion or situation
+// — to facet coverage, to the grounding line, to anything facet-aware. The
+// label text is all `guessFacet` needs, so this is a pure text pass over stored
+// rows: no model, no re-describe. Idempotent (only rewrites 'topic' vision tags
+// whose words clearly point elsewhere).
+export async function refacetVisionTags(): Promise<{ memes: number; tags: number }> {
+  const db = await getDb();
+  const rows = await db.getAllAsync<{ id: number; tags: string }>(
+    `SELECT id, tags FROM memes WHERE tags LIKE '%"source":"vision"%'`
+  );
+  let memes = 0;
+  let tags = 0;
+  for (const r of rows) {
+    const parsed = safeParseTags(r.tags);
+    let changed = 0;
+    for (const t of parsed) {
+      if (t.source !== 'vision' || t.category !== 'topic') continue;
+      const facet = guessFacet(t.label, 'topic');
+      if (facet !== 'topic') {
+        t.category = facet;
+        changed++;
+      }
+    }
+    if (changed === 0) continue;
+    await db.runAsync('UPDATE memes SET tags = ? WHERE id = ?', JSON.stringify(parsed), r.id);
+    memes++;
+    tags += changed;
+  }
+  if (memes > 0) {
+    invalidateSearchIndex();
+    emitKnowledgeChanged(); // facets feed grounding, the sidecar and the UI
+  }
+  return { memes, tags };
+}
+
+// Every tag the user applied by hand is an assertion that this meme IS that
+// label — the same statement teaching makes, with the same image vector behind
+// it. The learner only ever saw the `exemplars` table, so a label the user bulk
+// tagged onto 50 memes still trained NO head and never reached a meme indexed
+// afterwards. This hands those vectors to the trainer as positives without
+// writing anything into the user's explicit teachings.
+export interface ManualPositives {
+  category: string; // the facet the tag was filed under when it was applied
+  vectors: Float32Array[];
+}
+
+export async function getManualTagVectors(): Promise<Map<string, ManualPositives>> {
+  const db = await getDb();
+  const rows = await db.getAllAsync<{ tags: string; embedding: Uint8Array }>(
+    `SELECT tags, embedding FROM memes
+      WHERE pending = 0 AND length(embedding) > 0 AND tags LIKE '%"source":"manual"%'
+      ORDER BY id`
+  );
+  const out = new Map<string, ManualPositives>();
+  for (const r of rows) {
+    let vec: Float32Array | null = null;
+    for (const t of safeParseTags(r.tags)) {
+      if (t.source !== 'manual') continue;
+      vec = vec ?? blobToVec(r.embedding);
+      const label = normalizeLabel(t.label);
+      const cur = out.get(label);
+      // A bulk tag is stored with category 'user'; that is not a facet, so fall
+      // back to inferring one from the label the way teaching does.
+      if (cur) cur.vectors.push(vec);
+      else out.set(label, { category: guessFacet(label), vectors: [vec] });
+    }
+  }
+  return out;
+}
+
+// Fingerprint of the hand-applied tags, for the trained-heads cache. Content,
+// not counts: renaming a label on the same rows has to invalidate too, and the
+// row set is small (only memes carrying a manual tag are read).
+export async function getManualTagStamp(): Promise<string> {
+  const db = await getDb();
+  const rows = await db.getAllAsync<{ id: number; tags: string }>(
+    `SELECT id, tags FROM memes WHERE tags LIKE '%"source":"manual"%' ORDER BY id`
+  );
+  const parts: string[] = [];
+  for (const r of rows) {
+    for (const t of safeParseTags(r.tags)) {
+      if (t.source === 'manual') parts.push(`${r.id}:${normalizeLabel(t.label)}`);
+    }
+  }
+  return `${parts.length}.${hashText(parts.join('|'))}`;
 }
 
 export async function migrateStaleExemplars(): Promise<{ migrated: number; unmigratable: number }> {
