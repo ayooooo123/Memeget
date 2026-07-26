@@ -6,6 +6,7 @@ import { modelStamp, PRIMARY_EMBEDDING_MODEL, VISUAL_EMBEDDING_MODEL } from './e
 import { scoreEntry } from './searchCore';
 import { assembleSearchText, classificationContextTerms } from './searchText';
 import { guessFacet } from './facetCoverage';
+import { INSERT_MEME_SQL, MEMES_TABLE_SQL, RESTORE_SIDECAR_MEME_SQL } from './memeSql';
 // Knowledge mutations announce themselves here so the `.memeget` sidecar backup
 // picks them up. Emitting from the write helpers rather than the screens means
 // no UI path — present or future — can silently skip the backup.
@@ -98,26 +99,7 @@ export async function initDb(): Promise<void> {
   const db = await getDb();
   await db.execAsync(`
     PRAGMA journal_mode = WAL;
-    CREATE TABLE IF NOT EXISTS memes (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      uri TEXT UNIQUE NOT NULL,
-      name TEXT NOT NULL,
-      kind TEXT NOT NULL,
-      embedding BLOB NOT NULL,
-      visual_embedding BLOB,
-      visual_model TEXT NOT NULL DEFAULT '',
-      ocr_text TEXT NOT NULL DEFAULT '',
-      caption TEXT NOT NULL DEFAULT '',
-      caption_embedding BLOB,
-      transcript TEXT NOT NULL DEFAULT '',
-      tags TEXT NOT NULL DEFAULT '[]',
-      extra_terms TEXT NOT NULL DEFAULT '',
-      vision_state TEXT NOT NULL DEFAULT 'pending',
-      audio_state TEXT NOT NULL DEFAULT 'none',
-      indexed_at INTEGER NOT NULL,
-      modified_at INTEGER NOT NULL DEFAULT 0,
-      pending INTEGER NOT NULL DEFAULT 0
-    );
+    ${MEMES_TABLE_SQL};
     CREATE TABLE IF NOT EXISTS settings (
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
@@ -497,28 +479,7 @@ export async function insertMeme(args: {
   // Those are the most expensive things the app ever computes; an index pass
   // has nothing newer to say about them.
   await db.runAsync(
-    `INSERT INTO memes (uri, name, kind, embedding, visual_embedding, visual_model, ocr_text, tags, extra_terms, indexed_at, modified_at, vision_state, audio_state, thumb_uri)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT(uri) DO UPDATE SET
-       name = excluded.name,
-       kind = excluded.kind,
-       embedding = excluded.embedding,
-       visual_embedding = excluded.visual_embedding,
-       visual_model = excluded.visual_model,
-       ocr_text = excluded.ocr_text,
-       tags = excluded.tags,
-       extra_terms = excluded.extra_terms,
-       indexed_at = excluded.indexed_at,
-       modified_at = excluded.modified_at,
-       pending = 0,
-       -- Keep a poster we already extracted when this pass didn't produce one;
-       -- otherwise the row would point at nothing and the jpeg would be swept.
-       thumb_uri = CASE WHEN excluded.thumb_uri = '' THEN memes.thumb_uri ELSE excluded.thumb_uri END,
-       -- A described meme stays described; an undescribed one re-queues.
-       vision_state = CASE WHEN memes.caption = '' THEN excluded.vision_state ELSE memes.vision_state END,
-       -- 'done' with an empty transcript is a real answer (a silent clip), so
-       -- it's the state, not the text, that decides whether to re-queue.
-       audio_state = CASE WHEN memes.audio_state = 'done' THEN 'done' ELSE excluded.audio_state END`,
+    INSERT_MEME_SQL,
     args.uri,
     args.name,
     args.kind,
@@ -2110,31 +2071,7 @@ export async function restoreSidecarMemes(
   let added = 0;
   let enriched = 0;
   await db.withTransactionAsync(async () => {
-    const stmt = await db.prepareAsync(
-      `INSERT INTO memes (uri, name, kind, embedding, visual_embedding, visual_model, ocr_text,
-                          caption, caption_embedding, transcript, tags, extra_terms,
-                          vision_state, audio_state, indexed_at, modified_at, pending)
-       VALUES ($uri, $name, $kind, $embedding, $visualEmbedding, $visualModel, $ocr,
-               $caption, $captionEmbedding, $transcript, $tags, $extraTerms,
-               $visionState, $audioState, $now, $modifiedAt, $pending)
-       ON CONFLICT(uri) DO UPDATE SET
-         ocr_text = CASE WHEN memes.ocr_text = '' THEN excluded.ocr_text ELSE memes.ocr_text END,
-         caption = CASE WHEN memes.caption = '' THEN excluded.caption ELSE memes.caption END,
-         caption_embedding = CASE WHEN memes.caption_embedding IS NULL THEN excluded.caption_embedding ELSE memes.caption_embedding END,
-         transcript = CASE WHEN memes.transcript = '' THEN excluded.transcript ELSE memes.transcript END,
-         tags = CASE WHEN memes.tags IN ('', '[]') THEN excluded.tags ELSE memes.tags END,
-         extra_terms = CASE WHEN memes.extra_terms = '' THEN excluded.extra_terms ELSE memes.extra_terms END,
-         embedding = CASE WHEN length(memes.embedding) = 0 THEN excluded.embedding ELSE memes.embedding END,
-         visual_embedding = CASE WHEN memes.visual_embedding IS NULL THEN excluded.visual_embedding ELSE memes.visual_embedding END,
-         visual_model = CASE WHEN memes.visual_embedding IS NULL THEN excluded.visual_model ELSE memes.visual_model END,
-         vision_state = CASE WHEN memes.caption = '' THEN excluded.vision_state ELSE memes.vision_state END,
-         audio_state = CASE WHEN memes.audio_state = 'done' THEN 'done' ELSE excluded.audio_state END,
-         modified_at = CASE WHEN memes.modified_at = 0 THEN excluded.modified_at ELSE memes.modified_at END,
-         -- A placeholder that just received a usable vector is a real, indexed
-         -- meme now; leaving pending = 1 would hide it from search and keep the
-         -- indexer treating it as unfinished work.
-         pending = CASE WHEN length(memes.embedding) > 0 OR length(excluded.embedding) > 0 THEN 0 ELSE memes.pending END`
-    );
+    const stmt = await db.prepareAsync(RESTORE_SIDECAR_MEME_SQL);
     try {
       for (const e of entries) {
         await stmt.executeAsync({
