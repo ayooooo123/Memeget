@@ -3,6 +3,7 @@ import { manipulateAsync, SaveFormat } from 'expo-image-manipulator';
 
 import type { EmbeddingsApi } from './embeddings';
 import {
+  addManualPositives,
   classifyExemplars,
   classifyImage,
   classifyPrompts,
@@ -11,6 +12,7 @@ import {
   trainLabelModel,
   type LabelHead,
   type LabelVec,
+  type PositiveGroup,
 } from './learnCore';
 import {
   addIndexError,
@@ -29,6 +31,8 @@ import {
   getIndexedUris,
   getKnowledgeVersion,
   getLabelVectors,
+  getManualTagVectors,
+  type ManualPositives,
   getMemesNeedingCaptionEmbedding,
   getMemesNeedingVisualEmbedding,
   getMemesNeedingVision,
@@ -43,6 +47,7 @@ import {
   markVisualEmbeddingFailed,
   migrateStaleExemplars,
   refacetExemplars,
+  refacetVisionTags,
   getSetting,
   setSetting,
   pruneLabelVectors,
@@ -383,13 +388,16 @@ export async function buildExemplarHeads(): Promise<ExemplarModel> {
 
 async function trainExemplarHeads(): Promise<ExemplarModel> {
   const exemplars = await getExemplars();
-  if (exemplars.length === 0) return { heads: [], mean: null };
+  // Hand-applied tags are training data too, so a library with no explicit
+  // teachings but plenty of bulk tags still gets heads.
+  const manual = await getManualTagVectors().catch(() => new Map<string, ManualPositives>());
+  if (exemplars.length === 0 && manual.size === 0) return { heads: [], mean: null };
 
   // 250 random library vectors is plenty to estimate the mean and act as the
   // negative background for a logistic head — and roughly halves the per-pass
   // training cost vs. 500, which is what the user feels as teach latency.
   const sample = await getEmbeddingSample(250);
-  const dim = exemplars[0].vector.length;
+  const dim = exemplars[0]?.vector.length ?? [...manual.values()][0].vectors[0].length;
 
   // Library mean (background proxy) for mean-centering — this is what cancels
   // CLIP's anisotropic baseline so non-matches can actually reach ~0.
@@ -410,14 +418,7 @@ async function trainExemplarHeads(): Promise<ExemplarModel> {
   // explicit negative ("is NOT a <label>") sets — keeping both the raw vectors
   // (for background cleaning + the kNN pathway) and the centered ones (for the
   // logistic head).
-  interface Group {
-    category: string;
-    posRaw: number[][];
-    posCentered: number[][];
-    negRaw: number[][];
-    negCentered: number[][];
-  }
-  const byLabel = new Map<string, Group>();
+  const byLabel = new Map<string, PositiveGroup>();
   for (const e of exemplars) {
     const g =
       byLabel.get(e.label) ??
@@ -431,6 +432,7 @@ async function trainExemplarHeads(): Promise<ExemplarModel> {
     }
     byLabel.set(e.label, g);
   }
+  addManualPositives(byLabel, manual, center);
 
   const heads: LabelHead[] = [];
   for (const [label, g] of byLabel) {
@@ -619,6 +621,17 @@ export async function runIndex(
   if ((await getSetting(REFACET_EXEMPLARS_KEY).catch(() => null)) !== '1') {
     await refacetExemplars()
       .then(() => setSetting(REFACET_EXEMPLARS_KEY, '1'))
+      .catch(() => {});
+  }
+
+  // One-time: every VLM tag already in the library was filed as a blanket
+  // 'topic' (fresh describes now infer a facet). On a described library that
+  // is thousands of tags claiming the memes have no character, action, emotion
+  // or situation — pure text, so re-filing them needs no model.
+  if ((await getSetting(REFACET_VISION_TAGS_KEY).catch(() => null)) !== '1') {
+    opts.onProgress?.({ processed: total, total, added, current: 'sorting AI tags into facets…' });
+    await refacetVisionTags()
+      .then(() => setSetting(REFACET_VISION_TAGS_KEY, '1'))
       .catch(() => {});
   }
 
@@ -1047,6 +1060,10 @@ const REFACET_EXEMPLARS_KEY = 'exemplars.refaceted.v2';
 // calibrated scale (./recognition). Bump the version if the calibration curve
 // or the negative anchors change, so the library is re-scored against them.
 const RECALIBRATED_TAGS_KEY = 'tags.calibrated.v1';
+
+// One-time flag: stored VLM tags have been re-filed out of the blanket 'topic'
+// facet. Bump when the facet lexicon grows enough to catch labels it now knows.
+const REFACET_VISION_TAGS_KEY = 'tags.visionFaceted.v1';
 
 const DUP_COSINE = 0.99;
 const normText = (s: string) => s.toLowerCase().replace(/\s+/g, ' ').trim();

@@ -138,6 +138,28 @@ written into the meme's tags (dense image/caption understanding recovers ~¼ of 
 on its own). **So tag generation is the dominant lever**, which is what
 the loop below tunes.
 
+## Getting a real library out of a device (adb)
+
+Every loop below wants real data. The app writes its whole index to one SQLite
+file, and a debug build lets `run-as` read it without root — no in-app export,
+no tapping through Settings:
+
+```bash
+adb exec-out run-as com.memeget.app cat files/SQLite/memeget.db     > /tmp/mg/memeget.db
+adb exec-out run-as com.memeget.app cat files/SQLite/memeget.db-wal > /tmp/mg/memeget.db-wal
+adb exec-out run-as com.memeget.app cat files/SQLite/memeget.db-shm > /tmp/mg/memeget.db-shm
+```
+
+Pull all three: expo-sqlite runs in WAL mode, so the newest tags and captions
+live in `-wal` until a checkpoint — copying `memeget.db` alone gives you a stale
+library. `memes.tags` is JSON (`label`, `category`, `score`, `source`),
+`memes.embedding` is a float32 blob (512-d, MobileCLIP-S2), and `exemplars`
+holds what the user taught. That's everything `described.json`, a coverage run,
+or a fresh calibration needs.
+
+A release build blocks `run-as`; there, use Settings → *Export collection (zip)*
+and pull the zip out of `/sdcard/Download`.
+
 ## VLM prompt-tuning loop (facet coverage)
 
 Since search depends on the facet word being *in the tags*, the question every

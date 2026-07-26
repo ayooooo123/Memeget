@@ -4,7 +4,15 @@
 // plus a shared anisotropic baseline direction so everything has an elevated
 // floor similarity (the property that killed fixed cosine thresholds).
 
-import { classifyPrompts, fitLogistic, headProb, scoreExemplar, trainLabelModel } from './learnCore';
+import {
+  addManualPositives,
+  classifyPrompts,
+  fitLogistic,
+  headProb,
+  scoreExemplar,
+  trainLabelModel,
+  type PositiveGroup,
+} from './learnCore';
 import { MIN_LABEL_MARGIN, RECOGNIZED_CONFIDENCE } from './recognition';
 
 const DIM = 64;
@@ -281,5 +289,56 @@ describe('classifyPrompts', () => {
   it('works with no anchors and no labels', () => {
     expect(classifyPrompts(image(0.34, 0), labels, [])).toHaveLength(1);
     expect(classifyPrompts(image(0.34, 0), [], anchors)).toEqual([]);
+  });
+});
+
+// Hand-applied tags as training data. The behaviour that matters: a label the
+// user only ever bulk-tagged still gets a head (so it reaches memes indexed
+// later), without disturbing what the user taught deliberately.
+describe('addManualPositives', () => {
+  const v = (n: number) => [n, 0, 0];
+  const center = (x: ArrayLike<number>) => Array.from(x, (y) => y - 0.5);
+  const group = (over: Partial<PositiveGroup> = {}): PositiveGroup => ({
+    category: 'character',
+    posRaw: [],
+    posCentered: [],
+    negRaw: [],
+    negCentered: [],
+    ...over,
+  });
+
+  it('creates a trainable group for a label that was only ever bulk-tagged', () => {
+    const byLabel = new Map<string, PositiveGroup>();
+    addManualPositives(byLabel, new Map([['crt', { category: 'object', vectors: [v(1), v(2)] }]]), center);
+    const g = byLabel.get('crt')!;
+    expect(g.category).toBe('object');
+    expect(g.posRaw).toEqual([v(1), v(2)]);
+    expect(g.posCentered).toEqual([center(v(1)), center(v(2))]);
+  });
+
+  it('appends to a taught label without displacing its examples or corrections', () => {
+    const byLabel = new Map<string, PositiveGroup>([
+      ['pepe', group({ posRaw: [v(9)], posCentered: [center(v(9))], negRaw: [v(8)], negCentered: [center(v(8))] })],
+    ]);
+    addManualPositives(byLabel, new Map([['pepe', { category: 'topic', vectors: [v(1)] }]]), center);
+    const g = byLabel.get('pepe')!;
+    expect(g.posRaw).toEqual([v(9), v(1)]); // taught example stays first
+    expect(g.negRaw).toEqual([v(8)]); // "NOT a pepe" survives
+    expect(g.category).toBe('character'); // the teaching's facet wins
+  });
+
+  it('caps how many bulk tags become positives', () => {
+    const byLabel = new Map<string, PositiveGroup>();
+    const vectors = Array.from({ length: 50 }, (_, i) => v(i));
+    addManualPositives(byLabel, new Map([['schizo', { category: 'topic', vectors }]]), center, 4);
+    expect(byLabel.get('schizo')!.posRaw).toHaveLength(4);
+  });
+
+  it('leaves the cap room already used by explicit teachings', () => {
+    const byLabel = new Map<string, PositiveGroup>([
+      ['wojak', group({ posRaw: [v(1), v(2), v(3)], posCentered: [v(1), v(2), v(3)].map(center) })],
+    ]);
+    addManualPositives(byLabel, new Map([['wojak', { category: 'topic', vectors: [v(4), v(5)] }]]), center, 4);
+    expect(byLabel.get('wojak')!.posRaw).toEqual([v(1), v(2), v(3), v(4)]);
   });
 });

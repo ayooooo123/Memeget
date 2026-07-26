@@ -194,6 +194,50 @@ export interface TrainLabelInputs {
   otherPosCentered: number[][];
 }
 
+// A label's training set, grouped before `trainLabelModel` is called per label.
+export interface PositiveGroup {
+  category: string;
+  posRaw: number[][];
+  posCentered: number[][];
+  negRaw: number[][];
+  negCentered: number[][];
+}
+
+// Cap on how many hand-applied tags become training positives for one label.
+// Teaching converges long before this (three examples already recover ~43% of a
+// label's other memes on a real library), and every extra positive is another
+// kNN prototype scored against every meme on every re-tag.
+export const MAX_MANUAL_POSITIVES = 16;
+
+// Fold hand-applied tags into the taught-label training sets.
+//
+// A bulk tag is the same assertion teaching makes — "this meme IS X", with the
+// same image vector behind it — but it only ever labelled the memes it was
+// applied to: no head was trained, so nothing indexed afterwards could inherit
+// it. Feeding those vectors to the trainer is what makes a hand-applied label
+// keep working. Explicit teachings are kept ahead of them (the user picked
+// those examples deliberately), and explicit "NOT this" corrections are left
+// untouched.
+export function addManualPositives(
+  byLabel: Map<string, PositiveGroup>,
+  manual: ReadonlyMap<string, { category: string; vectors: ArrayLike<number>[] }>,
+  center: (v: ArrayLike<number>) => number[],
+  cap = MAX_MANUAL_POSITIVES
+): void {
+  for (const [label, { category, vectors }] of manual) {
+    let g = byLabel.get(label);
+    if (!g) {
+      g = { category, posRaw: [], posCentered: [], negRaw: [], negCentered: [] };
+      byLabel.set(label, g);
+    }
+    for (const v of vectors) {
+      if (g.posRaw.length >= cap) break;
+      g.posRaw.push(Array.from(v));
+      g.posCentered.push(center(v));
+    }
+  }
+}
+
 // Build the full model for one taught label. This is where the learning-quality
 // work happens; fitLogistic is just the optimizer.
 export async function trainLabelModel(inp: TrainLabelInputs): Promise<LabelHead> {

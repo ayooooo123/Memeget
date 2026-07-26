@@ -26,3 +26,17 @@ export function hashBase64(base64: string): string {
   // length.hash, both base-36 for a compact key.
   return `${len.toString(36)}.${(h >>> 0).toString(36)}`;
 }
+
+// FNV-1a over a whole string, base36. The same primitive `hashBase64` uses,
+// exposed for the places that fingerprint short text rather than file bytes:
+// a label prompt (so an edit invalidates its cached vector) or the set of
+// hand-applied tags (so the trained heads notice a rename). Not cryptographic —
+// it only has to change when the text does.
+export function hashText(s: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(36);
+}
