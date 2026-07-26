@@ -29,7 +29,11 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # 22, not 20: src/memeSql.test.ts runs the real meme upsert statements
+          # against `node:sqlite`, which only exists from Node 22.5. Those tests
+          # are what stop a merge from quietly restoring the INSERT OR REPLACE
+          # that used to wipe every VLM caption and transcript on re-index.
+          node-version: 22
           cache: npm
 
       - name: Install dependencies
