@@ -41,3 +41,25 @@ export function emitThumbsUpdated(patches: ThumbPatch[]): void {
   if (patches.length === 0) return;
   for (const cb of thumbListeners) cb(patches);
 }
+
+// Something worth backing up changed: a taught example, a manual tag, a VLM
+// caption, a transcript. Separate from onLibraryChanged (which is about what
+// the grid should re-fetch) because the audience is different — this one feeds
+// the debounced `.memeget` sidecar write, so knowledge reaches the user's own
+// folder without waiting for the next index pass. Teaching a dozen tags and
+// then losing them to a reinstall is exactly the failure this closes.
+//
+// Emitted from the DB write helpers rather than from the screens, so no UI path
+// can forget to announce a mutation.
+const knowledgeListeners = new Set<Listener>();
+
+export function onKnowledgeChanged(cb: Listener): () => void {
+  knowledgeListeners.add(cb);
+  return () => {
+    knowledgeListeners.delete(cb);
+  };
+}
+
+export function emitKnowledgeChanged(): void {
+  for (const cb of knowledgeListeners) cb();
+}

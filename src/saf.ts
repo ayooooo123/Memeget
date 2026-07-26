@@ -8,6 +8,7 @@ import * as VideoThumbnails from 'expo-video-thumbnails';
 
 import { getFileModifiedTime } from '../modules/memeget-bg';
 import { extOf, kindOf, mimeForName, videoMimeFor } from './mediaFormats';
+import { utf8Length } from './zipWriter';
 
 // Re-exported so existing importers (MemeGrid, the zip importer) can keep
 // pulling these off the SAF module; the definitions now live in the pure,
@@ -29,7 +30,7 @@ const SAF = FileSystem.StorageAccessFramework;
 
 // SAF content URIs encode the document id (including filename) in the path.
 // Decode and pull the trailing segment to recover a display name + extension.
-function nameFromContentUri(uri: string): string {
+export function nameFromContentUri(uri: string): string {
   try {
     const decoded = decodeURIComponent(uri);
     const lastColon = decoded.lastIndexOf(':');
@@ -60,6 +61,109 @@ export async function listMedia(folderUri: string): Promise<SafFile[]> {
     if (kind) out.push({ uri: childUri, name, kind });
   }
   return out;
+}
+
+// ---- sidecar directory access -------------------------------------------------
+//
+// The `.memeget` folder lives inside the user's own linked folder (see
+// sidecar.ts for why). listMedia above never sees it — it is a directory, and
+// directories carry no media extension for kindOf to match — so mirroring
+// knowledge into the folder can't feed it back to the indexer as memes.
+
+// Resolve a child by display name inside a SAF directory, or null when absent.
+// SAF gives no "does this path exist" call: a document is found by listing the
+// parent and matching names, and createFileAsync/makeDirectoryAsync will
+// silently mint a SECOND document ("library-00 (1).json") if handed a name that
+// already exists. Every write therefore looks the child up first and reuses its
+// uri.
+export async function findChild(dirUri: string, name: string): Promise<string | null> {
+  const children = await SAF.readDirectoryAsync(dirUri);
+  for (const childUri of children) {
+    if (nameFromContentUri(childUri) === name) return childUri;
+  }
+  return null;
+}
+
+export async function listChildNames(dirUri: string): Promise<string[]> {
+  const children = await SAF.readDirectoryAsync(dirUri);
+  return children.map(nameFromContentUri);
+}
+
+// The sidecar directory inside a linked folder, creating it when `create` is
+// set. Returns null when it doesn't exist (nothing to restore) or when the
+// provider refuses — a linked folder the user has since revoked, or one on a
+// read-only provider, must degrade to "no sidecar", never to a crash on a
+// background sync.
+export async function sidecarDir(
+  folderUri: string,
+  dirName: string,
+  create: boolean
+): Promise<string | null> {
+  try {
+    const existing = await findChild(folderUri, dirName);
+    if (existing) return existing;
+    if (!create) return null;
+    return await SAF.makeDirectoryAsync(folderUri, dirName);
+  } catch {
+    return null;
+  }
+}
+
+// Overwrite (or create) a UTF-8 text document in a SAF directory.
+//
+// SAF writes DO NOT truncate. expo-file-system opens the document with
+// ContentResolver mode "w", and ExternalStorageProvider honours that literally:
+// bytes are overwritten from offset 0 and anything the previous, longer content
+// left behind stays. Rewriting a chunk that shrank therefore produced a file
+// holding valid JSON followed by the tail of the old JSON — which JSON.parse
+// rejects outright, so the whole chunk silently restored as nothing. A backup
+// that quietly stops being readable is worse than no backup.
+//
+// The fix is to pad the new content with trailing spaces up to the byte length
+// of what was there before. JSON.parse ignores trailing whitespace, so the file
+// stays valid, the stale tail is overwritten, and — unlike delete-then-recreate
+// — there is never an instant where the document does not exist. `previousBytes`
+// comes from the caller's manifest when known; otherwise the old content is read
+// back to measure it.
+export async function writeSidecarFile(
+  dirUri: string,
+  fileName: string,
+  text: string,
+  previousBytes?: number
+): Promise<void> {
+  const uri = await findChild(dirUri, fileName);
+  if (!uri) {
+    // createFileAsync appends the extension implied by the mime type, so it gets
+    // the basename — the same dance saveToFolder does. A brand-new document has
+    // no stale tail, so it needs no padding.
+    const dot = fileName.lastIndexOf('.');
+    const created = await SAF.createFileAsync(
+      dirUri,
+      dot > 0 ? fileName.slice(0, dot) : fileName,
+      'application/json'
+    );
+    await FileSystem.writeAsStringAsync(created, text);
+    return;
+  }
+  let stale = previousBytes;
+  if (stale === undefined) {
+    const old = await FileSystem.readAsStringAsync(uri).catch(() => '');
+    stale = utf8Length(old);
+  }
+  const fresh = utf8Length(text);
+  // Spaces are one byte each, so the count is exact.
+  await FileSystem.writeAsStringAsync(uri, stale > fresh ? text + ' '.repeat(stale - fresh) : text);
+}
+
+// Read a sidecar document as text, or null when it isn't there / can't be read.
+export async function readSidecarFile(dirUri: string, fileName: string): Promise<string | null> {
+  try {
+    const uri = await findChild(dirUri, fileName);
+    if (!uri) return null;
+    return await FileSystem.readAsStringAsync(uri);
+  } catch {
+    return null;
+  }
 }
 
 // Best-effort last-modified time (ms since epoch) for a linked file, so the

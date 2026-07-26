@@ -60,6 +60,7 @@ import { importMemesFromZip, type ZipImportPhase } from '../zipImport';
 import { MEME_LABELS } from '../memeLabels';
 import { buildPack, parsePack, serializePack } from '../teachingPack';
 import { writeCollectionZip } from '../collectionExport';
+import { restoreAllSidecars, syncAllSidecars } from '../sidecarSync';
 import { colors, radius, space, TABBAR_CLEARANCE } from '../theme';
 import type { LinkedFolder } from '../types';
 
@@ -134,6 +135,8 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
     null
   );
   const [exportProgress, setExportProgress] = useState<{ done: number; total: number } | null>(null);
+  const [backingUp, setBackingUp] = useState(false);
+  const [backupStatus, setBackupStatus] = useState('');
 
   // Just the describe counters — one grouped query. Runs on a ticker while
   // there's outstanding work, so it must stay far cheaper than `refresh`.
@@ -186,6 +189,76 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
     setAudioStats(aStats);
     setAudioFailed(aFailed);
   }, []);
+
+  // Force a sidecar write for every linked folder. The same thing an index pass
+  // does at the end — exposed on its own because a user who has just spent an
+  // hour teaching tags shouldn't have to run a full index to get that written
+  // out where it's safe.
+  const onBackupNow = useCallback(async () => {
+    if (backingUp) return;
+    setBackingUp(true);
+    setBackupStatus('');
+    const release = acquireKeepAlive('Backing up meme knowledge');
+    try {
+      const results = await syncAllSidecars();
+      const wrote = results.filter((r) => !r.skipped);
+      if (wrote.length === 0) {
+        setBackupStatus('No folder could be written to — check the folder is still accessible.');
+        showToast('Backup failed — no writable folder', 'error');
+        return;
+      }
+      const memes = wrote.reduce((n, r) => n + r.memes, 0);
+      const files = wrote.reduce((n, r) => n + r.chunksWritten, 0);
+      setBackupStatus(
+        `Backed up ${memes} meme${memes === 1 ? '' : 's'} to ${wrote.length} folder${wrote.length === 1 ? '' : 's'} · ${files} file${files === 1 ? '' : 's'} updated`
+      );
+      success();
+    } catch (e) {
+      setBackupStatus('');
+      showToast(`Backup failed: ${String(e)}`, 'error');
+    } finally {
+      release();
+      setBackingUp(false);
+    }
+  }, [backingUp]);
+
+  // Pull knowledge back out of the folders. Additive, so this is safe to run at
+  // any time — the usual trigger is a fresh install whose folders were linked
+  // before the sidecar existed, or a restore the user wants to redo.
+  const onRestoreSidecars = useCallback(async () => {
+    if (backingUp) return;
+    setBackingUp(true);
+    setBackupStatus('');
+    const release = acquireKeepAlive('Restoring meme knowledge');
+    try {
+      const results = await restoreAllSidecars();
+      const found = results.filter((r) => r.found);
+      if (found.length === 0) {
+        setBackupStatus('No .memeget backup found in any linked folder yet.');
+        showToast('Nothing to restore', 'info');
+        return;
+      }
+      const added = found.reduce((n, r) => n + r.added, 0);
+      const enriched = found.reduce((n, r) => n + r.enriched, 0);
+      const taught = found.reduce((n, r) => n + r.teachingsAdded, 0);
+      const unreadable = found.reduce((n, r) => n + r.unreadable, 0);
+      setBackupStatus(
+        `Restored ${added} new meme${added === 1 ? '' : 's'}, filled in ${enriched} existing, ${taught} taught example${taught === 1 ? '' : 's'}` +
+          (found.some((r) => r.vectorsDropped) ? ' · vectors were from another model — run Index to re-embed' : '') +
+          // Loud on purpose: this is the backup failing to be a backup.
+          (unreadable > 0 ? ` · ⚠ ${unreadable} record${unreadable === 1 ? '' : 's'} could not be read — back up again to rewrite them` : '')
+      );
+      await refresh();
+      emitLibraryChanged();
+      success();
+    } catch (e) {
+      setBackupStatus('');
+      showToast(`Restore failed: ${String(e)}`, 'error');
+    } finally {
+      release();
+      setBackingUp(false);
+    }
+  }, [backingUp, refresh]);
 
   // Both tabs stay mounted (so the Library keeps its state), which means this
   // screen must refetch its stats whenever it becomes the visible tab.
@@ -1361,6 +1434,32 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
             </View>
           ))
         )}
+      </Section>
+
+      <Section glyph="🛟" title="Folder backup" tint={colors.good}>
+        <Text style={styles.note}>
+          Everything Memeget works out about your memes — tags, descriptions, transcripts,
+          embeddings and the examples you’ve taught — is mirrored into a{' '}
+          <Text style={styles.noteStrong}>.memeget</Text> folder inside each linked folder. It’s
+          written automatically after every index. Reinstall the app, rename the package, or move to
+          a new phone: link the same folder again and your knowledge comes back before a single
+          model has to run.
+        </Text>
+        {backupStatus && <Text style={styles.note}>{backupStatus}</Text>}
+        <Button
+          variant="primary"
+          icon="⇧"
+          label={backingUp ? 'Backing up…' : 'Back up now'}
+          onPress={onBackupNow}
+          disabled={backingUp || folders.length === 0}
+        />
+        <Button
+          variant="secondary"
+          icon="⇩"
+          label="Restore from linked folders"
+          onPress={onRestoreSidecars}
+          disabled={backingUp || folders.length === 0}
+        />
       </Section>
 
       <Section glyph="🔒" title="Privacy" tint={colors.good}>

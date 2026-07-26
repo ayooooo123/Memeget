@@ -6,6 +6,10 @@ import { modelStamp, PRIMARY_EMBEDDING_MODEL, VISUAL_EMBEDDING_MODEL } from './e
 import { scoreEntry } from './searchCore';
 import { assembleSearchText, classificationContextTerms } from './searchText';
 import { guessFacet } from './facetCoverage';
+// Knowledge mutations announce themselves here so the `.memeget` sidecar backup
+// picks them up. Emitting from the write helpers rather than the screens means
+// no UI path — present or future — can silently skip the backup.
+import { emitKnowledgeChanged } from './events';
 import {
   ensureSearchIndex,
   invalidateSearchIndex as invalidateResidentSearchIndex,
@@ -483,9 +487,38 @@ export async function insertMeme(args: {
   // analyze. modified_at drives the library's "most recent first" order — it's
   // the file's own last-modified time when we could read it, otherwise the
   // index time so a row is never 0.
+  //
+  // On conflict this refreshes the index-derived columns but deliberately does
+  // NOT touch caption, caption_embedding, or transcript — they're absent from
+  // the SET list, so they survive. This used to be INSERT OR REPLACE, which
+  // rebuilt the row from scratch and silently discarded every VLM description
+  // and transcript the moment a file was re-indexed (a cleared index, a
+  // re-scan, or a sidecar restore handing the indexer a row it already knows).
+  // Those are the most expensive things the app ever computes; an index pass
+  // has nothing newer to say about them.
   await db.runAsync(
-    `INSERT OR REPLACE INTO memes (uri, name, kind, embedding, visual_embedding, visual_model, ocr_text, tags, extra_terms, indexed_at, modified_at, vision_state, audio_state, thumb_uri)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO memes (uri, name, kind, embedding, visual_embedding, visual_model, ocr_text, tags, extra_terms, indexed_at, modified_at, vision_state, audio_state, thumb_uri)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(uri) DO UPDATE SET
+       name = excluded.name,
+       kind = excluded.kind,
+       embedding = excluded.embedding,
+       visual_embedding = excluded.visual_embedding,
+       visual_model = excluded.visual_model,
+       ocr_text = excluded.ocr_text,
+       tags = excluded.tags,
+       extra_terms = excluded.extra_terms,
+       indexed_at = excluded.indexed_at,
+       modified_at = excluded.modified_at,
+       pending = 0,
+       -- Keep a poster we already extracted when this pass didn't produce one;
+       -- otherwise the row would point at nothing and the jpeg would be swept.
+       thumb_uri = CASE WHEN excluded.thumb_uri = '' THEN memes.thumb_uri ELSE excluded.thumb_uri END,
+       -- A described meme stays described; an undescribed one re-queues.
+       vision_state = CASE WHEN memes.caption = '' THEN excluded.vision_state ELSE memes.vision_state END,
+       -- 'done' with an empty transcript is a real answer (a silent clip), so
+       -- it's the state, not the text, that decides whether to re-queue.
+       audio_state = CASE WHEN memes.audio_state = 'done' THEN 'done' ELSE excluded.audio_state END`,
     args.uri,
     args.name,
     args.kind,
@@ -664,6 +697,7 @@ export async function updateMemeTags(id: number, tags: Tag[], extraTerms: string
     id
   );
   invalidateSearchIndex(); // tags / association terms feed the lexical haystack
+  emitKnowledgeChanged();
 }
 
 // Write tags for many memes in one transaction with a single prepared statement.
@@ -686,6 +720,7 @@ export async function bulkUpdateMemeTags(
     await stmt.finalizeAsync();
   }
   invalidateSearchIndex(); // bulk tag/extra-terms rewrite (re-tag library)
+  emitKnowledgeChanged();
 }
 
 // ---- VLM enrichment ----------------------------------------------------------
@@ -782,6 +817,7 @@ export async function setMemeVision(
     id
   );
   invalidateSearchIndex(); // caption + caption vector + tags all feed search
+  emitKnowledgeChanged();
 }
 
 // Requeue one meme for description: flip vision_state back to 'pending' and drop
@@ -1131,6 +1167,7 @@ export async function setMemeTranscript(id: number, transcript: string): Promise
     id
   );
   invalidateSearchIndex(); // transcript is part of the lexical haystack
+  emitKnowledgeChanged();
 }
 
 // Mark a video as failed-to-transcribe without touching anything else, so a
@@ -1956,6 +1993,180 @@ export async function removeFolder(uri: string): Promise<void> {
   await db.runAsync('DELETE FROM folders WHERE uri = ?', uri);
 }
 
+// ---- sidecar (.memeget knowledge mirror) --------------------------------------
+
+// A SAF document uri always starts with its tree uri followed by '/document/',
+// so that prefix is what scopes a query to one linked folder. It has to go
+// through LIKE ... ESCAPE: SAF uris are percent-encoded ('primary%3AMeme'), and
+// a bare '%' inside a LIKE pattern is a wildcard that would happily match other
+// folders' memes.
+const LIKE_ESCAPE = /[\\%_]/g;
+
+export interface SidecarRow {
+  // Only used to confirm the file still exists in the folder before backing its
+  // knowledge up; the sidecar itself never stores a uri (they're install-local).
+  uri: string;
+  name: string;
+  kind: MediaKind;
+  tags: Tag[];
+  extraTerms: string;
+  ocr: string;
+  caption: string;
+  transcript: string;
+  visionState: string;
+  audioState: string;
+  modifiedAt: number;
+  embedding: Float32Array | null;
+  visualEmbedding: Float32Array | null;
+  visualModel: string;
+  captionEmbedding: Float32Array | null;
+}
+
+// Every fully-indexed meme living in one linked folder, with all the knowledge
+// the sidecar mirrors. Placeholders (pending = 1) are skipped: they carry no
+// knowledge yet, and writing them would put rows in the folder that claim to
+// know things they don't.
+export async function getSidecarRows(folderUri: string): Promise<SidecarRow[]> {
+  const db = await getDb();
+  const rows = await db.getAllAsync<{
+    uri: string;
+    name: string;
+    kind: MediaKind;
+    tags: string;
+    extra_terms: string;
+    ocr_text: string;
+    caption: string;
+    transcript: string;
+    vision_state: string;
+    audio_state: string;
+    modified_at: number;
+    embedding: Uint8Array | null;
+    visual_embedding: Uint8Array | null;
+    visual_model: string;
+    caption_embedding: Uint8Array | null;
+  }>(
+    `SELECT uri, name, kind, tags, extra_terms, ocr_text, caption, transcript, vision_state,
+            audio_state, modified_at, embedding, visual_embedding, visual_model, caption_embedding
+     FROM memes
+     WHERE pending = 0 AND uri LIKE ? ESCAPE '\\'
+     ORDER BY name`,
+    `${folderUri.replace(LIKE_ESCAPE, '\\$&')}/document/%`
+  );
+  return rows.map((r) => ({
+    uri: r.uri,
+    name: r.name,
+    kind: r.kind,
+    tags: safeParseTags(r.tags),
+    extraTerms: r.extra_terms ?? '',
+    ocr: r.ocr_text ?? '',
+    caption: r.caption ?? '',
+    transcript: r.transcript ?? '',
+    visionState: r.vision_state ?? 'pending',
+    audioState: r.audio_state ?? 'none',
+    modifiedAt: r.modified_at ?? 0,
+    embedding: r.embedding?.byteLength ? blobToVec(r.embedding) : null,
+    visualEmbedding: r.visual_embedding?.byteLength ? blobToVec(r.visual_embedding) : null,
+    visualModel: r.visual_model ?? '',
+    captionEmbedding: r.caption_embedding?.byteLength ? blobToVec(r.caption_embedding) : null,
+  }));
+}
+
+export interface SidecarRestoreEntry {
+  uri: string; // resolved against the files actually present in the folder
+  name: string;
+  kind: string;
+  tags: Tag[];
+  extraTerms: string;
+  ocr: string;
+  caption: string;
+  transcript: string;
+  visionState: string;
+  audioState: string;
+  modifiedAt: number;
+  embedding: number[];
+  visualEmbedding: number[];
+  visualModel: string;
+  captionEmbedding: number[];
+}
+
+// Fold sidecar knowledge back into the library. Strictly additive: a brand-new
+// meme is inserted whole, and an existing row only receives the fields it is
+// currently missing. Restoring must never be able to make the library worse
+// than it was — the user may have re-taught or re-described something since the
+// sidecar was written, and a folder is a file other tools can edit.
+//
+// A row restored WITHOUT an embedding (the sidecar was written under a
+// different primary model, so its vectors mean nothing here) is left pending so
+// the indexer re-embeds it; insertMeme's upsert preserves the caption and
+// transcript restored here when it does.
+export async function restoreSidecarMemes(
+  entries: SidecarRestoreEntry[]
+): Promise<{ added: number; enriched: number }> {
+  if (entries.length === 0) return { added: 0, enriched: 0 };
+  const db = await getDb();
+  const existing = new Set(
+    (await db.getAllAsync<{ uri: string }>('SELECT uri FROM memes')).map((r) => r.uri)
+  );
+  let added = 0;
+  let enriched = 0;
+  await db.withTransactionAsync(async () => {
+    const stmt = await db.prepareAsync(
+      `INSERT INTO memes (uri, name, kind, embedding, visual_embedding, visual_model, ocr_text,
+                          caption, caption_embedding, transcript, tags, extra_terms,
+                          vision_state, audio_state, indexed_at, modified_at, pending)
+       VALUES ($uri, $name, $kind, $embedding, $visualEmbedding, $visualModel, $ocr,
+               $caption, $captionEmbedding, $transcript, $tags, $extraTerms,
+               $visionState, $audioState, $now, $modifiedAt, $pending)
+       ON CONFLICT(uri) DO UPDATE SET
+         ocr_text = CASE WHEN memes.ocr_text = '' THEN excluded.ocr_text ELSE memes.ocr_text END,
+         caption = CASE WHEN memes.caption = '' THEN excluded.caption ELSE memes.caption END,
+         caption_embedding = CASE WHEN memes.caption_embedding IS NULL THEN excluded.caption_embedding ELSE memes.caption_embedding END,
+         transcript = CASE WHEN memes.transcript = '' THEN excluded.transcript ELSE memes.transcript END,
+         tags = CASE WHEN memes.tags IN ('', '[]') THEN excluded.tags ELSE memes.tags END,
+         extra_terms = CASE WHEN memes.extra_terms = '' THEN excluded.extra_terms ELSE memes.extra_terms END,
+         embedding = CASE WHEN length(memes.embedding) = 0 THEN excluded.embedding ELSE memes.embedding END,
+         visual_embedding = CASE WHEN memes.visual_embedding IS NULL THEN excluded.visual_embedding ELSE memes.visual_embedding END,
+         visual_model = CASE WHEN memes.visual_embedding IS NULL THEN excluded.visual_model ELSE memes.visual_model END,
+         vision_state = CASE WHEN memes.caption = '' THEN excluded.vision_state ELSE memes.vision_state END,
+         audio_state = CASE WHEN memes.audio_state = 'done' THEN 'done' ELSE excluded.audio_state END,
+         modified_at = CASE WHEN memes.modified_at = 0 THEN excluded.modified_at ELSE memes.modified_at END,
+         -- A placeholder that just received a usable vector is a real, indexed
+         -- meme now; leaving pending = 1 would hide it from search and keep the
+         -- indexer treating it as unfinished work.
+         pending = CASE WHEN length(memes.embedding) > 0 OR length(excluded.embedding) > 0 THEN 0 ELSE memes.pending END`
+    );
+    try {
+      for (const e of entries) {
+        await stmt.executeAsync({
+          $uri: e.uri,
+          $name: e.name,
+          $kind: e.kind,
+          $embedding: vecToBlob(e.embedding),
+          $visualEmbedding: e.visualEmbedding.length ? vecToBlob(e.visualEmbedding) : null,
+          $visualModel: e.visualEmbedding.length ? e.visualModel : '',
+          $ocr: e.ocr,
+          $caption: e.caption,
+          $captionEmbedding: e.captionEmbedding.length ? vecToBlob(e.captionEmbedding) : null,
+          $transcript: e.transcript,
+          $tags: JSON.stringify(normalizeTags(e.tags)),
+          $extraTerms: e.extraTerms,
+          $visionState: e.visionState,
+          $audioState: e.audioState,
+          $now: Date.now(),
+          $modifiedAt: e.modifiedAt,
+          $pending: e.embedding.length ? 0 : 1,
+        });
+        if (existing.has(e.uri)) enriched++;
+        else added++;
+      }
+    } finally {
+      await stmt.finalizeAsync();
+    }
+  });
+  invalidateSearchIndex(); // rows and their searchable text changed
+  return { added, enriched };
+}
+
 // ---- cached label vectors ----------------------------------------------------
 
 export async function getLabelVectors(
@@ -2011,6 +2222,7 @@ export async function addExemplar(args: {
     PRIMARY_EMBEDDING_MODEL.id,
     Date.now()
   );
+  emitKnowledgeChanged();
 }
 
 // Only exemplars taught in the ACTIVE primary space — vectors from a previous
@@ -2171,6 +2383,7 @@ export async function getLabels(): Promise<string[]> {
 export async function deleteExemplar(id: number): Promise<void> {
   const db = await getDb();
   await db.runAsync('DELETE FROM exemplars WHERE id = ?', id);
+  emitKnowledgeChanged();
 }
 
 // Drop every example for a label — i.e. forget a taught tag entirely. The tags
@@ -2179,6 +2392,7 @@ export async function deleteExemplar(id: number): Promise<void> {
 export async function deleteExemplarsByLabel(label: string): Promise<number> {
   const db = await getDb();
   const res = await db.runAsync('DELETE FROM exemplars WHERE label = ?', normalizeLabel(label));
+  emitKnowledgeChanged();
   return res.changes ?? 0;
 }
 
@@ -2288,6 +2502,7 @@ export async function deleteExemplarsByPack(pack: string): Promise<number> {
     "DELETE FROM exemplars WHERE origin = 'pack' AND pack = ?",
     pack
   );
+  emitKnowledgeChanged();
   return res.changes ?? 0;
 }
 
@@ -2305,7 +2520,11 @@ export async function importExemplars(
     associations: string[];
     positive: boolean;
   }[],
-  opts: { pack: string; mode?: 'merge' | 'replace' } = { pack: '' }
+  // `origin` records whose work these examples are. A shared teaching pack is
+  // someone else's ('pack', grouped under its name so it can be removed as a
+  // unit); a sidecar restore is the user's OWN teaching coming home, so it goes
+  // back in as 'self' rather than masquerading as a third-party import.
+  opts: { pack: string; mode?: 'merge' | 'replace'; origin?: 'self' | 'pack' } = { pack: '' }
 ): Promise<{ added: number; skipped: number; removed: number }> {
   const db = await getDb();
   const mode = opts.mode ?? 'merge';
@@ -2323,9 +2542,10 @@ export async function importExemplars(
   let removed = 0;
   // Import is gated on pack↔app model compatibility upstream, so imported
   // vectors are by definition in the active primary space.
+  const origin = opts.origin ?? 'pack';
   const stmt = await db.prepareAsync(
     `INSERT INTO exemplars (label, category, vector, associations, source_uri, is_positive, origin, pack, model, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, 'pack', ?, ?, ?)`
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   );
   try {
     await db.withTransactionAsync(async () => {
@@ -2347,7 +2567,8 @@ export async function importExemplars(
           JSON.stringify(e.associations),
           '', // imported examples have no local source image
           e.positive ? 1 : 0,
-          opts.pack || 'Imported pack',
+          origin,
+          origin === 'pack' ? opts.pack || 'Imported pack' : '',
           PRIMARY_EMBEDDING_MODEL.id,
           Date.now()
         );
@@ -2357,6 +2578,7 @@ export async function importExemplars(
   } finally {
     await stmt.finalizeAsync();
   }
+  emitKnowledgeChanged();
   return { added, skipped, removed };
 }
 
