@@ -506,12 +506,22 @@ export function VisionProvider({ children }: { children: React.ReactNode }) {
     }
   };
 
+  // A background tick holds the mutex for exactly one generation. Bouncing the
+  // user's "Describe N memes" tap with "already describing" for those few
+  // seconds was the most common way the button appeared to do nothing — wait
+  // the lock out instead, and only report 'busy' if something is truly stuck.
+  const BURST_LOCK_WAIT_MS = 30_000;
   const runEnrichment = async (
     opts?: { onProgress?: (p: EnrichProgress) => void; shouldCancel?: () => boolean }
-  ) => {
+  ): Promise<EnrichResult | 'busy'> => {
     // On-demand model: the burst may be the thing that summons it. If the load
     // fails, enricher.ready stays false and enrichLibrary reports it cleanly.
     await ensureModelLoaded();
+    const deadline = Date.now() + BURST_LOCK_WAIT_MS;
+    while (busyRef.current && Date.now() < deadline) {
+      if (opts?.shouldCancel?.()) return { described: 0, deduped: 0, failed: 0 };
+      await new Promise<void>((resolve) => setTimeout(resolve, 250));
+    }
     return runGuarded(() => enrichLibrary(enricherRef.current, opts ?? {}));
   };
 

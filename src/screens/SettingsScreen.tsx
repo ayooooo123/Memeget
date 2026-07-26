@@ -17,10 +17,8 @@ import {
   clearIndex,
   countAudioFailed,
   countMemes,
-  countMemesDescribed,
   countStaleExemplars,
   countMemesNeedingAudio,
-  countMemesNeedingVision,
   countMemesTranscribed,
   deleteExemplarsByLabel,
   deleteExemplarsByPack,
@@ -34,17 +32,20 @@ import {
   getIndexModelMismatch,
   getPosterStats,
   getTaughtLabelStats,
+  getVisionStats,
   importExemplars,
   migrateStaleExemplars,
   removeFolder,
   resetAllAudio,
   resetAudioFailures,
   resetFailedThumbs,
+  resetVisionFailures,
   type ImportedPack,
   type IndexError,
   type TaughtLabelStat,
+  type VisionStats,
 } from '../db';
-import { emitLibraryChanged } from '../events';
+import { emitLibraryChanged, onLibraryChanged } from '../events';
 import { success, warn } from '../haptics';
 import { acquireKeepAlive, reportKeepAliveProgress } from '../keepAlive';
 import {
@@ -79,6 +80,26 @@ async function deliverExport(path: string, fileName: string, mimeType: string): 
   }
 }
 
+const EMPTY_VISION_STATS: VisionStats = {
+  total: 0,
+  described: 0,
+  queued: 0,
+  indexing: 0,
+  failed: 0,
+  unsupported: 0,
+};
+
+// Rough remaining-time hint from the measured per-meme time — deliberately
+// coarse ("about 2h 10m left"), because a per-second countdown on a job paced
+// by battery and thermals would be a lie.
+function formatEta(ms: number): string {
+  const secs = Math.round(ms / 1000);
+  if (secs < 90) return `${secs}s`;
+  const mins = Math.round(secs / 60);
+  if (mins < 60) return `${mins}m`;
+  return `${Math.floor(mins / 60)}h ${mins % 60}m`;
+}
+
 export function SettingsScreen({ active = true }: { active?: boolean }) {
   const emb = useEmbeddings();
   const vision = useVision();
@@ -91,9 +112,10 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
   const [showErrors, setShowErrors] = useState(false);
   const [retagging, setRetagging] = useState<{ done: number; total: number } | null>(null);
   const [transferBusy, setTransferBusy] = useState(false);
-  const [described, setDescribed] = useState(0);
-  const [pending, setPending] = useState(0);
-  const [enriching, setEnriching] = useState<{ done: number; total: number } | null>(null);
+  const [visionStats, setVisionStats] = useState<VisionStats>(EMPTY_VISION_STATS);
+  const [enriching, setEnriching] = useState<{ done: number; total: number; current: string } | null>(
+    null
+  );
   const [tele, setTele] = useState<VisionTelemetry>({ described: 0, deduped: 0, failed: 0, avgMs: 0 });
   const enrichCancel = useRef(false);
   const [audioPending, setAudioPending] = useState(0);
@@ -113,21 +135,56 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
   );
   const [exportProgress, setExportProgress] = useState<{ done: number; total: number } | null>(null);
 
-  const refresh = useCallback(async () => {
-    setFolders(await getFolders());
-    setCount(await countMemes());
-    setModelMismatch(await getIndexModelMismatch().catch(() => null));
-    setStaleExemplars(await countStaleExemplars().catch(() => 0));
-    setTaughtStats(await getTaughtLabelStats().catch(() => []));
-    setImportedPacks(await getImportedPacks().catch(() => []));
-    setPosterStats(await getPosterStats().catch(() => ({ total: 0, done: 0, failed: 0, missing: 0 })));
-    setErrors(await getIndexErrors());
-    setDescribed(await countMemesDescribed());
-    setPending(await countMemesNeedingVision());
+  // Just the describe counters — one grouped query. Runs on a ticker while
+  // there's outstanding work, so it must stay far cheaper than `refresh`.
+  const refreshVision = useCallback(async () => {
+    setVisionStats(await getVisionStats().catch(() => EMPTY_VISION_STATS));
     setTele(getVisionTelemetry());
-    setAudioPending(await countMemesNeedingAudio().catch(() => 0));
-    setAudioStats(await countMemesTranscribed().catch(() => ({ analyzed: 0, withSpeech: 0 })));
-    setAudioFailed(await countAudioFailed().catch(() => 0));
+  }, []);
+
+  const refresh = useCallback(async () => {
+    // Independent reads: run them together. A dozen sequential SQLite round
+    // trips is what made opening this tab hitch on a big library.
+    const [
+      nextFolders,
+      nextCount,
+      mismatch,
+      stale,
+      taught,
+      packs,
+      posters,
+      errs,
+      vStats,
+      aPending,
+      aStats,
+      aFailed,
+    ] = await Promise.all([
+      getFolders().catch(() => []),
+      countMemes().catch(() => 0),
+      getIndexModelMismatch().catch(() => null),
+      countStaleExemplars().catch(() => 0),
+      getTaughtLabelStats().catch(() => []),
+      getImportedPacks().catch(() => []),
+      getPosterStats().catch(() => ({ total: 0, done: 0, failed: 0, missing: 0 })),
+      getIndexErrors().catch(() => []),
+      getVisionStats().catch(() => EMPTY_VISION_STATS),
+      countMemesNeedingAudio().catch(() => 0),
+      countMemesTranscribed().catch(() => ({ analyzed: 0, withSpeech: 0 })),
+      countAudioFailed().catch(() => 0),
+    ]);
+    setFolders(nextFolders);
+    setCount(nextCount);
+    setModelMismatch(mismatch);
+    setStaleExemplars(stale);
+    setTaughtStats(taught);
+    setImportedPacks(packs);
+    setPosterStats(posters);
+    setErrors(errs);
+    setVisionStats(vStats);
+    setTele(getVisionTelemetry());
+    setAudioPending(aPending);
+    setAudioStats(aStats);
+    setAudioFailed(aFailed);
   }, []);
 
   // Both tabs stay mounted (so the Library keeps its state), which means this
@@ -135,6 +192,24 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
   useEffect(() => {
     if (active) refresh();
   }, [active, refresh]);
+
+  // Keep the describe counters live while this tab is open. Re-reading only on
+  // tab focus made a model that was actively working look frozen — and the
+  // background trickle drops `vision.running` between items, so outstanding
+  // WORK (not the running flag) is what decides whether to tick. Gated on a
+  // plain boolean so the interval isn't torn down and rebuilt on every count
+  // change; it stops the moment the queue drains.
+  const visionBusy = visionStats.queued > 0 || visionStats.indexing > 0 || enriching !== null;
+  useEffect(() => {
+    if (!active) return;
+    const unsub = onLibraryChanged(refreshVision);
+    if (!visionBusy) return unsub;
+    const timer = setInterval(refreshVision, 2000);
+    return () => {
+      clearInterval(timer);
+      unsub();
+    };
+  }, [active, refreshVision, visionBusy]);
 
   // Clear the undecodable stamps and run the poster backfill in the foreground
   // with feedback — the idle loop would get there too, but silently, and after
@@ -516,26 +591,31 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
       showToast('Loading the vision model — the first describe after a cold start takes a bit', 'info');
     }
     enrichCancel.current = false;
-    setEnriching({ done: 0, total: 0 });
+    setEnriching({ done: 0, total: 0, current: '' });
     try {
       // Routed through the provider's mutex so it can never collide with the
       // background trickle (one accelerator, one generation at a time).
       const res = await vision.runEnrichment({
-        onProgress: (p) => setEnriching({ done: p.done, total: p.total }),
+        onProgress: (p) => setEnriching({ done: p.done, total: p.total, current: p.current }),
         shouldCancel: () => enrichCancel.current,
       });
       if (res === 'busy') {
         showToast('Already describing in the background — try again in a moment', 'info');
         return;
       }
-      success();
+      // Stop is not success. Cancelling during the lock wait yields zero work,
+      // and cancelling mid-run yields a partial count — neither deserves the
+      // success haptic or a "Described 0 memes" cheer.
       emitLibraryChanged(); // captions/tags changed under the Library's feet
       const dupNote = res.deduped > 0 ? ` · ${res.deduped} dup${res.deduped === 1 ? '' : 's'} skipped` : '';
       const failNote = res.failed > 0 ? ` · ${res.failed} failed` : '';
-      showToast(
-        `Described ${res.described} meme${res.described === 1 ? '' : 's'}${dupNote}${failNote}`,
-        'success'
-      );
+      const body = `${res.described} meme${res.described === 1 ? '' : 's'}${dupNote}${failNote}`;
+      if (enrichCancel.current) {
+        showToast(`Stopped — described ${body}`, 'info');
+        return;
+      }
+      success();
+      showToast(`Described ${body}`, 'success');
     } catch (e) {
       showToast(`Describe failed: ${String(e)}`, 'error');
     } finally {
@@ -543,6 +623,18 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
       refresh();
     }
   }, [vision, refresh]);
+
+  // Put the model's own failures back in the queue. Files the indexer could
+  // never read are NOT re-queued (see resetVisionFailures) — retrying those
+  // would burn a generation slot on every pass, forever.
+  const onRetryVisionFailures = useCallback(async () => {
+    const n = await resetVisionFailures().catch(() => 0);
+    await refreshVision();
+    showToast(
+      n > 0 ? `Re-queued ${n} meme${n === 1 ? '' : 's'} for describing` : 'Nothing retryable left',
+      'info'
+    );
+  }, [refreshVision]);
 
   const onRunTranscribe = useCallback(async () => {
     if (!audio.ready) {
@@ -685,7 +777,16 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
         : vision.modelIdle
           ? 'On demand' // loads only when there's something to describe
           : `Loading ${Math.round((vision.progress || 0) * 100)}%`;
-  const describedTotal = described + pending;
+  const describedPct = visionStats.total ? visionStats.described / visionStats.total : 0;
+  // Only the buckets that exist — a row of zeroes is noise.
+  const visionBreakdown = [
+    visionStats.queued > 0 ? `${visionStats.queued} to go` : '',
+    visionStats.indexing > 0 ? `${visionStats.indexing} still indexing` : '',
+    visionStats.failed > 0 ? `${visionStats.failed} failed` : '',
+    visionStats.unsupported > 0 ? `${visionStats.unsupported} unreadable` : '',
+  ]
+    .filter(Boolean)
+    .join(' · ');
 
   const audioTone = audio.error ? 'bad' : audio.ready ? 'good' : 'busy';
   const audioLabel = audio.error
@@ -764,40 +865,71 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
 
         {vision.enabled && (
           <>
-
-            <Row label="Described" value={`${described} / ${describedTotal}`} />
+            <Row label="Described" value={`${visionStats.described} / ${visionStats.total}`} />
+            <ProgressBar value={describedPct} tint={colors.good} />
+            {!!visionBreakdown && <Text style={styles.faintSmall}>{visionBreakdown}</Text>}
             {tele.avgMs > 0 && (
               <Text style={styles.faintSmall}>
-                ≈ {(tele.avgMs / 1000).toFixed(1)}s per meme on this device
+                ≈ {(tele.avgMs / 1000).toFixed(1)}s per meme
+                {visionStats.queued > 0
+                  ? ` · ~${formatEta(tele.avgMs * visionStats.queued)} of model time left`
+                  : ''}
                 {tele.deduped > 0 ? ` · ${tele.deduped} skipped as duplicates` : ''}
               </Text>
             )}
             {enriching ? (
-              <View style={{ gap: 8 }}>
+              <View style={styles.enrichBlock}>
                 <View style={styles.enrichTopRow}>
                   <Text style={styles.note}>
-                    Describing {enriching.done}/{enriching.total || '…'}
+                    {enriching.total
+                      ? `Describing ${enriching.done}/${enriching.total} · ${Math.round((enriching.done / enriching.total) * 100)}%`
+                      : 'Describing…'}
                   </Text>
                   <Pressable onPress={() => (enrichCancel.current = true)} hitSlop={10}>
                     <Text style={styles.stopText}>Stop</Text>
                   </Pressable>
                 </View>
                 <ProgressBar value={enriching.total ? enriching.done / enriching.total : 0} />
+                {!!enriching.current && (
+                  <Text style={styles.faintSmall} numberOfLines={1}>
+                    {enriching.current}
+                  </Text>
+                )}
               </View>
-            ) : pending > 0 ? (
+            ) : visionStats.queued > 0 ? (
               <Button
                 small
                 label={
                   vision.ready
-                    ? `Describe ${pending} meme${pending === 1 ? '' : 's'}`
-                    : `Describe ${pending} meme${pending === 1 ? '' : 's'} (loads model)`
+                    ? `Describe ${visionStats.queued} meme${visionStats.queued === 1 ? '' : 's'}`
+                    : `Describe ${visionStats.queued} meme${visionStats.queued === 1 ? '' : 's'} (loads model)`
                 }
                 onPress={onRunEnrich}
-                disabled={!vision.enabled}
               />
+            ) : visionStats.indexing > 0 ? (
+              <Text style={styles.note}>
+                {visionStats.indexing} meme{visionStats.indexing === 1 ? '' : 's'} still being indexed
+                — describing picks them up automatically.
+              </Text>
             ) : (
               <Text style={styles.note}>
-                {described > 0 ? 'Every meme has been described ✓' : 'Index some memes first, then describe them.'}
+                {visionStats.described > 0
+                  ? 'Every meme that can be described has been ✓'
+                  : 'Index some memes first, then describe them.'}
+              </Text>
+            )}
+            {visionStats.failed > 0 && (
+              <Button
+                small
+                variant="ghost"
+                label={`Retry ${visionStats.failed} that failed`}
+                onPress={onRetryVisionFailures}
+              />
+            )}
+            {visionStats.unsupported > 0 && (
+              <Text style={styles.faintSmall}>
+                {visionStats.unsupported} file{visionStats.unsupported === 1 ? '' : 's'} couldn’t be
+                read at all — see “Indexing errors” below.
               </Text>
             )}
 
@@ -840,7 +972,9 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
                   <Text style={styles.faintSmall}>Paused — {vision.pausedReason}</Text>
                 )}
                 {vision.running && !enriching && !vision.pausedReason && (
-                  <Text style={styles.faintSmall}>Working in the background… {described} described so far.</Text>
+                  <Text style={styles.faintSmall}>
+                    Working in the background… {visionStats.described} described so far.
+                  </Text>
                 )}
 
                 <View style={styles.bgDivider} />
@@ -1342,6 +1476,7 @@ const styles = StyleSheet.create({
   rowLabel: { color: colors.text, fontSize: 14, flexShrink: 1 },
   rowValue: { color: colors.accent, fontSize: 14, fontWeight: '700' },
   note: { color: colors.muted, fontSize: 12, lineHeight: 18 },
+  enrichBlock: { gap: 8 },
   enrichTopRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   stopText: { color: colors.danger, fontSize: 13, fontWeight: '700' },
   bgDivider: { height: 1, backgroundColor: colors.border, marginVertical: 4 },
