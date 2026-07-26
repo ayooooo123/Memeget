@@ -17,6 +17,7 @@
     "coverage": "jest facetCoverage --silent=false --verbose",
     "tagtest": "jest taggingEval --silent=false --verbose",
     "templates": "jest templateClusters --silent=false --verbose",
+    "recognition": "jest recognitionEval --silent=false --verbose",
     "doctor": "react-doctor",
     "agreement": "jest tagAgreement --silent=false --verbose"
   },

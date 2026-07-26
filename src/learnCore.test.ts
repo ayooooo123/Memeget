@@ -4,7 +4,8 @@
 // plus a shared anisotropic baseline direction so everything has an elevated
 // floor similarity (the property that killed fixed cosine thresholds).
 
-import { fitLogistic, headProb, scoreExemplar, trainLabelModel } from './learnCore';
+import { classifyPrompts, fitLogistic, headProb, scoreExemplar, trainLabelModel } from './learnCore';
+import { MIN_LABEL_MARGIN, RECOGNIZED_CONFIDENCE } from './recognition';
 
 const DIM = 64;
 
@@ -231,5 +232,54 @@ describe('fitLogistic', () => {
     const { w, b: bias } = await fitLogistic(a, b);
     for (const x of a.slice(0, 5)) expect(headProb({ w, b: bias }, x)).toBeGreaterThan(0.8);
     for (const x of b.slice(0, 5)) expect(headProb({ w, b: bias }, x)).toBeLessThan(0.2);
+  });
+});
+
+// Zero-shot half. Geometry is exact rather than sampled: an image built from
+// two orthonormal directions has a cosine to each that we choose outright, so
+// each case states the margin it is testing.
+describe('classifyPrompts', () => {
+  const e = (i: number): number[] => Array.from({ length: DIM }, (_, k) => (k === i ? 1 : 0));
+  // Image with cosine `toLabel` to e0 and `toAnchor` to e1 (both orthonormal),
+  // padded along e2 to stay unit-norm.
+  const image = (toLabel: number, toAnchor: number): number[] => {
+    const rest = Math.sqrt(Math.max(0, 1 - toLabel * toLabel - toAnchor * toAnchor));
+    return e(0)
+      .map((x) => x * toLabel)
+      .map((x, i) => x + e(1)[i] * toAnchor + e(2)[i] * rest);
+  };
+  const labels = [{ label: 'Pepe the Frog', category: 'character', vec: Float32Array.from(e(0)) }];
+  const anchors = [Float32Array.from(e(1))];
+
+  it('names a meme it is close to, with a confident score', () => {
+    const [tag] = classifyPrompts(image(0.34, 0.12), labels, anchors);
+    expect(tag.label).toBe('Pepe the Frog');
+    expect(tag.source).toBe('prompt');
+    expect(tag.score).toBeGreaterThan(RECOGNIZED_CONFIDENCE);
+  });
+
+  it('says nothing about a meme that matches nothing', () => {
+    // The non-standard case: middling similarity to every label. The old
+    // softmax rule emitted the best of them anyway.
+    expect(classifyPrompts(image(0.2, 0.18), labels, anchors)).toEqual([]);
+  });
+
+  it('discounts a label by how photo-generic the image is', () => {
+    // Identical cosine to the label; the second image also sits close to the
+    // "not a recognizable format" anchor, so its margin falls under the floor.
+    const cos = MIN_LABEL_MARGIN + 0.06;
+    expect(classifyPrompts(image(cos, 0.02), labels, anchors)).toHaveLength(1);
+    expect(classifyPrompts(image(cos, 0.24), labels, anchors)).toEqual([]);
+  });
+
+  it('scores a stronger match above a weaker one', () => {
+    const strong = classifyPrompts(image(0.32, 0.1), labels, anchors)[0];
+    const weak = classifyPrompts(image(0.24, 0.1), labels, anchors)[0];
+    expect(strong.score).toBeGreaterThan(weak.score);
+  });
+
+  it('works with no anchors and no labels', () => {
+    expect(classifyPrompts(image(0.34, 0), labels, [])).toHaveLength(1);
+    expect(classifyPrompts(image(0.34, 0), [], anchors)).toEqual([]);
   });
 });

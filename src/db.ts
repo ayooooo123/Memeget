@@ -2133,6 +2133,32 @@ export async function putLabelVector(
   );
 }
 
+// Drop cached text vectors nobody will ask for again: a prompt that was edited
+// (its key carries the prompt hash), an anchor that left the list, or a row
+// from before the keyspaces were namespaced. Each is 2KB of blob that would
+// otherwise sit in the DB forever. The table holds hundreds of rows, so reading
+// the keys to decide is cheaper than encoding the policy in SQL.
+export async function pruneLabelVectors(
+  isLive: (key: string) => boolean,
+  model = PRIMARY_EMBEDDING_MODEL.id
+): Promise<number> {
+  const db = await getDb();
+  const rows = await db.getAllAsync<{ label: string }>(
+    'SELECT label FROM label_vectors WHERE model = ?',
+    model
+  );
+  const dead = rows.map((r) => r.label).filter((k) => !isLive(k));
+  for (let i = 0; i < dead.length; i += 200) {
+    const chunk = dead.slice(i, i + 200);
+    await db.runAsync(
+      `DELETE FROM label_vectors WHERE model = ? AND label IN (${chunk.map(() => '?').join(',')})`,
+      model,
+      ...chunk
+    );
+  }
+  return dead.length;
+}
+
 // ---- exemplars (teach-by-example) --------------------------------------------
 
 export async function addExemplar(args: {

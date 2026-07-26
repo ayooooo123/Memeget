@@ -171,14 +171,65 @@ export const MEME_LABELS: LabelDef[] = [
   ...buildAllBaselineLabels(CURATED_MEME_LABELS),
 ];
 
-// Generic "not a recognizable format" anchors so weak matches don't get forced
-// into a label. We discard any predicted label that scores below the top
-// generic anchor (acts as a per-image dynamic threshold).
+// Generic "this is not a recognizable meme format" anchors. Their best match
+// gives each image a per-image bias (see ./recognition): images that sit close
+// to ALL text sit close to these too, so subtracting half of that similarity is
+// what separates "recognized" from "everything scores middling here".
+//
+// The set spans the shapes a NON-standard meme actually takes — a screenshot, a
+// social post, an AI-gen picture, a collage — because those are the images the
+// classifier must be able to decline. Anchors are load-bearing for the shipped
+// calibration: changing this list moves every margin, so re-run
+// `npm run recognition` (and re-tune thresholds if the tier table shifts).
 export const NEGATIVE_ANCHORS: string[] = [
   'a random photograph',
   'a plain screenshot',
   'an ordinary picture',
+  'a meme',
+  'an image macro with a caption',
+  'a funny picture with text on it',
+  'a screenshot of a social media post',
+  'a screenshot of a text conversation',
+  'an AI-generated image',
+  'a photo edited into a collage',
+  'a cartoon drawing',
+  'a photo of a person',
+  'a video still',
+  'an unfamiliar internet picture',
 ];
+
+// ---- text-vector cache keys ---------------------------------------------------
+//
+// `label_vectors` is a shared cache of embedded TEXT, and two subsystems embed
+// different text about the same label: the classifier embeds `def.prompt` ("a
+// Pepe the Frog meme, a green cartoon frog") while search expansion embeds
+// `searchLabelPrompt(label)` ("a meme about Pepe the Frog"). Keying both by the
+// bare label made them collide — whichever ran first won, so a search before
+// the first index could silently replace the curated classifier prompt (the
+// app's whole curation moat) with the generic search phrasing. Each keyspace is
+// therefore namespaced, and the classifier's key carries a hash of the prompt
+// so EDITING a prompt actually takes effect instead of reusing a stale vector.
+
+const CLASSIFIER_KEY_PREFIX = 'clip::';
+const ANCHOR_KEY_PREFIX = 'neg::';
+
+// FNV-1a, base36. Not cryptographic — it only has to change when the text does.
+function textHash(s: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(36);
+}
+
+export function labelVectorKey(def: LabelDef): string {
+  return `${CLASSIFIER_KEY_PREFIX}${textHash(def.prompt)}:${def.label}`;
+}
+
+export function anchorVectorKey(text: string): string {
+  return `${ANCHOR_KEY_PREFIX}${textHash(text)}`;
+}
 
 // label -> associations lookup, built once.
 export const ASSOCIATIONS: Record<string, string[]> = Object.fromEntries(

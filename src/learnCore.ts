@@ -18,6 +18,7 @@
 //
 // A meme carries the tag if either pathway accepts it.
 
+import { ANCHOR_BIAS, MIN_LABEL_MARGIN, labelConfidence } from './recognition';
 import type { Tag } from './types';
 
 export interface LabelVec {
@@ -301,12 +302,12 @@ export function scoreExemplar(
 
 // ---- zero-shot classification --------------------------------------------------
 
-// Zero-shot tuning. We softmax label + negative-anchor similarities together
-// (CLIP-style temperature) and only keep labels that beat every "this is just
-// an ordinary photo" anchor. A plain photo of a person therefore gets few or
-// zero format tags instead of being forced into the top-K wrong ones.
-const LOGIT_SCALE = 50; // softmax sharpness over cosine scores
-const MIN_PROB = 0.05; // floor so near-zero matches are dropped
+// A label is kept when the image is close to it in absolute terms, after
+// removing half of the image's own similarity to the generic "not a
+// recognizable format" anchors — see ./recognition for the derivation of both
+// the signal and the thresholds, and for why the previous softmax rule was a
+// measurably worse discriminator. The emitted score is a calibrated P(correct),
+// so downstream code can tell "we recognize this" from "we are guessing".
 
 function cosTo(a: ArrayLike<number>, b: Float32Array): number {
   let s = 0;
@@ -314,51 +315,39 @@ function cosTo(a: ArrayLike<number>, b: Float32Array): number {
   return s;
 }
 
-// Zero-shot half: text-prompt labels softmaxed against the negative anchors,
-// kept only if their probability exceeds the best anchor and MIN_PROB. Written
-// as tight loops over one scratch array — this runs once per meme per re-tag
-// (library × ~100 vectors × 512 dims), so intermediate map/spread allocations
-// were real time. Pure function of (embedding, curated labels): teaching never
-// changes its output, which is what lets retagAll cache it per meme.
+// Zero-shot half: every curated label scored against the image, kept only if it
+// clears the margin floor. Two flat passes with no intermediate arrays — this
+// runs once per meme per re-tag (library × ~400 vectors × 512 dims), where
+// map/spread allocations were real time. Pure function of (embedding, curated
+// labels): teaching never changes its output, which is what lets retagAll cache
+// it per meme.
 export function classifyPrompts(
   imageVec: number[],
   labelVecs: LabelVec[],
   negativeVecs: Float32Array[]
 ): Tag[] {
   const n = labelVecs.length;
-  const m = negativeVecs.length;
   if (n === 0) return [];
-  const scratch = new Float64Array(n + m);
-  let max = -Infinity;
-  for (let i = 0; i < n; i++) {
-    const c = cosTo(imageVec, labelVecs[i].vec);
-    scratch[i] = c;
-    if (c > max) max = c;
-  }
-  for (let j = 0; j < m; j++) {
+  // An image can sit on the far side of every anchor (all cosines negative);
+  // that is still its bias, and clamping it to 0 would score those images on a
+  // different scale than the calibration was measured on. No anchors at all
+  // (an old cache, a failed vocab build) means no correction.
+  let anchorMax = -Infinity;
+  for (let j = 0; j < negativeVecs.length; j++) {
     const c = cosTo(imageVec, negativeVecs[j]);
-    scratch[n + j] = c;
-    if (c > max) max = c;
+    if (c > anchorMax) anchorMax = c;
   }
-  // softmax over [labels, negatives] with temperature LOGIT_SCALE
-  let sum = 0;
-  for (let k = 0; k < n + m; k++) {
-    const e = Math.exp(LOGIT_SCALE * (scratch[k] - max));
-    scratch[k] = e;
-    sum += e;
-  }
-  if (sum === 0) sum = 1;
-  let negMax = 0;
-  for (let j = 0; j < m; j++) {
-    const p = scratch[n + j] / sum;
-    if (p > negMax) negMax = p;
-  }
+  const bias = Number.isFinite(anchorMax) ? ANCHOR_BIAS * anchorMax : 0;
   const out: Tag[] = [];
   for (let i = 0; i < n; i++) {
-    const p = scratch[i] / sum;
-    if (p > negMax && p > MIN_PROB) {
-      out.push({ label: labelVecs[i].label, category: labelVecs[i].category, score: p, source: 'prompt' });
-    }
+    const margin = cosTo(imageVec, labelVecs[i].vec) - bias;
+    if (margin < MIN_LABEL_MARGIN) continue;
+    out.push({
+      label: labelVecs[i].label,
+      category: labelVecs[i].category,
+      score: labelConfidence(margin),
+      source: 'prompt',
+    });
   }
   return out;
 }

@@ -39,6 +39,7 @@ import {
   rankSemanticLabels,
   searchLabelPrompt,
   searchTermsForText,
+  searchVectorKey,
 } from '../searchExpansion';
 import type { LinkedFolder, MediaKind, MemeRecord, SearchHit } from '../types';
 
@@ -63,12 +64,12 @@ async function seedSearchLabelVectors(
     const low = key.toLowerCase();
     if (!key || seen.has(low)) continue;
     seen.add(low);
-    if (cache.has(key) || cache.has(low)) continue;
+    if (cache.has(searchVectorKey(key)) || cache.has(searchVectorKey(low))) continue;
     const vec = await api.embedText(searchLabelPrompt(key));
-    await putLabelVector(key, vec, api.primaryModel.id);
+    await putLabelVector(searchVectorKey(key), vec, api.primaryModel.id);
     const arr = Float32Array.from(vec);
-    cache.set(key, arr);
-    cache.set(low, arr);
+    cache.set(searchVectorKey(key), arr);
+    cache.set(searchVectorKey(low), arr);
     added += 1;
     if (added >= maxNew || seen.size >= SEARCH_LABEL_VECTOR_LIMIT) break;
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
