@@ -309,7 +309,7 @@ export function buildBaseline(freq, { max = DEFAULTS.maxTags, source = 'memedepo
 // `buildMultiSourceBaseline` normalizes + quality-filters, de-dupes across
 // sources by stem (highest weight wins, provenance kept), ranks, and caps.
 
-const NAME_BASE = 100000; // keeps every name above every frequency tag
+export const NAME_BASE = 100000; // keeps every name above every frequency tag
 
 // Unwrap an API payload that may be a bare array or a wrapper object
 // ({depots|memes|data|results|items: [...]}, or any object whose first array

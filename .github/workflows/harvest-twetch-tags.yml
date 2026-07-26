@@ -1,0 +1,106 @@
+name: Harvest Twetch meme library
+
+# Pulls the Twetch meme library ("Dank Rares") through its public JSON API and
+# refreshes `src/data/twetchBaseline.json` — the vocabulary snapshot the
+# recognition eval grades and the third breadth tier reads
+# (src/baselineLabels.ts).
+#
+# Twetch is the only source we harvest whose memes carry HUMAN-APPLIED tags,
+# and its folders are curated by format (Pepe, Wojak, Bobo, Brainlet, Apu,
+# Grug, BSV). That makes it the best-shaped corpus available — and also the
+# reason to keep measuring it: as of the last run its labels did NOT improve
+# tagging (10 of 14 folders were already covered by the curated core, so the
+# remaining slots went to generic aspect words), which is why
+# MAX_TWETCH_LABELS is 0. This job keeps the snapshot fresh so the day that
+# changes, `npm run recognition` can prove it.
+#
+# Unlike memedepot, api.twetch.com is reachable from a dev machine too:
+#   npm run harvest:twetch
+#
+# Only derived text is collected — folder names, tag terms and their
+# frequencies. No meme images, no on-chain identifiers, no user data.
+
+on:
+  workflow_dispatch:
+    inputs:
+      max_items:
+        description: 'Max memes to page through'
+        default: '8000'
+      max_tags:
+        description: 'Max labels to keep'
+        default: '300'
+  schedule:
+    # Monthly, like the memedepot harvest — the vocabulary drifts slowly and
+    # nobody wants PR spam.
+    - cron: '0 7 1 * *'
+
+concurrency:
+  group: harvest-twetch-tags
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  harvest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # Guard the deterministic extraction before trusting a live crawl: the
+      # fixture in these tests mirrors the API's response shape, so a renamed
+      # field fails here instead of silently producing an empty baseline.
+      - name: Test harvester helpers
+        run: npm run harvest:twetch:test
+
+      - name: Harvest the meme library
+        run: |
+          node tools/twetch/harvest.mjs \
+            --maxItems "${{ github.event.inputs.max_items || '8000' }}" \
+            --maxTags "${{ github.event.inputs.max_tags || '300' }}"
+
+      # The harvester exits non-zero (leaving the file untouched) when the
+      # corpus comes back empty or untagged, so a shape change can't overwrite a
+      # good baseline with nothing.
+      #
+      # continue-on-error: opening the PR needs the "Allow GitHub Actions to
+      # create and approve pull requests" repo setting. If it's off, this step
+      # errors but the branch is already pushed, so the harvest still succeeded.
+      - name: Open PR with refreshed baseline
+        continue-on-error: true
+        uses: peter-evans/create-pull-request@v6
+        with:
+          branch: automation/twetch-tags
+          base: main
+          add-paths: src/data/twetchBaseline.json
+          commit-message: 'chore(data): refresh Twetch meme-library baseline'
+          title: 'chore(data): refresh Twetch meme-library baseline'
+          body: |
+            Automated harvest of the Twetch meme library's folders and
+            human-applied tags (`tools/twetch/harvest.mjs`).
+
+            **Review before merge:**
+            1. Skim the new/changed labels for junk or miscategorized terms.
+            2. Re-embed the vocabulary and re-run the recognition eval — a
+               vocabulary change is only safe if the numbers say so:
+
+               ```
+               python tools/eval/build_label_vectors.py
+               npm run recognition
+               ```
+
+            3. `MAX_TWETCH_LABELS` (src/baselineLabels.ts) is 0 until this tier
+               measurably improves tagging. If this harvest finally adds formats
+               the other sources lack, raise it and paste the before/after.
+
+            Only derived text (folder names, tag terms, counts) is harvested —
+            no meme images and no on-chain identifiers.
+          delete-branch: true

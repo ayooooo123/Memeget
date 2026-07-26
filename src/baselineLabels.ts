@@ -22,6 +22,7 @@
 
 import baseline from './data/memedepotBaseline.json';
 import basedmemesBaseline from './data/basedmemesBaseline.json';
+import twetchBaseline from './data/twetchBaseline.json';
 import type { LabelDef } from './memeLabels';
 
 // One harvested tag as it appears in the generated JSON. `prompt` is a
@@ -67,8 +68,33 @@ export const MAX_BASELINE_LABELS = 150;
 // and another false-positive chance.
 export const MAX_BASEDMEMES_LABELS = 150;
 
+// Cap on the THIRD (Twetch meme library) breadth tier — currently ZERO, on
+// purpose.
+//
+// Twetch is the best-shaped source we have: 6.5k memes, human-applied tags,
+// folders curated by format. But `npm run recognition` says the tier does not
+// pay for itself, on two independent corpora:
+//
+//                           holdout (595 KYM/basedmemes)   a real 2k library
+//   399 labels                546 right / 632 wrong        140/323 correct
+//   + 3 twetch folder names   545 / 633                    140/323
+//   + 20 twetch labels        542 / 638                    140/323
+//   + 60 twetch labels        540 / 649                    140/325
+//
+// The reason is in the data, not the source: 10 of Twetch's 14 folders (Pepe,
+// Wojak, Bobo, Brainlet, Boomer, Apu, Grug, Zoomer, Reaction…) are ALREADY in
+// the vocabulary from the curated core and the earlier tiers, so every slot
+// this tier wins goes to what is left — generic aspect words (Outdoors, Laugh,
+// Fight, Work), which measure as weak visual classes and add false positives.
+//
+// The harvest still ships and still runs (tools/twetch): it is the input the
+// eval needs, and the day Twetch adds formats the other sources lack, raising
+// this number is a one-line change that the harness can justify.
+export const MAX_TWETCH_LABELS = 0;
+
 const file = baseline as BaselineFile;
 const basedmemesFile = basedmemesBaseline as BaselineFile;
+const twetchFile = twetchBaseline as BaselineFile;
 
 export const BASELINE_META = {
   source: file.source ?? 'memedepot.com',
@@ -82,11 +108,17 @@ export const BASEDMEMES_META = {
   total: Array.isArray(basedmemesFile.labels) ? basedmemesFile.labels.length : 0,
 } as const;
 
+export const TWETCH_META = {
+  source: twetchFile.source ?? 'twetch.com',
+  generatedAt: twetchFile.generatedAt ?? null,
+  total: Array.isArray(twetchFile.labels) ? twetchFile.labels.length : 0,
+} as const;
+
 const normLabel = (s: string): string => s.trim().toLowerCase();
 
 // Turn harvested tags into LabelDefs: rank by frequency, drop anything already
 // covered by the curated set (case-insensitive), sanitize categories, dedupe,
-// and cap. Pure and curated-injected so `memeLabels.ts` can compose the two
+// and cap. Pure and curated-injected so `memeLabels.ts` can compose the
 // tiers without an import cycle.
 export function buildBaselineLabels(
   curated: LabelDef[],
@@ -126,16 +158,21 @@ export function buildBaselineLabels(
   return out;
 }
 
-// Compose BOTH machine-generated breadth tiers under the curated core, sharing
+// Compose EVERY machine-generated breadth tier under the curated core, sharing
 // one de-dupe pass so a term can appear in at most one place. The trick is to
-// reuse the pure `buildBaselineLabels` for each tier: the first tier de-dupes
-// against `curated`; the second de-dupes against `curated` PLUS the first tier
-// (passed as the `curated` arg), so memedepot always wins over basedmemes on a
-// shared term and neither collides with the curated labels. Order is memedepot
-// breadth first, then basedmemes breadth.
+// reuse the pure `buildBaselineLabels` for each tier: each one de-dupes against
+// `curated` PLUS the tiers already built (passed as the `curated` arg), so an
+// earlier source always wins a shared term and none collide with the curated
+// labels. Order is source quality: memedepot, then basedmemes+KYM, then Twetch.
+//
+// Twetch runs last not because it is worst — its folders are hand-curated and
+// its tags are human-applied — but because by the time it runs, the formats it
+// shares with the other sources (pepe, wojak, bobo) are already covered, so its
+// slots go to what only it has: the on-chain/BSV corner of meme culture.
 export function buildAllBaselineLabels(curated: LabelDef[]): LabelDef[] {
   const memedepotTags = file.labels ?? [];
   const basedmemesTags = basedmemesFile.labels ?? [];
+  const twetchTags = twetchFile.labels ?? [];
 
   const firstTier = buildBaselineLabels(curated, memedepotTags, MAX_BASELINE_LABELS);
   const secondTier = buildBaselineLabels(
@@ -143,6 +180,11 @@ export function buildAllBaselineLabels(curated: LabelDef[]): LabelDef[] {
     basedmemesTags,
     MAX_BASEDMEMES_LABELS
   );
+  const thirdTier = buildBaselineLabels(
+    [...curated, ...firstTier, ...secondTier],
+    twetchTags,
+    MAX_TWETCH_LABELS
+  );
 
-  return [...firstTier, ...secondTier];
+  return [...firstTier, ...secondTier, ...thirdTier];
 }

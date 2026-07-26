@@ -12,6 +12,8 @@
     "harvest:test": "node --test tools/memedepot/*.test.mjs",
     "mine:basedmemes": "node tools/basedmemes/mine_labels.mjs",
     "mine:basedmemes:test": "node --test tools/basedmemes/*.test.mjs",
+    "harvest:twetch": "node tools/twetch/harvest.mjs",
+    "harvest:twetch:test": "node --test tools/twetch/*.test.mjs",
     "diagnose": "node tools/memedepot/diagnose.mjs",
     "eval": "jest evalCore",
     "coverage": "jest facetCoverage --silent=false --verbose",
