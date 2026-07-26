@@ -1,0 +1,608 @@
+{
+  "source": "twetch.com",
+  "generatedAt": "2026-07-26T18:41:08.966Z",
+  "labels": [
+    {
+      "label": "Pepe",
+      "prompt": "a pepe meme",
+      "category": "character",
+      "count": 100000,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Wojak",
+      "prompt": "a wojak meme",
+      "category": "character",
+      "count": 99999,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Reaction",
+      "prompt": "a reaction meme",
+      "category": "situation",
+      "count": 99998,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Bobo",
+      "prompt": "a bobo meme",
+      "category": "character",
+      "count": 99997,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Brainlet",
+      "prompt": "a brainlet meme",
+      "category": "topic",
+      "count": 99996,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Boomer",
+      "prompt": "a boomer meme",
+      "category": "topic",
+      "count": 99995,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Toshi",
+      "prompt": "a toshi meme",
+      "category": "topic",
+      "count": 99994,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Zoomer",
+      "prompt": "a zoomer meme",
+      "category": "topic",
+      "count": 99992,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Grug",
+      "prompt": "a grug meme",
+      "category": "topic",
+      "count": 99991,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Twetch",
+      "prompt": "a twetch meme",
+      "category": "topic",
+      "count": 99989,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Crypto",
+      "prompt": "a crypto meme",
+      "category": "topic",
+      "count": 99987,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Happy",
+      "prompt": "a happy meme",
+      "category": "emotion",
+      "count": 836,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Outdoors",
+      "prompt": "a outdoors meme",
+      "category": "topic",
+      "count": 527,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Angry",
+      "prompt": "a angry meme",
+      "category": "emotion",
+      "count": 508,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Smug",
+      "prompt": "a smug meme",
+      "category": "emotion",
+      "count": 474,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Money",
+      "prompt": "a money meme",
+      "category": "topic",
+      "count": 459,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Confused",
+      "prompt": "a confused meme",
+      "category": "emotion",
+      "count": 426,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Comfy",
+      "prompt": "a comfy meme",
+      "category": "topic",
+      "count": 423,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Laugh",
+      "prompt": "a laugh meme",
+      "category": "topic",
+      "count": 407,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Fight",
+      "prompt": "a fight meme",
+      "category": "topic",
+      "count": 388,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Weapon",
+      "prompt": "a weapon meme",
+      "category": "object",
+      "count": 386,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Celebrate",
+      "prompt": "a celebrate meme",
+      "category": "topic",
+      "count": 384,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Morning",
+      "prompt": "a morning meme",
+      "category": "topic",
+      "count": 375,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Drink",
+      "prompt": "a drink meme",
+      "category": "topic",
+      "count": 372,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Work",
+      "prompt": "a work meme",
+      "category": "setting",
+      "count": 371,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Approve",
+      "prompt": "a approve meme",
+      "category": "topic",
+      "count": 343,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Tired",
+      "prompt": "a tired meme",
+      "category": "topic",
+      "count": 323,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Drive",
+      "prompt": "a drive meme",
+      "category": "topic",
+      "count": 321,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Cringe",
+      "prompt": "a cringe meme",
+      "category": "emotion",
+      "count": 319,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Scared",
+      "prompt": "a scared meme",
+      "category": "topic",
+      "count": 314,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Love",
+      "prompt": "a love meme",
+      "category": "topic",
+      "count": 282,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Game",
+      "prompt": "a game meme",
+      "category": "topic",
+      "count": 279,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Point",
+      "prompt": "a point meme",
+      "category": "topic",
+      "count": 261,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Sports",
+      "prompt": "a sports meme",
+      "category": "topic",
+      "count": 254,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Wave",
+      "prompt": "a wave meme",
+      "category": "topic",
+      "count": 246,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Clap",
+      "prompt": "a clap meme",
+      "category": "topic",
+      "count": 199,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Facepalm",
+      "prompt": "a facepalm meme",
+      "category": "action",
+      "count": 177,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Excite",
+      "prompt": "a excite meme",
+      "category": "topic",
+      "count": 120,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Excited",
+      "prompt": "a excited meme",
+      "category": "topic",
+      "count": 120,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Hooray",
+      "prompt": "a hooray meme",
+      "category": "topic",
+      "count": 93,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Craig",
+      "prompt": "a craig meme",
+      "category": "topic",
+      "count": 26,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Tarot",
+      "prompt": "a tarot meme",
+      "category": "topic",
+      "count": 22,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Arcana",
+      "prompt": "a arcana meme",
+      "category": "topic",
+      "count": 22,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Wright",
+      "prompt": "a wright meme",
+      "category": "topic",
+      "count": 17,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Satoshi",
+      "prompt": "a satoshi meme",
+      "category": "topic",
+      "count": 15,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Nakamoto",
+      "prompt": "a nakamoto meme",
+      "category": "topic",
+      "count": 13,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Cozy",
+      "prompt": "a cozy meme",
+      "category": "topic",
+      "count": 12,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Hoodie",
+      "prompt": "a hoodie meme",
+      "category": "topic",
+      "count": 9,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Twonk",
+      "prompt": "a twonk meme",
+      "category": "topic",
+      "count": 9,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Infinite",
+      "prompt": "a infinite meme",
+      "category": "topic",
+      "count": 5,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Loop",
+      "prompt": "a loop meme",
+      "category": "topic",
+      "count": 5,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Redhawk",
+      "prompt": "a redhawk meme",
+      "category": "topic",
+      "count": 5,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Physics",
+      "prompt": "a physics meme",
+      "category": "topic",
+      "count": 5,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Quantum",
+      "prompt": "a quantum meme",
+      "category": "topic",
+      "count": 5,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Bitcoin",
+      "prompt": "a bitcoin meme",
+      "category": "topic",
+      "count": 5,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Farmer",
+      "prompt": "a farmer meme",
+      "category": "topic",
+      "count": 4,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Smile",
+      "prompt": "a smile meme",
+      "category": "topic",
+      "count": 3,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Calvin",
+      "prompt": "a calvin meme",
+      "category": "topic",
+      "count": 3,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Never",
+      "prompt": "a never meme",
+      "category": "topic",
+      "count": 3,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Egghead",
+      "prompt": "a egghead meme",
+      "category": "topic",
+      "count": 3,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Creg",
+      "prompt": "a creg meme",
+      "category": "topic",
+      "count": 3,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Frog",
+      "prompt": "a frog meme",
+      "category": "character",
+      "count": 3,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Hatch",
+      "prompt": "a hatch meme",
+      "category": "topic",
+      "count": 3,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Punch",
+      "prompt": "a punch meme",
+      "category": "topic",
+      "count": 3,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Ayre",
+      "prompt": "a ayre meme",
+      "category": "topic",
+      "count": 2,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Caal",
+      "prompt": "a caal meme",
+      "category": "topic",
+      "count": 2,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Finland",
+      "prompt": "a finland meme",
+      "category": "topic",
+      "count": 2,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Sweatpants",
+      "prompt": "a sweatpants meme",
+      "category": "topic",
+      "count": 2,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Court",
+      "prompt": "a court meme",
+      "category": "topic",
+      "count": 2,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Sign",
+      "prompt": "a sign meme",
+      "category": "object",
+      "count": 2,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Bugs",
+      "prompt": "a bugs meme",
+      "category": "topic",
+      "count": 2,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Bunny",
+      "prompt": "a bunny meme",
+      "category": "topic",
+      "count": 2,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Smoking",
+      "prompt": "a smoking meme",
+      "category": "topic",
+      "count": 2,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Anime",
+      "prompt": "a anime meme",
+      "category": "topic",
+      "count": 2,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Look",
+      "prompt": "a look meme",
+      "category": "topic",
+      "count": 2,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Green-candle",
+      "prompt": "a green-candle meme",
+      "category": "topic",
+      "count": 2,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Green",
+      "prompt": "a green meme",
+      "category": "topic",
+      "count": 2,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Bullish",
+      "prompt": "a bullish meme",
+      "category": "topic",
+      "count": 2,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Bull",
+      "prompt": "a bull meme",
+      "category": "topic",
+      "count": 2,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Pump",
+      "prompt": "a pump meme",
+      "category": "topic",
+      "count": 2,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Craig-wright",
+      "prompt": "a craig-wright meme",
+      "category": "topic",
+      "count": 2,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Copa",
+      "prompt": "a copa meme",
+      "category": "topic",
+      "count": 2,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Nakamotor",
+      "prompt": "a nakamotor meme",
+      "category": "topic",
+      "count": 2,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Wojack",
+      "prompt": "a wojack meme",
+      "category": "topic",
+      "count": 2,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Plotting",
+      "prompt": "a plotting meme",
+      "category": "topic",
+      "count": 2,
+      "source": "twetch.com"
+    },
+    {
+      "label": "Farm",
+      "prompt": "a farm meme",
+      "category": "topic",
+      "count": 2,
+      "source": "twetch.com"
+    }
+  ]
+}
