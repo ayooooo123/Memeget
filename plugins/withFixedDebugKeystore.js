@@ -19,12 +19,12 @@
 // (SHA1 5E:8F:16:06:2E:A3:CD:2C:4A:0D:54:78:76:BA:A6:F3:8C:AB:F6:25), byte-for-
 // byte the same key current builds already use — so pinning it changes nothing
 // about existing installs (no forced reinstall), it just locks it in.
-const { withDangerousMod } = require('expo/config-plugins');
+const { withAndroidManifest, withDangerousMod } = require('expo/config-plugins');
 const fs = require('fs');
 const path = require('path');
 
 module.exports = function withFixedDebugKeystore(config) {
-  return withDangerousMod(config, [
+  const withKeystore = withDangerousMod(config, [
     'android',
     async (cfg) => {
       const src = path.join(cfg.modRequest.projectRoot, 'signing', 'debug.keystore');
@@ -40,4 +40,18 @@ module.exports = function withFixedDebugKeystore(config) {
       return cfg;
     },
   ]);
+
+  return withAndroidManifest(withKeystore, (cfg) => {
+    const app = cfg.modResults.manifest.application?.[0];
+    if (app?.$) {
+      // Memeget is an on-device ML + media library. It loads model runtimes and
+      // many decoded thumbnails/videos in one process, so the Android default
+      // growth limit left too little headroom after bitmap pressure. This is a
+      // mitigation only; the UI keeps decoded grid images out of Glide's shared
+      // memory cache so largeHeap is not carrying the fix by itself.
+      app.$['android:largeHeap'] = 'true';
+      app.$['android:enableOnBackInvokedCallback'] = 'true';
+    }
+    return cfg;
+  });
 };

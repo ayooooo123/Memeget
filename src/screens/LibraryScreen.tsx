@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  AppState,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -26,12 +27,13 @@ import {
   putLabelVector,
   searchByVector,
 } from '../db';
-import { noteInteractive, runIndex, retagAll, type IndexProgress } from '../indexer';
+import { interactiveActive, noteInteractive, runIndex, retagAll, type IndexProgress } from '../indexer';
 import { emitLibraryChanged, onLibraryChanged, onThumbsUpdated } from '../events';
 import { appendPage, mergeRecords, patchThumbs } from '../libraryCore';
 import { success, tap, thud } from '../haptics';
 import { pickFolder } from '../saf';
 import { restoreFolderSidecar } from '../sidecarSync';
+import { createTeachApplyQueue, type TeachApplyQueue } from '../teachApplyQueue';
 import { colors, radius, space, type } from '../theme';
 import {
   buildExpandedLexicalQuery,
@@ -162,6 +164,8 @@ export function LibraryScreen() {
   // and stutters, so we hold refreshes until the scroll settles.
   const scrollingRef = useRef(false);
   const pendingRefreshRef = useRef(false);
+  const appActiveRef = useRef(AppState.currentState === 'active');
+  const teachApplyQueueRef = useRef<TeachApplyQueue | null>(null);
 
   // Serialize refresh and page loads through one promise chain. They both read
   // "how much is loaded" and then write `recent`; interleaved (a background
@@ -380,6 +384,40 @@ export function LibraryScreen() {
   // flickering "Searching…" ↔ "N results" forever.
   const runSearchRef = useRef(runSearch);
   runSearchRef.current = runSearch;
+
+  useEffect(() => {
+    const queue = createTeachApplyQueue({
+      debounceMs: 1_200,
+      retryMs: 1_000,
+      isActive: () => appActiveRef.current && !interactiveActive(),
+      apply: async () => {
+        const embApi = embRef.current;
+        if (!embApi.ready) return;
+        const res = await retagAll(embApi, { shouldCancel: () => !appActiveRef.current || interactiveActive() });
+        if (res.cancelled) {
+          queue.request();
+          return;
+        }
+        await refresh();
+        const q = queryRef.current.trim();
+        if (q) await runSearchRef.current(q);
+      },
+      onError: (error) => showToast(`Tag apply failed: ${String(error)}`, 'error'),
+    });
+    teachApplyQueueRef.current = queue;
+    return () => {
+      queue.cancel();
+      if (teachApplyQueueRef.current === queue) teachApplyQueueRef.current = null;
+    };
+  }, [refresh]);
+
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (state) => {
+      appActiveRef.current = state === 'active';
+      if (appActiveRef.current) teachApplyQueueRef.current?.resume();
+    });
+    return () => sub.remove();
+  }, []);
 
   // Debounce so the grid narrows as you type without a search per keystroke.
   useEffect(() => {
@@ -605,17 +643,15 @@ export function LibraryScreen() {
     [isSearch, searching, results, query, indexing, progress, hasLibrary, count, folders, emb.ready, onLink, onIndex, kind, relaxedSearchScope]
   );
 
-  const onTaught = useCallback(
-    async (label: string) => {
-      const embApi = embRef.current;
-      if (embApi.ready) await retagAll(embApi);
-      await refresh();
-      const q = queryRef.current.trim();
-      if (q) await runSearchRef.current(q);
-      return countMemesWithLabel(label);
-    },
-    [refresh]
-  );
+  const onTaught = useCallback(async (label: string) => {
+    // Persisting the exemplar/manual tag is already done by MemeGrid. Mark the
+    // teach gesture as interactive, then run the full-library apply only after
+    // the user has stopped tagging/searching long enough for the queue to clear.
+    noteInteractive();
+    if (embRef.current.ready) teachApplyQueueRef.current?.request();
+    scheduleRefresh();
+    return countMemesWithLabel(label);
+  }, [scheduleRefresh]);
 
   const onDeleted = useCallback((id: number) => {
     setRecent((cur) => {

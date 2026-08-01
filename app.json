@@ -10,7 +10,7 @@
     "newArchEnabled": true,
     "android": {
       "package": "com.memeget.app",
-      "versionCode": 300,
+      "versionCode": 1151,
       "edgeToEdgeEnabled": true
     },
     "plugins": [
@@ -37,7 +37,7 @@
           "disableIOS": true
         }
       ],
-      "expo-video",
+      ["expo-video", { "supportsPictureInPicture": true }],
       "./plugins/withFixedDebugKeystore",
       "expo-task-manager",
       "expo-background-task",

@@ -25,13 +25,8 @@ import {
   tagTermScore,
   type LexicalQuery,
 } from './searchExpansion';
-import {
-  propagatedTag,
-  rankPropagationHits,
-  scorePropagationCandidate,
-  termsWithLabel,
-  type PropagationHit,
-} from './tagPropagation';
+import { rankPropagationHits, scorePropagationCandidate, type PropagationHit } from './tagPropagation';
+import { upsertDurableTag } from './tagMerge';
 import type { MemeRecord, MediaKind, SearchHit, Tag, LinkedFolder, Exemplar } from './types';
 import { selectPairVectors, type VisualSimilarityRecord } from './visualSearch';
 
@@ -1886,18 +1881,20 @@ export async function propagateTagToSimilarMemes(
     ...sourceIds
   );
 
-  // Cheap already-has-label check straight off the raw tags JSON (the exact
-  // encoded token, compared lowercase like the bulk-tag dedupe) — avoids
-  // JSON.parsing the whole library when only the winners need their tags
-  // materialized.
-  const needle = ('"label":' + JSON.stringify(trimmed)).toLowerCase();
+  const labelKey = normalizeLabel(trimmed);
+  const hasDurableLabel = (rawTags: string): boolean =>
+    safeParseTags(rawTags).some(
+      (t) =>
+        normalizeLabel(t.label) === labelKey &&
+        (t.source === 'manual' || t.source === 'exemplar' || t.source === 'propagated')
+    );
 
   const hits: PropagationHit[] = [];
   for (let i = 0; i < candRows.length; i++) {
     const r = candRows[i];
     const hit = scorePropagationCandidate(
       sources,
-      { id: r.id, hasLabel: (r.tags ?? '').toLowerCase().includes(needle), record: toRecord(r) },
+      { id: r.id, hasDurableLabel: hasDurableLabel(r.tags), record: toRecord(r) },
       VISUAL_EMBEDDING_MODEL
     );
     if (hit) hits.push(hit);
@@ -1914,16 +1911,17 @@ export async function propagateTagToSimilarMemes(
   const byId = new Map(candRows.map((r) => [r.id, r]));
   const updates = winners.map((w) => {
     const row = byId.get(w.id)!;
-    return {
-      id: w.id,
-      tags: [...safeParseTags(row.tags), propagatedTag(trimmed, w.score)],
-      extraTerms: termsWithLabel(row.extra_terms ?? '', trimmed),
-    };
+    const next = upsertDurableTag(safeParseTags(row.tags), row.extra_terms ?? '', {
+      label: trimmed,
+      category: 'user',
+      source: 'propagated',
+      score: w.score,
+    });
+    return { id: w.id, tags: next.tags, extraTerms: next.extraTerms };
   });
   await bulkUpdateMemeTags(updates);
   return { propagated: updates.length };
 }
-
 export async function clearIndex(): Promise<void> {
   const db = await getDb();
   await db.execAsync('DELETE FROM memes; DELETE FROM content_hashes;');

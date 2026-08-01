@@ -34,8 +34,10 @@ import {
   propagateTagToSimilarMemes,
   requeueMemeThumb,
   requeueMemeVision,
+  updateMemeTags,
+  sqliteVecReady,
 } from '../db';
-import { termsWithLabel } from '../tagPropagation';
+import { termsWithLabel, upsertDurableTag } from '../tagMerge';
 import { emitLibraryChanged } from '../events';
 import { guessFacet } from '../facetCoverage';
 import { scoreExemplar } from '../learnCore';
@@ -93,17 +95,6 @@ function filterTagSuggestions(labels: string[], query: string, limit = 12): stri
   return [...prefix, ...substr].slice(0, limit);
 }
 
-// Ordered source candidates for a grid cell. Real GIFs skip their persisted
-// thumb (a static jpeg — it froze them) and load the original bytes so they
-// animate right in the grid; when that decode fails (mp4 bytes wearing a .gif
-// name) the cell falls back to the extracted poster before giving up on the
-// stub. Everything else keeps loading the small persisted thumb.
-function cellSources(item: Pick<Item, 'kind' | 'uri' | 'name' | 'thumbUri'>): string[] {
-  if (item.kind === 'image' && /\.gif$/i.test(item.name)) {
-    return item.thumbUri ? [item.uri, item.thumbUri] : [item.uri];
-  }
-  return [thumbSource(item)];
-}
 
 // Track the on-screen keyboard height so the teach sheet (a bottom-anchored
 // Modal) can lift itself clear of the keyboard. KeyboardAvoidingView is
@@ -143,14 +134,16 @@ const GridCell = React.memo(function GridCell({
   onPress: (it: Item) => void;
   onLongPress: (it: Item) => void;
 }) {
-  // Walk the item's source candidates on render failure (an "mp4 gif" whose
-  // bytes wear a .gif name and land as kind 'image', a codec expo-image
-  // refuses, a stale/missing poster file): a failed source advances to the
-  // next, and only a tile with nothing left to try shows the labeled stub
-  // instead of a permanent blank square. The index resets whenever the
-  // candidate list changes so a poster landing later (patched in by id) is
-  // retried, not stuck on the earlier failure.
-  const sources = cellSources(item);
+  // Real GIFs try their original bytes first so they can animate in the grid;
+  // if the file is actually mp4 bytes wearing a .gif name, the cell falls back
+  // to the extracted poster before giving up on the stub. Everything else keeps
+  // loading the small persisted thumb.
+  const sources =
+    item.kind === 'image' && /\.gif$/i.test(item.name)
+      ? item.thumbUri
+        ? [item.uri, item.thumbUri]
+        : [item.uri]
+      : [thumbSource(item)];
   const [srcIdx, setSrcIdx] = useState(0);
   const srcKey = sources.join('\n');
   useEffect(() => setSrcIdx(0), [srcKey]);
@@ -188,17 +181,13 @@ const GridCell = React.memo(function GridCell({
           // Reuse the view and release the previous bitmap when a cell is
           // recycled (e.g. when retagAll hands the list a fresh array).
           recyclingKey={String(item.id)}
-          // Memory-only cache (NOT "disk"). The originals already live as local
-          // content:// files in the user's linked folder, so a disk cache just
-          // duplicates the entire library into the app's cache dir — it ballooned
-          // cache to library size, and once Android purged that cache the
-          // thumbnails got stranded in a perpetual loading state. Disk-only also
-          // meant no in-memory bitmaps, so every recycled cell re-decoded a
-          // full-res image off disk while scrolling, saturating the decode thread
-          // (the "feed won't load while scrolling" jank). The in-memory LRU keeps
-          // the active window smooth; off-screen cells decode again from the local
-          // file — cheap because allowDownscaling decodes straight to thumb size.
-          cachePolicy="memory"
+          // No shared Glide memory cache for grid cells. The logcat OOM happened
+          // after scrolling/searching through hundreds of local images, then
+          // opening a modal: the visible cells were bounded by FlatList, but
+          // cachePolicy="memory" let decoded bitmaps accumulate off-screen and
+          // fragmented Android's bitmap/resource heap. Active views still hold
+          // their current bitmap; recycled/off-screen cells release theirs.
+          cachePolicy="none"
           allowDownscaling
         />
       )}
@@ -276,8 +265,9 @@ export const MemeGrid = React.memo(function MemeGrid({
   const [bulkLabels, setBulkLabels] = useState<string[]>([]);
   const [bulkBusy, setBulkBusy] = useState(false);
   // Spread the tag to visual look-alikes after tagging (the toggle in the
-  // bulk-tag sheet). On by default; sticks for the session.
-  const [bulkSpread, setBulkSpread] = useState(true);
+  // bulk-tag sheet). Off by default: visual propagation scans the library and is
+  // better as an explicit choice than a surprise freeze on every bulk tag.
+  const [bulkSpread, setBulkSpread] = useState(false);
   // Read the latest selection mode from the tap/long-press handlers without
   // giving them a new identity each toggle (which would bust GridCell's memo).
   const selectionModeRef = useRef(false);
@@ -405,6 +395,10 @@ export const MemeGrid = React.memo(function MemeGrid({
     // The viewer is interactive foreground work: stand the background loops
     // down (they hold hardware codecs the video preview / frame-copy need).
     noteInteractive();
+    // Drop any stale Glide cache entries before the modal asks Android for a
+    // new window/surface. Best-effort; cachePolicy="none" keeps new grid cells
+    // from repopulating the process-wide bitmap cache.
+    void Image.clearMemoryCache().catch(() => {});
     // Opening a video contends for the hardware decoder the poster backfill
     // uses — stamp the short codec window so it briefly yields the decoder.
     if (it.kind === 'video') noteCodecInteractive();
@@ -485,26 +479,44 @@ export const MemeGrid = React.memo(function MemeGrid({
       .catch(() => setBulkLabels([]));
   };
 
+  const persistDurableTag = async (
+    item: Item,
+    label: string,
+    source: 'manual' | 'exemplar'
+  ): Promise<{ tags: Tag[]; extraTerms: string }> => {
+    const next = upsertDurableTag(item.tags, item.extraTerms, {
+      label,
+      category: source === 'manual' ? 'user' : guessFacet(label),
+      source,
+    });
+    await updateMemeTags(item.id, next.tags, next.extraTerms);
+    setSelected((prev) => (prev && prev.id === item.id ? { ...prev, ...next } : prev));
+    return next;
+  };
+
   const applyBulkTag = async () => {
     const label = bulkLabelInput.trim();
     if (!label || selectedIds.size === 0 || bulkBusy) return;
+    noteInteractive();
     setBulkBusy(true);
     try {
       const lower = label.toLowerCase();
       const updates = items
         .filter((it) => selectedIds.has(it.id))
         .map((it) => {
-          const already = it.tags.some((t) => t.label.toLowerCase() === lower);
-          const tags: Tag[] = already
-            ? it.tags
-            : [...it.tags, { label: lower, category: 'user', score: 1, source: 'manual' as const }];
-          return {
-            id: it.id,
-            tags,
-            extraTerms: already ? it.extraTerms : termsWithLabel(it.extraTerms, lower),
-          };
+          const next = upsertDurableTag(it.tags, it.extraTerms, {
+            label: lower,
+            category: 'user',
+            source: 'manual',
+          });
+          return { id: it.id, tags: next.tags, extraTerms: next.extraTerms };
         });
       await bulkUpdateMemeTags(updates);
+      setSelected((prev) => {
+        if (!prev || !selectedIds.has(prev.id)) return prev;
+        const next = updates.find((u) => u.id === prev.id);
+        return next ? { ...prev, tags: next.tags, extraTerms: next.extraTerms } : prev;
+      });
       // Optionally spread the tag to the tagged memes' visual look-alikes
       // (DINOv2 space when configured, else CLIP — see tagPropagation.ts).
       // Best-effort: a spread failure never rolls back the tag itself.
@@ -811,6 +823,7 @@ export const MemeGrid = React.memo(function MemeGrid({
 
   const openTeach = (asPositive: boolean, preset?: string) => {
     tap();
+    noteInteractive();
     setLabelInput(preset ?? '');
     setAssocInput('');
     setPositive(asPositive);
@@ -834,8 +847,8 @@ export const MemeGrid = React.memo(function MemeGrid({
           if (typeof matched === 'number') {
             showToast(
               taughtPositive
-                ? `Taught “${label}” from ${examples} example${examples === 1 ? '' : 's'} — ` +
-                    `${matched} meme${matched === 1 ? '' : 's'} now tagged` +
+                ? `Saved “${label}” from ${examples} example${examples === 1 ? '' : 's'} — ` +
+                    `${matched} meme${matched === 1 ? '' : 's'} currently tagged; applying look-alikes after you pause` +
                     (examples === 1 && matched <= 1 ? '. Teach a few more examples to catch the rest' : '')
                 : `Got it — NOT “${label}”. ${matched} meme${matched === 1 ? '' : 's'} still carry the tag`,
               'success'
@@ -855,6 +868,7 @@ export const MemeGrid = React.memo(function MemeGrid({
   const saveExemplar = async () => {
     const label = labelInput.trim();
     if (!selected || !label) return;
+    noteInteractive();
     setSaving(true);
     try {
       const emb = await getMemeEmbedding(selected.id);
@@ -875,6 +889,7 @@ export const MemeGrid = React.memo(function MemeGrid({
         sourceUri: selected.uri,
         positive,
       });
+      if (positive) await persistDurableTag(selected, label, 'exemplar');
     } catch (e) {
       showToast(`Could not teach: ${String(e)}`, 'error');
       return;
@@ -889,9 +904,10 @@ export const MemeGrid = React.memo(function MemeGrid({
     success();
 
     // For a positive teach, offer step 2: visually similar memes the user can
-    // confirm as further examples in one tap each. The apply is deferred until
-    // that step closes so the whole round costs a single library re-tag.
-    if (taughtPositive) {
+    // confirm as further examples in one tap each. Only do this when sqlite-vec
+    // is live: the JS fallback scans every stored vector and was another
+    // immediate freeze source right after saving a tag.
+    if (taughtPositive && sqliteVecReady()) {
       try {
         const candidates = (await getSimilarMemes(selected.id, 12)).filter(
           (s) => s.score >= CONFIRM_MIN_COSINE
@@ -926,6 +942,7 @@ export const MemeGrid = React.memo(function MemeGrid({
   const finishConfirm = async (picks: number[]) => {
     const c = confirming;
     if (!c || confirmSaving) return;
+    noteInteractive();
     setConfirmSaving(true);
     let added = 0;
     try {
@@ -941,6 +958,7 @@ export const MemeGrid = React.memo(function MemeGrid({
           sourceUri: hit.uri,
           positive: true,
         });
+        await persistDurableTag(hit, c.label, 'exemplar');
         added++;
       }
     } catch (e) {
@@ -957,6 +975,7 @@ export const MemeGrid = React.memo(function MemeGrid({
   // to turn a model guess (CLIP/VLM) into the user's own ground truth.
   const confirmTag = async (label: string) => {
     if (!selected) return;
+    noteInteractive();
     try {
       const emb = await getMemeEmbedding(selected.id);
       if (!emb) {
@@ -971,6 +990,7 @@ export const MemeGrid = React.memo(function MemeGrid({
         sourceUri: selected.uri,
         positive: true,
       });
+      await persistDurableTag(selected, label, 'exemplar');
       success();
       applyTeach(label, true, 1);
     } catch (e) {
@@ -1143,7 +1163,7 @@ export const MemeGrid = React.memo(function MemeGrid({
                         style={[styles.confirmThumb, picked && styles.confirmThumbOn]}
                         contentFit="cover"
                         recyclingKey={`conf-${s.id}`}
-                        cachePolicy="memory"
+                        cachePolicy="none"
                         allowDownscaling
                       />
                       {picked && (
@@ -1477,9 +1497,9 @@ function ViewerSheet({
                 contentFit="contain"
                 onError={() => setMediaFailed(true)}
                 recyclingKey={String(item.id)}
-                // Same reasoning as the grid: it's a local file, so skip the
-                // redundant on-disk copy and only hold it in memory while open.
-                cachePolicy="memory"
+                // Avoid retaining the full-res original in Glide's shared
+                // memory cache after the viewer closes.
+                cachePolicy="none"
                 allowDownscaling
               />
             </Pressable>
@@ -1588,9 +1608,9 @@ function ViewerSheet({
                             contentFit="cover"
                             transition={100}
                             recyclingKey={`sim-${s.id}`}
-                            // Same reasoning as the grid: originals are local
-                            // files, keep decoded thumbs in memory only.
-                            cachePolicy="memory"
+                            // Keep the horizontal suggestions transient; the
+                            // grid/viewer already owns the active bitmap.
+                            cachePolicy="none"
                             allowDownscaling
                           />
                           {s.kind === 'video' && (

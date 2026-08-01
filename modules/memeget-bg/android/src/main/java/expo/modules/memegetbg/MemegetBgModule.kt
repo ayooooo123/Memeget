@@ -93,17 +93,21 @@ class MemegetBgModule : Module() {
       }
     }
 
-    // Last-modified time (ms since epoch) of a SAF content:// document, read
-    // straight off its DocumentFile. This exists because expo-file-system's own
-    // APIs don't reliably surface modificationTime for SAF documents (the legacy
-    // getInfoAsync never sets it for content:// at all), which is what the meme
-    // library needs to order "most recently added first". Returns null when the
-    // uri is unreadable or the provider doesn't report a time (lastModified() is
-    // 0), so JS can fall back to the index time.
+    // Last-modified time (ms since epoch) for a SAF content:// document/tree,
+    // read straight off DocumentFile. Child document URIs are queried with
+    // fromSingleUri; folder tree URIs must use fromTreeUri or AndroidX logs
+    // "Unsupported Uri .../tree/..." and returns no metadata.
     Function("getModifiedTime") { uriStr: String ->
       val ctx = appContext.reactContext ?: return@Function null
       try {
-        val doc = DocumentFile.fromSingleUri(ctx, Uri.parse(uriStr)) ?: return@Function null
+        val uri = Uri.parse(uriStr)
+        val path = uri.path.orEmpty()
+        val doc =
+          if (path.contains("/tree/") && !path.contains("/document/")) {
+            DocumentFile.fromTreeUri(ctx, uri)
+          } else {
+            DocumentFile.fromSingleUri(ctx, uri)
+          } ?: return@Function null
         val lm = doc.lastModified()
         if (lm > 0L) lm.toDouble() else null
       } catch (e: Exception) {
