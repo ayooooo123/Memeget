@@ -28,15 +28,18 @@ initExecutorch({ resourceFetcher: ExpoResourceFetcher });
 // Bumped if we ever need to force another legacy-cache reclaim.
 const CACHE_PURGE_KEY = 'expo_image_disk_cache_purged_v1';
 
-// Reclaim cache-dir space in the background (never blocks first paint):
+// Reclaim cache-dir and bitmap-cache space in the background (never blocks first
+// paint):
 //   • Every launch, drop our own leaked temp files (share_/import_/meme_work_).
+//   • Every launch, clear Glide/SDWebImage's memory cache so an update from an
+//     older build can't start with stale decoded thumbnails still resident.
 //   • Once per install, purge the legacy expo-image disk cache the old
 //     `cachePolicy="disk"` left behind — it held a full duplicate of the
-//     library and is what made the app's cache balloon over repeated use. We're
-//     memory-only now, so nothing repopulates it; clearing once is enough.
+//     library and is what made the app's cache balloon over repeated use.
 async function maintainCaches(): Promise<void> {
   try {
     await sweepStaleCache();
+    await Image.clearMemoryCache().catch(() => {});
     if ((await getSetting(CACHE_PURGE_KEY)) !== '1') {
       await Image.clearDiskCache().catch(() => {});
       await setSetting(CACHE_PURGE_KEY, '1').catch(() => {});

@@ -104,42 +104,14 @@ import {
   MAX_VIDEO_FRAMES,
   MAX_VLM_FRAMES,
 } from './videoFrames';
+import { mergeDurableTags } from './tagMerge';
 import type { Tag } from './types';
 
-// Confidence in how a label was matched, highest first:
-//   manual     — the user typed it (e.g. multi-select bulk tag); never overridden
-//   ocr        — text literally in the image (watermark/caption)
-//   exemplar   — the user's own ground truth, taught by example
-//   propagated — spread from a manual tag to a visual look-alike
-//   vision     — the VLM's (Gemma) open-vocabulary read of the image
-//   prompt     — CLIP zero-shot guess against the fixed label vocabulary
-const TAG_RANK: Record<NonNullable<Tag['source']>, number> = {
-  manual: 6,
-  ocr: 5,
-  exemplar: 4,
-  propagated: 3,
-  vision: 2,
-  prompt: 1,
-};
-const tagRank = (t: Tag): number => TAG_RANK[t.source ?? 'prompt'] ?? 1;
-
-// De-dupe a pile of tags by label, keeping the highest-confidence source (and
-// highest score within a source), best first, capped.
-function dedupeRankTags(tags: Tag[], cap = 6): Tag[] {
-  const best = new Map<string, Tag>();
-  for (const t of tags) {
-    const cur = best.get(t.label);
-    if (!cur || tagRank(t) > tagRank(cur) || (tagRank(t) === tagRank(cur) && t.score > cur.score)) {
-      best.set(t.label, t);
-    }
-  }
-  return [...best.values()].sort((a, b) => tagRank(b) - tagRank(a) || b.score - a.score).slice(0, cap);
-}
 
 // Fast-pass merge: CLIP/exemplar visual tags + OCR-derived tags. Kept tight (4)
 // because the slower VLM pass adds richer tags later.
 function mergeTags(visual: Tag[], fromOcr: Tag[]): Tag[] {
-  return dedupeRankTags([...visual, ...fromOcr], 4);
+  return mergeDurableTags([...visual, ...fromOcr], 4);
 }
 
 // On-device OCR (Google ML Kit on Android). Imported lazily/defensively so a
@@ -372,31 +344,50 @@ export interface ExemplarModel {
 // never served.
 let headsCache: { version: string; model: ExemplarModel } | null = null;
 
+interface CancellationOptions {
+  shouldCancel?: () => boolean;
+}
+
+class RetagCancelledError extends Error {}
+
+function throwIfCancelled(shouldCancel?: () => boolean): void {
+  if (shouldCancel?.()) throw new RetagCancelledError();
+}
+
+function isRetagCancelled(error: unknown): boolean {
+  return error instanceof RetagCancelledError;
+}
+
+
 // Train a logistic-regression head for every taught label from the exemplars in
 // the DB, using a random sample of the library as the negative background. Pure
 // vector math (no CLIP/api), so it can also be called standalone (e.g. the
 // detail-view debug readout). Returns the per-label heads plus the library mean
 // used to center vectors at inference time.
-export async function buildExemplarHeads(): Promise<ExemplarModel> {
+export async function buildExemplarHeads(opts: CancellationOptions = {}): Promise<ExemplarModel> {
+  throwIfCancelled(opts.shouldCancel);
   const version = await getKnowledgeVersion();
   if (headsCache && headsCache.version === version) return headsCache.model;
 
-  const model = await trainExemplarHeads();
+  const model = await trainExemplarHeads(opts);
   headsCache = { version, model };
   return model;
 }
 
-async function trainExemplarHeads(): Promise<ExemplarModel> {
+async function trainExemplarHeads(opts: CancellationOptions = {}): Promise<ExemplarModel> {
+  throwIfCancelled(opts.shouldCancel);
   const exemplars = await getExemplars();
   // Hand-applied tags are training data too, so a library with no explicit
   // teachings but plenty of bulk tags still gets heads.
   const manual = await getManualTagVectors().catch(() => new Map<string, ManualPositives>());
+  throwIfCancelled(opts.shouldCancel);
   if (exemplars.length === 0 && manual.size === 0) return { heads: [], mean: null };
 
   // 250 random library vectors is plenty to estimate the mean and act as the
   // negative background for a logistic head — and roughly halves the per-pass
   // training cost vs. 500, which is what the user feels as teach latency.
   const sample = await getEmbeddingSample(250);
+  throwIfCancelled(opts.shouldCancel);
   const dim = exemplars[0]?.vector.length ?? [...manual.values()][0].vectors[0].length;
 
   // Library mean (background proxy) for mean-centering — this is what cancels
@@ -436,6 +427,7 @@ async function trainExemplarHeads(): Promise<ExemplarModel> {
 
   const heads: LabelHead[] = [];
   for (const [label, g] of byLabel) {
+    throwIfCancelled(opts.shouldCancel);
     if (g.posRaw.length === 0) continue; // need at least one positive to train
     const otherPosRaw: number[][] = [];
     const otherPosCentered: number[][] = [];
@@ -464,6 +456,8 @@ async function trainExemplarHeads(): Promise<ExemplarModel> {
   return { heads, mean };
 }
 
+type BuildKnowledgeOptions = ((s: string) => void) | (CancellationOptions & { onStatus?: (s: string) => void });
+
 // Compute (and cache) CLIP text vectors for every curated label + negative
 // anchor, then load taught exemplars and build the association lookup.
 // `onStatus` streams what the slow parts are actually doing — a silent
@@ -473,8 +467,11 @@ async function trainExemplarHeads(): Promise<ExemplarModel> {
 // that's real minutes of on-device math.
 export async function buildKnowledge(
   api: EmbeddingsApi,
-  onStatus?: (s: string) => void
+  opts: BuildKnowledgeOptions = {}
 ): Promise<Knowledge> {
+  const onStatus = typeof opts === 'function' ? opts : opts.onStatus;
+  const shouldCancel = typeof opts === 'function' ? undefined : opts.shouldCancel;
+  throwIfCancelled(shouldCancel);
   const modelId = api.primaryModel.id;
   const cache = await getLabelVectors(modelId);
 
@@ -495,14 +492,18 @@ export async function buildKnowledge(
   if (vocabTotal > 0) onStatus?.(`embedding label vocabulary 0/${vocabTotal}…`);
 
   for (let i = 0; i < MEME_LABELS.length; i++) {
+    throwIfCancelled(shouldCancel);
     if (cache.has(labelKeys[i])) continue;
     const vec = await api.embedText(MEME_LABELS[i].prompt);
+    throwIfCancelled(shouldCancel);
     await putLabelVector(labelKeys[i], vec, modelId);
     cache.set(labelKeys[i], Float32Array.from(vec));
     noteVocab();
   }
   for (const i of missingAnchors) {
+    throwIfCancelled(shouldCancel);
     const vec = await api.embedText(NEGATIVE_ANCHORS[i]);
+    throwIfCancelled(shouldCancel);
     await putLabelVector(anchorKeys[i], vec, modelId);
     cache.set(anchorKeys[i], Float32Array.from(vec));
     noteVocab();
@@ -523,9 +524,10 @@ export async function buildKnowledge(
   }
   const negativeVecs = anchorKeys.map((k) => cache.get(k)!).filter(Boolean);
 
+  throwIfCancelled(shouldCancel);
   const exemplars = await getExemplars();
   onStatus?.('training taught labels…');
-  const { heads: exemplarHeads, mean } = await buildExemplarHeads();
+  const { heads: exemplarHeads, mean } = await buildExemplarHeads({ shouldCancel });
   onStatus?.('');
 
   // Association lookup: curated terms + any added with an exemplar.
@@ -970,13 +972,13 @@ async function retagWithKnowledge(
     }
     const visual = mergeClassified(prompts.tags, classifyExemplars(vec, know.exemplarHeads, know.mean));
     const base = mergeTags(visual, ocrTags(row.ocrText));
-    // Preserve any VLM tags, user-applied (manual) tags, and tags spread from a
-    // manual tag to look-alikes — re-tagging applies new taught knowledge, it
-    // shouldn't erase the vision pass's work or a tag the user put there.
+    // Preserve VLM tags and every user-owned tag. Re-tagging applies new taught
+    // knowledge; it must not erase a tag the user assigned, taught, or accepted
+    // through look-alike propagation.
     const kept = row.tags.filter(
-      (t) => t.source === 'vision' || t.source === 'manual' || t.source === 'propagated'
+      (t) => t.source === 'vision' || t.source === 'manual' || t.source === 'exemplar' || t.source === 'propagated'
     );
-    const merged = dedupeRankTags([...base, ...kept], 6);
+    const merged = mergeDurableTags([...base, ...kept], 6);
     // Likewise keep the vision search terms (subjects/text/caption keywords)
     // that already live in extra_terms — union them with the fresh assoc terms.
     const extraTerms = unionTerms(extraTermsFor(merged, know.assoc), row.extraTerms);
@@ -1000,7 +1002,15 @@ export async function retagAll(
   api: EmbeddingsApi,
   opts: { onProgress?: (done: number, total: number) => void; shouldCancel?: () => boolean } = {}
 ): Promise<RetagResult> {
-  return withHeavyPass(async () => retagWithKnowledge(await buildKnowledge(api), opts));
+  return withHeavyPass(async () => {
+    try {
+      const know = await buildKnowledge(api, { shouldCancel: opts.shouldCancel });
+      return await retagWithKnowledge(know, opts);
+    } catch (error) {
+      if (isRetagCancelled(error)) return { updated: 0, cancelled: true };
+      throw error;
+    }
+  });
 }
 
 // Merge two whitespace-separated term strings into a de-duplicated bag.
@@ -1184,7 +1194,7 @@ async function describeAndSave(
       score: 0.9,
       source: 'vision' as const,
     }));
-    const merged = dedupeRankTags([...m.tags, ...visionTags], 6);
+    const merged = mergeDurableTags([...m.tags, ...visionTags], 6);
     const extraTerms = visionExtraTerms(merged, assoc, res);
     const captionEmbedding = vision.embedText
       ? await vision.embedText(captionSearchText(res.caption, merged, extraTerms))
@@ -1214,7 +1224,7 @@ async function enrichOne(
     // Copy the twin's caption; re-rank tags so this meme keeps its own
     // CLIP/OCR/exemplar tags alongside the twin's vision tags.
     const visionTags = twin.tags.filter((t) => t.source === 'vision');
-    const merged = dedupeRankTags([...m.tags, ...visionTags], 6);
+    const merged = mergeDurableTags([...m.tags, ...visionTags], 6);
     const extraTerms = `${extraTermsFor(merged, assoc)} ${twin.extraTerms}`.replace(/\s+/g, ' ').trim();
     const captionEmbedding =
       twin.captionEmbedding ??

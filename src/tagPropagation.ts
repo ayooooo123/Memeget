@@ -31,7 +31,9 @@ export const PROPAGATE_MAX_TARGETS = 40;
 
 export interface PropagationCandidate {
   id: number;
-  hasLabel: boolean; // already carries the label (case-insensitive) — never re-tagged
+  // Already carries this label from a user-owned source. Auto prompt/vision/OCR
+  // matches must still be scored so propagation can promote them to durable.
+  hasDurableLabel: boolean;
   record: VisualSimilarityRecord;
 }
 
@@ -56,7 +58,7 @@ export function scorePropagationCandidate(
   candidate: PropagationCandidate,
   activeVisualModel: Pick<EmbeddingModelSpec, 'id' | 'available'>
 ): PropagationHit | null {
-  if (candidate.hasLabel) return null;
+  if (candidate.hasDurableLabel) return null;
   if (candidate.record.imageEmbedding.length === 0) return null; // degraded row
 
   let best: PropagationHit | null = null;

@@ -30,8 +30,8 @@ function dinoRec(c: number): VisualSimilarityRecord {
   return rec({ visualEmbedding: atCos(c), visualModel: VISUAL_EMBEDDING_MODEL.id });
 }
 
-function cand(id: number, record: VisualSimilarityRecord, hasLabel = false): PropagationCandidate {
-  return { id, record, hasLabel };
+function cand(id: number, record: VisualSimilarityRecord, hasDurableLabel = false): PropagationCandidate {
+  return { id, record, hasDurableLabel };
 }
 
 describe('tag propagation', () => {
@@ -64,8 +64,12 @@ describe('tag propagation', () => {
     expect(hits[0].score).toBeCloseTo(1, 5);
   });
 
-  it('never re-tags a candidate that already carries the label', () => {
+  it('skips a candidate that already carries a durable user-owned label', () => {
     expect(scorePropagationCandidate([rec()], cand(1, rec(), true), ACTIVE_DINO)).toBeNull();
+  });
+
+  it('still scores an auto-tagged candidate so propagation can promote durability', () => {
+    expect(scorePropagationCandidate([rec()], cand(1, rec(), false), ACTIVE_DINO)?.id).toBe(1);
   });
 
   it('skips degraded rows and mixed-dimension pairs without scoring them', () => {
