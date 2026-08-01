@@ -60,6 +60,7 @@ import {
 import { importMemesFromZip, type ZipImportPhase } from '../zipImport';
 import { MEME_LABELS } from '../memeLabels';
 import { formatBuildLabel } from '../memeActionsCore';
+import { shouldShowTaughtTags } from '../settingsTagCore';
 import { buildPack, parsePack, serializePack } from '../teachingPack';
 import { writeCollectionZip } from '../collectionExport';
 import { restoreAllSidecars, syncAllSidecars } from '../sidecarSync';
@@ -103,13 +104,20 @@ function formatEta(ms: number): string {
   return `${Math.floor(mins / 60)}h ${mins % 60}m`;
 }
 
-export function SettingsScreen({ active = true }: { active?: boolean }) {
+export function SettingsScreen({
+  active = true,
+  onSearchLabel,
+}: {
+  active?: boolean;
+  onSearchLabel?: (label: string) => void;
+}) {
   const emb = useEmbeddings();
   const vision = useVision();
   const audio = useAudio();
   const [folders, setFolders] = useState<LinkedFolder[]>([]);
   const [count, setCount] = useState(0);
   const [taughtStats, setTaughtStats] = useState<TaughtLabelStat[]>([]);
+  const [showTaughtTags, setShowTaughtTags] = useState(false);
   const [importedPacks, setImportedPacks] = useState<ImportedPack[]>([]);
   const [errors, setErrors] = useState<IndexError[]>([]);
   const [showErrors, setShowErrors] = useState(false);
@@ -1252,11 +1260,19 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
       </Section>
 
       <Section glyph="★" title="Taught knowledge" tint={colors.good}>
-        <Row
-          label="Tags you've taught"
-          value={String(taughtStats.length)}
-          valueTint={colors.good}
-        />
+        <Pressable
+          onPress={() => setShowTaughtTags((shown) => !shown)}
+          disabled={taughtStats.length === 0}
+          accessibilityRole="button"
+          accessibilityState={{ expanded: showTaughtTags }}
+          accessibilityLabel={`${showTaughtTags ? 'Collapse' : 'Expand'} taught tags`}
+        >
+          <Row
+            label="Tags you've taught"
+            value={`${taughtStats.length}${taughtStats.length > 0 ? (showTaughtTags ? '  ▴' : '  ▾') : ''}`}
+            valueTint={colors.good}
+          />
+        </Pressable>
         {staleExemplars > 0 && (
           <>
             <Text style={styles.errText}>
@@ -1280,33 +1296,37 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
             Milady). Re-tagging applies it across everything already indexed — no re-scanning, it
             reuses the embeddings on device.
           </Text>
-        ) : (
+        ) : shouldShowTaughtTags(taughtStats.length, showTaughtTags) ? (
           <View style={styles.taughtList}>
             {taughtStats.map((t) => (
-              <View
-                key={t.label}
-                style={styles.taughtRow}
-                accessible
-                accessibilityLabel={`${t.label}, ${t.tagged} memes tagged, ${t.positives} examples${t.negatives ? `, ${t.negatives} corrections` : ''}`}
-              >
-                <Text style={styles.taughtLabel} numberOfLines={1}>
-                  {t.label}
-                </Text>
-                <Text style={styles.taughtCompactMeta}>
-                  {t.tagged}m · {t.positives}+{t.negatives > 0 ? ` · ${t.negatives}−` : ''}
-                </Text>
-                <View style={[styles.srcChip, t.fromPack ? styles.srcPack : styles.srcSelf]}>
-                  <Text style={[styles.srcChipText, { color: t.fromPack ? colors.accent : colors.muted }]}>
-                    {t.fromSelf && t.fromPack ? 'you+pack' : t.fromPack ? 'pack' : 'you'}
+              <View key={t.label} style={styles.taughtRow}>
+                <Pressable
+                  style={styles.taughtSearchTarget}
+                  onPress={() => onSearchLabel?.(t.label)}
+                  disabled={!onSearchLabel}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Show memes tagged ${t.label}`}
+                  accessibilityHint="Opens matching results in Library"
+                >
+                  <Text style={styles.taughtLabel} numberOfLines={1}>
+                    {t.label}
                   </Text>
-                </View>
+                  <Text style={styles.taughtCompactMeta}>
+                    {t.tagged}m · {t.positives}+{t.negatives > 0 ? ` · ${t.negatives}−` : ''}
+                  </Text>
+                  <View style={[styles.srcChip, t.fromPack ? styles.srcPack : styles.srcSelf]}>
+                    <Text style={[styles.srcChipText, { color: t.fromPack ? colors.accent : colors.muted }]}>
+                      {t.fromSelf && t.fromPack ? 'you+pack' : t.fromPack ? 'pack' : 'you'}
+                    </Text>
+                  </View>
+                </Pressable>
                 <Pressable hitSlop={8} onPress={() => onForget(t.label)} accessibilityLabel={`Forget ${t.label}`}>
                   <Text style={styles.taughtForget}>✕</Text>
                 </Pressable>
               </View>
             ))}
           </View>
-        )}
+        ) : null}
 
         {retagging ? (
           <View style={{ gap: 8 }}>
@@ -1617,6 +1637,7 @@ const styles = StyleSheet.create({
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: colors.border,
   },
+  taughtSearchTarget: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 7 },
   taughtMain: { flex: 1, gap: 2 },
   taughtTitleRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   taughtLabel: { color: colors.text, fontSize: 13, fontWeight: '700', flex: 1 },
