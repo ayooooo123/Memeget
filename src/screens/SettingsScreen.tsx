@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Alert, Linking, Pressable, ScrollView, StyleSheet, Switch, Text, View } from 'react-native';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
+import Constants from 'expo-constants';
 import { File, FileMode } from 'expo-file-system';
 import * as Sharing from 'expo-sharing';
 import { manipulateAsync, SaveFormat } from 'expo-image-manipulator';
@@ -58,6 +59,7 @@ import {
 } from '../indexer';
 import { importMemesFromZip, type ZipImportPhase } from '../zipImport';
 import { MEME_LABELS } from '../memeLabels';
+import { formatBuildLabel } from '../memeActionsCore';
 import { buildPack, parsePack, serializePack } from '../teachingPack';
 import { writeCollectionZip } from '../collectionExport';
 import { restoreAllSidecars, syncAllSidecars } from '../sidecarSync';
@@ -1281,26 +1283,24 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
         ) : (
           <View style={styles.taughtList}>
             {taughtStats.map((t) => (
-              <View key={t.label} style={styles.taughtRow}>
-                <View style={styles.taughtMain}>
-                  <View style={styles.taughtTitleRow}>
-                    <Text style={styles.taughtLabel} numberOfLines={1}>
-                      {t.label}
-                    </Text>
-                    <View style={[styles.srcChip, t.fromPack ? styles.srcPack : styles.srcSelf]}>
-                      <Text style={[styles.srcChipText, { color: t.fromPack ? colors.accent : colors.muted }]}>
-                        {t.fromSelf && t.fromPack ? 'you + pack' : t.fromPack ? 'pack' : 'you'}
-                      </Text>
-                    </View>
-                  </View>
-                  <Text style={styles.taughtMeta}>
-                    {t.tagged} meme{t.tagged === 1 ? '' : 's'} tagged · {t.positives} example
-                    {t.positives === 1 ? '' : 's'}
-                    {t.negatives > 0 ? ` · ${t.negatives} correction${t.negatives === 1 ? '' : 's'}` : ''}
-                    {t.fromPack && t.packs.length > 0 ? ` · from ${t.packs.join(', ')}` : ''}
+              <View
+                key={t.label}
+                style={styles.taughtRow}
+                accessible
+                accessibilityLabel={`${t.label}, ${t.tagged} memes tagged, ${t.positives} examples${t.negatives ? `, ${t.negatives} corrections` : ''}`}
+              >
+                <Text style={styles.taughtLabel} numberOfLines={1}>
+                  {t.label}
+                </Text>
+                <Text style={styles.taughtCompactMeta}>
+                  {t.tagged}m · {t.positives}+{t.negatives > 0 ? ` · ${t.negatives}−` : ''}
+                </Text>
+                <View style={[styles.srcChip, t.fromPack ? styles.srcPack : styles.srcSelf]}>
+                  <Text style={[styles.srcChipText, { color: t.fromPack ? colors.accent : colors.muted }]}>
+                    {t.fromSelf && t.fromPack ? 'you+pack' : t.fromPack ? 'pack' : 'you'}
                   </Text>
                 </View>
-                <Pressable hitSlop={8} onPress={() => onForget(t.label)}>
+                <Pressable hitSlop={8} onPress={() => onForget(t.label)} accessibilityLabel={`Forget ${t.label}`}>
                   <Text style={styles.taughtForget}>✕</Text>
                 </Pressable>
               </View>
@@ -1473,7 +1473,14 @@ export function SettingsScreen({ active = true }: { active?: boolean }) {
       </Section>
 
       <Text style={styles.version}>
-        Memeget<Text style={{ color: colors.volt }}>.</Text> 0.1 · private, on-device meme search
+        {formatBuildLabel(
+          Constants.expoConfig?.version,
+          Constants.platform?.android?.versionCode ??
+            Constants.platform?.ios?.buildNumber ??
+            Constants.expoConfig?.android?.versionCode ??
+            Constants.expoConfig?.ios?.buildNumber
+        )}
+        {' · private, on-device meme search'}
       </Text>
     </ScrollView>
   );
@@ -1599,31 +1606,32 @@ const styles = StyleSheet.create({
   taughtList: {
     backgroundColor: colors.surface2,
     borderRadius: radius.md,
-    paddingHorizontal: space.md,
-    paddingVertical: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 2,
   },
   taughtRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 12,
-    paddingVertical: 9,
+    gap: 7,
+    paddingVertical: 6,
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: colors.border,
   },
   taughtMain: { flex: 1, gap: 2 },
-  taughtTitleRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  taughtLabel: { color: colors.text, fontSize: 14, fontWeight: '700', flexShrink: 1 },
+  taughtTitleRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  taughtLabel: { color: colors.text, fontSize: 13, fontWeight: '700', flex: 1 },
   taughtMeta: { color: colors.muted, fontSize: 11 },
-  taughtForget: { color: colors.faint, fontSize: 16, fontWeight: '700', paddingHorizontal: 4 },
+  taughtCompactMeta: { color: colors.muted, fontSize: 10, fontVariant: ['tabular-nums'] },
+  taughtForget: { color: colors.faint, fontSize: 15, fontWeight: '700', paddingHorizontal: 2 },
   srcChip: {
-    paddingHorizontal: 7,
-    paddingVertical: 1,
+    paddingHorizontal: 5,
+    paddingVertical: 0,
     borderRadius: radius.sm,
     borderWidth: 1,
   },
   srcSelf: { borderColor: colors.border, backgroundColor: 'transparent' },
   srcPack: { borderColor: colors.accent, backgroundColor: colors.surface },
-  srcChipText: { fontSize: 9, fontWeight: '800', letterSpacing: 0.3, textTransform: 'uppercase' },
+  srcChipText: { fontSize: 8, fontWeight: '800', letterSpacing: 0.2, textTransform: 'uppercase' },
   packRow: {
     flexDirection: 'row',
     alignItems: 'center',
