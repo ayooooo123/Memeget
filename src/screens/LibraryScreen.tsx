@@ -27,13 +27,14 @@ import {
   putLabelVector,
   searchByVector,
 } from '../db';
-import { interactiveActive, noteInteractive, runIndex, retagAll, type IndexProgress } from '../indexer';
+import { interactiveActive, noteInteractive, runIndex, retagAll, yieldToSearch, type IndexProgress } from '../indexer';
 import { emitLibraryChanged, onLibraryChanged, onThumbsUpdated } from '../events';
 import { appendPage, mergeRecords, patchThumbs } from '../libraryCore';
 import { success, tap, thud } from '../haptics';
 import { pickFolder } from '../saf';
 import { restoreFolderSidecar } from '../sidecarSync';
 import { createTeachApplyQueue, type TeachApplyQueue } from '../teachApplyQueue';
+import { runProgressiveSearch } from '../searchCoordinator';
 import { colors, radius, space, type } from '../theme';
 import {
   buildExpandedLexicalQuery,
@@ -48,7 +49,6 @@ import type { LinkedFolder, MediaKind, MemeRecord, SearchHit } from '../types';
 const PAGE = 90;
 
 const SEARCH_LABEL_VECTOR_LIMIT = 120;
-const SEARCH_LABEL_SYNC_SEED_LIMIT = 8;
 
 
 let searchLabelSeed: Promise<void> | null = null;
@@ -67,6 +67,7 @@ async function seedSearchLabelVectors(
     if (!key || seen.has(low)) continue;
     seen.add(low);
     if (cache.has(searchVectorKey(key)) || cache.has(searchVectorKey(low))) continue;
+    await yieldToSearch();
     const vec = await api.embedText(searchLabelPrompt(key));
     await putLabelVector(searchVectorKey(key), vec, api.primaryModel.id);
     const arr = Float32Array.from(vec);
@@ -307,7 +308,6 @@ export function LibraryScreen() {
         setSearching(false);
         return;
       }
-      if (!emb.ready) return;
       // Tell the idle loops (DINO backfill, paced describes) to stand down —
       // they were starving the text embed this search needs.
       noteInteractive();
@@ -320,55 +320,35 @@ export function LibraryScreen() {
       // thread behind the latest one.
       const stale = () => queryRef.current.trim() !== q;
       try {
-        // The text embed competes for CPU with whatever generation is already
-        // in flight. If it takes noticeably long, serve lexical-only results
-        // (OCR/tags/captions/filenames) immediately, then upgrade to the full
-        // hybrid ranking when the vector lands. `Infinity` ranks the ENTIRE
-        // indexed collection — a search sorts the library, it doesn't cut it
-        // down — and the grid pages the ranked list via the same infinite
-        // scroll as browse.
-        const vecPromise = emb.embedText(q);
-        const TIMED_OUT = Symbol('embed-timeout');
-        const first = await Promise.race([
-          vecPromise,
-          new Promise<typeof TIMED_OUT>((r) => setTimeout(() => r(TIMED_OUT), 1_200)),
-        ]);
-        if (first === TIMED_OUT) {
-          const quick = await searchByVector(null, q, Infinity, kindArg(), stale);
-          if (quick !== null && !stale()) setResults(quick);
-        }
-        const vec = await vecPromise;
-        if (stale()) return;
-        const exactTerms = searchTermsForText(q);
-        let expanded = buildExpandedLexicalQuery(exactTerms, []);
-        try {
-          const labels = [...taughtLabelsRef.current, ...libraryTagsRef.current].slice(
-            0,
-            SEARCH_LABEL_VECTOR_LIMIT
-          );
-          const vectors = await getLabelVectors(emb.primaryModel.id);
-          await seedSearchLabelVectors(emb, labels, vectors, SEARCH_LABEL_SYNC_SEED_LIMIT);
-          void seedMissingSearchLabelVectors(emb, labels, vectors).catch(() => {});
-          if (stale()) return;
-          const semanticHits = rankSemanticLabels(
-            vec,
-            buildLabelExpansionCandidates(vectors, libraryTagsRef.current, taughtLabelsRef.current)
-          );
-          expanded = buildExpandedLexicalQuery(exactTerms, semanticHits);
-        } catch {
-          // Semantic expansion is a relevance upgrade, not a search dependency.
-        }
-        const hits = await searchByVector(vec, q, Infinity, kindArg(), stale, expanded);
-        // Embedding + brute-force search are async and on-device, so they can
-        // resolve long after the box was cleared or retyped. If the current
-        // query no longer matches what we searched for, drop these results —
-        // otherwise we'd clobber browse mode back into "N results for ''", or
-        // let a slow earlier search overwrite a newer one.
-        if (hits === null || stale()) return;
-        setResults(hits);
-      } catch {
-        // Embed failed (model unloading, OOM) — keep whatever lexical results
-        // are already showing rather than blanking the grid.
+        await runProgressiveSearch({
+          lexicalSearch: () => searchByVector(null, q, Infinity, kindArg(), stale),
+          embed: emb.ready ? () => emb.embedText(q) : undefined,
+          hybridSearch: emb.ready ? async (vec) => {
+            const exactTerms = searchTermsForText(q);
+            let expanded = buildExpandedLexicalQuery(exactTerms, []);
+            try {
+              const labels = [...taughtLabelsRef.current, ...libraryTagsRef.current].slice(
+                0,
+                SEARCH_LABEL_VECTOR_LIMIT
+              );
+              const vectors = await getLabelVectors(emb.primaryModel.id);
+              if (stale()) return null;
+              const semanticHits = rankSemanticLabels(
+                vec,
+                buildLabelExpansionCandidates(vectors, libraryTagsRef.current, taughtLabelsRef.current)
+              );
+              expanded = buildExpandedLexicalQuery(exactTerms, semanticHits);
+              // Missing label vectors are a relevance upgrade, never query-path
+              // work. The seeder waits for the interactive window to clear.
+              void seedMissingSearchLabelVectors(emb, labels, vectors).catch(() => {});
+            } catch {
+              // Semantic expansion is optional; dense + lexical search still runs.
+            }
+            return searchByVector(vec, q, Infinity, kindArg(), stale, expanded);
+          } : undefined,
+          publish: (hits) => setResults(hits),
+          isCurrent: () => !stale(),
+        });
       } finally {
         // Only clear the spinner if this is still the active search; a superseded
         // run bailing out shouldn't yank the indicator from the live one.
@@ -419,17 +399,16 @@ export function LibraryScreen() {
     return () => sub.remove();
   }, []);
 
-  // Debounce so the grid narrows as you type without a search per keystroke.
+  // A short coalescing window absorbs a burst of keyboard events without adding
+  // a human-perceptible pause. The lexical path then paints before model embed.
   useEffect(() => {
     if (!query.trim()) {
       setResults(null);
       setVisibleResults(PAGE);
-      // A search in flight when the box is cleared bails without clearing its
-      // own spinner (it's no longer the active query), so reset it here.
       setSearching(false);
       return;
     }
-    const id = setTimeout(() => runSearchRef.current(query), 350);
+    const id = setTimeout(() => runSearchRef.current(query), 80);
     return () => clearTimeout(id);
   }, [query]);
 

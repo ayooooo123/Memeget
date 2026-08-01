@@ -37,6 +37,7 @@ import {
   updateMemeTags,
   sqliteVecReady,
 } from '../db';
+import { applyTagResponsively } from '../tagApplyCoordinator';
 import { termsWithLabel, upsertDurableTag } from '../tagMerge';
 import { emitLibraryChanged } from '../events';
 import { guessFacet } from '../facetCoverage';
@@ -511,33 +512,35 @@ export const MemeGrid = React.memo(function MemeGrid({
           });
           return { id: it.id, tags: next.tags, extraTerms: next.extraTerms };
         });
-      await bulkUpdateMemeTags(updates);
-      setSelected((prev) => {
-        if (!prev || !selectedIds.has(prev.id)) return prev;
-        const next = updates.find((u) => u.id === prev.id);
-        return next ? { ...prev, tags: next.tags, extraTerms: next.extraTerms } : prev;
-      });
-      // Optionally spread the tag to the tagged memes' visual look-alikes
-      // (DINOv2 space when configured, else CLIP — see tagPropagation.ts).
-      // Best-effort: a spread failure never rolls back the tag itself.
-      let spread = 0;
-      if (bulkSpread) {
-        spread = await propagateTagToSimilarMemes(
-          updates.map((u) => u.id),
-          lower
-        )
-          .then((r) => r.propagated)
-          .catch(() => 0);
-      }
-      emitLibraryChanged();
-      setBulkTagging(false);
-      exitSelection();
-      success();
       const tagged = `Tagged ${updates.length} meme${updates.length === 1 ? '' : 's'} “${lower}”`;
-      showToast(
-        spread > 0 ? `${tagged} · spread to ${spread} look-alike${spread === 1 ? '' : 's'}` : tagged,
-        'success'
-      );
+      await applyTagResponsively({
+        persist: () => bulkUpdateMemeTags(updates),
+        onPersisted: () => {
+          setSelected((prev) => {
+            if (!prev || !selectedIds.has(prev.id)) return prev;
+            const next = updates.find((u) => u.id === prev.id);
+            return next ? { ...prev, tags: next.tags, extraTerms: next.extraTerms } : prev;
+          });
+          emitLibraryChanged();
+          setBulkTagging(false);
+          exitSelection();
+          success();
+          showToast(tagged, 'success');
+        },
+        propagate: bulkSpread
+          ? () =>
+              propagateTagToSimilarMemes(
+                updates.map((u) => u.id),
+                lower
+              ).then((result) => result.propagated)
+          : undefined,
+        onPropagated: (spread) => {
+          if (spread <= 0) return;
+          emitLibraryChanged();
+          showToast(`Spread “${lower}” to ${spread} look-alike${spread === 1 ? '' : 's'}`, 'success');
+        },
+        onPropagationError: () => showToast(`${tagged}; look-alike spread failed`, 'error'),
+      });
     } catch (e) {
       showToast(`Could not tag: ${String(e)}`, 'error');
     } finally {
