@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { StatusBar } from 'expo-status-bar';
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Animated, AppState, Pressable, StyleSheet, Text, View } from 'react-native';
@@ -19,6 +19,7 @@ import { ShareReceiver } from './src/components/ShareReceiver';
 import { ToastHost } from './src/components/Toast';
 import { tap } from './src/haptics';
 import { colors, radius, shadow, TABBAR_CLEARANCE } from './src/theme';
+import { createTagSearchRequest, type TagSearchRequest } from './src/settingsTagCore';
 
 // Must run once, before any model hook loads a model. Wires ExecuTorch's
 // resource fetcher to Expo's filesystem so model binaries can be downloaded
@@ -74,6 +75,7 @@ export default function App() {
 function Shell() {
   const insets = useSafeAreaInsets();
   const [tab, setTab] = useState<TabKey>('library');
+  const [tagSearchRequest, setTagSearchRequest] = useState<TagSearchRequest | null>(null);
   const [dbReady, setDbReady] = useState(false);
 
   useEffect(() => {
@@ -102,6 +104,13 @@ function Shell() {
     };
   }, []);
 
+  const openTagSearch = useCallback((label: string) => {
+    setTagSearchRequest((previous) =>
+      createTagSearchRequest(label, previous?.nonce ?? 0)
+    );
+    setTab('library');
+  }, []);
+
   return (
     <SafeAreaView style={styles.root} edges={['top', 'left', 'right']}>
       {!dbReady ? (
@@ -111,10 +120,10 @@ function Shell() {
         // search text, and results across tab switches.
         <View style={styles.body}>
           <View style={[styles.screen, tab !== 'library' && styles.hidden]}>
-            <LibraryScreen />
+            <LibraryScreen tagSearchRequest={tagSearchRequest} />
           </View>
           <View style={[styles.screen, tab !== 'settings' && styles.hidden]}>
-            <SettingsScreen active={tab === 'settings'} />
+            <SettingsScreen active={tab === 'settings'} onSearchLabel={openTagSearch} />
           </View>
         </View>
       )}

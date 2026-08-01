@@ -53,6 +53,7 @@ import {
   searchVectorKey,
 } from '../searchExpansion';
 import type { LinkedFolder, MediaKind, MemeRecord, SearchHit } from '../types';
+import type { TagSearchRequest } from '../settingsTagCore';
 
 const PAGE = 90;
 
@@ -101,7 +102,7 @@ async function seedMissingSearchLabelVectors(
   return searchLabelSeed;
 }
 
-export function LibraryScreen() {
+export function LibraryScreen({ tagSearchRequest }: { tagSearchRequest?: TagSearchRequest | null }) {
   const emb = useEmbeddings();
   // Mirror the embeddings api into a ref so the stable callbacks below
   // (onIndex/onTaught) don't take a new identity every time the CLIP model's
@@ -425,6 +426,16 @@ export function LibraryScreen() {
     // Toggle: tapping the active chip clears the filter.
     setQuery((cur) => (cur.trim() === label ? '' : label));
   }, []);
+
+  // Settings tag rows are navigation requests, not toggle chips: selecting the
+  // same tag twice must keep showing that tag instead of clearing the search.
+  useEffect(() => {
+    if (!tagSearchRequest) return;
+    tap();
+    setKind('all');
+    setQuery(tagSearchRequest.label);
+    setScrollToTopSignal((n) => n + 1);
+  }, [tagSearchRequest]);
 
   // Tapping a media chip toggles that filter (tap again to clear back to 'all').
   const toggleKind = useCallback((k: MediaKind) => {
