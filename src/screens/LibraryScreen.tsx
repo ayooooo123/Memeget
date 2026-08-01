@@ -27,11 +27,19 @@ import {
   putLabelVector,
   searchByVector,
 } from '../db';
-import { interactiveActive, noteInteractive, runIndex, retagAll, yieldToSearch, type IndexProgress } from '../indexer';
+import {
+  indexSavedFiles,
+  interactiveActive,
+  noteInteractive,
+  runIndex,
+  retagAll,
+  yieldToSearch,
+  type IndexProgress,
+} from '../indexer';
 import { emitLibraryChanged, onLibraryChanged, onThumbsUpdated } from '../events';
 import { appendPage, mergeRecords, patchThumbs } from '../libraryCore';
 import { success, tap, thud } from '../haptics';
-import { pickFolder } from '../saf';
+import { pickFolder, type SafFile } from '../saf';
 import { restoreFolderSidecar } from '../sidecarSync';
 import { createTeachApplyQueue, type TeachApplyQueue } from '../teachApplyQueue';
 import { runProgressiveSearch } from '../searchCoordinator';
@@ -622,6 +630,21 @@ export function LibraryScreen() {
     [isSearch, searching, results, query, indexing, progress, hasLibrary, count, folders, emb.ready, onLink, onIndex, kind, relaxedSearchScope]
   );
 
+  const onCreated = useCallback(
+    (saved: SafFile[]) => {
+      scheduleRefresh();
+      const api = embRef.current;
+      if (!api.ready) return;
+      void indexSavedFiles(api, saved)
+        .then(() => emitLibraryChanged())
+        .catch(() => {
+          // The pending row and linked-folder file are durable; the next
+          // recovery/index pass retries them if foreground indexing fails.
+        });
+    },
+    [scheduleRefresh]
+  );
+
   const onTaught = useCallback(async (label: string) => {
     // Persisting the exemplar/manual tag is already done by MemeGrid. Mark the
     // teach gesture as interactive, then run the full-library apply only after
@@ -732,6 +755,7 @@ export function LibraryScreen() {
         onEndReached={loadMore}
         loadingMore={loadingMore}
         onDeleted={onDeleted}
+        onCreated={onCreated}
         onSearchLabel={searchLabel}
         scrollToTopSignal={scrollToTopSignal}
         onScrollActiveChange={onScrollActiveChange}

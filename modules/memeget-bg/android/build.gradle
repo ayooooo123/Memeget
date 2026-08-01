@@ -27,5 +27,7 @@ dependencies {
   // bundles (see its android/build.gradle: androidxMedia3Version) so the app
   // resolves a single coherent ExoPlayer — a mismatched media3 across modules
   // crashes at runtime. Keep this in lockstep whenever expo-video is upgraded.
+  implementation 'androidx.media3:media3-transformer:1.9.0'
+  implementation 'androidx.media3:media3-effect:1.9.0'
   implementation 'androidx.media3:media3-inspector:1.9.0'
 }

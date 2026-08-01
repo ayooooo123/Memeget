@@ -8,12 +8,15 @@ import android.content.Intent
 import android.net.Uri
 import android.os.BatteryManager
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.Environment
 import android.os.PowerManager
 import android.provider.MediaStore
 import androidx.core.content.FileProvider
 import androidx.documentfile.provider.DocumentFile
 import expo.modules.kotlin.modules.Module
+import expo.modules.kotlin.Promise
 import expo.modules.kotlin.modules.ModuleDefinition
 import java.io.File
 import java.io.FileOutputStream
@@ -53,6 +56,59 @@ class MemegetBgModule : Module() {
       val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
       cm.setPrimaryClip(clip)
     }
+
+    // Render a finished variation into app cache. Images use Bitmap/Canvas;
+    // videos use Media3 Transformer and settle the JS promise only after its
+    // callback reports a complete MP4 file.
+    AsyncFunction("renderMemeVariation") {
+      source: String,
+      kind: String,
+      topText: String,
+      bottomText: String,
+      coverTop: Boolean,
+      coverBottom: Boolean,
+      promise: Promise ->
+      val ctx = appContext.reactContext
+        ?: return@AsyncFunction promise.reject("E_CONTEXT", "React context unavailable", null)
+      if (kind == "video") {
+        Handler(Looper.getMainLooper()).post {
+          MemeMediaEditor.exportVideo(
+            ctx,
+            source,
+            topText,
+            bottomText,
+            onSuccess = promise::resolve,
+            onError = { error -> promise.reject("E_VIDEO_EXPORT", error.message, error) }
+          )
+        }
+      } else {
+        try {
+          promise.resolve(
+            MemeMediaEditor.renderImage(ctx, source, topText, bottomText, coverTop, coverBottom)
+          )
+        } catch (error: Throwable) {
+          promise.reject("E_IMAGE_EXPORT", error.message, error)
+        }
+      }
+    }
+
+    // WebM is playable in Memeget but not accepted by several mobile paste
+    // targets. Produce genuine H.264/AAC MP4 bytes before clipboard staging.
+    AsyncFunction("transcodeVideoToMp4") { source: String, promise: Promise ->
+      val ctx = appContext.reactContext
+        ?: return@AsyncFunction promise.reject("E_CONTEXT", "React context unavailable", null)
+      Handler(Looper.getMainLooper()).post {
+        MemeMediaEditor.exportVideo(
+          ctx,
+          source,
+          topText = "",
+          bottomText = "",
+          onSuccess = promise::resolve,
+          onError = { error -> promise.reject("E_VIDEO_TRANSCODE", error.message, error) }
+        )
+      }
+    }
+
 
     // Copy a finished export file (written to the app cache) into the public
     // Downloads folder so it lands there directly, no share-sheet round trip.

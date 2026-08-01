@@ -28,6 +28,15 @@ interface MemegetBgNative {
   extractAudio(source: string, maxSeconds: number): Promise<ExtractedAudio | null>;
   extractVideoFrame(source: string, seconds: number): Promise<string | null>;
   extractVideoFramePlayer(source: string, seconds: number): Promise<string | null>;
+  renderMemeVariation(
+    source: string,
+    kind: 'image' | 'video',
+    topText: string,
+    bottomText: string,
+    coverTop: boolean,
+    coverBottom: boolean
+  ): Promise<string>;
+  transcodeVideoToMp4(source: string): Promise<string>;
   copyFileToClipboard(uri: string, name: string, mimeType: string): Promise<void>;
   saveToDownloads(srcPath: string, name: string, mimeType: string): Promise<string>;
 }
@@ -133,6 +142,28 @@ export async function extractVideoFramePlayer(
   if (!native || typeof native.extractVideoFramePlayer !== 'function') return null;
   const p = await native.extractVideoFramePlayer(source, seconds);
   return typeof p === 'string' && p ? p : null;
+}
+
+export const mediaEditorNativeAvailable =
+  native != null &&
+  typeof native.renderMemeVariation === 'function' &&
+  typeof native.transcodeVideoToMp4 === 'function';
+
+export async function renderMemeVariation(
+  source: string,
+  kind: 'image' | 'video',
+  topText: string,
+  bottomText: string,
+  coverTop = false,
+  coverBottom = false
+): Promise<string | null> {
+  if (!native || typeof native.renderMemeVariation !== 'function') return null;
+  return native.renderMemeVariation(source, kind, topText, bottomText, coverTop, coverBottom);
+}
+
+export async function transcodeVideoToMp4(source: string): Promise<string | null> {
+  if (!native || typeof native.transcodeVideoToMp4 !== 'function') return null;
+  return native.transcodeVideoToMp4(source);
 }
 
 // Put an actual file (in practice a video, which expo-clipboard can't hold) on

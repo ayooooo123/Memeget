@@ -42,17 +42,34 @@ import { termsWithLabel, upsertDurableTag } from '../tagMerge';
 import { emitLibraryChanged } from '../events';
 import { guessFacet } from '../facetCoverage';
 import { scoreExemplar } from '../learnCore';
-import { buildExemplarHeads, noteInteractive, type ExemplarModel } from '../indexer';
+import { buildExemplarHeads, noteInteractive, saveSharedFiles, type ExemplarModel } from '../indexer';
 import { noteCodecInteractive } from '../interactive';
 import { success, tap, thud, warn } from '../haptics';
-import { copyFileToClipboard } from '../../modules/memeget-bg';
-import { deleteFile, materialize, readImageBase64, readVideoFrameBase64, videoMimeFor } from '../saf';
+import {
+  copyFileToClipboard,
+  mediaEditorNativeAvailable,
+  renderMemeVariation,
+  saveToDownloads,
+  transcodeVideoToMp4,
+} from '../../modules/memeget-bg';
+import { compatibleCopyTarget, makeVariationName } from '../memeActionsCore';
+import { mimeForName } from '../mediaFormats';
+import {
+  deleteCache,
+  deleteFile,
+  materialize,
+  readImageBase64,
+  readVideoFrameBase64,
+  videoMimeFor,
+  type SafFile,
+} from '../saf';
 import { colors, radius, shadow, space, TABBAR_CLEARANCE } from '../theme';
 import { useConst } from '../reactUtils';
 import type { MemeRecord, SearchHit, Tag } from '../types';
 
 import { useAudio } from '../audio';
 import { showToast } from './Toast';
+import { MemeVariationEditor, type VariationDraft } from './MemeVariationEditor';
 import { Chip, PressableScale } from './ui';
 
 const GAP = 3;
@@ -229,6 +246,7 @@ export const MemeGrid = React.memo(function MemeGrid({
   onSearchLabel,
   emptyState,
   scrollToTopSignal,
+  onCreated,
   onScrollActiveChange,
 }: {
   items: Item[];
@@ -244,6 +262,8 @@ export const MemeGrid = React.memo(function MemeGrid({
   // Called after a meme is deleted so the parent can drop it from its list.
   onDeleted?: (id: number) => void;
   // Tap a tag in the viewer to jump to a search for it. Optional.
+  // Called after a rendered variation is saved as a pending collection item.
+  onCreated?: (saved: SafFile[]) => void;
   onSearchLabel?: (label: string) => void;
   // Rendered when items is empty (e.g. a "no results" state).
   emptyState?: React.ReactElement | null;
@@ -256,6 +276,8 @@ export const MemeGrid = React.memo(function MemeGrid({
   onScrollActiveChange?: (active: boolean) => void;
 }) {
   const [selected, setSelected] = useState<Item | null>(null);
+  const [variationOpen, setVariationOpen] = useState(false);
+  const [variationError, setVariationError] = useState('');
   // Multi-select: long-press a cell to enter selection mode, tap to toggle, then
   // apply a bulk action (tag / delete) to the whole set. Kept in the grid (not
   // lifted to the screen) so the bar and cell overlays live next to the list.
@@ -639,32 +661,116 @@ export const MemeGrid = React.memo(function MemeGrid({
     }
   };
 
+  const onExportFile = async () => {
+    if (!selected || busy) return;
+    noteInteractive();
+    setBusy(true);
+    try {
+      const path = await materialize(selected.uri, selected.name);
+      const destination = await saveToDownloads(path, selected.name, mimeForName(selected.name));
+      if (!destination) throw new Error('Downloads export needs a native build');
+      success();
+      showToast(`Saved to ${destination}`, 'success');
+    } catch (e) {
+      showToast(`Could not export: ${String(e)}`, 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const openVariation = () => {
+    if (!selected || busy) return;
+    if (!mediaEditorNativeAvailable) {
+      showToast('Meme editing needs the installed native build', 'error');
+      return;
+    }
+    noteInteractive();
+    if (selected.kind === 'video') noteCodecInteractive();
+    setVariationError('');
+    setVariationOpen(true);
+  };
+
+  const saveVariation = async (draft: VariationDraft) => {
+    const item = selected;
+    if (!item || busy) return;
+    setBusy(true);
+    setVariationError('');
+    let rendered: string | null = null;
+    let materialized: string | null = null;
+    try {
+      materialized = await materialize(item.uri, item.name);
+      rendered = await renderMemeVariation(
+        materialized,
+        item.kind,
+        draft.topText,
+        draft.bottomText,
+        item.kind === 'image' && draft.coverTop,
+        item.kind === 'image' && draft.coverBottom
+      );
+      if (!rendered) throw new Error('Meme editor is unavailable in this build');
+      const extension = item.kind === 'video' ? 'mp4' : 'png';
+      const mimeType = item.kind === 'video' ? 'video/mp4' : 'image/png';
+      const result = await saveSharedFiles([
+        {
+          path: rendered,
+          fileName: makeVariationName(item.name, extension),
+          mimeType,
+        },
+      ]);
+      if (result.saved.length === 0) {
+        throw new Error(result.duplicates ? 'That variation already exists' : 'Could not write to the linked folder');
+      }
+      setVariationOpen(false);
+      emitLibraryChanged();
+      onCreated?.(result.saved);
+      success();
+      showToast('New variation saved — indexing in background', 'success');
+    } catch (e) {
+      const message = `Could not create variation: ${String(e)}`;
+      setVariationError(message);
+      showToast(message, 'error');
+    } finally {
+      if (materialized) await deleteCache(materialized).catch(() => {});
+      if (rendered) await deleteCache(rendered).catch(() => {});
+      setBusy(false);
+    }
+  };
+
   const onCopy = async () => {
     if (!selected || busy) return;
     const isVideo = selected.kind === 'video';
-    // Frame extraction needs a hardware decoder; make the background loops
-    // yield theirs before we try (retries inside cover the in-flight one).
+    let converted: string | null = null;
+    let materialized: string | null = null;
+    // Frame extraction/transcoding needs hardware codecs; make background work
+    // yield before the copy path claims them.
     noteInteractive();
-    if (isVideo) noteCodecInteractive(); // free the poster loop's decoder now
+    if (isVideo) noteCodecInteractive();
     setBusy(true);
     try {
       if (isVideo) {
-        // Put the actual video file on the clipboard as a content:// uri (the
-        // memeget-bg native module — expo-clipboard can only hold images).
-        // Apps that accept rich pastes receive the full video; if the module
-        // isn't built in or the copy fails, fall through to the still frame.
-        const copied = await copyFileToClipboard(
-          selected.uri,
-          selected.name,
-          videoMimeFor(selected.name)
-        ).catch(() => false);
+        const target = compatibleCopyTarget(selected.name, selected.kind);
+        let source = selected.uri;
+        if (target.transcode) {
+          showToast('Converting WebM to MP4 for paste compatibility…', 'info');
+          materialized = await materialize(selected.uri, selected.name);
+          converted = await transcodeVideoToMp4(materialized);
+          if (!converted) throw new Error('This build cannot convert WebM video');
+          source = converted;
+        }
+        const copied = await copyFileToClipboard(source, target.name, target.mimeType).catch(() => false);
         if (copied) {
           success();
-          showToast('Video copied — paste it in apps that accept videos', 'success');
+          showToast(
+            target.transcode
+              ? 'MP4 copied — paste it into X or another video app'
+              : 'Video copied — paste it in apps that accept videos',
+            'success'
+          );
           return;
         }
       }
-      // Images copy as-is; videos fall back to a representative still frame.
+      // Images copy as-is; videos fall back to a representative still frame
+      // only when the target does not accept file clipboard items.
       const base64 = isVideo
         ? await readVideoFrameBase64(selected.uri, selected.name)
         : await readImageBase64(selected.uri, selected.name);
@@ -674,6 +780,8 @@ export const MemeGrid = React.memo(function MemeGrid({
     } catch (e) {
       showToast(`Could not copy: ${String(e)}`, 'error');
     } finally {
+      if (materialized) await deleteCache(materialized).catch(() => {});
+      if (converted) await deleteCache(converted).catch(() => {});
       setBusy(false);
     }
   };
@@ -1113,6 +1221,8 @@ export const MemeGrid = React.memo(function MemeGrid({
         onClose={() => setSelected(null)}
         onShare={onShare}
         onCopy={onCopy}
+        onExport={onExportFile}
+        onCreateVariation={openVariation}
         onCopyText={onCopyText}
         onDelete={onDelete}
         onRecaption={onRecaption}
@@ -1137,6 +1247,15 @@ export const MemeGrid = React.memo(function MemeGrid({
           const { score, ...rec } = hit;
           setSelected(rec as MemeRecord);
         }}
+      />
+
+      <MemeVariationEditor
+        item={selected}
+        visible={variationOpen}
+        saving={busy}
+        error={variationError}
+        onClose={() => setVariationOpen(false)}
+        onSave={saveVariation}
       />
 
       <Modal
@@ -1366,6 +1485,8 @@ function ViewerSheet({
   onClose,
   onShare,
   onCopy,
+  onExport,
+  onCreateVariation,
   onCopyText,
   onDelete,
   onRecaption,
@@ -1384,6 +1505,8 @@ function ViewerSheet({
   onClose: () => void;
   onShare: () => void;
   onCopy: () => void;
+  onExport: () => void;
+  onCreateVariation: () => void;
   onCopyText: () => void;
   onDelete: () => void;
   // Re-run the vision model / regenerate the poster for just this meme.
@@ -1653,6 +1776,20 @@ function ViewerSheet({
               <Pressable style={[StyleSheet.absoluteFill, styles.moreScrim]} onPress={() => setMoreOpen(false)} />
               <View style={[styles.moreSheet, { paddingBottom: insets.bottom + space.md }]}>
                 <View style={styles.grabber} />
+                <MoreRow
+                  glyph="⇩"
+                  label="Export file to Downloads"
+                  hint="Save the original without opening the share sheet"
+                  onPress={closeMoreThen(onExport)}
+                  disabled={busy}
+                />
+                <MoreRow
+                  glyph="Aa"
+                  label="Create a variation…"
+                  hint="Add or replace edge text and save a new meme"
+                  onPress={closeMoreThen(onCreateVariation)}
+                  disabled={busy}
+                />
                 {!!item.ocrText && (
                   <MoreRow glyph="🆎" label="Copy the text in this meme" onPress={closeMoreThen(onCopyText)} />
                 )}
