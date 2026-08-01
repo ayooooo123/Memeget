@@ -48,6 +48,32 @@ export function invalidateSearchIndex(): void {
   dirty = true;
 }
 
+export interface SearchCachePatch {
+  id: number;
+  record: Partial<MemeRecord>;
+  searchText: string;
+}
+
+// Patch fields that do not alter vector identity (currently tags/extra terms)
+// without throwing away every decoded embedding. Returns false when no stable
+// resident cache exists so the caller can fall back to full invalidation.
+export function patchSearchIndexEntries(patches: readonly SearchCachePatch[]): boolean {
+  if (dirty || building || !entries) return false;
+  const byId = new Map(patches.map((patch) => [patch.id, patch]));
+  let matched = 0;
+  entries = entries.map((entry) => {
+    const patch = byId.get(entry.id);
+    if (!patch) return entry;
+    matched++;
+    return {
+      ...entry,
+      searchText: patch.searchText,
+      record: { ...entry.record, ...patch.record },
+    };
+  });
+  return matched === patches.length;
+}
+
 // Return the resident entries, rebuilding via `load` only when stale. Concurrent
 // callers during a build share the one in-flight build instead of each issuing
 // their own SELECT. An invalidation that lands mid-build re-flags `dirty`, so the

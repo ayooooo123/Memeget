@@ -15,6 +15,8 @@ import { emitKnowledgeChanged } from './events';
 import {
   ensureSearchIndex,
   invalidateSearchIndex as invalidateResidentSearchIndex,
+  patchSearchIndexEntries,
+  peekSearchIndex,
   type SearchCacheEntry,
 } from './searchIndexCache';
 import {
@@ -649,13 +651,15 @@ export async function getMemeEmbedding(id: number): Promise<Float32Array | null>
 
 export async function updateMemeTags(id: number, tags: Tag[], extraTerms: string): Promise<void> {
   const db = await getDb();
+  const normalized = normalizeTags(tags);
   await db.runAsync(
     'UPDATE memes SET tags = ?, extra_terms = ? WHERE id = ?',
-    JSON.stringify(normalizeTags(tags)),
+    JSON.stringify(normalized),
     extraTerms,
     id
   );
-  invalidateSearchIndex(); // tags / association terms feed the lexical haystack
+  if (!patchTagSearchCache([{ id, tags: normalized, extraTerms }])) invalidateResidentSearchIndex();
+  ftsDirty = true;
   emitKnowledgeChanged();
 }
 
@@ -667,18 +671,20 @@ export async function bulkUpdateMemeTags(
   updates: { id: number; tags: Tag[]; extraTerms: string }[]
 ): Promise<void> {
   if (updates.length === 0) return;
+  const normalized = updates.map((u) => ({ ...u, tags: normalizeTags(u.tags) }));
   const db = await getDb();
   const stmt = await db.prepareAsync('UPDATE memes SET tags = ?, extra_terms = ? WHERE id = ?');
   try {
     await db.withTransactionAsync(async () => {
-      for (const u of updates) {
-        await stmt.executeAsync(JSON.stringify(normalizeTags(u.tags)), u.extraTerms, u.id);
+      for (const u of normalized) {
+        await stmt.executeAsync(JSON.stringify(u.tags), u.extraTerms, u.id);
       }
     });
   } finally {
     await stmt.finalizeAsync();
   }
-  invalidateSearchIndex(); // bulk tag/extra-terms rewrite (re-tag library)
+  if (!patchTagSearchCache(normalized)) invalidateResidentSearchIndex();
+  ftsDirty = true;
   emitKnowledgeChanged();
 }
 
@@ -1497,6 +1503,32 @@ function rowSearchText(row: MemeRow): string {
   });
 }
 
+function patchTagSearchCache(
+  updates: readonly { id: number; tags: Tag[]; extraTerms: string }[]
+): boolean {
+  const resident = peekSearchIndex();
+  if (!resident) return false;
+  const byId = new Map(updates.map((update) => [update.id, update]));
+  const patches = resident.flatMap((entry) => {
+    const update = byId.get(entry.id);
+    if (!update) return [];
+    const record = { tags: update.tags, extraTerms: update.extraTerms };
+    return [{
+      id: entry.id,
+      record,
+      searchText: assembleSearchText({
+        ocr: entry.record.ocrText,
+        name: entry.record.name,
+        caption: entry.record.caption,
+        transcript: entry.record.transcript,
+        tagLabels: update.tags.map((tag) => tag.label),
+        extraTerms: update.extraTerms,
+      }),
+    }];
+  });
+  return patches.length === updates.length && patchSearchIndexEntries(patches);
+}
+
 // Materialize only the winners: rowToRecord JSON.parses every meme's tags, and
 // doing that for the whole library on each (debounced) keystroke was most of
 // the search cost. Scoring uses raw columns; the top `limit` rows get parsed.
@@ -1596,7 +1628,10 @@ async function ftsRankedIds(
   shouldAbort?: () => boolean
 ): Promise<number[]> {
   const match = ftsMatchQuery(lexicalQuery);
-  if (!match || !(await ensureFtsSearchIndex(db, allEntries)) || shouldAbort?.()) return [];
+  // Rebuilding every FTS row is much slower than the in-memory lexical scan.
+  // Never put that rebuild in the keystroke path; dirty indexes simply fall
+  // back to scoreEntry until an idle rebuild path is available.
+  if (!match || ftsDirty || !(await ensureFtsSearchIndex(db, allEntries)) || shouldAbort?.()) return [];
   const eligible = new Set(eligibleEntries.map((e) => e.id));
   const rows = await db.getAllAsync<{ id: number }>(
     `SELECT rowid AS id

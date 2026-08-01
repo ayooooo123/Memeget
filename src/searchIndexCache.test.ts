@@ -1,6 +1,7 @@
 import {
   ensureSearchIndex,
   invalidateSearchIndex,
+  patchSearchIndexEntries,
   peekSearchIndex,
   resetSearchIndexForTest,
   type SearchCacheEntry,
@@ -105,5 +106,31 @@ describe('search index cache', () => {
     // The mid-build invalidation must force the next call to rebuild.
     await ensureSearchIndex(load);
     expect(calls).toBe(2);
+  });
+
+  it('patches searchable tag fields without rebuilding every decoded vector', async () => {
+    let calls = 0;
+    await ensureSearchIndex(async () => {
+      calls++;
+      return [makeEntry(1), makeEntry(2)];
+    });
+
+    const patched = patchSearchIndexEntries([
+      {
+        id: 2,
+        record: { tags: [{ label: 'pepe', category: 'user', source: 'manual', score: 1 }] },
+        searchText: 'meme 2 pepe',
+      },
+    ]);
+    const entries = await ensureSearchIndex(async () => {
+      calls++;
+      return [];
+    });
+
+    expect(patched).toBe(true);
+    expect(calls).toBe(1);
+    expect(entries[0].searchText).toBe('meme 1');
+    expect(entries[1].searchText).toBe('meme 2 pepe');
+    expect(entries[1].record.tags[0].label).toBe('pepe');
   });
 });

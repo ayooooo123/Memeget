@@ -10,7 +10,7 @@
     "newArchEnabled": true,
     "android": {
       "package": "com.memeget.app",
-      "versionCode": 1151,
+      "versionCode": 1152,
       "edgeToEdgeEnabled": true
     },
     "plugins": [
