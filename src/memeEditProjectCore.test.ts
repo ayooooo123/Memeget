@@ -11,6 +11,7 @@ import {
   createDefaultVideoProject,
   createProjectHistory,
   interpolateTransformKeyframes,
+  interpolateCoverCorrections,
   isLayerActiveAt,
   mapPointToCroppedCanvas,
   mapRectToCroppedCanvas,
@@ -26,10 +27,12 @@ import {
   undoProjectHistory,
   validateMemeEditProject,
   type CoverLayer,
+  type CoverCorrectionKeyframe,
   type MediaOverlayLayer,
   type MemeEditProject,
   type MemeEditLayer,
   type SubjectLayer,
+  type MaskTrackSpec,
   type TextLayer,
   type TransformKeyframe,
 } from './memeEditProjectCore';
@@ -76,6 +79,23 @@ function keyframe(
     ...overrides,
   };
 }
+function maskTrack(
+  id: string,
+  active: MaskTrackSpec['active'] = null
+): MaskTrackSpec {
+  return {
+    id,
+    active,
+    corrections: [
+      {
+        timeUs: active?.startUs ?? 0,
+        rect: { x: 0.1, y: 0.1, width: 0.3, height: 0.3 },
+        easing: 'linear',
+      },
+    ],
+  };
+}
+
 
 function textLayer(id: string, active: TextLayer['active'] = null): TextLayer {
   return {
@@ -129,6 +149,7 @@ describe('default projects', () => {
       },
       video: null,
       layers: [],
+      maskTracks: [],
       background: {
         mode: 'source',
         color: '#000000',
@@ -242,6 +263,19 @@ describe('retained ranges and timeline mapping', () => {
     expect(outputTimeToSourceTimeUs(2 * SECOND_US + 1, ranges, 2)).toBeNull();
     expect(outputDurationUs(ranges, 2)).toBe(2 * SECOND_US);
   });
+  test('treats interior retained-range ends as half-open and only includes the final endpoint', () => {
+    const ranges = [
+      { startUs: 0, endUs: 2 * SECOND_US },
+      { startUs: 4 * SECOND_US, endUs: 6 * SECOND_US },
+    ];
+
+    expect(sourceTimeToOutputTimeUs(2 * SECOND_US, ranges, 2)).toBeNull();
+    expect(sourceTimeToOutputTimeUs(4 * SECOND_US, ranges, 2)).toBe(SECOND_US);
+    expect(outputTimeToSourceTimeUs(SECOND_US, ranges, 2)).toBe(4 * SECOND_US);
+    expect(sourceTimeToOutputTimeUs(6 * SECOND_US, ranges, 2)).toBe(2 * SECOND_US);
+    expect(outputTimeToSourceTimeUs(2 * SECOND_US, ranges, 2)).toBe(6 * SECOND_US);
+  });
+
 
   test('uses deterministic integer microseconds at 0.5x speed', () => {
     const ranges = [
@@ -298,6 +332,8 @@ describe('layer behavior', () => {
       mode: 'solid',
       color: '#000000',
       pixelSize: 8,
+      active: { startUs: SECOND_US, endUs: 2 * SECOND_US },
+      corrections: [],
     };
 
     expect(isLayerActiveAt(timed, SECOND_US - 1)).toBe(false);
@@ -305,7 +341,7 @@ describe('layer behavior', () => {
     expect(isLayerActiveAt(timed, 2 * SECOND_US)).toBe(true);
     expect(isLayerActiveAt(timed, 2 * SECOND_US + 1)).toBe(false);
     expect(isLayerActiveAt(textLayer('image'), 99 * SECOND_US)).toBe(true);
-    expect(isLayerActiveAt(cover, 99 * SECOND_US)).toBe(true);
+    expect(isLayerActiveAt(cover, 99 * SECOND_US)).toBe(false);
   });
 
   test('linearly interpolates sparse transforms and clamps outside their timestamps', () => {
@@ -354,6 +390,32 @@ describe('layer behavior', () => {
     expect(interpolateTransformKeyframes(frames, SECOND_US)?.center).toEqual({ x: 0.8, y: 0.8 });
     expect(frames).toHaveLength(2);
   });
+  test('interpolates sparse cover rect corrections while holding discrete mode changes', () => {
+    const corrections: CoverCorrectionKeyframe[] = [
+      {
+        timeUs: 0,
+        rect: { x: 0.1, y: 0.1, width: 0.2, height: 0.2 },
+        mode: 'solid',
+        easing: 'linear',
+      },
+      {
+        timeUs: SECOND_US,
+        rect: { x: 0.3, y: 0.3, width: 0.4, height: 0.4 },
+        mode: 'pixelate',
+        easing: 'hold',
+      },
+    ];
+
+    expect(interpolateCoverCorrections(corrections, 500_000)).toEqual({
+      rect: { x: 0.2, y: 0.2, width: 0.3, height: 0.3 },
+      mode: 'solid',
+    });
+    expect(interpolateCoverCorrections(corrections, SECOND_US)).toEqual({
+      rect: { x: 0.3, y: 0.3, width: 0.4, height: 0.4 },
+      mode: 'pixelate',
+    });
+  });
+
 });
 
 describe('persisted project validation', () => {
@@ -390,10 +452,20 @@ describe('persisted project validation', () => {
         mode: 'pixelate',
         color: '#000000',
         pixelSize: 12,
+        active,
+        corrections: [
+          {
+            timeUs: SECOND_US,
+            rect: { x: 0.1, y: 0.1, width: 0.3, height: 0.3 },
+            mode: 'pixelate',
+            easing: 'hold',
+          },
+        ],
       },
       subject,
       media,
     ];
+    project.maskTracks = [maskTrack('subject-track', active)];
     project.transient.maskTracks['subject-track'] = 'file:///mask.track';
 
     expect(validateMemeEditProject(project)).toEqual({ ok: true, value: project });
@@ -407,6 +479,8 @@ describe('persisted project validation', () => {
     mode: 'solid',
     color: '#000000',
     pixelSize: 8,
+    active: activeLayerRange,
+    corrections: [],
   };
   const validSubjectLayer: SubjectLayer = {
     id: 'subject',
@@ -471,6 +545,41 @@ describe('persisted project validation', () => {
       expectInvalid(project, path);
     }
   );
+  test('requires persistent normalized correction metadata for referenced mask tracks', () => {
+    const project = createDefaultVideoProject(videoSource);
+    const active = { startUs: 0, endUs: SECOND_US };
+    project.layers = [
+      {
+        id: 'media',
+        kind: 'media',
+        assetUri: 'file:///replacement.png',
+        assetKind: 'image',
+        fit: 'cover',
+        targetMaskTrackId: 'missing-track',
+        active,
+        keyframes: [keyframe(0)],
+      },
+    ];
+    expectInvalid(project, 'layers[0].targetMaskTrackId', 'invalid_value');
+
+    const persistent = maskTrack('object-track', active);
+    const malformedCorrection: unknown = {
+      ...project,
+      layers: [],
+      maskTracks: [
+        {
+          ...persistent,
+          corrections: [{ ...persistent.corrections[0], bitmap: 'forbidden-bytes' }],
+        },
+      ],
+    };
+    expectInvalid(
+      malformedCorrection,
+      'maskTracks[0].corrections[0].bitmap',
+      'unknown_field'
+    );
+  });
+
 
   test('returns actionable errors for malformed version and non-finite geometry', () => {
     const imageProject = cloneProject(createDefaultImageProject(imageSource));
@@ -588,6 +697,28 @@ describe('persisted project validation', () => {
       ])
     );
     expectInvalid(tooManyTracks, 'transient.maskTracks', 'limit_exceeded');
+    const tooManyPersistentTracks = cloneProject(createDefaultImageProject(imageSource));
+    tooManyPersistentTracks.maskTracks = Array.from(
+      { length: PROJECT_LIMITS.maxMaskTracks + 1 },
+      (_, index) => maskTrack(`persistent-track-${index}`)
+    );
+    expectInvalid(tooManyPersistentTracks, 'maskTracks', 'limit_exceeded');
+    const tooManyCorrections = cloneProject(createDefaultImageProject(imageSource));
+    const correctionTrack = maskTrack('bounded-track');
+    correctionTrack.corrections = Array.from(
+      { length: PROJECT_LIMITS.maxCorrectionsPerMaskTrack + 1 },
+      (_, index) => ({
+        timeUs: index,
+        rect: { x: 0.1, y: 0.1, width: 0.2, height: 0.2 },
+        easing: 'linear' as const,
+      })
+    );
+    tooManyCorrections.maskTracks = [correctionTrack];
+    expectInvalid(
+      tooManyCorrections,
+      'maskTracks[0].corrections',
+      'limit_exceeded'
+    );
   });
 
   test('rejects projects with too many distinct external assets or an unbounded asset URI', () => {
@@ -669,7 +800,11 @@ describe('immutable reducer', () => {
       type: 'set-materialized-source-uri',
       uri: 'file:///cache/source.mp4',
     });
-    const tracked = reduceMemeEditProject(materialized, {
+    const persistent = reduceMemeEditProject(materialized, {
+      type: 'add-mask-track',
+      track: maskTrack('track', { startUs: 0, endUs: videoSource.durationUs }),
+    });
+    const tracked = reduceMemeEditProject(persistent, {
       type: 'set-mask-track-uri',
       trackId: 'track',
       uri: 'file:///cache/mask.track',
@@ -734,6 +869,125 @@ describe('immutable reducer', () => {
     ]);
     expect(requireTextLayer(added.layers[0]).keyframes).toEqual([keyframe(0)]);
   });
+  test('keeps background reducer output validator-valid for every mode', () => {
+    const project = createDefaultImageProject(imageSource);
+    const sourceBackground = reduceMemeEditProject(project, {
+      type: 'set-background',
+      background: {
+        mode: 'source',
+        color: '#000000',
+        assetUri: 'file:///must-be-cleared.jpg',
+        blurScale: 0,
+      },
+    });
+    expect(sourceBackground.background.assetUri).toBeNull();
+    expect(validateMemeEditProject(sourceBackground).ok).toBe(true);
+    const nonAssetModes = ['solid', 'blurred-source'] as const;
+    for (const mode of nonAssetModes) {
+      const reduced = reduceMemeEditProject(project, {
+        type: 'set-background',
+        background: {
+          mode,
+          color: '#000000',
+          assetUri: 'file:///must-also-be-cleared.jpg',
+          blurScale: 0.5,
+        },
+      });
+      expect(reduced.background.assetUri).toBeNull();
+      expect(validateMemeEditProject(reduced).ok).toBe(true);
+    }
+
+    const assetModes = ['image', 'video'] as const;
+    for (const mode of assetModes) {
+      const reduced = reduceMemeEditProject(project, {
+        type: 'set-background',
+        background: {
+          mode,
+          color: '#000000',
+          assetUri: `file:///background.${mode === 'image' ? 'jpg' : 'mp4'}`,
+          blurScale: 0,
+        },
+      });
+      expect(validateMemeEditProject(reduced).ok).toBe(true);
+    }
+
+    const missingAsset = reduceMemeEditProject(project, {
+      type: 'set-background',
+      background: {
+        mode: 'image',
+        color: '#000000',
+        assetUri: null,
+        blurScale: 0,
+      },
+    });
+    expect(missingAsset).toBe(project);
+    expect(validateMemeEditProject(missingAsset).ok).toBe(true);
+  });
+
+  test('rejects reducer range and keyframe collections above their post-normalization limits', () => {
+    const project = createDefaultVideoProject(videoSource);
+    const retainedRanges = Array.from(
+      { length: PROJECT_LIMITS.maxRetainedRanges + 1 },
+      (_, index) => ({ startUs: index * 2, endUs: index * 2 + 1 })
+    );
+    expect(() =>
+      reduceMemeEditProject(project, {
+        type: 'set-video-retained-ranges',
+        retainedRanges,
+      })
+    ).toThrow(RangeError);
+
+    const added = reduceMemeEditProject(project, {
+      type: 'add-layer',
+      layer: textLayer('bounded', { startUs: 0, endUs: SECOND_US }),
+    });
+    const keyframes = Array.from(
+      { length: PROJECT_LIMITS.maxKeyframesPerLayer + 1 },
+      (_, index) => keyframe(index)
+    );
+    expect(() =>
+      reduceMemeEditProject(added, {
+        type: 'set-layer-keyframes',
+        id: 'bounded',
+        keyframes,
+      })
+    ).toThrow(RangeError);
+  });
+
+  test('adds, updates, and removes persistent sparse mask correction tracks immutably', () => {
+    const project = createDefaultImageProject(imageSource);
+    const originalTrack = maskTrack('object-track');
+    const added = reduceMemeEditProject(project, {
+      type: 'add-mask-track',
+      track: originalTrack,
+    });
+    const correctedTrack: MaskTrackSpec = {
+      ...originalTrack,
+      corrections: [
+        ...originalTrack.corrections,
+        {
+          timeUs: 0,
+          rect: { x: 0.2, y: 0.2, width: 0.2, height: 0.2 },
+          easing: 'hold',
+        },
+      ],
+    };
+    const updated = reduceMemeEditProject(added, {
+      type: 'update-mask-track',
+      track: correctedTrack,
+    });
+    const removed = reduceMemeEditProject(updated, {
+      type: 'remove-mask-track',
+      trackId: 'object-track',
+    });
+
+    expect(project.maskTracks).toEqual([]);
+    expect(added.maskTracks).toEqual([originalTrack]);
+    expect(updated.maskTracks[0].corrections).toHaveLength(1);
+    expect(removed.maskTracks).toEqual([]);
+    expect(validateMemeEditProject(updated).ok).toBe(true);
+  });
+
   test('refuses action strings that would make the in-memory project unbounded', () => {
     const project = createDefaultImageProject(imageSource);
     const oversized = 'x'.repeat(PROJECT_LIMITS.maxAssetUriLength + 1);

@@ -42,6 +42,16 @@ export interface TextLayer {
   keyframes: TransformKeyframe[];
 }
 
+export interface RectCorrectionKeyframe {
+  timeUs: number;
+  rect: NormalizedRect;
+  easing: 'linear' | 'hold';
+}
+
+export interface CoverCorrectionKeyframe extends RectCorrectionKeyframe {
+  mode: 'solid' | 'pixelate';
+}
+
 export interface CoverLayer {
   id: string;
   kind: 'cover';
@@ -49,6 +59,8 @@ export interface CoverLayer {
   mode: 'solid' | 'pixelate';
   color: string;
   pixelSize: number;
+  active: TimeRangeUs | null;
+  corrections: CoverCorrectionKeyframe[];
 }
 
 export interface SubjectLayer {
@@ -76,6 +88,12 @@ export interface MediaOverlayLayer {
 
 export type MemeEditLayer = TextLayer | CoverLayer | SubjectLayer | MediaOverlayLayer;
 export type KeyframedLayer = TextLayer | SubjectLayer | MediaOverlayLayer;
+
+export interface MaskTrackSpec {
+  id: string;
+  active: TimeRangeUs | null;
+  corrections: RectCorrectionKeyframe[];
+}
 
 export interface BackgroundSpec {
   mode: 'source' | 'solid' | 'blurred-source' | 'image' | 'video';
@@ -112,6 +130,7 @@ export interface MemeEditProject {
   base: BaseTransform;
   video: VideoEditSpec | null;
   layers: MemeEditLayer[];
+  maskTracks: MaskTrackSpec[];
   background: BackgroundSpec;
   transient: {
     maskTracks: Record<string, string>;
@@ -143,6 +162,7 @@ export const PROJECT_LIMITS = Object.freeze({
   maxKeyframesPerLayer: 256,
   maxInsertedCards: 32,
   maxMaskTracks: 32,
+  maxCorrectionsPerMaskTrack: 256,
   maxExternalAssets: 32,
   maxAssetUriLength: 4_096,
 });
@@ -385,7 +405,12 @@ export function normalizeRetainedRanges(
       merged.push(range);
     }
   }
-  return merged.slice(0, PROJECT_LIMITS.maxRetainedRanges);
+  if (merged.length > PROJECT_LIMITS.maxRetainedRanges) {
+    throw new RangeError(
+      `Retained ranges exceed the ${PROJECT_LIMITS.maxRetainedRanges}-range limit after normalization.`
+    );
+  }
+  return merged;
 }
 
 export function outputDurationUs(ranges: readonly TimeRangeUs[], speed: number): number {
@@ -402,9 +427,11 @@ export function sourceTimeToOutputTimeUs(
 ): number | null {
   if (!Number.isSafeInteger(sourceTimeUs) || !Number.isFinite(speed) || speed <= 0) return null;
   let retainedBeforeUs = 0;
-  for (const range of ranges) {
+  for (let index = 0; index < ranges.length; index += 1) {
+    const range = ranges[index];
+    const isLast = index === ranges.length - 1;
     if (sourceTimeUs < range.startUs) return null;
-    if (sourceTimeUs <= range.endUs) {
+    if (sourceTimeUs < range.endUs || (isLast && sourceTimeUs === range.endUs)) {
       return Math.round((retainedBeforeUs + sourceTimeUs - range.startUs) / speed);
     }
     retainedBeforeUs += range.endUs - range.startUs;
@@ -441,7 +468,7 @@ export function outputTimeToSourceTimeUs(
 }
 
 export function isLayerActiveAt(layer: MemeEditLayer, timeUs: number): boolean {
-  if (layer.kind === 'cover' || layer.active === null) return true;
+  if (layer.active === null) return true;
   return timeUs >= layer.active.startUs && timeUs <= layer.active.endUs;
 }
 
@@ -487,6 +514,43 @@ export function interpolateTransformKeyframes(
   };
 }
 
+export function interpolateCoverCorrections(
+  corrections: readonly CoverCorrectionKeyframe[],
+  timeUs: number
+): { rect: NormalizedRect; mode: CoverLayer['mode'] } | null {
+  if (corrections.length === 0) return null;
+  if (timeUs <= corrections[0].timeUs) {
+    return { rect: { ...corrections[0].rect }, mode: corrections[0].mode };
+  }
+  const last = corrections[corrections.length - 1];
+  if (timeUs >= last.timeUs) return { rect: { ...last.rect }, mode: last.mode };
+
+  let low = 0;
+  let high = corrections.length - 1;
+  while (low + 1 < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (corrections[middle].timeUs <= timeUs) low = middle;
+    else high = middle;
+  }
+  const left = corrections[low];
+  const right = corrections[high];
+  if (left.easing === 'hold') return { rect: { ...left.rect }, mode: left.mode };
+  const progress = (timeUs - left.timeUs) / (right.timeUs - left.timeUs);
+  return {
+    rect: {
+      x: roundGeometry(left.rect.x + (right.rect.x - left.rect.x) * progress),
+      y: roundGeometry(left.rect.y + (right.rect.y - left.rect.y) * progress),
+      width: roundGeometry(
+        left.rect.width + (right.rect.width - left.rect.width) * progress
+      ),
+      height: roundGeometry(
+        left.rect.height + (right.rect.height - left.rect.height) * progress
+      ),
+    },
+    mode: left.mode,
+  };
+}
+
 function defaultBaseTransform(): BaseTransform {
   return {
     rotation: 0,
@@ -508,6 +572,7 @@ export function createDefaultImageProject(source: ImageSourceMetadata): MemeEdit
     base: defaultBaseTransform(),
     video: null,
     layers: [],
+    maskTracks: [],
     background: defaultBackground(),
     transient: { maskTracks: {}, materializedSourceUri: null },
   };
@@ -525,6 +590,7 @@ export function createDefaultVideoProject(source: VideoSourceMetadata): MemeEdit
       insertedCards: [],
     },
     layers: [],
+    maskTracks: [],
     background: defaultBackground(),
     transient: { maskTracks: {}, materializedSourceUri: null },
   };
@@ -894,45 +960,44 @@ function validateKeyframes(
         `${framePath}.easing must be linear or hold.`
       );
     }
-    if (validTime) {
-      if (previousTimeUs !== null) {
-        if (timeUs === previousTimeUs) {
-          addError(
-            errors,
-            `${framePath}.timeUs`,
-            'duplicate',
-            `${framePath}.timeUs duplicates the previous keyframe timestamp.`
-          );
-        } else if (timeUs < previousTimeUs) {
-          addError(
-            errors,
-            `${framePath}.timeUs`,
-            'not_sorted',
-            `${path} must be sorted by timeUs.`
-          );
-        }
-      }
-      previousTimeUs = timeUs;
-      if (sourceKind === 'image' && timeUs !== 0) {
+    if (!validTime) return;
+    if (previousTimeUs !== null) {
+      if (timeUs === previousTimeUs) {
         addError(
           errors,
           `${framePath}.timeUs`,
-          'out_of_bounds',
-          'Image keyframes must use timeUs=0.'
+          'duplicate',
+          `${framePath}.timeUs duplicates the previous keyframe timestamp.`
         );
-      }
-      if (
-        sourceKind === 'video' &&
-        active !== null &&
-        (timeUs < active.startUs || timeUs > active.endUs)
-      ) {
+      } else if (timeUs < previousTimeUs) {
         addError(
           errors,
           `${framePath}.timeUs`,
-          'out_of_bounds',
-          `${framePath}.timeUs must be inside the layer active range.`
+          'not_sorted',
+          `${path} must be sorted by timeUs.`
         );
       }
+    }
+    previousTimeUs = timeUs;
+    if (sourceKind === 'image' && timeUs !== 0) {
+      addError(
+        errors,
+        `${framePath}.timeUs`,
+        'out_of_bounds',
+        'Image keyframes must use timeUs=0.'
+      );
+    }
+    if (
+      sourceKind === 'video' &&
+      active !== null &&
+      (timeUs < active.startUs || timeUs > active.endUs)
+    ) {
+      addError(
+        errors,
+        `${framePath}.timeUs`,
+        'out_of_bounds',
+        `${framePath}.timeUs must be inside the layer active range.`
+      );
     }
   });
   if (sourceKind === 'image' && value.length !== 1) {
@@ -960,11 +1025,161 @@ function readValidActiveRange(
   return null;
 }
 
+function validateRectCorrections(
+  value: unknown,
+  path: string,
+  sourceKind: MediaEditKind | null,
+  active: TimeRangeUs | null,
+  maximumCount: number,
+  requireOne: boolean,
+  includeMode: boolean,
+  errors: ProjectValidationError[]
+): void {
+  if (!Array.isArray(value)) {
+    addError(errors, path, 'invalid_type', `${path} must be an array.`);
+    return;
+  }
+  if (requireOne && value.length === 0) {
+    addError(errors, path, 'invalid_value', `${path} must contain a sparse correction.`);
+  }
+  if (value.length > maximumCount) {
+    addError(
+      errors,
+      path,
+      'limit_exceeded',
+      `${path} exceeds the ${maximumCount}-correction limit.`
+    );
+  }
+  let previousTimeUs: number | null = null;
+  value.forEach((candidate, index) => {
+    const correctionPath = `${path}[${index}]`;
+    if (!validateRecord(candidate, correctionPath, errors)) return;
+    const allowed = includeMode
+      ? ['timeUs', 'rect', 'mode', 'easing']
+      : ['timeUs', 'rect', 'easing'];
+    rejectUnknownFields(candidate, allowed, correctionPath, errors);
+    const timeUs = candidate.timeUs;
+    const validTime = validateIntegerTime(timeUs, `${correctionPath}.timeUs`, errors);
+    validateNormalizedRect(candidate.rect, `${correctionPath}.rect`, errors, true);
+    if (includeMode && candidate.mode !== 'solid' && candidate.mode !== 'pixelate') {
+      addError(
+        errors,
+        `${correctionPath}.mode`,
+        'invalid_value',
+        `${correctionPath}.mode must be solid or pixelate.`
+      );
+    }
+    if (candidate.easing !== 'linear' && candidate.easing !== 'hold') {
+      addError(
+        errors,
+        `${correctionPath}.easing`,
+        'invalid_value',
+        `${correctionPath}.easing must be linear or hold.`
+      );
+    }
+    if (!validTime) return;
+    if (previousTimeUs !== null) {
+      if (timeUs === previousTimeUs) {
+        addError(
+          errors,
+          `${correctionPath}.timeUs`,
+          'duplicate',
+          `${correctionPath}.timeUs duplicates the previous correction.`
+        );
+      } else if (timeUs < previousTimeUs) {
+        addError(
+          errors,
+          `${correctionPath}.timeUs`,
+          'not_sorted',
+          `${path} must be sorted by timeUs.`
+        );
+      }
+    }
+    previousTimeUs = timeUs;
+    if (sourceKind === 'image' && timeUs !== 0) {
+      addError(
+        errors,
+        `${correctionPath}.timeUs`,
+        'out_of_bounds',
+        'Image corrections must use timeUs=0.'
+      );
+    }
+    if (
+      sourceKind === 'video' &&
+      active !== null &&
+      (timeUs < active.startUs || timeUs > active.endUs)
+    ) {
+      addError(
+        errors,
+        `${correctionPath}.timeUs`,
+        'out_of_bounds',
+        `${correctionPath}.timeUs must be inside the active range.`
+      );
+    }
+  });
+}
+
+function validateMaskTracks(
+  value: unknown,
+  sourceKind: MediaEditKind | null,
+  durationUs: number,
+  errors: ProjectValidationError[]
+): Set<string> {
+  const ids = new Set<string>();
+  if (!Array.isArray(value)) {
+    addError(errors, 'maskTracks', 'invalid_type', 'maskTracks must be an array.');
+    return ids;
+  }
+  if (value.length > PROJECT_LIMITS.maxMaskTracks) {
+    addError(
+      errors,
+      'maskTracks',
+      'limit_exceeded',
+      `maskTracks exceeds the ${PROJECT_LIMITS.maxMaskTracks}-track limit.`
+    );
+  }
+  value.forEach((candidate, index) => {
+    const path = `maskTracks[${index}]`;
+    if (!validateRecord(candidate, path, errors)) return;
+    rejectUnknownFields(candidate, ['id', 'active', 'corrections'], path, errors);
+    if (validateString(candidate.id, `${path}.id`, MAX_ID_LENGTH, errors)) {
+      if (ids.has(candidate.id)) {
+        addError(
+          errors,
+          `${path}.id`,
+          'duplicate',
+          `Mask track ID "${candidate.id}" is duplicated.`
+        );
+      }
+      ids.add(candidate.id);
+    }
+    const active = readValidActiveRange(
+      candidate.active,
+      `${path}.active`,
+      sourceKind,
+      durationUs,
+      errors
+    );
+    validateRectCorrections(
+      candidate.corrections,
+      `${path}.corrections`,
+      sourceKind,
+      active,
+      PROJECT_LIMITS.maxCorrectionsPerMaskTrack,
+      true,
+      false,
+      errors
+    );
+  });
+  return ids;
+}
+
 function validateLayer(
   value: unknown,
   index: number,
   sourceKind: MediaEditKind | null,
   durationUs: number,
+  maskTrackIds: ReadonlySet<string>,
   errors: ProjectValidationError[]
 ): void {
   const path = `layers[${index}]`;
@@ -988,7 +1203,12 @@ function validateLayer(
     return;
   }
   if (value.kind === 'cover') {
-    rejectUnknownFields(value, ['id', 'kind', 'rect', 'mode', 'color', 'pixelSize'], path, errors);
+    rejectUnknownFields(
+      value,
+      ['id', 'kind', 'rect', 'mode', 'color', 'pixelSize', 'active', 'corrections'],
+      path,
+      errors
+    );
     validateNormalizedRect(value.rect, `${path}.rect`, errors, true);
     if (value.mode !== 'solid' && value.mode !== 'pixelate') {
       addError(errors, `${path}.mode`, 'invalid_value', `${path}.mode must be solid or pixelate.`);
@@ -1004,6 +1224,23 @@ function validateLayer(
         `${path}.pixelSize must be greater than 0 and at most ${MAX_PIXEL_SIZE}.`
       );
     }
+    const active = readValidActiveRange(
+      value.active,
+      `${path}.active`,
+      sourceKind,
+      durationUs,
+      errors
+    );
+    validateRectCorrections(
+      value.corrections,
+      `${path}.corrections`,
+      sourceKind,
+      active,
+      PROJECT_LIMITS.maxKeyframesPerLayer,
+      false,
+      true,
+      errors
+    );
     return;
   }
   if (value.kind === 'subject') {
@@ -1038,6 +1275,14 @@ function validateLayer(
       );
     }
     validateString(value.maskTrackId, `${path}.maskTrackId`, MAX_ID_LENGTH, errors);
+    if (typeof value.maskTrackId === 'string' && !maskTrackIds.has(value.maskTrackId)) {
+      addError(
+        errors,
+        `${path}.maskTrackId`,
+        'invalid_value',
+        `${path}.maskTrackId must reference persistent mask correction metadata.`
+      );
+    }
     const active = readValidActiveRange(value.active, `${path}.active`, sourceKind, durationUs, errors);
     validateKeyframes(value.keyframes, `${path}.keyframes`, sourceKind, active, errors);
     if (value.outlineColor !== null) {
@@ -1072,6 +1317,17 @@ function validateLayer(
         `${path}.targetMaskTrackId`,
         MAX_ID_LENGTH,
         errors
+      );
+    }
+    if (
+      typeof value.targetMaskTrackId === 'string' &&
+      !maskTrackIds.has(value.targetMaskTrackId)
+    ) {
+      addError(
+        errors,
+        `${path}.targetMaskTrackId`,
+        'invalid_value',
+        `${path}.targetMaskTrackId must reference persistent mask correction metadata.`
       );
     }
     const active = readValidActiveRange(value.active, `${path}.active`, sourceKind, durationUs, errors);
@@ -1243,8 +1499,11 @@ function validateBackground(value: unknown, errors: ProjectValidationError[]): v
   }
   validateUnitNumber(value.blurScale, 'background.blurScale', errors);
 }
-
-function validateTransient(value: unknown, errors: ProjectValidationError[]): void {
+function validateTransient(
+  value: unknown,
+  maskTrackIds: ReadonlySet<string>,
+  errors: ProjectValidationError[]
+): void {
   if (!validateRecord(value, 'transient', errors)) return;
   rejectUnknownFields(value, ['maskTracks', 'materializedSourceUri'], 'transient', errors);
   if (validateRecord(value.maskTracks, 'transient.maskTracks', errors)) {
@@ -1265,6 +1524,14 @@ function validateTransient(value: unknown, errors: ProjectValidationError[]): vo
         PROJECT_LIMITS.maxAssetUriLength,
         errors
       );
+      if (!maskTrackIds.has(trackId)) {
+        addError(
+          errors,
+          `transient.maskTracks.${trackId}`,
+          'invalid_value',
+          `Transient mask URI "${trackId}" must reference persistent correction metadata.`
+        );
+      }
     }
   }
   if (value.materializedSourceUri !== null) {
@@ -1309,7 +1576,7 @@ export function validateMemeEditProject(input: unknown): ProjectValidationResult
   if (!validateRecord(input, '', errors)) return { ok: false, errors };
   rejectUnknownFields(
     input,
-    ['version', 'source', 'base', 'video', 'layers', 'background', 'transient'],
+    ['version', 'source', 'base', 'video', 'layers', 'maskTracks', 'background', 'transient'],
     '',
     errors
   );
@@ -1330,6 +1597,12 @@ export function validateMemeEditProject(input: unknown): ProjectValidationResult
       ? sourceDurationUs
       : 0;
   validateVideo(input.video, sourceKind, durationUs, errors);
+  const maskTrackIds = validateMaskTracks(
+    input.maskTracks,
+    sourceKind,
+    durationUs,
+    errors
+  );
 
   if (!Array.isArray(input.layers)) {
     addError(errors, 'layers', 'invalid_type', 'layers must be an array.');
@@ -1344,7 +1617,7 @@ export function validateMemeEditProject(input: unknown): ProjectValidationResult
     }
     const ids = new Set<string>();
     input.layers.forEach((layer, index) => {
-      validateLayer(layer, index, sourceKind, durationUs, errors);
+      validateLayer(layer, index, sourceKind, durationUs, maskTrackIds, errors);
       if (isRecord(layer) && typeof layer.id === 'string') {
         if (ids.has(layer.id)) {
           addError(errors, `layers[${index}].id`, 'duplicate', `Layer ID "${layer.id}" is duplicated.`);
@@ -1354,7 +1627,7 @@ export function validateMemeEditProject(input: unknown): ProjectValidationResult
     });
   }
   validateBackground(input.background, errors);
-  validateTransient(input.transient, errors);
+  validateTransient(input.transient, maskTrackIds, errors);
   validateExternalAssetCount(input, errors);
 
   if (errors.length > 0) return { ok: false, errors };
@@ -1402,7 +1675,7 @@ export function normalizeTransformKeyframes(
   maximumTimeUs: number
 ): TransformKeyframe[] {
   const byTime = new Map<number, TransformKeyframe>();
-  for (const frame of keyframes.slice(0, PROJECT_LIMITS.maxKeyframesPerLayer)) {
+  for (const frame of keyframes) {
     const timeUs = Math.round(
       clampNumber(frame.timeUs, minimumTimeUs, maximumTimeUs, minimumTimeUs)
     );
@@ -1419,11 +1692,27 @@ export function normalizeTransformKeyframes(
       easing: frame.easing === 'hold' ? 'hold' : 'linear',
     });
   }
-  return Array.from(byTime.values()).sort((left, right) => left.timeUs - right.timeUs);
+  const normalized = Array.from(byTime.values()).sort((left, right) => left.timeUs - right.timeUs);
+  if (normalized.length > PROJECT_LIMITS.maxKeyframesPerLayer) {
+    throw new RangeError(
+      `Keyframes exceed the ${PROJECT_LIMITS.maxKeyframesPerLayer}-keyframe limit after normalization.`
+    );
+  }
+  return normalized;
 }
 
 function cloneLayer(layer: MemeEditLayer): MemeEditLayer {
-  if (layer.kind === 'cover') return { ...layer, rect: { ...layer.rect } };
+  if (layer.kind === 'cover') {
+    return {
+      ...layer,
+      rect: { ...layer.rect },
+      active: layer.active ? { ...layer.active } : null,
+      corrections: layer.corrections.map((correction) => ({
+        ...correction,
+        rect: { ...correction.rect },
+      })),
+    };
+  }
   const keyframes = layer.keyframes.map((frame) => ({ ...frame, center: { ...frame.center } }));
   if (layer.kind === 'text') {
     return {
@@ -1485,15 +1774,84 @@ function assertLayerStringsAreBounded(layer: MemeEditLayer): void {
   }
 }
 
+function normalizeRectCorrections(
+  corrections: readonly RectCorrectionKeyframe[],
+  minimumTimeUs: number,
+  maximumTimeUs: number,
+  maximumCount: number
+): RectCorrectionKeyframe[] {
+  const byTime = new Map<number, RectCorrectionKeyframe>();
+  for (const correction of corrections) {
+    const timeUs = Math.round(
+      clampNumber(correction.timeUs, minimumTimeUs, maximumTimeUs, minimumTimeUs)
+    );
+    byTime.set(timeUs, {
+      timeUs,
+      rect: normalizeCrop(correction.rect, { x: 0, y: 0, width: 1, height: 1 }),
+      easing: correction.easing === 'hold' ? 'hold' : 'linear',
+    });
+  }
+  const normalized = Array.from(byTime.values()).sort((left, right) => left.timeUs - right.timeUs);
+  if (normalized.length > maximumCount) {
+    throw new RangeError(
+      `Corrections exceed the ${maximumCount}-correction limit after normalization.`
+    );
+  }
+  return normalized;
+}
+
+function normalizeCoverCorrections(
+  corrections: readonly CoverCorrectionKeyframe[],
+  minimumTimeUs: number,
+  maximumTimeUs: number
+): CoverCorrectionKeyframe[] {
+  const byTime = new Map<number, CoverCorrectionKeyframe>();
+  for (const correction of corrections) {
+    const timeUs = Math.round(
+      clampNumber(correction.timeUs, minimumTimeUs, maximumTimeUs, minimumTimeUs)
+    );
+    byTime.set(timeUs, {
+      timeUs,
+      rect: normalizeCrop(correction.rect, { x: 0, y: 0, width: 1, height: 1 }),
+      mode: correction.mode === 'pixelate' ? 'pixelate' : 'solid',
+      easing: correction.easing === 'hold' ? 'hold' : 'linear',
+    });
+  }
+  const normalized = Array.from(byTime.values()).sort((left, right) => left.timeUs - right.timeUs);
+  if (normalized.length > PROJECT_LIMITS.maxKeyframesPerLayer) {
+    throw new RangeError(
+      `Cover corrections exceed the ${PROJECT_LIMITS.maxKeyframesPerLayer}-correction limit after normalization.`
+    );
+  }
+  return normalized;
+}
+
+function normalizeMaskTrack(
+  track: MaskTrackSpec,
+  project: MemeEditProject
+): MaskTrackSpec {
+  assertBoundedString(track.id, MAX_ID_LENGTH, 'Mask track ID');
+  const durationUs = project.source.durationUs ?? 0;
+  const active =
+    project.source.kind === 'image'
+      ? null
+      : normalizeActiveRange(track.active, durationUs, { startUs: 0, endUs: durationUs });
+  const minimumTimeUs = active?.startUs ?? 0;
+  const maximumTimeUs = active?.endUs ?? 0;
+  const corrections = normalizeRectCorrections(
+    track.corrections,
+    minimumTimeUs,
+    maximumTimeUs,
+    PROJECT_LIMITS.maxCorrectionsPerMaskTrack
+  );
+  if (corrections.length === 0) {
+    throw new RangeError('Persistent mask tracks require at least one normalized correction.');
+  }
+  return { id: track.id, active, corrections };
+}
+
 function normalizeLayer(layer: MemeEditLayer, project: MemeEditProject): MemeEditLayer {
   assertLayerStringsAreBounded(layer);
-  if (layer.kind === 'cover') {
-    return {
-      ...layer,
-      rect: normalizeCrop(layer.rect, { x: 0, y: 0, width: 1, height: 1 }),
-      pixelSize: roundGeometry(clampNumber(layer.pixelSize, 1, MAX_PIXEL_SIZE, 8)),
-    };
-  }
   const durationUs = project.source.durationUs ?? 0;
   const active =
     project.source.kind === 'image'
@@ -1501,6 +1859,32 @@ function normalizeLayer(layer: MemeEditLayer, project: MemeEditProject): MemeEdi
       : normalizeActiveRange(layer.active, durationUs, { startUs: 0, endUs: durationUs });
   const minimumTimeUs = active?.startUs ?? 0;
   const maximumTimeUs = active?.endUs ?? 0;
+  if (layer.kind === 'cover') {
+    return {
+      ...layer,
+      rect: normalizeCrop(layer.rect, { x: 0, y: 0, width: 1, height: 1 }),
+      pixelSize: roundGeometry(clampNumber(layer.pixelSize, 1, MAX_PIXEL_SIZE, 8)),
+      active,
+      corrections: normalizeCoverCorrections(
+        layer.corrections,
+        minimumTimeUs,
+        maximumTimeUs
+      ),
+    };
+  }
+  if (
+    layer.kind === 'subject' &&
+    !project.maskTracks.some((track) => track.id === layer.maskTrackId)
+  ) {
+    throw new Error(`Subject layer mask track "${layer.maskTrackId}" does not exist.`);
+  }
+  if (
+    layer.kind === 'media' &&
+    layer.targetMaskTrackId !== null &&
+    !project.maskTracks.some((track) => track.id === layer.targetMaskTrackId)
+  ) {
+    throw new Error(`Media target mask track "${layer.targetMaskTrackId}" does not exist.`);
+  }
   let keyframes = normalizeTransformKeyframes(layer.keyframes, minimumTimeUs, maximumTimeUs);
   if (keyframes.length === 0) {
     keyframes = [
@@ -1541,8 +1925,10 @@ function normalizeLayer(layer: MemeEditLayer, project: MemeEditProject): MemeEdi
   return { ...layer, active, keyframes };
 }
 
-function normalizeBackground(background: BackgroundSpec): BackgroundSpec {
+function normalizeBackground(background: BackgroundSpec): BackgroundSpec | null {
   assertBoundedString(background.color, MAX_COLOR_LENGTH, 'Background color');
+  const requiresAsset = background.mode === 'image' || background.mode === 'video';
+  if (requiresAsset && background.assetUri === null) return null;
   if (background.assetUri !== null) {
     assertBoundedString(
       background.assetUri,
@@ -1550,7 +1936,11 @@ function normalizeBackground(background: BackgroundSpec): BackgroundSpec {
       'Background asset URI'
     );
   }
-  return { ...background, blurScale: clampUnit(background.blurScale) };
+  return {
+    ...background,
+    assetUri: requiresAsset ? background.assetUri : null,
+    blurScale: clampUnit(background.blurScale),
+  };
 }
 
 function externalAssetCount(project: MemeEditProject): number {
@@ -1582,6 +1972,10 @@ export type MemeEditProjectAction =
   | { type: 'duplicate-layer'; id: string; newId: string }
   | { type: 'set-layer-active-range'; id: string; active: TimeRangeUs | null }
   | { type: 'set-layer-keyframes'; id: string; keyframes: TransformKeyframe[] }
+  | { type: 'set-cover-corrections'; id: string; corrections: CoverCorrectionKeyframe[] }
+  | { type: 'add-mask-track'; track: MaskTrackSpec }
+  | { type: 'update-mask-track'; track: MaskTrackSpec }
+  | { type: 'remove-mask-track'; trackId: string }
   | { type: 'set-background'; background: BackgroundSpec }
   | { type: 'set-materialized-source-uri'; uri: string | null }
   | { type: 'set-mask-track-uri'; trackId: string; uri: string }
@@ -1679,9 +2073,8 @@ export function reduceMemeEditProject(
     }
     case 'set-layer-active-range': {
       const index = project.layers.findIndex((layer) => layer.id === action.id);
-      const candidate = project.layers[index];
-      if (candidate === undefined || candidate.kind === 'cover') return project;
-      const original = candidate;
+      const original = project.layers[index];
+      if (original === undefined) return project;
       const durationUs = project.source.durationUs ?? 0;
       const active =
         project.source.kind === 'image'
@@ -1689,13 +2082,22 @@ export function reduceMemeEditProject(
           : normalizeActiveRange(action.active, durationUs, original.active);
       const minimumTimeUs = active?.startUs ?? 0;
       const maximumTimeUs = active?.endUs ?? 0;
-      const keyframes = normalizeTransformKeyframes(
-        original.keyframes,
-        minimumTimeUs,
-        maximumTimeUs
-      );
       const layers = project.layers.slice();
-      layers[index] = { ...original, active, keyframes };
+      if (original.kind === 'cover') {
+        const corrections = normalizeCoverCorrections(
+          original.corrections,
+          minimumTimeUs,
+          maximumTimeUs
+        );
+        layers[index] = { ...original, active, corrections };
+      } else {
+        const keyframes = normalizeTransformKeyframes(
+          original.keyframes,
+          minimumTimeUs,
+          maximumTimeUs
+        );
+        layers[index] = { ...original, active, keyframes };
+      }
       return { ...project, layers };
     }
     case 'set-layer-keyframes': {
@@ -1715,11 +2117,66 @@ export function reduceMemeEditProject(
       layers[index] = { ...original, keyframes };
       return { ...project, layers };
     }
-    case 'set-background':
-      return enforceProjectBounds({
-        ...project,
-        background: normalizeBackground(action.background),
+    case 'set-cover-corrections': {
+      const index = project.layers.findIndex((layer) => layer.id === action.id);
+      const original = project.layers[index];
+      if (original === undefined || original.kind !== 'cover') return project;
+      const minimumTimeUs = original.active?.startUs ?? 0;
+      const maximumTimeUs = original.active?.endUs ?? 0;
+      const corrections = normalizeCoverCorrections(
+        action.corrections,
+        minimumTimeUs,
+        maximumTimeUs
+      );
+      const layers = project.layers.slice();
+      layers[index] = { ...original, corrections };
+      return { ...project, layers };
+    }
+    case 'add-mask-track': {
+      if (project.maskTracks.length >= PROJECT_LIMITS.maxMaskTracks) {
+        throw new RangeError(
+          `Project cannot contain more than ${PROJECT_LIMITS.maxMaskTracks} mask tracks.`
+        );
+      }
+      if (project.maskTracks.some((track) => track.id === action.track.id)) {
+        throw new Error(`Mask track ID "${action.track.id}" already exists.`);
+      }
+      const track = normalizeMaskTrack(action.track, project);
+      return { ...project, maskTracks: [...project.maskTracks, track] };
+    }
+    case 'update-mask-track': {
+      const index = project.maskTracks.findIndex((track) => track.id === action.track.id);
+      if (index < 0) return project;
+      const maskTracks = project.maskTracks.slice();
+      maskTracks[index] = normalizeMaskTrack(action.track, project);
+      return { ...project, maskTracks };
+    }
+    case 'remove-mask-track': {
+      const index = project.maskTracks.findIndex((track) => track.id === action.trackId);
+      if (index < 0) return project;
+      const referenced = project.layers.some((layer) => {
+        return (
+          (layer.kind === 'subject' && layer.maskTrackId === action.trackId) ||
+          (layer.kind === 'media' && layer.targetMaskTrackId === action.trackId)
+        );
       });
+      if (referenced) return project;
+      const transientMaskTracks = { ...project.transient.maskTracks };
+      delete transientMaskTracks[action.trackId];
+      return {
+        ...project,
+        maskTracks: [
+          ...project.maskTracks.slice(0, index),
+          ...project.maskTracks.slice(index + 1),
+        ],
+        transient: { ...project.transient, maskTracks: transientMaskTracks },
+      };
+    }
+    case 'set-background': {
+      const background = normalizeBackground(action.background);
+      if (background === null) return project;
+      return enforceProjectBounds({ ...project, background });
+    }
     case 'set-materialized-source-uri':
       if (action.uri !== null) {
         assertBoundedString(
@@ -1733,6 +2190,7 @@ export function reduceMemeEditProject(
         transient: { ...project.transient, materializedSourceUri: action.uri },
       };
     case 'set-mask-track-uri': {
+      if (!project.maskTracks.some((track) => track.id === action.trackId)) return project;
       assertBoundedString(action.trackId, MAX_ID_LENGTH, 'Mask track ID');
       assertBoundedString(
         action.uri,
