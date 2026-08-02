@@ -5,6 +5,9 @@ import android.graphics.Typeface
 import android.os.Build
 import android.text.Layout
 import android.text.StaticLayout
+import android.text.SpannableString
+import android.text.Spanned
+import android.text.style.LineHeightSpan
 import android.text.TextPaint
 import kotlin.math.max
 import kotlin.math.roundToInt
@@ -65,9 +68,10 @@ internal object MemeTextLayout {
       letterSpacing = letterSpacingEm
       typeface = weightedTypeface(context, fontFamily, fontWeight)
     }
-    val layout = StaticLayout.Builder.obtain(text, 0, text.length, paint, boundedWidth)
+    val styledText = withAbsoluteLineHeight(text, lineHeightPx)
+    val layout = StaticLayout.Builder.obtain(styledText, 0, styledText.length, paint, boundedWidth)
       .setAlignment(androidAlignment(align))
-      .setLineSpacing(lineSpacingExtra(paint, lineHeightPx), 1f)
+      .setLineSpacing(0f, 1f)
       .setIncludePad(false)
       .setBreakStrategy(Layout.BREAK_STRATEGY_HIGH_QUALITY)
       .setHyphenationFrequency(Layout.HYPHENATION_FREQUENCY_NONE)
@@ -111,6 +115,14 @@ internal object MemeTextLayout {
     else -> Layout.Alignment.ALIGN_CENTER
   }
 
+
+  internal fun withAbsoluteLineHeight(text: String, lineHeightPx: Float): SpannableString {
+    val styled = SpannableString(text)
+    if (styled.isNotEmpty()) {
+      styled.setSpan(LineHeightSpan.Standard(max(1, lineHeightPx.roundToInt())), 0, styled.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+    }
+    return styled
+  }
   internal fun lineSpacingExtra(paint: TextPaint, lineHeightPx: Float): Float {
     val metrics = paint.fontMetrics
     val nativeLineHeight = metrics.descent - metrics.ascent

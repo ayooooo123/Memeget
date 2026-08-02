@@ -1,14 +1,13 @@
 package expo.modules.memegetbg
+
 import android.graphics.Typeface
 import android.util.TypedValue
 import android.view.View
 import android.widget.TextView
-
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import org.json.JSONArray
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -21,13 +20,14 @@ class MemeTextLayoutInstrumentedTest {
     val presets = listOf("impact", "subtitle", "label", "news", "bubble", "plain")
     presets.forEach { preset ->
       val family = if (preset == "impact") "Anton" else "NotoSans"
+      val lineHeightPx = if (preset == "impact") 46f else 56f
       val result = MemeTextLayout.measure(
         context = context,
-        text = "$preset layout fixture words",
+        text = "$preset layout fixture words\n\nblank line kept",
         fontFamily = family,
         fontWeight = if (preset == "plain") 400 else 700,
         fontSizePx = 48f,
-        lineHeightPx = 56f,
+        lineHeightPx = lineHeightPx,
         letterSpacingEm = if (preset == "impact") 0.018f else 0f,
         widthPx = 720,
         align = if (preset == "news" || preset == "bubble") "left" else "center"
@@ -38,7 +38,11 @@ class MemeTextLayoutInstrumentedTest {
       result.lines.forEach { line ->
         assertTrue("$preset line width within wrap", line.widthPx <= 720f)
         assertTrue("$preset baseline below top", line.baselinePx > line.topPx)
-        assertTrue("$preset valid line range", line.start < line.end)
+        assertTrue("$preset valid line range", line.start <= line.end)
+      }
+      result.lines.zipWithNext().forEach { (left, right) ->
+        assertTrue("$preset line top step uses absolute line height", kotlin.math.abs((right.topPx - left.topPx) - lineHeightPx) <= 1f)
+        assertTrue("$preset baseline step uses absolute line height", kotlin.math.abs((right.baselinePx - left.baselinePx) - lineHeightPx) <= 1f)
       }
     }
   }
@@ -62,6 +66,9 @@ class MemeTextLayoutInstrumentedTest {
     assertTrue(result.lines.map { it.text }.contains(""))
     assertTrue(result.lines.any { it.text.contains("AV") })
     assertTrue(result.lines.any { it.text.contains("日本語") })
+    result.lines.zipWithNext().forEach { (left, right) ->
+      assertTrue("unicode baseline step", kotlin.math.abs((right.baselinePx - left.baselinePx) - 50f) <= 1f)
+    }
   }
 
   @Test
@@ -117,40 +124,18 @@ class MemeTextLayoutInstrumentedTest {
       val widthPx = input.getInt("widthPx")
       val align = input.getString("align")
 
-      val result = MemeTextLayout.measure(
-        context = context,
-        text = text,
-        fontFamily = fontFamily,
-        fontWeight = fontWeight,
-        fontSizePx = fontSizePx,
-        lineHeightPx = lineHeightPx,
-        letterSpacingEm = letterSpacingEm,
-        widthPx = widthPx,
-        align = align
-      )
+      val result = MemeTextLayout.measure(context, text, fontFamily, fontWeight, fontSizePx, lineHeightPx, letterSpacingEm, widthPx, align)
       val textView = TextView(context).apply {
         includeFontPadding = false
-        setText(text)
+        setText(MemeTextLayout.withAbsoluteLineHeight(text, lineHeightPx))
         setTextSize(TypedValue.COMPLEX_UNIT_PX, fontSizePx)
         letterSpacing = letterSpacingEm
         typeface = Typeface.create(Typeface.createFromAsset(context.assets, if (fontFamily == "Anton") "fonts/Anton-Regular.ttf" else "fonts/NotoSans.ttf"), fontWeight, false)
-        setLineSpacing(MemeTextLayout.lineSpacingExtra(paint, lineHeightPx), 1f)
+        setLineSpacing(0f, 1f)
         textAlignment = if (align == "right") View.TEXT_ALIGNMENT_TEXT_END else if (align == "left") View.TEXT_ALIGNMENT_TEXT_START else View.TEXT_ALIGNMENT_CENTER
       }
       val preview = MemeTextPreviewView(context).apply {
-        configure(
-          text = text,
-          fontFamily = fontFamily,
-          fontWeight = fontWeight,
-          fontSizePx = fontSizePx,
-          lineHeightPx = lineHeightPx,
-          letterSpacingEm = letterSpacingEm,
-          widthPx = widthPx,
-          align = align,
-          fillColor = android.graphics.Color.WHITE,
-          outlineColor = android.graphics.Color.BLACK,
-          outlineWidthPx = 8f
-        )
+        configure(text, fontFamily, fontWeight, fontSizePx, lineHeightPx, letterSpacingEm, widthPx, align, android.graphics.Color.WHITE, android.graphics.Color.BLACK, 8f)
       }
       assertEquals("$preset native preview line count", result.lines.size, preview.layoutResult().lines.size)
       val widthSpec = View.MeasureSpec.makeMeasureSpec(widthPx, View.MeasureSpec.EXACTLY)
