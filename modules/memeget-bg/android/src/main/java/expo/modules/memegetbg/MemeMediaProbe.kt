@@ -211,7 +211,10 @@ object MemeMediaProbe {
     width = width?.takeIf { it > 0 } ?: retriever.width
     height = height?.takeIf { it > 0 } ?: retriever.height
     durationUs = durationUs?.takeIf { it > 0L } ?: retriever.durationUs
-    rotation = rotation ?: retriever.rotationDegrees
+    rotation =
+      rotation?.takeIf { normalizeRotation(it) != 0 }
+        ?: retriever.rotationDegrees
+        ?: rotation
     frameRate = frameRate?.takeIf { it > 0.0 && it.isFinite() } ?: retriever.frameRate
     if (width == null || width <= 0 || height == null || height <= 0) {
       throw IOException("Video dimensions are unavailable")
