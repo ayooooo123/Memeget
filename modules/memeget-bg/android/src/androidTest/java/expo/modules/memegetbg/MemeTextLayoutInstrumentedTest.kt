@@ -100,9 +100,25 @@ class MemeTextLayoutInstrumentedTest {
         setTextSize(TypedValue.COMPLEX_UNIT_PX, fontSizePx)
         letterSpacing = letterSpacingEm
         typeface = Typeface.create(Typeface.createFromAsset(context.assets, if (fontFamily == "Anton") "fonts/Anton-Regular.ttf" else "fonts/NotoSans.ttf"), fontWeight, false)
+        setLineSpacing(MemeTextLayout.lineSpacingExtra(paint, lineHeightPx), 1f)
         textAlignment = if (align == "right") View.TEXT_ALIGNMENT_TEXT_END else if (align == "left") View.TEXT_ALIGNMENT_TEXT_START else View.TEXT_ALIGNMENT_CENTER
-        setLineSpacing(0f, lineHeightPx / fontSizePx)
       }
+      val preview = MemeTextPreviewView(context).apply {
+        configure(
+          text = text,
+          fontFamily = fontFamily,
+          fontWeight = fontWeight,
+          fontSizePx = fontSizePx,
+          lineHeightPx = lineHeightPx,
+          letterSpacingEm = letterSpacingEm,
+          widthPx = widthPx,
+          align = align,
+          fillColor = android.graphics.Color.WHITE,
+          outlineColor = android.graphics.Color.BLACK,
+          outlineWidthPx = 8f
+        )
+      }
+      assertEquals("$preset native preview line count", result.lines.size, preview.layoutResult().lines.size)
       val widthSpec = View.MeasureSpec.makeMeasureSpec(widthPx, View.MeasureSpec.EXACTLY)
       val heightSpec = View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
       textView.measure(widthSpec, heightSpec)

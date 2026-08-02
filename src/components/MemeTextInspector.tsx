@@ -198,30 +198,38 @@ export const MemeTextInspector = React.memo(function MemeTextInspector({
   projectRef.current = project;
   selectedLayerRef.current = layer;
 
-  const flushText = useCallback(() => {
+  const flushText = useCallback((commitTransaction = false) => {
     const pending = pendingTextRef.current;
-    if (!pending) return;
+    if (!pending) {
+      if (commitTransaction) onCommitTextTransaction?.();
+      return null;
+    }
     pendingTextRef.current = null;
     clearTimeout(textTimerRef.current ?? undefined);
     textTimerRef.current = null;
     const current = projectRef.current.layers.find((candidate): candidate is TextLayer => candidate.id === pending.layerId && candidate.kind === 'text');
-    if (!current || current.text === pending.text) return;
-    onApplyAction({ type: 'update-layer', layer: { ...current, text: pending.text } });
-    onCommitTextTransaction?.();
+    if (!current) {
+      if (commitTransaction) onCommitTextTransaction?.();
+      return null;
+    }
+    const next = composePendingTextLayer(current, pending);
+    if (next !== current) onApplyAction({ type: 'update-layer', layer: next });
+    if (commitTransaction) onCommitTextTransaction?.();
+    return next;
   }, [onApplyAction, onCommitTextTransaction]);
 
-  const layerWithPendingText = useCallback((current: TextLayer): TextLayer => {
+  const layerWithPendingText = useCallback((current: TextLayer): { layer: TextLayer; consumed: boolean } => {
     const pending = pendingTextRef.current;
     const next = composePendingTextLayer(current, pending);
-    if (next === current) return current;
+    if (next === current) return { layer: current, consumed: false };
     pendingTextRef.current = null;
     clearTimeout(textTimerRef.current ?? undefined);
     textTimerRef.current = null;
-    return next;
+    return { layer: next, consumed: true };
   }, []);
 
   useEffect(() => {
-    flushText();
+    flushText(true);
     const nextText = layer?.text ?? '';
     setDraftText(nextText);
     pendingTextRef.current = null;
@@ -234,8 +242,8 @@ export const MemeTextInspector = React.memo(function MemeTextInspector({
     inputRef.current?.setNativeProps({ text: nextText });
   }, [layer?.id, layer?.text]);
 
-  useEffect(() => () => { flushText(); onCommitTextTransaction?.(); }, [flushText, onCommitTextTransaction]);
-  useEffect(() => onRegisterPendingTextFlush?.(() => { flushText(); onCommitTextTransaction?.(); }), [flushText, onCommitTextTransaction, onRegisterPendingTextFlush]);
+  useEffect(() => () => { flushText(true); }, [flushText]);
+  useEffect(() => onRegisterPendingTextFlush?.(() => { flushText(true); }), [flushText, onRegisterPendingTextFlush]);
 
   const queueText = useCallback((text: string) => {
     if (!layer || disabled) return;
@@ -244,18 +252,20 @@ export const MemeTextInspector = React.memo(function MemeTextInspector({
     onBeginTextTransaction?.();
     pendingTextRef.current = { layerId: layer.id, text: boundedText };
     clearTimeout(textTimerRef.current ?? undefined);
-    textTimerRef.current = setTimeout(flushText, TEXT_COMMIT_DELAY_MS) as unknown as number;
+    textTimerRef.current = setTimeout(() => flushText(false), TEXT_COMMIT_DELAY_MS) as unknown as number;
   }, [disabled, flushText, layer, onBeginTextTransaction]);
 
   const updateLayer = useCallback((updater: (current: TextLayer) => TextLayer) => {
     const current = selectedLayerRef.current;
     if (!current || disabled) return;
-    onApplyAction({ type: 'update-layer', layer: updater(layerWithPendingText(current)) });
-  }, [disabled, layerWithPendingText, onApplyAction]);
+    const composed = layerWithPendingText(current);
+    onApplyAction({ type: 'update-layer', layer: updater(composed.layer) });
+    onCommitTextTransaction?.();
+  }, [disabled, layerWithPendingText, onApplyAction, onCommitTextTransaction]);
 
   const addText = useCallback((preset: MemeTextPresetId = 'impact') => {
     if (!canAdd) return;
-    flushText();
+    flushText(true);
     const id = nextDuplicateLayerId(idPrefix, projectRef.current.layers.map((candidate) => candidate.id));
     const next = createMemeTextLayer(id, preset, { text: 'Meme text' });
     onApplyAction({ type: 'add-layer', layer: next });
@@ -305,7 +315,7 @@ export const MemeTextInspector = React.memo(function MemeTextInspector({
           multiline
           textAlignVertical="top"
           onChangeText={queueText}
-          onBlur={flushText}
+          onBlur={() => flushText(true)}
           maxLength={MEME_TEXT_MAX_LENGTH}
           placeholder="Type a caption"
           placeholderTextColor={colors.faint}
@@ -355,7 +365,7 @@ export const MemeTextInspector = React.memo(function MemeTextInspector({
             value={activeStartValue}
             onChange={(value) => {
               if (!layer) return;
-              flushText();
+              flushText(true);
               const startUs = Math.min(Math.round(value * durationUs), Math.max(0, activeEndUs - 1));
               onApplyAction({ type: 'set-layer-active-range', id: layer.id, active: { startUs, endUs: activeEndUs } });
             }}
@@ -367,7 +377,7 @@ export const MemeTextInspector = React.memo(function MemeTextInspector({
             value={activeEndValue}
             onChange={(value) => {
               if (!layer) return;
-              flushText();
+              flushText(true);
               const endUs = Math.max(Math.round(value * durationUs), activeStartUs + 1);
               onApplyAction({ type: 'set-layer-active-range', id: layer.id, active: { startUs: activeStartUs, endUs } });
             }}
@@ -429,10 +439,10 @@ export const MemeTextInspector = React.memo(function MemeTextInspector({
       </Section>
       <Section title="Layer actions">
         <View style={styles.buttonWrap}>
-          <ControlButton label="Move up" hint="Move text layer visually forward" disabled={!layer || disabled || selectedIndex >= project.layers.length - 1} onPress={() => { flushText(); if (layer) onMoveLayer(layer.id, selectedIndex + 1); }} />
-          <ControlButton label="Move down" hint="Move text layer visually backward" disabled={!layer || disabled || selectedIndex <= 0} onPress={() => { flushText(); if (layer) onMoveLayer(layer.id, selectedIndex - 1); }} />
-          <ControlButton label="Duplicate" hint="Duplicate text layer with a new deterministic ID" disabled={!layer || disabled || project.layers.length >= PROJECT_LIMITS.maxLayers} onPress={() => { flushText(); if (layer) onDuplicateLayer(layer.id); }} />
-          <ControlButton label="Delete" hint="Delete selected text layer" danger disabled={!layer || disabled} onPress={() => { flushText(); if (layer) onDeleteLayer(layer.id); }} />
+          <ControlButton label="Move up" hint="Move text layer visually forward" disabled={!layer || disabled || selectedIndex >= project.layers.length - 1} onPress={() => { flushText(true); if (layer) onMoveLayer(layer.id, selectedIndex + 1); }} />
+          <ControlButton label="Move down" hint="Move text layer visually backward" disabled={!layer || disabled || selectedIndex <= 0} onPress={() => { flushText(true); if (layer) onMoveLayer(layer.id, selectedIndex - 1); }} />
+          <ControlButton label="Duplicate" hint="Duplicate text layer with a new deterministic ID" disabled={!layer || disabled || project.layers.length >= PROJECT_LIMITS.maxLayers} onPress={() => { flushText(true); if (layer) onDuplicateLayer(layer.id); }} />
+          <ControlButton label="Delete" hint="Delete selected text layer" danger disabled={!layer || disabled} onPress={() => { flushText(true); if (layer) onDeleteLayer(layer.id); }} />
         </View>
       </Section>
     </ScrollView>
