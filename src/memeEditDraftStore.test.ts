@@ -25,6 +25,8 @@ import {
   MemeEditDraftStore,
   MemeEditSourcePreparationController,
   MemeEditSourceSessionController,
+  flushAutosaveBeforeSourceRelease,
+  requestSourceSessionClose,
   createExpoMemeEditDraftIo,
   draftStoragePaths,
   type MemeEditDraftIdentity,
@@ -705,6 +707,49 @@ describe('MemeEditAutosaveController', () => {
     expect(io.files.has(paths.draft)).toBe(false);
     expect(io.files.has(`${io.cacheDirectory}${paths.ownedAssetPrefix}mask.bin`)).toBe(false);
   });
+
+  test('discard remains schedulable when store cleanup fails', async () => {
+    const io = new MemoryDraftIo();
+    const store = new MemeEditDraftStore(io, { now: () => 20_000 });
+    const timers = new FakeTimers();
+    const controller = new MemeEditAutosaveController(store, identity, { timers });
+    const originalRemove = io.remove.bind(io);
+    let failed = false;
+    io.remove = async (path) => {
+      if (!failed) {
+        failed = true;
+        throw new Error(`remove failed: ${path}`);
+      }
+      await originalRemove(path);
+    };
+
+    await expect(controller.discard()).rejects.toThrow('remove failed');
+    io.remove = originalRemove;
+    controller.schedule(project('after-failed-discard'));
+    await controller.flush();
+
+    await expect(store.restore(identity)).resolves.toMatchObject({
+      status: 'restored',
+      project: { background: { color: 'after-failed-discard' } },
+    });
+  });
+
+  test('teardown helper flushes pending debounce before releasing source assets', async () => {
+    const io = new MemoryDraftIo();
+    const store = new MemeEditDraftStore(io, { now: () => 20_000 });
+    const timers = new FakeTimers();
+    const controller = new MemeEditAutosaveController(store, identity, { timers });
+    const release = jest.fn(async () => {});
+    controller.schedule(project('teardown-save'));
+
+    await flushAutosaveBeforeSourceRelease(controller, release);
+
+    expect(release).toHaveBeenCalledTimes(1);
+    await expect(store.restore(identity)).resolves.toMatchObject({
+      status: 'restored',
+      project: { background: { color: 'teardown-save' } },
+    });
+  });
 });
 
 describe('MemeEditSourcePreparationController', () => {
@@ -1030,6 +1075,64 @@ describe('MemeEditSourcePreparationController', () => {
     await cancelling;
     expect(io.probe).not.toHaveBeenCalled();
     expect(events.some((event) => event.startsWith('remove:file:///cache/'))).toBe(true);
+  });
+
+  test('loading close helper calls onClose before a stalled materialize releases', async () => {
+    let releaseCopy!: () => void;
+    const copyGate = new Promise<void>((resolve) => {
+      releaseCopy = resolve;
+    });
+    const io: MemeEditSourcePreparationIo = {
+      cacheDirectory: 'file:///cache/',
+      materialize: jest.fn(async () => copyGate),
+      remove: jest.fn(async () => {}),
+      probe: jest.fn(async () => probeResult),
+    };
+    const controller = new MemeEditSourceSessionController(io, {
+      sessionId: 'meme-remix/prompt-close',
+      uri: 'content://provider/source.mp4',
+      name: 'source.mp4',
+      indexedKind: 'video',
+      modifiedTimeMs: null,
+    });
+    const onClose = jest.fn();
+    const onError = jest.fn();
+    void controller.prepare().catch(() => {});
+
+    requestSourceSessionClose(controller, onClose, onError);
+
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(io.probe).not.toHaveBeenCalled();
+    releaseCopy();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  test('source session cancel retries owned deletion until cleanup succeeds', async () => {
+    const remove = jest
+      .fn()
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error('unlink busy'))
+      .mockResolvedValue(undefined);
+    const io: MemeEditSourcePreparationIo = {
+      cacheDirectory: 'file:///cache/',
+      materialize: jest.fn(async () => {}),
+      remove,
+      probe: jest.fn(async () => probeResult),
+    };
+    const controller = new MemeEditSourceSessionController(io, {
+      sessionId: 'meme-remix/retry-remove',
+      uri: 'content://provider/source.mp4',
+      name: 'source.mp4',
+      indexedKind: 'video',
+      modifiedTimeMs: null,
+    });
+    await controller.prepare();
+
+    await expect(controller.cancel()).rejects.toThrow('unlink busy');
+    await expect(controller.cancel()).resolves.toBeUndefined();
+    expect(remove).toHaveBeenCalledTimes(3);
   });
 });
 

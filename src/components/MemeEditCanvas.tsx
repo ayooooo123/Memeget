@@ -7,6 +7,7 @@ import {
   containedMediaRect,
   dragKeyframeByViewDelta,
   gesturePointInsideMedia,
+  gestureMoveShouldClaim,
   layerHandlePoints,
   normalizedPointToViewPoint,
   resizeKeyframeFromHandle,
@@ -133,6 +134,9 @@ const TransformableLayerView = React.memo(function TransformableLayerView({
   const scalePreview = useConst(() => new Animated.Value(1));
   const rotatePreview = useConst(() => new Animated.Value(0));
   const gestureStart = useRef<{ keyframe: TransformKeyframe; center: ViewPoint; handle: ViewPoint } | null>(null);
+  const dragStartAccepted = useRef(false);
+  const resizeStartAccepted = useRef(false);
+  const rotateStartAccepted = useRef(false);
   const keyframe = firstKeyframe(layer);
   const visualWidth = layer.kind === 'text' ? layer.width : 0.28;
   const box = keyframeLayerBox(keyframe, visualWidth, mediaRect);
@@ -152,74 +156,98 @@ const TransformableLayerView = React.memo(function TransformableLayerView({
   }, [layer, onCommitLayerKeyframes, rotatePreview, scalePreview, translate]);
 
   const dragPan = useMemo(() => PanResponder.create({
-    onStartShouldSetPanResponder: (event) => gesturePointInsideMedia({ x: box.x + event.nativeEvent.locationX, y: box.y + event.nativeEvent.locationY }, mediaRect),
-    onMoveShouldSetPanResponder: (_event, gesture) => Math.abs(gesture.dx) + Math.abs(gesture.dy) > 2,
+    onStartShouldSetPanResponder: (event) => {
+      const accepted = gesturePointInsideMedia({ x: box.x + event.nativeEvent.locationX, y: box.y + event.nativeEvent.locationY }, mediaRect);
+      dragStartAccepted.current = accepted;
+      return accepted;
+    },
+    onMoveShouldSetPanResponder: (_event, gesture) => gestureMoveShouldClaim(dragStartAccepted.current, gesture),
     onPanResponderGrant: () => {
+      if (!dragStartAccepted.current) return;
       onSelectLayer(layer.id);
       gestureStart.current = { keyframe, center: handles.center, handle: handles.resize };
       translate.setValue({ x: 0, y: 0 });
     },
     onPanResponderMove: (_event, gesture) => {
+      if (!dragStartAccepted.current) return;
       translate.setValue({ x: gesture.dx, y: gesture.dy });
     },
     onPanResponderRelease: (_event, gesture) => {
-      const start = gestureStart.current?.keyframe ?? keyframe;
-      commit(dragKeyframeByViewDelta(start, { dx: gesture.dx, dy: gesture.dy } satisfies ViewDelta, mediaRect));
+      if (dragStartAccepted.current) {
+        const start = gestureStart.current?.keyframe ?? keyframe;
+        commit(dragKeyframeByViewDelta(start, { dx: gesture.dx, dy: gesture.dy } satisfies ViewDelta, mediaRect));
+      }
+      dragStartAccepted.current = false;
       gestureStart.current = null;
     },
     onPanResponderTerminate: () => {
       translate.setValue({ x: 0, y: 0 });
+      dragStartAccepted.current = false;
       gestureStart.current = null;
     },
   }), [box.x, box.y, commit, handles.center, handles.resize, keyframe, layer.id, mediaRect, onSelectLayer, translate]);
 
   const resizePan = useMemo(() => PanResponder.create({
-    onStartShouldSetPanResponder: (event) => selected && gesturePointInsideMedia({ x: box.x + box.width - 22 + event.nativeEvent.locationX, y: box.y + box.height - 22 + event.nativeEvent.locationY }, mediaRect),
-    onMoveShouldSetPanResponder: () => selected,
+    onStartShouldSetPanResponder: () => {
+      const accepted = selected && gesturePointInsideMedia(handles.resize, mediaRect);
+      resizeStartAccepted.current = accepted;
+      return accepted;
+    },
+    onMoveShouldSetPanResponder: (_event, gesture) => gestureMoveShouldClaim(resizeStartAccepted.current, gesture),
     onPanResponderGrant: () => {
+      if (!resizeStartAccepted.current) return;
       gestureStart.current = { keyframe, center: handles.center, handle: handles.resize };
       scalePreview.setValue(1);
     },
     onPanResponderMove: (_event, gesture) => {
       const start = gestureStart.current;
-      if (!start) return;
+      if (!resizeStartAccepted.current || !start) return;
       const next = resizeKeyframeFromHandle(start.keyframe, start.center, start.handle, { x: start.handle.x + gesture.dx, y: start.handle.y + gesture.dy });
       scalePreview.setValue(next.scale / Math.max(0.01, start.keyframe.scale));
     },
     onPanResponderRelease: (_event, gesture) => {
       const start = gestureStart.current;
-      if (start) commit(resizeKeyframeFromHandle(start.keyframe, start.center, start.handle, { x: start.handle.x + gesture.dx, y: start.handle.y + gesture.dy }));
+      if (resizeStartAccepted.current && start) commit(resizeKeyframeFromHandle(start.keyframe, start.center, start.handle, { x: start.handle.x + gesture.dx, y: start.handle.y + gesture.dy }));
+      resizeStartAccepted.current = false;
       gestureStart.current = null;
     },
     onPanResponderTerminate: () => {
       scalePreview.setValue(1);
+      resizeStartAccepted.current = false;
       gestureStart.current = null;
     },
-  }), [box.height, box.width, box.x, box.y, commit, handles.center, handles.resize, keyframe, mediaRect, scalePreview, selected]);
+  }), [commit, handles.center, handles.resize, keyframe, mediaRect, scalePreview, selected]);
 
   const rotatePan = useMemo(() => PanResponder.create({
-    onStartShouldSetPanResponder: (event) => selected && gesturePointInsideMedia({ x: box.x + box.width / 2 - 22 + event.nativeEvent.locationX, y: box.y - 44 + event.nativeEvent.locationY }, mediaRect),
-    onMoveShouldSetPanResponder: () => selected,
+    onStartShouldSetPanResponder: () => {
+      const accepted = selected && gesturePointInsideMedia(handles.rotate, mediaRect);
+      rotateStartAccepted.current = accepted;
+      return accepted;
+    },
+    onMoveShouldSetPanResponder: (_event, gesture) => gestureMoveShouldClaim(rotateStartAccepted.current, gesture),
     onPanResponderGrant: () => {
+      if (!rotateStartAccepted.current) return;
       gestureStart.current = { keyframe, center: handles.center, handle: handles.rotate };
       rotatePreview.setValue(0);
     },
     onPanResponderMove: (_event, gesture) => {
       const start = gestureStart.current;
-      if (!start) return;
+      if (!rotateStartAccepted.current || !start) return;
       const next = rotateKeyframeFromHandle(start.keyframe, start.center, start.handle, { x: start.handle.x + gesture.dx, y: start.handle.y + gesture.dy });
       rotatePreview.setValue(next.rotationDegrees - start.keyframe.rotationDegrees);
     },
     onPanResponderRelease: (_event, gesture) => {
       const start = gestureStart.current;
-      if (start) commit(rotateKeyframeFromHandle(start.keyframe, start.center, start.handle, { x: start.handle.x + gesture.dx, y: start.handle.y + gesture.dy }));
+      if (rotateStartAccepted.current && start) commit(rotateKeyframeFromHandle(start.keyframe, start.center, start.handle, { x: start.handle.x + gesture.dx, y: start.handle.y + gesture.dy }));
+      rotateStartAccepted.current = false;
       gestureStart.current = null;
     },
     onPanResponderTerminate: () => {
       rotatePreview.setValue(0);
+      rotateStartAccepted.current = false;
       gestureStart.current = null;
     },
-  }), [box.height, box.width, box.x, box.y, commit, handles.center, handles.rotate, keyframe, mediaRect, rotatePreview, selected]);
+  }), [commit, handles.center, handles.rotate, keyframe, mediaRect, rotatePreview, selected]);
 
   if (hidden) return null;
 
@@ -260,6 +288,8 @@ const TransformableLayerView = React.memo(function TransformableLayerView({
       }}
     >
       {layer.kind === 'media' && <MediaLayerContent layer={layer} />}
+      {layer.kind === 'text' && <TextLayerContent layer={layer} />}
+      {layer.kind === 'subject' && <SubjectLayerContent project={project} layer={layer} />}
       {selected && (
         <>
           <Animated.View

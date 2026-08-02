@@ -2,6 +2,8 @@ import {
   applyProjectAction,
   beginProjectTransaction,
   commitProjectTransaction,
+  type MemeEditLayer,
+  type MemeEditProject,
   type MemeEditProjectAction,
   type ProjectHistory,
   type QuarterRotation,
@@ -52,6 +54,13 @@ export interface LayerHandlePoints {
 
 export type TransformAccessibilityAction = 'increment' | 'decrement' | 'longpress' | 'escape';
 export type TransformHandleKind = 'resize' | 'rotate';
+
+export interface CanvasLayerDescriptor {
+  id: string;
+  kind: MemeEditLayer['kind'];
+  unavailable: boolean;
+  label: string;
+}
 
 const MIN_SCALE = 0.01;
 const MAX_SCALE = 16;
@@ -113,6 +122,10 @@ export function viewRectToAbsoluteStyle(rect: ViewRect): AbsoluteRectStyle {
 
 export function gesturePointInsideMedia(point: ViewPoint, mediaRect: ViewRect): boolean {
   return viewPointToNormalizedPoint(point, mediaRect) !== null;
+}
+
+export function gestureMoveShouldClaim(startAccepted: boolean, delta: ViewDelta): boolean {
+  return startAccepted && finite(delta.dx) && finite(delta.dy) && Math.abs(delta.dx) + Math.abs(delta.dy) > 2;
 }
 
 export function viewPointToNormalizedPoint(point: ViewPoint, mediaRect: ViewRect): NormalizedPoint | null {
@@ -265,6 +278,18 @@ export function nextDuplicateLayerId(prefix: string, ids: readonly string[]): st
     if (Number.isSafeInteger(value) && value > maximum) maximum = value;
   }
   return `${prefix}-dup-${maximum + 1}`;
+}
+
+export function describeCanvasLayers(project: MemeEditProject): CanvasLayerDescriptor[] {
+  return project.layers.map((layer) => {
+    if (layer.kind === 'text') return { id: layer.id, kind: layer.kind, unavailable: false, label: 'Text layer' };
+    if (layer.kind === 'cover') return { id: layer.id, kind: layer.kind, unavailable: false, label: layer.mode === 'pixelate' ? 'Pixelate region' : 'Cover region' };
+    if (layer.kind === 'subject') {
+      const unavailable = !project.transient.maskTracks[layer.maskTrackId];
+      return { id: layer.id, kind: layer.kind, unavailable, label: unavailable ? 'Subject mask unavailable' : 'Subject mask' };
+    }
+    return { id: layer.id, kind: layer.kind, unavailable: false, label: layer.assetKind === 'video' ? 'Video overlay' : 'Image overlay' };
+  });
 }
 
 export function commitGestureTransaction(

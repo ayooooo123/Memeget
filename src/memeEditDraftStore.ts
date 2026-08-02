@@ -583,9 +583,39 @@ export class MemeEditAutosaveController {
 
   async discard(): Promise<void> {
     this.cancel();
-    this.discarded = true;
     await this.queueTail;
     await this.store.discard(this.identity);
+    this.discarded = true;
+  }
+}
+
+export function requestSourceSessionClose(
+  controller: { cancel(): Promise<void> },
+  onClose: () => void,
+  onError: (error: unknown) => void = () => {}
+): void {
+  onClose();
+  void controller.cancel().catch((error) => {
+    onError(error);
+  });
+}
+
+export async function flushAutosaveBeforeSourceRelease(
+  autosave: MemeEditAutosaveController | null,
+  release: () => Promise<void>,
+  onError: (error: unknown) => void = () => {}
+): Promise<void> {
+  if (autosave) {
+    try {
+      await autosave.flush();
+    } catch (error) {
+      onError(error);
+    }
+  }
+  try {
+    await release();
+  } catch (error) {
+    onError(error);
   }
 }
 
@@ -700,17 +730,21 @@ async function releaseSharedPreparation(entry: SharedPreparationEntry): Promise<
   if (entry.references > 0) return;
   entry.closing = true;
   const finalization = (async (): Promise<void> => {
-    try {
-      const prepared = await entry.promise.catch(() => null);
-      if (prepared?.owned) await entry.io.remove(prepared.uri);
-    } finally {
-      if (SHARED_SOURCE_PREPARATIONS.get(entry.key) === entry) {
-        SHARED_SOURCE_PREPARATIONS.delete(entry.key);
-      }
+    const prepared = await entry.promise.catch(() => null);
+    if (prepared?.owned) await entry.io.remove(prepared.uri);
+    if (SHARED_SOURCE_PREPARATIONS.get(entry.key) === entry) {
+      SHARED_SOURCE_PREPARATIONS.delete(entry.key);
     }
   })();
   entry.finalization = finalization;
-  await finalization;
+  try {
+    await finalization;
+  } catch (error) {
+    entry.closing = false;
+    entry.references = 1;
+    entry.finalization = null;
+    throw error;
+  }
 }
 
 function projectFromPreparedProbe(uri: string, name: string, probe: MediaProbeResult): MemeEditProject {
@@ -818,10 +852,10 @@ export class MemeEditSourceSessionController {
   async cancel(): Promise<void> {
     this.closed = true;
     if (this.released) return;
-    this.released = true;
-    const destination = this.destination;
-    if (this.preparation) await this.preparation.catch(() => {});
+    const prepared = this.preparation ? await this.preparation.catch(() => null) : null;
+    const destination = this.destination ?? prepared?.materializedSourceUri ?? null;
     if (this.owned && destination) await this.io.remove(destination);
+    this.released = true;
   }
 
   discard(): Promise<void> {
