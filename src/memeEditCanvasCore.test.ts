@@ -6,6 +6,7 @@ import {
   gestureMoveShouldClaim,
   gesturePointInsideMedia,
   layerHandlePoints,
+  layerBodyTouchInsideMedia,
   layerHandleTouchInsideMedia,
   nextDuplicateLayerId,
   normalizedPointToViewPoint,
@@ -196,6 +197,12 @@ describe('transform gesture math', () => {
     const doubleScaleCenterOutsideTop = kf({ scale: 2, center: { x: 0.5, y: 0.6 } });
     expect(layerHandlePoints(doubleScaleCenterOutsideTop, 0.2, rect).rotate.y).toBeCloseTo(8);
     expect(layerHandleTouchInsideMedia(doubleScaleCenterOutsideTop, 0.2, rect, 'rotate', { x: 22, y: 37 })).toBe(true);
+  });
+
+  test('gates rotated layer body touch points instead of unrotated box coordinates', () => {
+    const flippedAtLeftEdge = kf({ rotationDegrees: 180, center: { x: 0.005, y: 0.5 } });
+    expect(layerBodyTouchInsideMedia(flippedAtLeftEdge, 0.2, rect, { x: 1, y: 22 })).toBe(true);
+    expect(layerBodyTouchInsideMedia(flippedAtLeftEdge, 0.2, rect, { x: 43, y: 22 })).toBe(false);
   });
 
   test('accessibility transform actions commit bounded keyframe changes', () => {

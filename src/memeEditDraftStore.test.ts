@@ -755,6 +755,34 @@ describe('MemeEditAutosaveController', () => {
     });
   });
 
+  test('discard failure does not overwrite a newer schedule made while discard is pending', async () => {
+    const io = new MemoryDraftIo();
+    const store = new MemeEditDraftStore(io, { now: () => 20_000 });
+    const timers = new FakeTimers();
+    const controller = new MemeEditAutosaveController(store, identity, { timers });
+    let releaseRemove!: () => void;
+    const removeGate = new Promise<void>((resolve) => {
+      releaseRemove = resolve;
+    });
+    io.remove = async (path) => {
+      await removeGate;
+      throw new Error(`remove failed: ${path}`);
+    };
+    controller.schedule(project('discard-A'));
+    const discard = controller.discard();
+    await Promise.resolve();
+
+    controller.schedule(project('newer-B'));
+    releaseRemove();
+    await expect(discard).rejects.toThrow('remove failed');
+    await controller.flush();
+
+    await expect(store.restore(identity)).resolves.toMatchObject({
+      status: 'restored',
+      project: { background: { color: 'newer-B' } },
+    });
+  });
+
   test('teardown helper flushes pending debounce before releasing source assets', async () => {
     const io = new MemoryDraftIo();
     const store = new MemeEditDraftStore(io, { now: () => 20_000 });

@@ -8,6 +8,7 @@ import {
   dragKeyframeByViewDelta,
   gesturePointInsideMedia,
   gestureMoveShouldClaim,
+  layerBodyTouchInsideMedia,
   layerHandlePoints,
   layerHandleTouchInsideMedia,
   normalizedPointToViewPoint,
@@ -158,7 +159,10 @@ const TransformableLayerView = React.memo(function TransformableLayerView({
 
   const dragPan = useMemo(() => PanResponder.create({
     onStartShouldSetPanResponder: (event) => {
-      const accepted = gesturePointInsideMedia({ x: box.x + event.nativeEvent.locationX, y: box.y + event.nativeEvent.locationY }, mediaRect);
+      const accepted = layerBodyTouchInsideMedia(keyframe, visualWidth, mediaRect, {
+        x: event.nativeEvent.locationX,
+        y: event.nativeEvent.locationY,
+      });
       dragStartAccepted.current = accepted;
       return accepted;
     },
@@ -186,7 +190,7 @@ const TransformableLayerView = React.memo(function TransformableLayerView({
       dragStartAccepted.current = false;
       gestureStart.current = null;
     },
-  }), [box.x, box.y, commit, handles.center, handles.resize, keyframe, layer.id, mediaRect, onSelectLayer, translate]);
+  }), [commit, handles.center, handles.resize, keyframe, layer.id, mediaRect, onSelectLayer, translate, visualWidth]);
 
   const resizePan = useMemo(() => PanResponder.create({
     onStartShouldSetPanResponder: (event) => {

@@ -265,6 +265,15 @@ export function layerLocalPointToCanvasPoint(
   };
 }
 
+export function layerBodyTouchInsideMedia(
+  keyframe: TransformKeyframe,
+  layerWidth: number,
+  mediaRect: ViewRect,
+  localPoint: ViewPoint
+): boolean {
+  return gesturePointInsideMedia(layerLocalPointToCanvasPoint(keyframe, layerWidth, mediaRect, localPoint), mediaRect);
+}
+
 export function layerHandleTouchInsideMedia(
   keyframe: TransformKeyframe,
   layerWidth: number,
