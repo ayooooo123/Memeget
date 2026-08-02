@@ -1,0 +1,2005 @@
+{
+  "schemaVersion": 1,
+  "task": "0.2",
+  "observedAtUtc": "2026-08-02T03:34:05.194Z",
+  "gateStatus": "FAIL",
+  "device": {
+    "manufacturer": "Google",
+    "model": "Pixel 9 Pro",
+    "device": "caiman",
+    "hardware": "caiman",
+    "androidRelease": "17",
+    "apiLevel": 37,
+    "buildId": "CP2A.260705.006",
+    "buildDisplay": "2026072901",
+    "buildIncremental": "2026072901",
+    "securityPatch": "2026-07-05",
+    "buildFingerprint": "google\/caiman\/caiman:17\/CP2A.260705.006\/2026072901:user\/release-keys",
+    "supportedAbis": [
+      "arm64-v8a"
+    ],
+    "pageSizeBytes": 4096,
+    "emulator": false
+  },
+  "provenance": {
+    "tasksVision": {
+      "group": "com.google.mediapipe",
+      "artifact": "tasks-vision",
+      "version": "0.10.29",
+      "pomUrl": "https:\/\/dl.google.com\/dl\/android\/maven2\/com\/google\/mediapipe\/tasks-vision\/0.10.29\/tasks-vision-0.10.29.pom",
+      "license": "Apache-2.0",
+      "licenseUrl": "https:\/\/github.com\/google-ai-edge\/mediapipe\/blob\/v0.10.29\/LICENSE"
+    },
+    "model": {
+      "asset": "selfie_segmenter_float16_v1.tflite",
+      "name": "MediaPipe SelfieSegmenter (square)",
+      "version": "1",
+      "downloadUrl": "https:\/\/storage.googleapis.com\/mediapipe-models\/image_segmenter\/selfie_segmenter\/float16\/1\/selfie_segmenter.tflite",
+      "sha256": "191ac9529ae506ee0beefa6b2c945a172dab9d07d1e802a290a4e4038226658b",
+      "bytes": 249537,
+      "inputShape": "256x256x3",
+      "quantization": "float16",
+      "output": "two-class confidence mask; background index 0, person index 1",
+      "license": "Apache-2.0",
+      "licenseAsset": "Apache-2.0.txt",
+      "licenseUrl": "https:\/\/www.apache.org\/licenses\/LICENSE-2.0.txt",
+      "modelCardUrl": "https:\/\/storage.googleapis.com\/mediapipe-assets\/Model%20Card%20MediaPipe%20Selfie%20Segmentation.pdf",
+      "officialCatalogUrl": "https:\/\/developers.google.com\/edge\/mediapipe\/solutions\/vision\/image_segmenter#models",
+      "observedSha256": "191ac9529ae506ee0beefa6b2c945a172dab9d07d1e802a290a4e4038226658b",
+      "digestMatches": true
+    },
+    "fixtureSource": {
+      "personalMedia": false,
+      "description": "Public OpenCV pedestrian sample vtest.avi; no user or maintainer media and no identities are used.",
+      "downloadUrl": "https:\/\/raw.githubusercontent.com\/opencv\/opencv\/4.12.0\/samples\/data\/vtest.avi",
+      "sha256": "45cddc9490be69345cbdab64ca583be65987e864ca408038e648db99e10516cf",
+      "license": "Apache-2.0",
+      "licenseUrl": "https:\/\/github.com\/opencv\/opencv\/blob\/4.12.0\/LICENSE"
+    },
+    "generator": {
+      "script": "fixtures\/generate-video-segmentation-fixtures.sh",
+      "ffmpegVersion": "8.1.2-tessus",
+      "downloadUrl": "https:\/\/evermeet.cx\/ffmpeg\/ffmpeg-8.1.2.zip",
+      "archiveSha256": "e91df72a1ee7c26606f90dd2dd4dcccc6a75140ff9ea6fdd50faae828b82ba69",
+      "binarySha256": "60725ea0467ccaf900bf294d3567c302a802dc661f03bdde6aa7ecc9ccf05c4f"
+    },
+    "fixtures": [
+      {
+        "id": "one_person",
+        "asset": "video_segmentation_one_person_10s_720p.mp4",
+        "sha256": "4cae38ceb3c6ff8faab4026b5ff3cb8907ca381e4b44bec47815471e6446453f",
+        "bytes": 899703,
+        "width": 1280,
+        "height": 720,
+        "nominalDurationMs": 10000,
+        "description": "One visible pedestrian, source seconds 40-47 slowed to ten seconds and tightly cropped; dark synthetic side padding.",
+        "observedSha256": "4cae38ceb3c6ff8faab4026b5ff3cb8907ca381e4b44bec47815471e6446453f",
+        "digestMatches": true
+      },
+      {
+        "id": "two_people_crossing_occluding",
+        "asset": "video_segmentation_two_crossing_10s_720p.mp4",
+        "sha256": "12c6173e83dc4ede1b4c016b16612df7b16932243c09cbe1d681a4c1735166d3",
+        "bytes": 2641403,
+        "width": 1280,
+        "height": 720,
+        "nominalDurationMs": 10000,
+        "description": "Source seconds 65-75 with multiple pedestrians including observable crossings and partial occlusion; scaled and padded to 720p.",
+        "observedSha256": "12c6173e83dc4ede1b4c016b16612df7b16932243c09cbe1d681a4c1735166d3",
+        "digestMatches": true
+      },
+      {
+        "id": "fast_motion",
+        "asset": "video_segmentation_fast_motion_10s_720p.mp4",
+        "sha256": "f4ff899061b78f5fb204daf68ffe25289d1eba84528ed424e83255995d8b0f67",
+        "bytes": 3421846,
+        "width": 1280,
+        "height": 720,
+        "nominalDurationMs": 10000,
+        "description": "Source seconds 20-60 accelerated four times, then scaled and padded to 720p.",
+        "observedSha256": "f4ff899061b78f5fb204daf68ffe25289d1eba84528ed424e83255995d8b0f67",
+        "digestMatches": true
+      }
+    ],
+    "modelProvenanceComplete": true,
+    "allDigestsMatch": true
+  },
+  "nativeArtifact": {
+    "tasksVisionArtifactVersion": "0.10.29",
+    "runtimeClassPresent": true,
+    "packagedNativeLibraries": [
+      {
+        "apk": "base.apk",
+        "entry": "lib\/arm64-v8a\/libmediapipe_tasks_vision_jni.so",
+        "abi": "arm64-v8a",
+        "bytes": 10422840,
+        "zipMethod": "STORED",
+        "elfLoadSegmentAlignmentsBytes": [
+          16384,
+          16384,
+          16384
+        ],
+        "elfSupports16KiBPages": true
+      },
+      {
+        "apk": "base.apk",
+        "entry": "lib\/armeabi-v7a\/libmediapipe_tasks_vision_jni.so",
+        "abi": "armeabi-v7a",
+        "bytes": 6920096,
+        "zipMethod": "STORED",
+        "elfLoadSegmentAlignmentsBytes": [
+          16384,
+          16384,
+          16384
+        ],
+        "elfSupports16KiBPages": true
+      },
+      {
+        "apk": "base.apk",
+        "entry": "lib\/x86\/libmediapipe_tasks_vision_jni.so",
+        "abi": "x86",
+        "bytes": 13888228,
+        "zipMethod": "STORED",
+        "elfLoadSegmentAlignmentsBytes": [
+          16384,
+          16384,
+          16384
+        ],
+        "elfSupports16KiBPages": true
+      },
+      {
+        "apk": "base.apk",
+        "entry": "lib\/x86_64\/libmediapipe_tasks_vision_jni.so",
+        "abi": "x86_64",
+        "bytes": 12596280,
+        "zipMethod": "STORED",
+        "elfLoadSegmentAlignmentsBytes": [
+          16384,
+          16384,
+          16384
+        ],
+        "elfSupports16KiBPages": true
+      }
+    ],
+    "packagedAbis": [
+      "arm64-v8a",
+      "armeabi-v7a",
+      "x86",
+      "x86_64"
+    ],
+    "deviceSupportedAbis": [
+      "arm64-v8a"
+    ],
+    "devicePageSizeBytes": 4096,
+    "arm64ElfLoadSegmentAlignmentsBytes": [
+      16384,
+      16384,
+      16384
+    ],
+    "arm64ElfSupports16KiBPages": true,
+    "installedArm64LibraryObserved": null
+  },
+  "probe": {
+    "runningMode": "VIDEO",
+    "delegate": "CPU",
+    "workingSizes": [
+      256,
+      384,
+      512
+    ],
+    "maskFps": [
+      8,
+      12,
+      15
+    ],
+    "maskThreshold": 0.5,
+    "temporalSmoothing": "EMA current=0.65 previous=0.35000002",
+    "peakMemoryMetric": "android.os.Debug.getPss process PSS sampled every 20 ms, including model setup and teardown",
+    "pipelineRuntimeMetric": "asset decode + scale + VIDEO-mode inference + smoothing + mask metrics; evidence rendering excluded",
+    "latencyMetric": "per-frame MediaPipe segmentForVideo wall-clock latency",
+    "memoryCeilingBytes": 268435456,
+    "memoryCeilingSource": "ActivityManager.memoryClass observed on the physical device",
+    "qualityThresholds": {
+      "foregroundCoverageMeanMin": 0.002,
+      "foregroundCoverageMeanMax": 0.7,
+      "nonEmptyFrameRatioMin": 0.95,
+      "temporalMaskIouMeanMin": 0.55,
+      "edgePumpingP95Max": 0.35,
+      "areaPumpingP95Max": 0.35
+    }
+  },
+  "matrix": [
+    {
+      "workingSize": 256,
+      "workingFrameWidth": 256,
+      "workingFrameHeight": 144,
+      "maskFps": 8,
+      "status": "COMPLETED",
+      "qualityStatus": "FAIL",
+      "worstPipelineRuntimeMs": 54770,
+      "worstRuntimeXRealtime": 5.477,
+      "peakPssBytes": 244515840,
+      "memoryCeilingBytes": 268435456,
+      "underMemoryCeiling": true,
+      "withinThreeTimesRealtime": false,
+      "fixtures": [
+        {
+          "id": "one_person",
+          "status": "COMPLETED",
+          "sourceSha256": "4cae38ceb3c6ff8faab4026b5ff3cb8907ca381e4b44bec47815471e6446453f",
+          "sourceBytes": 899703,
+          "observedDurationMs": 10000,
+          "observedWidth": 1280,
+          "observedHeight": 720,
+          "framesProcessed": 80,
+          "maskWidth": 256,
+          "maskHeight": 144,
+          "confidenceMaskCount": 1,
+          "pipelineRuntimeMs": 52251,
+          "runtimeXRealtime": 5.2251,
+          "throughputFramesPerSecond": 1.531071175671279,
+          "inferenceLatencyMs": {
+            "median": 88.899251,
+            "p95": 114.851684,
+            "max": 150.522217
+          },
+          "decodeLatencyMs": {
+            "median": 451.779094,
+            "p95": 645.428263,
+            "max": 693.456584
+          },
+          "peakPssBytes": 238398464,
+          "quality": {
+            "foregroundCoverageMean": 0.004442342122395833,
+            "foregroundCoverageMin": 0,
+            "foregroundCoverageMax": 0.03759765625,
+            "nonEmptyFrameRatio": 0.3875,
+            "temporalMaskIouMean": 0.7919820160813574,
+            "temporalMaskIouP05": 0,
+            "edgePumpingMean": 0.16071560434221224,
+            "edgePumpingP95": 1,
+            "areaPumpingMean": 0.1774127043809763,
+            "areaPumpingP95": 1,
+            "foregroundCoveragePass": true,
+            "nonEmptyFramesPass": false,
+            "temporalStabilityPass": true,
+            "normalPlaybackNoObviousEdgePumping": false,
+            "areaStabilityPass": false,
+            "qualityPass": false
+          },
+          "evidenceFileName": "video-segmentation-mask-one_person-256-8fps.png"
+        },
+        {
+          "id": "two_people_crossing_occluding",
+          "status": "COMPLETED",
+          "sourceSha256": "12c6173e83dc4ede1b4c016b16612df7b16932243c09cbe1d681a4c1735166d3",
+          "sourceBytes": 2641403,
+          "observedDurationMs": 10000,
+          "observedWidth": 1280,
+          "observedHeight": 720,
+          "framesProcessed": 80,
+          "maskWidth": 256,
+          "maskHeight": 144,
+          "confidenceMaskCount": 1,
+          "pipelineRuntimeMs": 54040,
+          "runtimeXRealtime": 5.404,
+          "throughputFramesPerSecond": 1.4803849000740192,
+          "inferenceLatencyMs": {
+            "median": 93.318278,
+            "p95": 121.383789,
+            "max": 158.900513
+          },
+          "decodeLatencyMs": {
+            "median": 473.83431,
+            "p95": 663.352987,
+            "max": 698.787435
+          },
+          "peakPssBytes": 244515840,
+          "quality": {
+            "foregroundCoverageMean": 0.0015852186414930553,
+            "foregroundCoverageMin": 0,
+            "foregroundCoverageMax": 0.021131727430555556,
+            "nonEmptyFrameRatio": 0.35,
+            "temporalMaskIouMean": 0.6064432526645777,
+            "temporalMaskIouP05": 0,
+            "edgePumpingMean": 0.3420880884368091,
+            "edgePumpingP95": 1,
+            "areaPumpingMean": 0.389472338622747,
+            "areaPumpingP95": 1,
+            "foregroundCoveragePass": false,
+            "nonEmptyFramesPass": false,
+            "temporalStabilityPass": true,
+            "normalPlaybackNoObviousEdgePumping": false,
+            "areaStabilityPass": false,
+            "qualityPass": false
+          },
+          "evidenceFileName": "video-segmentation-mask-two_people_crossing_occluding-256-8fps.png"
+        },
+        {
+          "id": "fast_motion",
+          "status": "COMPLETED",
+          "sourceSha256": "f4ff899061b78f5fb204daf68ffe25289d1eba84528ed424e83255995d8b0f67",
+          "sourceBytes": 3421846,
+          "observedDurationMs": 10000,
+          "observedWidth": 1280,
+          "observedHeight": 720,
+          "framesProcessed": 80,
+          "maskWidth": 256,
+          "maskHeight": 144,
+          "confidenceMaskCount": 1,
+          "pipelineRuntimeMs": 54770,
+          "runtimeXRealtime": 5.477,
+          "throughputFramesPerSecond": 1.460653642505021,
+          "inferenceLatencyMs": {
+            "median": 94.776937,
+            "p95": 119.863078,
+            "max": 144.262655
+          },
+          "decodeLatencyMs": {
+            "median": 502.938029,
+            "p95": 710.932129,
+            "max": 774.859253
+          },
+          "peakPssBytes": 240756736,
+          "quality": {
+            "foregroundCoverageMean": 0.01032172309027778,
+            "foregroundCoverageMin": 0,
+            "foregroundCoverageMax": 0.03396267361111111,
+            "nonEmptyFrameRatio": 0.8,
+            "temporalMaskIouMean": 0.3577637588797422,
+            "temporalMaskIouP05": 0,
+            "edgePumpingMean": 0.5096928447486725,
+            "edgePumpingP95": 1,
+            "areaPumpingMean": 0.6187557533622454,
+            "areaPumpingP95": 1,
+            "foregroundCoveragePass": true,
+            "nonEmptyFramesPass": false,
+            "temporalStabilityPass": false,
+            "normalPlaybackNoObviousEdgePumping": false,
+            "areaStabilityPass": false,
+            "qualityPass": false
+          },
+          "evidenceFileName": "video-segmentation-mask-fast_motion-256-8fps.png"
+        }
+      ],
+      "accepted": false
+    },
+    {
+      "workingSize": 256,
+      "workingFrameWidth": 256,
+      "workingFrameHeight": 144,
+      "maskFps": 12,
+      "status": "COMPLETED",
+      "qualityStatus": "FAIL",
+      "worstPipelineRuntimeMs": 57811,
+      "worstRuntimeXRealtime": 5.7811,
+      "peakPssBytes": 275826688,
+      "memoryCeilingBytes": 268435456,
+      "underMemoryCeiling": false,
+      "withinThreeTimesRealtime": false,
+      "fixtures": [
+        {
+          "id": "one_person",
+          "status": "COMPLETED",
+          "sourceSha256": "4cae38ceb3c6ff8faab4026b5ff3cb8907ca381e4b44bec47815471e6446453f",
+          "sourceBytes": 899703,
+          "observedDurationMs": 10000,
+          "observedWidth": 1280,
+          "observedHeight": 720,
+          "framesProcessed": 120,
+          "maskWidth": 256,
+          "maskHeight": 144,
+          "confidenceMaskCount": 1,
+          "pipelineRuntimeMs": 57605,
+          "runtimeXRealtime": 5.7605,
+          "throughputFramesPerSecond": 2.083152504122906,
+          "inferenceLatencyMs": {
+            "median": 72.630371,
+            "p95": 105.52653,
+            "max": 113.007405
+          },
+          "decodeLatencyMs": {
+            "median": 335.853272,
+            "p95": 554.115153,
+            "max": 689.115682
+          },
+          "peakPssBytes": 275826688,
+          "quality": {
+            "foregroundCoverageMean": 0.00409568504050926,
+            "foregroundCoverageMin": 0,
+            "foregroundCoverageMax": 0.037896050347222224,
+            "nonEmptyFrameRatio": 0.38333333333333336,
+            "temporalMaskIouMean": 0.8202026710801155,
+            "temporalMaskIouP05": 0,
+            "edgePumpingMean": 0.13984771818853914,
+            "edgePumpingP95": 1,
+            "areaPumpingMean": 0.15553101197952765,
+            "areaPumpingP95": 1,
+            "foregroundCoveragePass": true,
+            "nonEmptyFramesPass": false,
+            "temporalStabilityPass": true,
+            "normalPlaybackNoObviousEdgePumping": false,
+            "areaStabilityPass": false,
+            "qualityPass": false
+          },
+          "evidenceFileName": "video-segmentation-mask-one_person-256-12fps.png"
+        },
+        {
+          "id": "two_people_crossing_occluding",
+          "status": "COMPLETED",
+          "sourceSha256": "12c6173e83dc4ede1b4c016b16612df7b16932243c09cbe1d681a4c1735166d3",
+          "sourceBytes": 2641403,
+          "observedDurationMs": 10000,
+          "observedWidth": 1280,
+          "observedHeight": 720,
+          "framesProcessed": 120,
+          "maskWidth": 256,
+          "maskHeight": 144,
+          "confidenceMaskCount": 1,
+          "pipelineRuntimeMs": 57811,
+          "runtimeXRealtime": 5.7811,
+          "throughputFramesPerSecond": 2.075729532441923,
+          "inferenceLatencyMs": {
+            "median": 67.183512,
+            "p95": 110.329997,
+            "max": 150.583863
+          },
+          "decodeLatencyMs": {
+            "median": 348.853597,
+            "p95": 521.862387,
+            "max": 614.821045
+          },
+          "peakPssBytes": 251436032,
+          "quality": {
+            "foregroundCoverageMean": 0.0017150878906249994,
+            "foregroundCoverageMin": 0,
+            "foregroundCoverageMax": 0.023003472222222224,
+            "nonEmptyFrameRatio": 0.35,
+            "temporalMaskIouMean": 0.6833735199056888,
+            "temporalMaskIouP05": 0,
+            "edgePumpingMean": 0.2695014447039623,
+            "edgePumpingP95": 1,
+            "areaPumpingMean": 0.30993831267772787,
+            "areaPumpingP95": 1,
+            "foregroundCoveragePass": false,
+            "nonEmptyFramesPass": false,
+            "temporalStabilityPass": true,
+            "normalPlaybackNoObviousEdgePumping": false,
+            "areaStabilityPass": false,
+            "qualityPass": false
+          },
+          "evidenceFileName": "video-segmentation-mask-two_people_crossing_occluding-256-12fps.png"
+        },
+        {
+          "id": "fast_motion",
+          "status": "COMPLETED",
+          "sourceSha256": "f4ff899061b78f5fb204daf68ffe25289d1eba84528ed424e83255995d8b0f67",
+          "sourceBytes": 3421846,
+          "observedDurationMs": 10000,
+          "observedWidth": 1280,
+          "observedHeight": 720,
+          "framesProcessed": 120,
+          "maskWidth": 256,
+          "maskHeight": 144,
+          "confidenceMaskCount": 1,
+          "pipelineRuntimeMs": 56557,
+          "runtimeXRealtime": 5.6557,
+          "throughputFramesPerSecond": 2.121753275456619,
+          "inferenceLatencyMs": {
+            "median": 59.868327,
+            "p95": 101.287842,
+            "max": 116.940227
+          },
+          "decodeLatencyMs": {
+            "median": 340.201335,
+            "p95": 503.404175,
+            "max": 597.511678
+          },
+          "peakPssBytes": 256680960,
+          "quality": {
+            "foregroundCoverageMean": 0.010607458043981482,
+            "foregroundCoverageMin": 0,
+            "foregroundCoverageMax": 0.041015625,
+            "nonEmptyFrameRatio": 0.7833333333333333,
+            "temporalMaskIouMean": 0.48308168008011804,
+            "temporalMaskIouP05": 0,
+            "edgePumpingMean": 0.37888010275749556,
+            "edgePumpingP95": 1,
+            "areaPumpingMean": 0.46655387209037824,
+            "areaPumpingP95": 1,
+            "foregroundCoveragePass": true,
+            "nonEmptyFramesPass": false,
+            "temporalStabilityPass": false,
+            "normalPlaybackNoObviousEdgePumping": false,
+            "areaStabilityPass": false,
+            "qualityPass": false
+          },
+          "evidenceFileName": "video-segmentation-mask-fast_motion-256-12fps.png"
+        }
+      ],
+      "accepted": false
+    },
+    {
+      "workingSize": 256,
+      "workingFrameWidth": 256,
+      "workingFrameHeight": 144,
+      "maskFps": 15,
+      "status": "COMPLETED",
+      "qualityStatus": "FAIL",
+      "worstPipelineRuntimeMs": 86304,
+      "worstRuntimeXRealtime": 8.6304,
+      "peakPssBytes": 245010432,
+      "memoryCeilingBytes": 268435456,
+      "underMemoryCeiling": true,
+      "withinThreeTimesRealtime": false,
+      "fixtures": [
+        {
+          "id": "one_person",
+          "status": "COMPLETED",
+          "sourceSha256": "4cae38ceb3c6ff8faab4026b5ff3cb8907ca381e4b44bec47815471e6446453f",
+          "sourceBytes": 899703,
+          "observedDurationMs": 10000,
+          "observedWidth": 1280,
+          "observedHeight": 720,
+          "framesProcessed": 150,
+          "maskWidth": 256,
+          "maskHeight": 144,
+          "confidenceMaskCount": 1,
+          "pipelineRuntimeMs": 73889,
+          "runtimeXRealtime": 7.3889,
+          "throughputFramesPerSecond": 2.030072135229872,
+          "inferenceLatencyMs": {
+            "median": 71.548787,
+            "p95": 112.02535,
+            "max": 142.319214
+          },
+          "decodeLatencyMs": {
+            "median": 362.797608,
+            "p95": 537.18453,
+            "max": 662.030315
+          },
+          "peakPssBytes": 245010432,
+          "quality": {
+            "foregroundCoverageMean": 0.003887803819444445,
+            "foregroundCoverageMin": 0,
+            "foregroundCoverageMax": 0.03819444444444445,
+            "nonEmptyFrameRatio": 0.4,
+            "temporalMaskIouMean": 0.8273042917210193,
+            "temporalMaskIouP05": 0,
+            "edgePumpingMean": 0.13544018078637213,
+            "edgePumpingP95": 1,
+            "areaPumpingMean": 0.15476526484038564,
+            "areaPumpingP95": 1,
+            "foregroundCoveragePass": true,
+            "nonEmptyFramesPass": false,
+            "temporalStabilityPass": true,
+            "normalPlaybackNoObviousEdgePumping": false,
+            "areaStabilityPass": false,
+            "qualityPass": false
+          },
+          "evidenceFileName": "video-segmentation-mask-one_person-256-15fps.png"
+        },
+        {
+          "id": "two_people_crossing_occluding",
+          "status": "COMPLETED",
+          "sourceSha256": "12c6173e83dc4ede1b4c016b16612df7b16932243c09cbe1d681a4c1735166d3",
+          "sourceBytes": 2641403,
+          "observedDurationMs": 10000,
+          "observedWidth": 1280,
+          "observedHeight": 720,
+          "framesProcessed": 150,
+          "maskWidth": 256,
+          "maskHeight": 144,
+          "confidenceMaskCount": 1,
+          "pipelineRuntimeMs": 78370,
+          "runtimeXRealtime": 7.837,
+          "throughputFramesPerSecond": 1.9139977032027562,
+          "inferenceLatencyMs": {
+            "median": 73.326986,
+            "p95": 106.106364,
+            "max": 119.662882
+          },
+          "decodeLatencyMs": {
+            "median": 381.60966,
+            "p95": 539.098877,
+            "max": 586.083944
+          },
+          "peakPssBytes": 244453376,
+          "quality": {
+            "foregroundCoverageMean": 0.0019759114583333326,
+            "foregroundCoverageMin": 0,
+            "foregroundCoverageMax": 0.025065104166666668,
+            "nonEmptyFrameRatio": 0.36,
+            "temporalMaskIouMean": 0.6967151206737987,
+            "temporalMaskIouP05": 0,
+            "edgePumpingMean": 0.2681958739087896,
+            "edgePumpingP95": 1,
+            "areaPumpingMean": 0.29808448411416383,
+            "areaPumpingP95": 1,
+            "foregroundCoveragePass": false,
+            "nonEmptyFramesPass": false,
+            "temporalStabilityPass": true,
+            "normalPlaybackNoObviousEdgePumping": false,
+            "areaStabilityPass": false,
+            "qualityPass": false
+          },
+          "evidenceFileName": "video-segmentation-mask-two_people_crossing_occluding-256-15fps.png"
+        },
+        {
+          "id": "fast_motion",
+          "status": "COMPLETED",
+          "sourceSha256": "f4ff899061b78f5fb204daf68ffe25289d1eba84528ed424e83255995d8b0f67",
+          "sourceBytes": 3421846,
+          "observedDurationMs": 10000,
+          "observedWidth": 1280,
+          "observedHeight": 720,
+          "framesProcessed": 150,
+          "maskWidth": 256,
+          "maskHeight": 144,
+          "confidenceMaskCount": 1,
+          "pipelineRuntimeMs": 86304,
+          "runtimeXRealtime": 8.6304,
+          "throughputFramesPerSecond": 1.7380422691879867,
+          "inferenceLatencyMs": {
+            "median": 83.704305,
+            "p95": 115.28064,
+            "max": 151.641316
+          },
+          "decodeLatencyMs": {
+            "median": 431.227702,
+            "p95": 634.321818,
+            "max": 674.555583
+          },
+          "peakPssBytes": 237348864,
+          "quality": {
+            "foregroundCoverageMean": 0.011118525752314819,
+            "foregroundCoverageMin": 0,
+            "foregroundCoverageMax": 0.04258897569444445,
+            "nonEmptyFrameRatio": 0.8133333333333334,
+            "temporalMaskIouMean": 0.4950742831378546,
+            "temporalMaskIouP05": 0,
+            "edgePumpingMean": 0.3803609105150519,
+            "edgePumpingP95": 1,
+            "areaPumpingMean": 0.47617149244604967,
+            "areaPumpingP95": 1,
+            "foregroundCoveragePass": true,
+            "nonEmptyFramesPass": false,
+            "temporalStabilityPass": false,
+            "normalPlaybackNoObviousEdgePumping": false,
+            "areaStabilityPass": false,
+            "qualityPass": false
+          },
+          "evidenceFileName": "video-segmentation-mask-fast_motion-256-15fps.png"
+        }
+      ],
+      "accepted": false
+    },
+    {
+      "workingSize": 384,
+      "workingFrameWidth": 384,
+      "workingFrameHeight": 216,
+      "maskFps": 8,
+      "status": "COMPLETED",
+      "qualityStatus": "FAIL",
+      "worstPipelineRuntimeMs": 50474,
+      "worstRuntimeXRealtime": 5.0474,
+      "peakPssBytes": 243465216,
+      "memoryCeilingBytes": 268435456,
+      "underMemoryCeiling": true,
+      "withinThreeTimesRealtime": false,
+      "fixtures": [
+        {
+          "id": "one_person",
+          "status": "COMPLETED",
+          "sourceSha256": "4cae38ceb3c6ff8faab4026b5ff3cb8907ca381e4b44bec47815471e6446453f",
+          "sourceBytes": 899703,
+          "observedDurationMs": 10000,
+          "observedWidth": 1280,
+          "observedHeight": 720,
+          "framesProcessed": 80,
+          "maskWidth": 384,
+          "maskHeight": 216,
+          "confidenceMaskCount": 1,
+          "pipelineRuntimeMs": 43232,
+          "runtimeXRealtime": 4.3232,
+          "throughputFramesPerSecond": 1.8504811250925242,
+          "inferenceLatencyMs": {
+            "median": 80.796387,
+            "p95": 121.515055,
+            "max": 126.666056
+          },
+          "decodeLatencyMs": {
+            "median": 367.489909,
+            "p95": 547.92338,
+            "max": 576.836792
+          },
+          "peakPssBytes": 241589248,
+          "quality": {
+            "foregroundCoverageMean": 0.0042741186824845675,
+            "foregroundCoverageMin": 0,
+            "foregroundCoverageMax": 0.03372154706790124,
+            "nonEmptyFrameRatio": 0.4,
+            "temporalMaskIouMean": 0.7825424899031662,
+            "temporalMaskIouP05": 0,
+            "edgePumpingMean": 0.16927629312435316,
+            "edgePumpingP95": 1,
+            "areaPumpingMean": 0.18789262842754714,
+            "areaPumpingP95": 1,
+            "foregroundCoveragePass": true,
+            "nonEmptyFramesPass": false,
+            "temporalStabilityPass": true,
+            "normalPlaybackNoObviousEdgePumping": false,
+            "areaStabilityPass": false,
+            "qualityPass": false
+          },
+          "evidenceFileName": "video-segmentation-mask-one_person-384-8fps.png"
+        },
+        {
+          "id": "two_people_crossing_occluding",
+          "status": "COMPLETED",
+          "sourceSha256": "12c6173e83dc4ede1b4c016b16612df7b16932243c09cbe1d681a4c1735166d3",
+          "sourceBytes": 2641403,
+          "observedDurationMs": 10000,
+          "observedWidth": 1280,
+          "observedHeight": 720,
+          "framesProcessed": 80,
+          "maskWidth": 384,
+          "maskHeight": 216,
+          "confidenceMaskCount": 1,
+          "pipelineRuntimeMs": 46957,
+          "runtimeXRealtime": 4.6957,
+          "throughputFramesPerSecond": 1.7036863513427178,
+          "inferenceLatencyMs": {
+            "median": 78.857951,
+            "p95": 108.254598,
+            "max": 122.257649
+          },
+          "decodeLatencyMs": {
+            "median": 390.30892,
+            "p95": 610.740398,
+            "max": 709.589518
+          },
+          "peakPssBytes": 232999936,
+          "quality": {
+            "foregroundCoverageMean": 0.010515076437114199,
+            "foregroundCoverageMin": 0,
+            "foregroundCoverageMax": 0.034047067901234566,
+            "nonEmptyFrameRatio": 0.9875,
+            "temporalMaskIouMean": 0.45572983448965,
+            "temporalMaskIouP05": 0.011990407673860911,
+            "edgePumpingMean": 0.34593288436179587,
+            "edgePumpingP95": 0.921875,
+            "areaPumpingMean": 0.4733295822648967,
+            "areaPumpingP95": 0.9792452830188679,
+            "foregroundCoveragePass": true,
+            "nonEmptyFramesPass": true,
+            "temporalStabilityPass": false,
+            "normalPlaybackNoObviousEdgePumping": false,
+            "areaStabilityPass": false,
+            "qualityPass": false
+          },
+          "evidenceFileName": "video-segmentation-mask-two_people_crossing_occluding-384-8fps.png"
+        },
+        {
+          "id": "fast_motion",
+          "status": "COMPLETED",
+          "sourceSha256": "f4ff899061b78f5fb204daf68ffe25289d1eba84528ed424e83255995d8b0f67",
+          "sourceBytes": 3421846,
+          "observedDurationMs": 10000,
+          "observedWidth": 1280,
+          "observedHeight": 720,
+          "framesProcessed": 80,
+          "maskWidth": 384,
+          "maskHeight": 216,
+          "confidenceMaskCount": 1,
+          "pipelineRuntimeMs": 50474,
+          "runtimeXRealtime": 5.0474,
+          "throughputFramesPerSecond": 1.5849744422871181,
+          "inferenceLatencyMs": {
+            "median": 91.480062,
+            "p95": 115.500448,
+            "max": 155.984579
+          },
+          "decodeLatencyMs": {
+            "median": 420.212077,
+            "p95": 624.443481,
+            "max": 674.715861
+          },
+          "peakPssBytes": 243465216,
+          "quality": {
+            "foregroundCoverageMean": 0.02007333260995371,
+            "foregroundCoverageMin": 0,
+            "foregroundCoverageMax": 0.04431905864197531,
+            "nonEmptyFrameRatio": 0.975,
+            "temporalMaskIouMean": 0.516749740500627,
+            "temporalMaskIouP05": 0,
+            "edgePumpingMean": 0.2786501460792168,
+            "edgePumpingP95": 1,
+            "areaPumpingMean": 0.3934877840131756,
+            "areaPumpingP95": 1,
+            "foregroundCoveragePass": true,
+            "nonEmptyFramesPass": true,
+            "temporalStabilityPass": false,
+            "normalPlaybackNoObviousEdgePumping": false,
+            "areaStabilityPass": false,
+            "qualityPass": false
+          },
+          "evidenceFileName": "video-segmentation-mask-fast_motion-384-8fps.png"
+        }
+      ],
+      "accepted": false
+    },
+    {
+      "workingSize": 384,
+      "workingFrameWidth": 384,
+      "workingFrameHeight": 216,
+      "maskFps": 12,
+      "status": "COMPLETED",
+      "qualityStatus": "FAIL",
+      "worstPipelineRuntimeMs": 83027,
+      "worstRuntimeXRealtime": 8.3027,
+      "peakPssBytes": 254061568,
+      "memoryCeilingBytes": 268435456,
+      "underMemoryCeiling": true,
+      "withinThreeTimesRealtime": false,
+      "fixtures": [
+        {
+          "id": "one_person",
+          "status": "COMPLETED",
+          "sourceSha256": "4cae38ceb3c6ff8faab4026b5ff3cb8907ca381e4b44bec47815471e6446453f",
+          "sourceBytes": 899703,
+          "observedDurationMs": 10000,
+          "observedWidth": 1280,
+          "observedHeight": 720,
+          "framesProcessed": 120,
+          "maskWidth": 384,
+          "maskHeight": 216,
+          "confidenceMaskCount": 1,
+          "pipelineRuntimeMs": 83027,
+          "runtimeXRealtime": 8.3027,
+          "throughputFramesPerSecond": 1.4453129704794825,
+          "inferenceLatencyMs": {
+            "median": 97.44226,
+            "p95": 129.497763,
+            "max": 156.167237
+          },
+          "decodeLatencyMs": {
+            "median": 475.11202,
+            "p95": 641.234049,
+            "max": 709.842001
+          },
+          "peakPssBytes": 252360704,
+          "quality": {
+            "foregroundCoverageMean": 0.004045801986882714,
+            "foregroundCoverageMin": 0,
+            "foregroundCoverageMax": 0.034722222222222224,
+            "nonEmptyFrameRatio": 0.4,
+            "temporalMaskIouMean": 0.8102844714042172,
+            "temporalMaskIouP05": 0,
+            "edgePumpingMean": 0.1450921102634745,
+            "edgePumpingP95": 1,
+            "areaPumpingMean": 0.16664064390663974,
+            "areaPumpingP95": 1,
+            "foregroundCoveragePass": true,
+            "nonEmptyFramesPass": false,
+            "temporalStabilityPass": true,
+            "normalPlaybackNoObviousEdgePumping": false,
+            "areaStabilityPass": false,
+            "qualityPass": false
+          },
+          "evidenceFileName": "video-segmentation-mask-one_person-384-12fps.png"
+        },
+        {
+          "id": "two_people_crossing_occluding",
+          "status": "COMPLETED",
+          "sourceSha256": "12c6173e83dc4ede1b4c016b16612df7b16932243c09cbe1d681a4c1735166d3",
+          "sourceBytes": 2641403,
+          "observedDurationMs": 10000,
+          "observedWidth": 1280,
+          "observedHeight": 720,
+          "framesProcessed": 120,
+          "maskWidth": 384,
+          "maskHeight": 216,
+          "confidenceMaskCount": 1,
+          "pipelineRuntimeMs": 73962,
+          "runtimeXRealtime": 7.3962,
+          "throughputFramesPerSecond": 1.6224547740731727,
+          "inferenceLatencyMs": {
+            "median": 85.075399,
+            "p95": 107.281861,
+            "max": 131.434204
+          },
+          "decodeLatencyMs": {
+            "median": 408.728842,
+            "p95": 593.091268,
+            "max": 638.802205
+          },
+          "peakPssBytes": 254061568,
+          "quality": {
+            "foregroundCoverageMean": 0.010936595775462968,
+            "foregroundCoverageMin": 0,
+            "foregroundCoverageMax": 0.03601224922839506,
+            "nonEmptyFrameRatio": 0.975,
+            "temporalMaskIouMean": 0.5355207229882419,
+            "temporalMaskIouP05": 0.009523809523809525,
+            "edgePumpingMean": 0.30198074772226247,
+            "edgePumpingP95": 0.9591836734693877,
+            "areaPumpingMean": 0.4033632362730831,
+            "areaPumpingP95": 0.9857954545454546,
+            "foregroundCoveragePass": true,
+            "nonEmptyFramesPass": true,
+            "temporalStabilityPass": false,
+            "normalPlaybackNoObviousEdgePumping": false,
+            "areaStabilityPass": false,
+            "qualityPass": false
+          },
+          "evidenceFileName": "video-segmentation-mask-two_people_crossing_occluding-384-12fps.png"
+        },
+        {
+          "id": "fast_motion",
+          "status": "COMPLETED",
+          "sourceSha256": "f4ff899061b78f5fb204daf68ffe25289d1eba84528ed424e83255995d8b0f67",
+          "sourceBytes": 3421846,
+          "observedDurationMs": 10000,
+          "observedWidth": 1280,
+          "observedHeight": 720,
+          "framesProcessed": 120,
+          "maskWidth": 384,
+          "maskHeight": 216,
+          "confidenceMaskCount": 1,
+          "pipelineRuntimeMs": 81086,
+          "runtimeXRealtime": 8.1086,
+          "throughputFramesPerSecond": 1.4799102187800606,
+          "inferenceLatencyMs": {
+            "median": 87.431437,
+            "p95": 111.793051,
+            "max": 149.880615
+          },
+          "decodeLatencyMs": {
+            "median": 445.49524,
+            "p95": 687.493083,
+            "max": 713.671875
+          },
+          "peakPssBytes": 239887360,
+          "quality": {
+            "foregroundCoverageMean": 0.02109706548996913,
+            "foregroundCoverageMin": 0,
+            "foregroundCoverageMax": 0.04435522762345679,
+            "nonEmptyFrameRatio": 0.9666666666666667,
+            "temporalMaskIouMean": 0.596182016121552,
+            "temporalMaskIouP05": 0.006114338122898196,
+            "edgePumpingMean": 0.2483681445849074,
+            "edgePumpingP95": 0.7884615384615384,
+            "areaPumpingMean": 0.3172916740294071,
+            "areaPumpingP95": 0.9800097513408094,
+            "foregroundCoveragePass": true,
+            "nonEmptyFramesPass": true,
+            "temporalStabilityPass": true,
+            "normalPlaybackNoObviousEdgePumping": false,
+            "areaStabilityPass": false,
+            "qualityPass": false
+          },
+          "evidenceFileName": "video-segmentation-mask-fast_motion-384-12fps.png"
+        }
+      ],
+      "accepted": false
+    },
+    {
+      "workingSize": 384,
+      "workingFrameWidth": 384,
+      "workingFrameHeight": 216,
+      "maskFps": 15,
+      "status": "COMPLETED",
+      "qualityStatus": "FAIL",
+      "worstPipelineRuntimeMs": 108346,
+      "worstRuntimeXRealtime": 10.8346,
+      "peakPssBytes": 252766208,
+      "memoryCeilingBytes": 268435456,
+      "underMemoryCeiling": true,
+      "withinThreeTimesRealtime": false,
+      "fixtures": [
+        {
+          "id": "one_person",
+          "status": "COMPLETED",
+          "sourceSha256": "4cae38ceb3c6ff8faab4026b5ff3cb8907ca381e4b44bec47815471e6446453f",
+          "sourceBytes": 899703,
+          "observedDurationMs": 10000,
+          "observedWidth": 1280,
+          "observedHeight": 720,
+          "framesProcessed": 150,
+          "maskWidth": 384,
+          "maskHeight": 216,
+          "confidenceMaskCount": 1,
+          "pipelineRuntimeMs": 108346,
+          "runtimeXRealtime": 10.8346,
+          "throughputFramesPerSecond": 1.3844535100511324,
+          "inferenceLatencyMs": {
+            "median": 93.796021,
+            "p95": 123.136637,
+            "max": 143.22172
+          },
+          "decodeLatencyMs": {
+            "median": 493.477539,
+            "p95": 671.961711,
+            "max": 734.956462
+          },
+          "peakPssBytes": 240948224,
+          "quality": {
+            "foregroundCoverageMean": 0.0038634902263374486,
+            "foregroundCoverageMin": 0,
+            "foregroundCoverageMax": 0.03449315200617284,
+            "nonEmptyFrameRatio": 0.41333333333333333,
+            "temporalMaskIouMean": 0.8358074052757835,
+            "temporalMaskIouP05": 0,
+            "edgePumpingMean": 0.12143971539942297,
+            "edgePumpingP95": 1,
+            "areaPumpingMean": 0.14627210755685388,
+            "areaPumpingP95": 1,
+            "foregroundCoveragePass": true,
+            "nonEmptyFramesPass": false,
+            "temporalStabilityPass": true,
+            "normalPlaybackNoObviousEdgePumping": false,
+            "areaStabilityPass": false,
+            "qualityPass": false
+          },
+          "evidenceFileName": "video-segmentation-mask-one_person-384-15fps.png"
+        },
+        {
+          "id": "two_people_crossing_occluding",
+          "status": "COMPLETED",
+          "sourceSha256": "12c6173e83dc4ede1b4c016b16612df7b16932243c09cbe1d681a4c1735166d3",
+          "sourceBytes": 2641403,
+          "observedDurationMs": 10000,
+          "observedWidth": 1280,
+          "observedHeight": 720,
+          "framesProcessed": 150,
+          "maskWidth": 384,
+          "maskHeight": 216,
+          "confidenceMaskCount": 1,
+          "pipelineRuntimeMs": 107952,
+          "runtimeXRealtime": 10.7952,
+          "throughputFramesPerSecond": 1.3895064473099155,
+          "inferenceLatencyMs": {
+            "median": 93.293701,
+            "p95": 117.804077,
+            "max": 160.034546
+          },
+          "decodeLatencyMs": {
+            "median": 493.035849,
+            "p95": 680.054729,
+            "max": 758.897257
+          },
+          "peakPssBytes": 247439360,
+          "quality": {
+            "foregroundCoverageMean": 0.011263503086419744,
+            "foregroundCoverageMin": 0,
+            "foregroundCoverageMax": 0.038990162037037035,
+            "nonEmptyFrameRatio": 0.98,
+            "temporalMaskIouMean": 0.574085926922759,
+            "temporalMaskIouP05": 0.026737967914438502,
+            "edgePumpingMean": 0.2736559389904782,
+            "edgePumpingP95": 0.9347826086956522,
+            "areaPumpingMean": 0.36809182503840304,
+            "areaPumpingP95": 0.9714285714285714,
+            "foregroundCoveragePass": true,
+            "nonEmptyFramesPass": true,
+            "temporalStabilityPass": true,
+            "normalPlaybackNoObviousEdgePumping": false,
+            "areaStabilityPass": false,
+            "qualityPass": false
+          },
+          "evidenceFileName": "video-segmentation-mask-two_people_crossing_occluding-384-15fps.png"
+        },
+        {
+          "id": "fast_motion",
+          "status": "COMPLETED",
+          "sourceSha256": "f4ff899061b78f5fb204daf68ffe25289d1eba84528ed424e83255995d8b0f67",
+          "sourceBytes": 3421846,
+          "observedDurationMs": 10000,
+          "observedWidth": 1280,
+          "observedHeight": 720,
+          "framesProcessed": 150,
+          "maskWidth": 384,
+          "maskHeight": 216,
+          "confidenceMaskCount": 1,
+          "pipelineRuntimeMs": 83057,
+          "runtimeXRealtime": 8.3057,
+          "throughputFramesPerSecond": 1.8059886583912252,
+          "inferenceLatencyMs": {
+            "median": 76.597005,
+            "p95": 106.156331,
+            "max": 138.541423
+          },
+          "decodeLatencyMs": {
+            "median": 374.916057,
+            "p95": 572.037638,
+            "max": 657.241252
+          },
+          "peakPssBytes": 252766208,
+          "quality": {
+            "foregroundCoverageMean": 0.021407455632716045,
+            "foregroundCoverageMin": 0,
+            "foregroundCoverageMax": 0.05791859567901234,
+            "nonEmptyFrameRatio": 0.9533333333333334,
+            "temporalMaskIouMean": 0.6397524852224352,
+            "temporalMaskIouP05": 0.05959849435382685,
+            "edgePumpingMean": 0.23998726784518604,
+            "edgePumpingP95": 0.7021276595744681,
+            "areaPumpingMean": 0.2753151416319415,
+            "areaPumpingP95": 0.8748414376321353,
+            "foregroundCoveragePass": true,
+            "nonEmptyFramesPass": true,
+            "temporalStabilityPass": true,
+            "normalPlaybackNoObviousEdgePumping": false,
+            "areaStabilityPass": false,
+            "qualityPass": false
+          },
+          "evidenceFileName": "video-segmentation-mask-fast_motion-384-15fps.png"
+        }
+      ],
+      "accepted": false
+    },
+    {
+      "workingSize": 512,
+      "workingFrameWidth": 512,
+      "workingFrameHeight": 288,
+      "maskFps": 8,
+      "status": "COMPLETED",
+      "qualityStatus": "FAIL",
+      "worstPipelineRuntimeMs": 51573,
+      "worstRuntimeXRealtime": 5.1573,
+      "peakPssBytes": 271953920,
+      "memoryCeilingBytes": 268435456,
+      "underMemoryCeiling": false,
+      "withinThreeTimesRealtime": false,
+      "fixtures": [
+        {
+          "id": "one_person",
+          "status": "COMPLETED",
+          "sourceSha256": "4cae38ceb3c6ff8faab4026b5ff3cb8907ca381e4b44bec47815471e6446453f",
+          "sourceBytes": 899703,
+          "observedDurationMs": 10000,
+          "observedWidth": 1280,
+          "observedHeight": 720,
+          "framesProcessed": 80,
+          "maskWidth": 512,
+          "maskHeight": 288,
+          "confidenceMaskCount": 1,
+          "pipelineRuntimeMs": 48518,
+          "runtimeXRealtime": 4.8518,
+          "throughputFramesPerSecond": 1.64887258337112,
+          "inferenceLatencyMs": {
+            "median": 89.578328,
+            "p95": 126.635051,
+            "max": 139.935506
+          },
+          "decodeLatencyMs": {
+            "median": 368.707357,
+            "p95": 570.130494,
+            "max": 617.751506
+          },
+          "peakPssBytes": 271953920,
+          "quality": {
+            "foregroundCoverageMean": 0.0040161980523003475,
+            "foregroundCoverageMin": 0,
+            "foregroundCoverageMax": 0.031758626302083336,
+            "nonEmptyFrameRatio": 0.4875,
+            "temporalMaskIouMean": 0.7009720403483305,
+            "temporalMaskIouP05": 0,
+            "edgePumpingMean": 0.23991551573062744,
+            "edgePumpingP95": 1,
+            "areaPumpingMean": 0.2691374107970097,
+            "areaPumpingP95": 1,
+            "foregroundCoveragePass": true,
+            "nonEmptyFramesPass": false,
+            "temporalStabilityPass": true,
+            "normalPlaybackNoObviousEdgePumping": false,
+            "areaStabilityPass": false,
+            "qualityPass": false
+          },
+          "evidenceFileName": "video-segmentation-mask-one_person-512-8fps.png"
+        },
+        {
+          "id": "two_people_crossing_occluding",
+          "status": "COMPLETED",
+          "sourceSha256": "12c6173e83dc4ede1b4c016b16612df7b16932243c09cbe1d681a4c1735166d3",
+          "sourceBytes": 2641403,
+          "observedDurationMs": 10000,
+          "observedWidth": 1280,
+          "observedHeight": 720,
+          "framesProcessed": 80,
+          "maskWidth": 512,
+          "maskHeight": 288,
+          "confidenceMaskCount": 1,
+          "pipelineRuntimeMs": 51573,
+          "runtimeXRealtime": 5.1573,
+          "throughputFramesPerSecond": 1.5511992709363427,
+          "inferenceLatencyMs": {
+            "median": 95.439941,
+            "p95": 123.297079,
+            "max": 132.543457
+          },
+          "decodeLatencyMs": {
+            "median": 401.72937,
+            "p95": 616.274251,
+            "max": 667.879151
+          },
+          "peakPssBytes": 256158720,
+          "quality": {
+            "foregroundCoverageMean": 0.0060612996419270836,
+            "foregroundCoverageMin": 0,
+            "foregroundCoverageMax": 0.023552788628472224,
+            "nonEmptyFrameRatio": 0.9125,
+            "temporalMaskIouMean": 0.5132610951294722,
+            "temporalMaskIouP05": 0,
+            "edgePumpingMean": 0.35665113371185947,
+            "edgePumpingP95": 1,
+            "areaPumpingMean": 0.40793811600227925,
+            "areaPumpingP95": 1,
+            "foregroundCoveragePass": true,
+            "nonEmptyFramesPass": false,
+            "temporalStabilityPass": false,
+            "normalPlaybackNoObviousEdgePumping": false,
+            "areaStabilityPass": false,
+            "qualityPass": false
+          },
+          "evidenceFileName": "video-segmentation-mask-two_people_crossing_occluding-512-8fps.png"
+        },
+        {
+          "id": "fast_motion",
+          "status": "COMPLETED",
+          "sourceSha256": "f4ff899061b78f5fb204daf68ffe25289d1eba84528ed424e83255995d8b0f67",
+          "sourceBytes": 3421846,
+          "observedDurationMs": 10000,
+          "observedWidth": 1280,
+          "observedHeight": 720,
+          "framesProcessed": 80,
+          "maskWidth": 512,
+          "maskHeight": 288,
+          "confidenceMaskCount": 1,
+          "pipelineRuntimeMs": 42972,
+          "runtimeXRealtime": 4.2972,
+          "throughputFramesPerSecond": 1.8616773713115518,
+          "inferenceLatencyMs": {
+            "median": 74.409627,
+            "p95": 107.007894,
+            "max": 119.056681
+          },
+          "decodeLatencyMs": {
+            "median": 355.320883,
+            "p95": 522.408447,
+            "max": 581.123373
+          },
+          "peakPssBytes": 265969664,
+          "quality": {
+            "foregroundCoverageMean": 0.01744316948784722,
+            "foregroundCoverageMin": 0,
+            "foregroundCoverageMax": 0.04686143663194445,
+            "nonEmptyFrameRatio": 0.975,
+            "temporalMaskIouMean": 0.5430306175187796,
+            "temporalMaskIouP05": 0.002145922746781116,
+            "edgePumpingMean": 0.26941409383626475,
+            "edgePumpingP95": 0.7296037296037297,
+            "areaPumpingMean": 0.3397291006113765,
+            "areaPumpingP95": 0.9035714285714286,
+            "foregroundCoveragePass": true,
+            "nonEmptyFramesPass": true,
+            "temporalStabilityPass": false,
+            "normalPlaybackNoObviousEdgePumping": false,
+            "areaStabilityPass": false,
+            "qualityPass": false
+          },
+          "evidenceFileName": "video-segmentation-mask-fast_motion-512-8fps.png"
+        }
+      ],
+      "accepted": false
+    },
+    {
+      "workingSize": 512,
+      "workingFrameWidth": 512,
+      "workingFrameHeight": 288,
+      "maskFps": 12,
+      "status": "COMPLETED",
+      "qualityStatus": "FAIL",
+      "worstPipelineRuntimeMs": 85824,
+      "worstRuntimeXRealtime": 8.5824,
+      "peakPssBytes": 268441600,
+      "memoryCeilingBytes": 268435456,
+      "underMemoryCeiling": false,
+      "withinThreeTimesRealtime": false,
+      "fixtures": [
+        {
+          "id": "one_person",
+          "status": "COMPLETED",
+          "sourceSha256": "4cae38ceb3c6ff8faab4026b5ff3cb8907ca381e4b44bec47815471e6446453f",
+          "sourceBytes": 899703,
+          "observedDurationMs": 10000,
+          "observedWidth": 1280,
+          "observedHeight": 720,
+          "framesProcessed": 120,
+          "maskWidth": 512,
+          "maskHeight": 288,
+          "confidenceMaskCount": 1,
+          "pipelineRuntimeMs": 80037,
+          "runtimeXRealtime": 8.0037,
+          "throughputFramesPerSecond": 1.4993065707110462,
+          "inferenceLatencyMs": {
+            "median": 100.246175,
+            "p95": 128.862061,
+            "max": 217.076538
+          },
+          "decodeLatencyMs": {
+            "median": 423.23877,
+            "p95": 615.125977,
+            "max": 644.987712
+          },
+          "peakPssBytes": 268329984,
+          "quality": {
+            "foregroundCoverageMean": 0.0037562052408854157,
+            "foregroundCoverageMin": 0,
+            "foregroundCoverageMax": 0.03166368272569445,
+            "nonEmptyFrameRatio": 0.48333333333333334,
+            "temporalMaskIouMean": 0.7575727521139711,
+            "temporalMaskIouP05": 0,
+            "edgePumpingMean": 0.18941286101909963,
+            "edgePumpingP95": 1,
+            "areaPumpingMean": 0.22090063857466669,
+            "areaPumpingP95": 1,
+            "foregroundCoveragePass": true,
+            "nonEmptyFramesPass": false,
+            "temporalStabilityPass": true,
+            "normalPlaybackNoObviousEdgePumping": false,
+            "areaStabilityPass": false,
+            "qualityPass": false
+          },
+          "evidenceFileName": "video-segmentation-mask-one_person-512-12fps.png"
+        },
+        {
+          "id": "two_people_crossing_occluding",
+          "status": "COMPLETED",
+          "sourceSha256": "12c6173e83dc4ede1b4c016b16612df7b16932243c09cbe1d681a4c1735166d3",
+          "sourceBytes": 2641403,
+          "observedDurationMs": 10000,
+          "observedWidth": 1280,
+          "observedHeight": 720,
+          "framesProcessed": 120,
+          "maskWidth": 512,
+          "maskHeight": 288,
+          "confidenceMaskCount": 1,
+          "pipelineRuntimeMs": 85824,
+          "runtimeXRealtime": 8.5824,
+          "throughputFramesPerSecond": 1.3982102908277405,
+          "inferenceLatencyMs": {
+            "median": 102.993408,
+            "p95": 131.546631,
+            "max": 145.468913
+          },
+          "decodeLatencyMs": {
+            "median": 455.429891,
+            "p95": 614.587403,
+            "max": 680.786337
+          },
+          "peakPssBytes": 267940864,
+          "quality": {
+            "foregroundCoverageMean": 0.006553423846209489,
+            "foregroundCoverageMin": 0,
+            "foregroundCoverageMax": 0.029344346788194444,
+            "nonEmptyFrameRatio": 0.9416666666666667,
+            "temporalMaskIouMean": 0.5324468973847162,
+            "temporalMaskIouP05": 0,
+            "edgePumpingMean": 0.33116496155823627,
+            "edgePumpingP95": 1,
+            "areaPumpingMean": 0.39179353968470954,
+            "areaPumpingP95": 1,
+            "foregroundCoveragePass": true,
+            "nonEmptyFramesPass": false,
+            "temporalStabilityPass": false,
+            "normalPlaybackNoObviousEdgePumping": false,
+            "areaStabilityPass": false,
+            "qualityPass": false
+          },
+          "evidenceFileName": "video-segmentation-mask-two_people_crossing_occluding-512-12fps.png"
+        },
+        {
+          "id": "fast_motion",
+          "status": "COMPLETED",
+          "sourceSha256": "f4ff899061b78f5fb204daf68ffe25289d1eba84528ed424e83255995d8b0f67",
+          "sourceBytes": 3421846,
+          "observedDurationMs": 10000,
+          "observedWidth": 1280,
+          "observedHeight": 720,
+          "framesProcessed": 120,
+          "maskWidth": 512,
+          "maskHeight": 288,
+          "confidenceMaskCount": 1,
+          "pipelineRuntimeMs": 80528,
+          "runtimeXRealtime": 8.0528,
+          "throughputFramesPerSecond": 1.4901649115835487,
+          "inferenceLatencyMs": {
+            "median": 94.458862,
+            "p95": 127.556804,
+            "max": 186.457601
+          },
+          "decodeLatencyMs": {
+            "median": 418.049846,
+            "p95": 634.859579,
+            "max": 708.62443
+          },
+          "peakPssBytes": 268441600,
+          "quality": {
+            "foregroundCoverageMean": 0.018761076750578694,
+            "foregroundCoverageMin": 0,
+            "foregroundCoverageMax": 0.04709201388888889,
+            "nonEmptyFrameRatio": 0.9916666666666667,
+            "temporalMaskIouMean": 0.6104694073583866,
+            "temporalMaskIouP05": 0.0017857142857142857,
+            "edgePumpingMean": 0.24127106654834585,
+            "edgePumpingP95": 0.7045454545454546,
+            "areaPumpingMean": 0.2798012830335632,
+            "areaPumpingP95": 0.8888888888888888,
+            "foregroundCoveragePass": true,
+            "nonEmptyFramesPass": true,
+            "temporalStabilityPass": true,
+            "normalPlaybackNoObviousEdgePumping": false,
+            "areaStabilityPass": false,
+            "qualityPass": false
+          },
+          "evidenceFileName": "video-segmentation-mask-fast_motion-512-12fps.png"
+        }
+      ],
+      "accepted": false
+    },
+    {
+      "workingSize": 512,
+      "workingFrameWidth": 512,
+      "workingFrameHeight": 288,
+      "maskFps": 15,
+      "status": "COMPLETED",
+      "qualityStatus": "FAIL",
+      "worstPipelineRuntimeMs": 110761,
+      "worstRuntimeXRealtime": 11.0761,
+      "peakPssBytes": 277078016,
+      "memoryCeilingBytes": 268435456,
+      "underMemoryCeiling": false,
+      "withinThreeTimesRealtime": false,
+      "fixtures": [
+        {
+          "id": "one_person",
+          "status": "COMPLETED",
+          "sourceSha256": "4cae38ceb3c6ff8faab4026b5ff3cb8907ca381e4b44bec47815471e6446453f",
+          "sourceBytes": 899703,
+          "observedDurationMs": 10000,
+          "observedWidth": 1280,
+          "observedHeight": 720,
+          "framesProcessed": 150,
+          "maskWidth": 512,
+          "maskHeight": 288,
+          "confidenceMaskCount": 1,
+          "pipelineRuntimeMs": 92443,
+          "runtimeXRealtime": 9.2443,
+          "throughputFramesPerSecond": 1.6226215073072054,
+          "inferenceLatencyMs": {
+            "median": 91.984335,
+            "p95": 122.006999,
+            "max": 168.644572
+          },
+          "decodeLatencyMs": {
+            "median": 394.263713,
+            "p95": 551.102621,
+            "max": 680.775106
+          },
+          "peakPssBytes": 277078016,
+          "quality": {
+            "foregroundCoverageMean": 0.003580186631944444,
+            "foregroundCoverageMin": 0,
+            "foregroundCoverageMax": 0.032328287760416664,
+            "nonEmptyFrameRatio": 0.4866666666666667,
+            "temporalMaskIouMean": 0.7765248617159786,
+            "temporalMaskIouP05": 0,
+            "edgePumpingMean": 0.1801191840527952,
+            "edgePumpingP95": 1,
+            "areaPumpingMean": 0.2070381201109068,
+            "areaPumpingP95": 1,
+            "foregroundCoveragePass": true,
+            "nonEmptyFramesPass": false,
+            "temporalStabilityPass": true,
+            "normalPlaybackNoObviousEdgePumping": false,
+            "areaStabilityPass": false,
+            "qualityPass": false
+          },
+          "evidenceFileName": "video-segmentation-mask-one_person-512-15fps.png"
+        },
+        {
+          "id": "two_people_crossing_occluding",
+          "status": "COMPLETED",
+          "sourceSha256": "12c6173e83dc4ede1b4c016b16612df7b16932243c09cbe1d681a4c1735166d3",
+          "sourceBytes": 2641403,
+          "observedDurationMs": 10000,
+          "observedWidth": 1280,
+          "observedHeight": 720,
+          "framesProcessed": 150,
+          "maskWidth": 512,
+          "maskHeight": 288,
+          "confidenceMaskCount": 1,
+          "pipelineRuntimeMs": 101022,
+          "runtimeXRealtime": 10.1022,
+          "throughputFramesPerSecond": 1.4848250876046802,
+          "inferenceLatencyMs": {
+            "median": 99.342163,
+            "p95": 123.0955,
+            "max": 190.430542
+          },
+          "decodeLatencyMs": {
+            "median": 427.202556,
+            "p95": 596.929281,
+            "max": 632.915976
+          },
+          "peakPssBytes": 266285056,
+          "quality": {
+            "foregroundCoverageMean": 0.0065020978009259255,
+            "foregroundCoverageMin": 0,
+            "foregroundCoverageMax": 0.033162434895833336,
+            "nonEmptyFrameRatio": 0.94,
+            "temporalMaskIouMean": 0.5707509563019671,
+            "temporalMaskIouP05": 0,
+            "edgePumpingMean": 0.2948335138749433,
+            "edgePumpingP95": 1,
+            "areaPumpingMean": 0.36725435934432604,
+            "areaPumpingP95": 1,
+            "foregroundCoveragePass": true,
+            "nonEmptyFramesPass": false,
+            "temporalStabilityPass": true,
+            "normalPlaybackNoObviousEdgePumping": false,
+            "areaStabilityPass": false,
+            "qualityPass": false
+          },
+          "evidenceFileName": "video-segmentation-mask-two_people_crossing_occluding-512-15fps.png"
+        },
+        {
+          "id": "fast_motion",
+          "status": "COMPLETED",
+          "sourceSha256": "f4ff899061b78f5fb204daf68ffe25289d1eba84528ed424e83255995d8b0f67",
+          "sourceBytes": 3421846,
+          "observedDurationMs": 10000,
+          "observedWidth": 1280,
+          "observedHeight": 720,
+          "framesProcessed": 150,
+          "maskWidth": 512,
+          "maskHeight": 288,
+          "confidenceMaskCount": 1,
+          "pipelineRuntimeMs": 110761,
+          "runtimeXRealtime": 11.0761,
+          "throughputFramesPerSecond": 1.3542672962504854,
+          "inferenceLatencyMs": {
+            "median": 104.150798,
+            "p95": 128.531291,
+            "max": 182.008545
+          },
+          "decodeLatencyMs": {
+            "median": 477.726644,
+            "p95": 670.267049,
+            "max": 724.092652
+          },
+          "peakPssBytes": 263744512,
+          "quality": {
+            "foregroundCoverageMean": 0.01886754918981481,
+            "foregroundCoverageMin": 0,
+            "foregroundCoverageMax": 0.057732476128472224,
+            "nonEmptyFrameRatio": 0.9933333333333333,
+            "temporalMaskIouMean": 0.6517730066957481,
+            "temporalMaskIouP05": 0.13864628820960698,
+            "edgePumpingMean": 0.2211187321267983,
+            "edgePumpingP95": 0.5748299319727891,
+            "areaPumpingMean": 0.2491100234295932,
+            "areaPumpingP95": 0.7704248366013072,
+            "foregroundCoveragePass": true,
+            "nonEmptyFramesPass": true,
+            "temporalStabilityPass": true,
+            "normalPlaybackNoObviousEdgePumping": false,
+            "areaStabilityPass": false,
+            "qualityPass": false
+          },
+          "evidenceFileName": "video-segmentation-mask-fast_motion-512-15fps.png"
+        }
+      ],
+      "accepted": false
+    }
+  ],
+  "maskEvidence": [
+    {
+      "fixtureId": "one_person",
+      "workingSize": 256,
+      "maskFps": 8,
+      "fileName": "video-segmentation-mask-one_person-256-8fps.png",
+      "sha256": "ef29e2a0629b2b69400bd8d4278f0142acca3a4ab7b947e80734da21031467c4",
+      "bytes": 303007,
+      "renderRuntimeMs": 6147,
+      "format": "PNG 5x2 contact sheet at source seconds 0-9",
+      "visualEncoding": "source RGB with smoothed >=0.5 mask tinted green and one-pixel mask boundary red"
+    },
+    {
+      "fixtureId": "two_people_crossing_occluding",
+      "workingSize": 256,
+      "maskFps": 8,
+      "fileName": "video-segmentation-mask-two_people_crossing_occluding-256-8fps.png",
+      "sha256": "29a1333626e8c56d81095b68b118e609661e369a3a8f7750dc6c8949ed7bfc3e",
+      "bytes": 643391,
+      "renderRuntimeMs": 6243,
+      "format": "PNG 5x2 contact sheet at source seconds 0-9",
+      "visualEncoding": "source RGB with smoothed >=0.5 mask tinted green and one-pixel mask boundary red"
+    },
+    {
+      "fixtureId": "fast_motion",
+      "workingSize": 256,
+      "maskFps": 8,
+      "fileName": "video-segmentation-mask-fast_motion-256-8fps.png",
+      "sha256": "f35c53f3267cf4985234570ad12a2dbe729012d7f44ff78332f631841f2bc788",
+      "bytes": 650880,
+      "renderRuntimeMs": 6339,
+      "format": "PNG 5x2 contact sheet at source seconds 0-9",
+      "visualEncoding": "source RGB with smoothed >=0.5 mask tinted green and one-pixel mask boundary red"
+    },
+    {
+      "fixtureId": "one_person",
+      "workingSize": 256,
+      "maskFps": 12,
+      "fileName": "video-segmentation-mask-one_person-256-12fps.png",
+      "sha256": "ef29e2a0629b2b69400bd8d4278f0142acca3a4ab7b947e80734da21031467c4",
+      "bytes": 303007,
+      "renderRuntimeMs": 4932,
+      "format": "PNG 5x2 contact sheet at source seconds 0-9",
+      "visualEncoding": "source RGB with smoothed >=0.5 mask tinted green and one-pixel mask boundary red"
+    },
+    {
+      "fixtureId": "two_people_crossing_occluding",
+      "workingSize": 256,
+      "maskFps": 12,
+      "fileName": "video-segmentation-mask-two_people_crossing_occluding-256-12fps.png",
+      "sha256": "29a1333626e8c56d81095b68b118e609661e369a3a8f7750dc6c8949ed7bfc3e",
+      "bytes": 643391,
+      "renderRuntimeMs": 3542,
+      "format": "PNG 5x2 contact sheet at source seconds 0-9",
+      "visualEncoding": "source RGB with smoothed >=0.5 mask tinted green and one-pixel mask boundary red"
+    },
+    {
+      "fixtureId": "fast_motion",
+      "workingSize": 256,
+      "maskFps": 12,
+      "fileName": "video-segmentation-mask-fast_motion-256-12fps.png",
+      "sha256": "f35c53f3267cf4985234570ad12a2dbe729012d7f44ff78332f631841f2bc788",
+      "bytes": 650880,
+      "renderRuntimeMs": 4425,
+      "format": "PNG 5x2 contact sheet at source seconds 0-9",
+      "visualEncoding": "source RGB with smoothed >=0.5 mask tinted green and one-pixel mask boundary red"
+    },
+    {
+      "fixtureId": "one_person",
+      "workingSize": 256,
+      "maskFps": 15,
+      "fileName": "video-segmentation-mask-one_person-256-15fps.png",
+      "sha256": "ef29e2a0629b2b69400bd8d4278f0142acca3a4ab7b947e80734da21031467c4",
+      "bytes": 303007,
+      "renderRuntimeMs": 3743,
+      "format": "PNG 5x2 contact sheet at source seconds 0-9",
+      "visualEncoding": "source RGB with smoothed >=0.5 mask tinted green and one-pixel mask boundary red"
+    },
+    {
+      "fixtureId": "two_people_crossing_occluding",
+      "workingSize": 256,
+      "maskFps": 15,
+      "fileName": "video-segmentation-mask-two_people_crossing_occluding-256-15fps.png",
+      "sha256": "29a1333626e8c56d81095b68b118e609661e369a3a8f7750dc6c8949ed7bfc3e",
+      "bytes": 643391,
+      "renderRuntimeMs": 3346,
+      "format": "PNG 5x2 contact sheet at source seconds 0-9",
+      "visualEncoding": "source RGB with smoothed >=0.5 mask tinted green and one-pixel mask boundary red"
+    },
+    {
+      "fixtureId": "fast_motion",
+      "workingSize": 256,
+      "maskFps": 15,
+      "fileName": "video-segmentation-mask-fast_motion-256-15fps.png",
+      "sha256": "f35c53f3267cf4985234570ad12a2dbe729012d7f44ff78332f631841f2bc788",
+      "bytes": 650880,
+      "renderRuntimeMs": 4565,
+      "format": "PNG 5x2 contact sheet at source seconds 0-9",
+      "visualEncoding": "source RGB with smoothed >=0.5 mask tinted green and one-pixel mask boundary red"
+    },
+    {
+      "fixtureId": "one_person",
+      "workingSize": 384,
+      "maskFps": 8,
+      "fileName": "video-segmentation-mask-one_person-384-8fps.png",
+      "sha256": "909473adfd51b675a742d0872022a7cd2b47887fa051637f63f54322b2d84c94",
+      "bytes": 612416,
+      "renderRuntimeMs": 4893,
+      "format": "PNG 5x2 contact sheet at source seconds 0-9",
+      "visualEncoding": "source RGB with smoothed >=0.5 mask tinted green and one-pixel mask boundary red"
+    },
+    {
+      "fixtureId": "two_people_crossing_occluding",
+      "workingSize": 384,
+      "maskFps": 8,
+      "fileName": "video-segmentation-mask-two_people_crossing_occluding-384-8fps.png",
+      "sha256": "ed8cfe0c6383d234ac1c97fd8bfec5fde53e631d8db1f9f225e49f6c479829e0",
+      "bytes": 1320410,
+      "renderRuntimeMs": 5058,
+      "format": "PNG 5x2 contact sheet at source seconds 0-9",
+      "visualEncoding": "source RGB with smoothed >=0.5 mask tinted green and one-pixel mask boundary red"
+    },
+    {
+      "fixtureId": "fast_motion",
+      "workingSize": 384,
+      "maskFps": 8,
+      "fileName": "video-segmentation-mask-fast_motion-384-8fps.png",
+      "sha256": "f65f0047270249244c8b49242df16e4f9fddfd71dd37012ccb25c19cde6d1bb5",
+      "bytes": 1333537,
+      "renderRuntimeMs": 3844,
+      "format": "PNG 5x2 contact sheet at source seconds 0-9",
+      "visualEncoding": "source RGB with smoothed >=0.5 mask tinted green and one-pixel mask boundary red"
+    },
+    {
+      "fixtureId": "one_person",
+      "workingSize": 384,
+      "maskFps": 12,
+      "fileName": "video-segmentation-mask-one_person-384-12fps.png",
+      "sha256": "909473adfd51b675a742d0872022a7cd2b47887fa051637f63f54322b2d84c94",
+      "bytes": 612416,
+      "renderRuntimeMs": 6518,
+      "format": "PNG 5x2 contact sheet at source seconds 0-9",
+      "visualEncoding": "source RGB with smoothed >=0.5 mask tinted green and one-pixel mask boundary red"
+    },
+    {
+      "fixtureId": "two_people_crossing_occluding",
+      "workingSize": 384,
+      "maskFps": 12,
+      "fileName": "video-segmentation-mask-two_people_crossing_occluding-384-12fps.png",
+      "sha256": "ed8cfe0c6383d234ac1c97fd8bfec5fde53e631d8db1f9f225e49f6c479829e0",
+      "bytes": 1320410,
+      "renderRuntimeMs": 5945,
+      "format": "PNG 5x2 contact sheet at source seconds 0-9",
+      "visualEncoding": "source RGB with smoothed >=0.5 mask tinted green and one-pixel mask boundary red"
+    },
+    {
+      "fixtureId": "fast_motion",
+      "workingSize": 384,
+      "maskFps": 12,
+      "fileName": "video-segmentation-mask-fast_motion-384-12fps.png",
+      "sha256": "f65f0047270249244c8b49242df16e4f9fddfd71dd37012ccb25c19cde6d1bb5",
+      "bytes": 1333537,
+      "renderRuntimeMs": 6710,
+      "format": "PNG 5x2 contact sheet at source seconds 0-9",
+      "visualEncoding": "source RGB with smoothed >=0.5 mask tinted green and one-pixel mask boundary red"
+    },
+    {
+      "fixtureId": "one_person",
+      "workingSize": 384,
+      "maskFps": 15,
+      "fileName": "video-segmentation-mask-one_person-384-15fps.png",
+      "sha256": "909473adfd51b675a742d0872022a7cd2b47887fa051637f63f54322b2d84c94",
+      "bytes": 612416,
+      "renderRuntimeMs": 6526,
+      "format": "PNG 5x2 contact sheet at source seconds 0-9",
+      "visualEncoding": "source RGB with smoothed >=0.5 mask tinted green and one-pixel mask boundary red"
+    },
+    {
+      "fixtureId": "two_people_crossing_occluding",
+      "workingSize": 384,
+      "maskFps": 15,
+      "fileName": "video-segmentation-mask-two_people_crossing_occluding-384-15fps.png",
+      "sha256": "ed8cfe0c6383d234ac1c97fd8bfec5fde53e631d8db1f9f225e49f6c479829e0",
+      "bytes": 1320410,
+      "renderRuntimeMs": 6622,
+      "format": "PNG 5x2 contact sheet at source seconds 0-9",
+      "visualEncoding": "source RGB with smoothed >=0.5 mask tinted green and one-pixel mask boundary red"
+    },
+    {
+      "fixtureId": "fast_motion",
+      "workingSize": 384,
+      "maskFps": 15,
+      "fileName": "video-segmentation-mask-fast_motion-384-15fps.png",
+      "sha256": "f65f0047270249244c8b49242df16e4f9fddfd71dd37012ccb25c19cde6d1bb5",
+      "bytes": 1333537,
+      "renderRuntimeMs": 6399,
+      "format": "PNG 5x2 contact sheet at source seconds 0-9",
+      "visualEncoding": "source RGB with smoothed >=0.5 mask tinted green and one-pixel mask boundary red"
+    },
+    {
+      "fixtureId": "one_person",
+      "workingSize": 512,
+      "maskFps": 8,
+      "fileName": "video-segmentation-mask-one_person-512-8fps.png",
+      "sha256": "af754e50b3fcd380c15c829115ed9f1366d2fe5d87debb318fa442c5112aab80",
+      "bytes": 979613,
+      "renderRuntimeMs": 5696,
+      "format": "PNG 5x2 contact sheet at source seconds 0-9",
+      "visualEncoding": "source RGB with smoothed >=0.5 mask tinted green and one-pixel mask boundary red"
+    },
+    {
+      "fixtureId": "two_people_crossing_occluding",
+      "workingSize": 512,
+      "maskFps": 8,
+      "fileName": "video-segmentation-mask-two_people_crossing_occluding-512-8fps.png",
+      "sha256": "db63834fb177fab7dc7835101271ab7cdf57b7e94243961a2b5bf6dd66986687",
+      "bytes": 2174378,
+      "renderRuntimeMs": 5134,
+      "format": "PNG 5x2 contact sheet at source seconds 0-9",
+      "visualEncoding": "source RGB with smoothed >=0.5 mask tinted green and one-pixel mask boundary red"
+    },
+    {
+      "fixtureId": "fast_motion",
+      "workingSize": 512,
+      "maskFps": 8,
+      "fileName": "video-segmentation-mask-fast_motion-512-8fps.png",
+      "sha256": "56fb49099ebb4634cfeb2f0df10b2f0a9693c535e7c3657a8432e34fd693ae42",
+      "bytes": 2199334,
+      "renderRuntimeMs": 4588,
+      "format": "PNG 5x2 contact sheet at source seconds 0-9",
+      "visualEncoding": "source RGB with smoothed >=0.5 mask tinted green and one-pixel mask boundary red"
+    },
+    {
+      "fixtureId": "one_person",
+      "workingSize": 512,
+      "maskFps": 12,
+      "fileName": "video-segmentation-mask-one_person-512-12fps.png",
+      "sha256": "af754e50b3fcd380c15c829115ed9f1366d2fe5d87debb318fa442c5112aab80",
+      "bytes": 979613,
+      "renderRuntimeMs": 4946,
+      "format": "PNG 5x2 contact sheet at source seconds 0-9",
+      "visualEncoding": "source RGB with smoothed >=0.5 mask tinted green and one-pixel mask boundary red"
+    },
+    {
+      "fixtureId": "two_people_crossing_occluding",
+      "workingSize": 512,
+      "maskFps": 12,
+      "fileName": "video-segmentation-mask-two_people_crossing_occluding-512-12fps.png",
+      "sha256": "db63834fb177fab7dc7835101271ab7cdf57b7e94243961a2b5bf6dd66986687",
+      "bytes": 2174378,
+      "renderRuntimeMs": 7076,
+      "format": "PNG 5x2 contact sheet at source seconds 0-9",
+      "visualEncoding": "source RGB with smoothed >=0.5 mask tinted green and one-pixel mask boundary red"
+    },
+    {
+      "fixtureId": "fast_motion",
+      "workingSize": 512,
+      "maskFps": 12,
+      "fileName": "video-segmentation-mask-fast_motion-512-12fps.png",
+      "sha256": "56fb49099ebb4634cfeb2f0df10b2f0a9693c535e7c3657a8432e34fd693ae42",
+      "bytes": 2199334,
+      "renderRuntimeMs": 3897,
+      "format": "PNG 5x2 contact sheet at source seconds 0-9",
+      "visualEncoding": "source RGB with smoothed >=0.5 mask tinted green and one-pixel mask boundary red"
+    },
+    {
+      "fixtureId": "one_person",
+      "workingSize": 512,
+      "maskFps": 15,
+      "fileName": "video-segmentation-mask-one_person-512-15fps.png",
+      "sha256": "af754e50b3fcd380c15c829115ed9f1366d2fe5d87debb318fa442c5112aab80",
+      "bytes": 979613,
+      "renderRuntimeMs": 5924,
+      "format": "PNG 5x2 contact sheet at source seconds 0-9",
+      "visualEncoding": "source RGB with smoothed >=0.5 mask tinted green and one-pixel mask boundary red"
+    },
+    {
+      "fixtureId": "two_people_crossing_occluding",
+      "workingSize": 512,
+      "maskFps": 15,
+      "fileName": "video-segmentation-mask-two_people_crossing_occluding-512-15fps.png",
+      "sha256": "db63834fb177fab7dc7835101271ab7cdf57b7e94243961a2b5bf6dd66986687",
+      "bytes": 2174378,
+      "renderRuntimeMs": 5937,
+      "format": "PNG 5x2 contact sheet at source seconds 0-9",
+      "visualEncoding": "source RGB with smoothed >=0.5 mask tinted green and one-pixel mask boundary red"
+    },
+    {
+      "fixtureId": "fast_motion",
+      "workingSize": 512,
+      "maskFps": 15,
+      "fileName": "video-segmentation-mask-fast_motion-512-15fps.png",
+      "sha256": "56fb49099ebb4634cfeb2f0df10b2f0a9693c535e7c3657a8432e34fd693ae42",
+      "bytes": 2199334,
+      "renderRuntimeMs": 3063,
+      "format": "PNG 5x2 contact sheet at source seconds 0-9",
+      "visualEncoding": "source RGB with smoothed >=0.5 mask tinted green and one-pixel mask boundary red"
+    }
+  ],
+  "cancellationCleanup": {
+    "status": "PASS",
+    "activeBeforeCancel": true,
+    "cancelIssued": true,
+    "framesProcessedBeforeCancel": 1,
+    "cancelLatencyMs": 72,
+    "workerStopped": true,
+    "segmenterClosed": true,
+    "retrieverClosed": true,
+    "partialEvidenceDeleted": true,
+    "followUpInferenceSucceeded": true,
+    "leftoverCancellationFiles": 0,
+    "workerError": null
+  },
+  "tracking": {
+    "decision": "REJECTED_OMITTED",
+    "actualOnDeviceImplementationAvailable": false,
+    "candidateClassInspection": [
+      {
+        "className": "com.google.mediapipe.tasks.vision.objecttracker.ObjectTracker",
+        "present": false
+      },
+      {
+        "className": "com.google.mediapipe.tasks.vision.tracker.ObjectTracker",
+        "present": false
+      }
+    ],
+    "imageSegmenterResultMethods": [
+      "$r8$lambda$S27OAwtT4bN8nXIj4qcf7Wqessw",
+      "categoryMask",
+      "confidenceMasks",
+      "create",
+      "equals",
+      "getClass",
+      "hashCode",
+      "notify",
+      "notifyAll",
+      "qualityScores",
+      "timestampMs",
+      "toString",
+      "wait"
+    ],
+    "combinedMaskHasSubjectIdentity": false,
+    "scenarios": [
+      {
+        "id": "crossing",
+        "fixture": "two_people_crossing_occluding",
+        "status": "NOT_RUN_NO_IMPLEMENTATION"
+      },
+      {
+        "id": "occlusion",
+        "fixture": "two_people_crossing_occluding",
+        "status": "NOT_RUN_NO_IMPLEMENTATION"
+      },
+      {
+        "id": "cut",
+        "fixture": "synthetic cut between fixture sources",
+        "status": "NOT_RUN_NO_IMPLEMENTATION"
+      }
+    ],
+    "subjectJumpCount": null,
+    "reason": "Pinned on-device Tasks Vision exposes only a combined person confidence mask and no subject-identity tracker; crossings, occlusions, and cuts cannot be tested without inventing a stub."
+  },
+  "capabilities": {
+    "videoIsolation": {
+      "status": "REJECTED",
+      "reason": "No observed configuration passes all three fixture quality thresholds, <=3x realtime, measured memory ceiling, and cancellation cleanup; no production stub is permitted.",
+      "selectedSettings": null,
+      "stillImageIsolation": "OUT_OF_SCOPE_LATER"
+    },
+    "autoTrack": {
+      "status": "REJECTED_OMITTED",
+      "reason": "Pinned on-device Tasks Vision exposes only a combined person confidence mask and no subject-identity tracker; crossings, occlusions, and cuts cannot be tested without inventing a stub.",
+      "manualSparseKeyframes": "PRODUCT_COMPLETE_FALLBACK"
+    }
+  },
+  "criteria": {
+    "provenance": {
+      "status": "PASS",
+      "criterion": "Pinned model\/artifact\/fixture provenance and SHA-256 digests match packaged assets"
+    },
+    "matrixComplete": {
+      "status": "PASS",
+      "criterion": "All 256\/384\/512 x 8\/12\/15 observations completed"
+    },
+    "nativePageAlignment": {
+      "status": "PASS",
+      "criterion": "Packaged arm64 MediaPipe ELF PT_LOAD alignments support 16 KiB pages"
+    },
+    "cancellationCleanup": {
+      "status": "PASS",
+      "criterion": "Cancellation stops work, closes MediaPipe\/decoder resources, removes partial evidence, and permits follow-up inference"
+    },
+    "videoIsolation": {
+      "status": "FAIL",
+      "criterion": "A selected 10 s 720p configuration is <=3x realtime, below the observed memory ceiling, and quality-acceptable on every fixture"
+    }
+  }
+}
