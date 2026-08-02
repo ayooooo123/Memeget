@@ -52,6 +52,7 @@ export interface LayerHandlePoints {
   rotate: ViewPoint;
 }
 
+export type LayerHandleTouchKind = 'resize' | 'rotate';
 export type TransformAccessibilityAction = 'increment' | 'decrement' | 'longpress' | 'escape';
 export type TransformHandleKind = 'resize' | 'rotate';
 
@@ -64,6 +65,14 @@ export interface CanvasLayerDescriptor {
 
 const MIN_SCALE = 0.01;
 const MAX_SCALE = 16;
+const TRANSFORM_HANDLE_SIZE = 44;
+const TRANSFORM_HANDLE_HALF = TRANSFORM_HANDLE_SIZE / 2;
+const ROTATE_HANDLE_TOP = -44;
+
+function layerViewSize(layerWidth: number, mediaRect: ViewRect): { width: number; height: number } {
+  const width = Math.max(TRANSFORM_HANDLE_SIZE, mediaRect.width * Math.max(0.04, layerWidth));
+  return { width, height: width };
+}
 const EPSILON = 1e-6;
 
 function finite(value: number): boolean {
@@ -218,8 +227,9 @@ export function layerHandlePoints(
   mediaRect: ViewRect
 ): LayerHandlePoints {
   const center = normalizedPointToViewPoint(keyframe.center, mediaRect);
-  const width = Math.max(44, mediaRect.width * Math.max(0.04, layerWidth) * clampScale(keyframe.scale));
-  const height = width;
+  const size = layerViewSize(layerWidth, mediaRect);
+  const width = size.width * clampScale(keyframe.scale);
+  const height = size.height * clampScale(keyframe.scale);
   const radians = keyframe.rotationDegrees * Math.PI / 180;
   const cos = Math.cos(radians);
   const sin = Math.sin(radians);
@@ -230,8 +240,43 @@ export function layerHandlePoints(
   return {
     center,
     resize: rotate(width / 2, height / 2),
-    rotate: rotate(0, -height / 2 - 28),
+    rotate: layerLocalPointToCanvasPoint(keyframe, layerWidth, mediaRect, { x: size.width / 2, y: ROTATE_HANDLE_TOP + TRANSFORM_HANDLE_HALF }),
   };
+}
+
+export function layerLocalPointToCanvasPoint(
+  keyframe: TransformKeyframe,
+  layerWidth: number,
+  mediaRect: ViewRect,
+  localPoint: ViewPoint
+): ViewPoint {
+  const center = normalizedPointToViewPoint(keyframe.center, mediaRect);
+  const size = layerViewSize(layerWidth, mediaRect);
+  const width = size.width * clampScale(keyframe.scale);
+  const height = size.height * clampScale(keyframe.scale);
+  const x = localPoint.x * clampScale(keyframe.scale) - width / 2;
+  const y = localPoint.y * clampScale(keyframe.scale) - height / 2;
+  const radians = keyframe.rotationDegrees * Math.PI / 180;
+  const cos = Math.cos(radians);
+  const sin = Math.sin(radians);
+  return {
+    x: roundCanvas(center.x + x * cos - y * sin),
+    y: roundCanvas(center.y + x * sin + y * cos),
+  };
+}
+
+export function layerHandleTouchInsideMedia(
+  keyframe: TransformKeyframe,
+  layerWidth: number,
+  mediaRect: ViewRect,
+  handle: LayerHandleTouchKind,
+  handleLocalPoint: ViewPoint
+): boolean {
+  const size = layerViewSize(layerWidth, mediaRect);
+  const localPoint = handle === 'resize'
+    ? { x: size.width - TRANSFORM_HANDLE_HALF + handleLocalPoint.x, y: size.height - TRANSFORM_HANDLE_HALF + handleLocalPoint.y }
+    : { x: size.width / 2 - TRANSFORM_HANDLE_HALF + handleLocalPoint.x, y: ROTATE_HANDLE_TOP + handleLocalPoint.y };
+  return gesturePointInsideMedia(layerLocalPointToCanvasPoint(keyframe, layerWidth, mediaRect, localPoint), mediaRect);
 }
 
 export function transformAccessibilityAction(

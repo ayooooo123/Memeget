@@ -734,6 +734,27 @@ describe('MemeEditAutosaveController', () => {
     });
   });
 
+  test('discard failure preserves pending snapshot and timer for retry flush', async () => {
+    const io = new MemoryDraftIo();
+    const store = new MemeEditDraftStore(io, { now: () => 20_000 });
+    const timers = new FakeTimers();
+    const controller = new MemeEditAutosaveController(store, identity, { timers });
+    const originalRemove = io.remove.bind(io);
+    io.remove = async (path) => {
+      throw new Error(`remove failed: ${path}`);
+    };
+    controller.schedule(project('pending-latest'));
+
+    await expect(controller.discard()).rejects.toThrow('remove failed');
+    io.remove = originalRemove;
+    await controller.flush();
+
+    await expect(store.restore(identity)).resolves.toMatchObject({
+      status: 'restored',
+      project: { background: { color: 'pending-latest' } },
+    });
+  });
+
   test('teardown helper flushes pending debounce before releasing source assets', async () => {
     const io = new MemoryDraftIo();
     const store = new MemeEditDraftStore(io, { now: () => 20_000 });
@@ -748,6 +769,30 @@ describe('MemeEditAutosaveController', () => {
     await expect(store.restore(identity)).resolves.toMatchObject({
       status: 'restored',
       project: { background: { color: 'teardown-save' } },
+    });
+  });
+
+  test('teardown helper keeps source release retryable when autosave flush fails', async () => {
+    const io = new MemoryDraftIo();
+    const store = new MemeEditDraftStore(io, { now: () => 20_000 });
+    const timers = new FakeTimers();
+    const errors: unknown[] = [];
+    const controller = new MemeEditAutosaveController(store, identity, { timers });
+    const release = jest.fn(async () => {});
+    io.writeError = new Error('flush failed');
+    controller.schedule(project('flush-retry'));
+
+    await flushAutosaveBeforeSourceRelease(controller, release, (error) => errors.push(error));
+
+    expect(release).not.toHaveBeenCalled();
+    expect(errors).toHaveLength(1);
+    io.writeError = null;
+    await flushAutosaveBeforeSourceRelease(controller, release, (error) => errors.push(error));
+
+    expect(release).toHaveBeenCalledTimes(1);
+    await expect(store.restore(identity)).resolves.toMatchObject({
+      status: 'restored',
+      project: { background: { color: 'flush-retry' } },
     });
   });
 });

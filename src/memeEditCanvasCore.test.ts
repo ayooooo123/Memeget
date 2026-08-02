@@ -6,6 +6,7 @@ import {
   gestureMoveShouldClaim,
   gesturePointInsideMedia,
   layerHandlePoints,
+  layerHandleTouchInsideMedia,
   nextDuplicateLayerId,
   normalizedPointToViewPoint,
   resizeKeyframeFromHandle,
@@ -144,7 +145,7 @@ describe('transform gesture math', () => {
     expect(handles.center).toEqual({ x: 120, y: 60 });
     expect(handles.resize.x).toBeCloseTo(98);
     expect(handles.resize.y).toBeCloseTo(82);
-    expect(handles.rotate.x).toBeCloseTo(170);
+    expect(handles.rotate.x).toBeCloseTo(164);
     expect(handles.rotate.y).toBeCloseTo(60);
     const resized = resizeKeyframeFromHandle(kf({ rotationDegrees: 90 }), handles.center, handles.resize, {
       x: handles.resize.x - 10,
@@ -153,6 +154,24 @@ describe('transform gesture math', () => {
     const flipped = layerHandlePoints(kf({ rotationDegrees: 180, scale: 1, center: { x: 0.01, y: 0.5 } }), 0.2, rect);
     expect(gesturePointInsideMedia(flipped.resize, rect)).toBe(false);
     expect(resized.scale).toBeGreaterThan(1);
+  });
+
+  test('gates the transformed local handle touch point, not just the handle center', () => {
+    const rightInside = kf({ center: { x: 0.885, y: 0.5 } });
+    expect(layerHandlePoints(rightInside, 0.2, rect).resize.x).toBeCloseTo(219);
+    expect(layerHandleTouchInsideMedia(rightInside, 0.2, rect, 'resize', { x: 37, y: 22 })).toBe(false);
+
+    const centerOutside = kf({ center: { x: 0.895, y: 0.5 } });
+    expect(layerHandlePoints(centerOutside, 0.2, rect).resize.x).toBeCloseTo(221);
+    expect(layerHandleTouchInsideMedia(centerOutside, 0.2, rect, 'resize', { x: 6, y: 22 })).toBe(true);
+
+    const topInside = kf({ center: { x: 0.5, y: 0.45 } });
+    expect(layerHandlePoints(topInside, 0.2, rect).rotate.y).toBeCloseTo(11);
+    expect(layerHandleTouchInsideMedia(topInside, 0.2, rect, 'rotate', { x: 22, y: 7 })).toBe(false);
+
+    const centerOutsideTop = kf({ center: { x: 0.5, y: 0.42 } });
+    expect(layerHandlePoints(centerOutsideTop, 0.2, rect).rotate.y).toBeCloseTo(8);
+    expect(layerHandleTouchInsideMedia(centerOutsideTop, 0.2, rect, 'rotate', { x: 22, y: 37 })).toBe(true);
   });
 
   test('accessibility transform actions commit bounded keyframe changes', () => {
