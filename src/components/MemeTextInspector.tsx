@@ -38,7 +38,7 @@ interface MemeTextInspectorProps {
   onDuplicateLayer: (id: string) => void;
   onDeleteLayer: (id: string) => void;
   onMoveLayer: (id: string, toIndex: number) => void;
-  onRegisterPendingTextFlush?: (flush: () => void) => () => void;
+  onRegisterPendingTextFlush?: (flush: () => MemeEditProject | null) => () => void;
   onBeginTextTransaction?: () => void;
   onCommitTextTransaction?: () => void;
 }
@@ -213,9 +213,17 @@ export const MemeTextInspector = React.memo(function MemeTextInspector({
       return null;
     }
     const next = composePendingTextLayer(current, pending);
-    if (next !== current) onApplyAction({ type: 'update-layer', layer: next });
+    if (next === current) {
+      if (commitTransaction) onCommitTextTransaction?.();
+      return null;
+    }
+    const nextProject = {
+      ...projectRef.current,
+      layers: projectRef.current.layers.map((candidate) => candidate.id === next.id ? next : candidate),
+    };
+    onApplyAction({ type: 'update-layer', layer: next });
     if (commitTransaction) onCommitTextTransaction?.();
-    return next;
+    return nextProject;
   }, [onApplyAction, onCommitTextTransaction]);
 
   const layerWithPendingText = useCallback((current: TextLayer): { layer: TextLayer; consumed: boolean } => {
@@ -243,7 +251,7 @@ export const MemeTextInspector = React.memo(function MemeTextInspector({
   }, [layer?.id, layer?.text]);
 
   useEffect(() => () => { flushText(true); }, [flushText]);
-  useEffect(() => onRegisterPendingTextFlush?.(() => { flushText(true); }), [flushText, onRegisterPendingTextFlush]);
+  useEffect(() => onRegisterPendingTextFlush?.(() => flushText(true)), [flushText, onRegisterPendingTextFlush]);
 
   const queueText = useCallback((text: string) => {
     if (!layer || disabled) return;

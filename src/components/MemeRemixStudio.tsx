@@ -164,16 +164,30 @@ export function MemeRemixStudio({
   const autosaveRef = useRef<MemeEditAutosaveController | null>(null);
   const sourceControllerRef = useRef<MemeEditSourceSessionController | null>(null);
   const closedRef = useRef(true);
-  const pendingTextFlushRef = useRef<(() => void) | null>(null);
+  const pendingTextFlushRef = useRef<(() => MemeEditProject | null) | null>(null);
+  const pendingTextProjectRef = useRef<MemeEditProject | null>(null);
 
   const ready = state.kind === 'ready' ? state : null;
   const project = ready?.history.present ?? null;
 
-  const registerPendingTextFlush = useCallback((flush: () => void) => {
+  const registerPendingTextFlush = useCallback((flush: () => MemeEditProject | null) => {
     pendingTextFlushRef.current = flush;
     return () => {
       if (pendingTextFlushRef.current === flush) pendingTextFlushRef.current = null;
     };
+  }, []);
+  const flushPendingTextSnapshot = useCallback(() => {
+    const snapshot = pendingTextFlushRef.current?.() ?? null;
+    if (snapshot) pendingTextProjectRef.current = snapshot;
+    return snapshot;
+  }, []);
+  const flushExactPendingTextAutosave = useCallback(async () => {
+    const snapshot = pendingTextProjectRef.current;
+    const autosave = autosaveRef.current;
+    if (!snapshot || !autosave) return;
+    autosave.schedule(snapshot);
+    await autosave.flush();
+    pendingTextProjectRef.current = null;
   }, []);
   const closeSessionAssets = useCallback(async () => {
     const autosave = autosaveRef.current;
@@ -195,17 +209,21 @@ export function MemeRemixStudio({
 
   useEffect(() => {
     if (!visible || !item) {
-      pendingTextFlushRef.current?.();
       closedRef.current = true;
       setCleanupPending(false);
-      setBefore(false);
+      flushPendingTextSnapshot();
       setInlineError('');
       setDiscarding(false);
       setSelectedLayerId(null);
       setState({ kind: 'closed' });
-      void closeSessionAssets().catch((error) => {
-        if (!closedRef.current) setInlineError(`Could not close edit session: ${String(error)}`);
-      });
+      void (async () => {
+        try {
+          await flushExactPendingTextAutosave();
+          await closeSessionAssets();
+        } catch (error) {
+          if (!closedRef.current) setInlineError(`Could not close edit session: ${String(error)}`);
+        }
+      })();
       return;
     }
 
@@ -285,7 +303,7 @@ export function MemeRemixStudio({
       closedRef.current = true;
       void closeSessionAssets().catch(() => {});
     };
-  }, [closeSessionAssets, draftStore, item, retryNonce, sourceIo, visible]);
+  }, [closeSessionAssets, draftStore, flushExactPendingTextAutosave, flushPendingTextSnapshot, item, retryNonce, sourceIo, visible]);
 
   useEffect(() => {
     if (!project || !autosaveRef.current) return;
@@ -354,7 +372,7 @@ export function MemeRemixStudio({
   }, [applyAction, project?.layers]);
 
   const cancel = useCallback(() => {
-    pendingTextFlushRef.current?.();
+    flushPendingTextSnapshot();
     if (discarding) return;
     if (state.kind !== 'ready') {
       closedRef.current = true;
@@ -374,16 +392,16 @@ export function MemeRemixStudio({
     }
     void (async () => {
       try {
+        await flushExactPendingTextAutosave();
         await closeSessionAssets();
         onClose();
       } catch (error) {
         setInlineError(`Could not close edit session: ${String(error)}`);
       }
     })();
-  }, [closeSessionAssets, discarding, onClose, state.kind]);
+  }, [closeSessionAssets, discarding, flushExactPendingTextAutosave, flushPendingTextSnapshot, onClose, state.kind]);
 
   const discard = useCallback(() => {
-    if (!ready || discarding) return;
     Alert.alert('Discard draft and close?', 'This removes the saved edit draft for this source. The original file is not changed.', [
       { text: 'Keep editing', style: 'cancel' },
       {

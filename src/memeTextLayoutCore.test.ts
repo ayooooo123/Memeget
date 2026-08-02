@@ -13,6 +13,7 @@ import {
   memeTextMeasureKey,
   nativeMemeTextLayoutInputFromSpec,
   compareNativeMemeTextLayoutToSpec,
+  compareNativeMemeTextLayoutResults,
   getMemeTextPresetDefaults,
   textDisplayText,
 } from './memeTextLayoutCore';
@@ -219,14 +220,23 @@ describe('serializable meme text layout contract', () => {
       maxBaselineDriftPx: 0,
     });
 
-    const driftedNative = {
+    const measuredNative = {
       ...exactNative,
-      heightPx: 3,
-      lines: [{ text: 'native line', start: 0, end: 11, widthPx: 10, topPx: 0, baselinePx: 3 }],
+      heightPx: 40,
+      lines: [{ text: 'native line', start: 0, end: 11, widthPx: 10, topPx: 0, baselinePx: 30 }],
     };
-    expect(compareNativeMemeTextLayoutToSpec(spec, driftedNative)).toMatchObject({
+    expect(compareNativeMemeTextLayoutToSpec(spec, measuredNative)).toMatchObject({
+      ok: true,
+      lineCountDrift: 0,
+    });
+
+    const driftedPreview = {
+      ...measuredNative,
+      lines: measuredNative.lines.map((line) => ({ ...line, baselinePx: line.baselinePx + 3 })),
+    };
+    expect(compareNativeMemeTextLayoutResults(measuredNative, driftedPreview, spec.transform.scale, MEME_TEXT_LAYOUT_TOLERANCE_PX)).toMatchObject({
       ok: false,
-      lineCountDrift: 1,
+      maxBaselineDriftPx: 4.199999999999999,
     });
   });
 

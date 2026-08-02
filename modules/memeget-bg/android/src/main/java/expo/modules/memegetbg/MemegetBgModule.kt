@@ -26,7 +26,21 @@ class MemegetBgModule : Module() {
   override fun definition() = ModuleDefinition {
     Name("MemegetBg")
 
-    View(MemeTextPreviewView::class) {}
+    View(MemeTextPreviewView::class) {
+      Events("onMetrics")
+      Prop("text") { view: MemeTextPreviewView, value: String -> view.setText(value) }
+      Prop("fontFamily") { view: MemeTextPreviewView, value: String -> view.setFontFamily(value) }
+      Prop("fontWeight") { view: MemeTextPreviewView, value: Int -> view.setFontWeight(value) }
+      Prop("fontSizePx") { view: MemeTextPreviewView, value: Double -> view.setFontSizePx(value.toFloat()) }
+      Prop("lineHeightPx") { view: MemeTextPreviewView, value: Double -> view.setLineHeightPx(value.toFloat()) }
+      Prop("letterSpacingEm") { view: MemeTextPreviewView, value: Double -> view.setLetterSpacingEm(value.toFloat()) }
+      Prop("widthPx") { view: MemeTextPreviewView, value: Int -> view.setWidthPx(value) }
+      Prop("align") { view: MemeTextPreviewView, value: String -> view.setAlign(value) }
+      Prop("fillColor") { view: MemeTextPreviewView, value: String -> view.setFillColor(value) }
+      Prop("strokeColor") { view: MemeTextPreviewView, value: String -> view.setStrokeColor(value) }
+      Prop("strokeWidthPx") { view: MemeTextPreviewView, value: Double -> view.setStrokeWidthPx(value.toFloat()) }
+      Prop("opacity") { view: MemeTextPreviewView, value: Double -> view.setOpacity(value.toFloat()) }
+    }
 
     // Put an actual file — in practice a video, which expo-clipboard can't
     // handle — on the system clipboard as a content:// uri. The file is staged
