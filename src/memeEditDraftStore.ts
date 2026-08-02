@@ -575,10 +575,124 @@ export class MemeEditAutosaveController {
   }
 }
 
+interface SharedPreparationEntry {
+  key: string;
+  io: MemeEditSourcePreparationIo;
+  promise: Promise<PreparedResource>;
+  references: number;
+  closing: boolean;
+  finalization: Promise<void> | null;
+}
+
+interface PreparationLocation {
+  key: string;
+  destination: string;
+  isFile: boolean;
+}
+
+// A session-owned destination is process-global even when callers construct
+// multiple controllers. Coordinate it here so no controller can remove or
+// overwrite another controller's in-flight/shared materialization.
+const SHARED_SOURCE_PREPARATIONS = new Map<string, SharedPreparationEntry>();
+
+function preparationLocation(
+  io: MemeEditSourcePreparationIo,
+  identity: MemeEditDraftIdentity
+): PreparationLocation {
+  const source = identity.source;
+  const isFile = source.uri.startsWith('file://');
+  if (isFile) {
+    return {
+      key: `unowned:${identityToken(source.uri)}`,
+      destination: source.uri,
+      isFile: true,
+    };
+  }
+  const extensionMatch = /\.([a-zA-Z0-9]{1,10})$/.exec(source.name);
+  const extension = (
+    extensionMatch?.[1] ?? (source.kind === 'video' ? 'mp4' : 'jpg')
+  ).toLowerCase();
+  const paths = draftStoragePaths(io.cacheDirectory, identity);
+  const destination =
+    `${cacheRoot(io.cacheDirectory)}${paths.ownedAssetPrefix}` +
+    `materialized_source.${extension}`;
+  return { key: destination, destination, isFile: false };
+}
+
+async function acquireSharedPreparation(
+  io: MemeEditSourcePreparationIo,
+  identity: MemeEditDraftIdentity
+): Promise<SharedPreparationEntry> {
+  const location = preparationLocation(io, identity);
+  for (;;) {
+    const existing = SHARED_SOURCE_PREPARATIONS.get(location.key);
+    if (existing) {
+      if (existing.closing) {
+        await existing.finalization?.catch(() => {});
+        continue;
+      }
+      existing.references += 1;
+      return existing;
+    }
+
+    const source = identity.source;
+    const operation = (async (): Promise<PreparedResource> => {
+      if (location.isFile) {
+        return { uri: source.uri, probe: await io.probe(source.uri), owned: false };
+      }
+      try {
+        await io.remove(location.destination);
+        await io.materialize(source.uri, location.destination);
+        const probe = await io.probe(location.destination);
+        return { uri: location.destination, probe, owned: true };
+      } catch (error) {
+        await io.remove(location.destination).catch(() => {});
+        throw error;
+      }
+    })();
+    const entry: SharedPreparationEntry = {
+      key: location.key,
+      io,
+      promise: operation,
+      references: 1,
+      closing: false,
+      finalization: null,
+    };
+    SHARED_SOURCE_PREPARATIONS.set(location.key, entry);
+    void operation.catch(() => {
+      if (SHARED_SOURCE_PREPARATIONS.get(location.key) === entry) {
+        SHARED_SOURCE_PREPARATIONS.delete(location.key);
+      }
+    });
+    return entry;
+  }
+}
+
+async function releaseSharedPreparation(entry: SharedPreparationEntry): Promise<void> {
+  if (entry.references <= 0) return;
+  entry.references -= 1;
+  if (entry.references > 0) return;
+  entry.closing = true;
+  const finalization = (async (): Promise<void> => {
+    try {
+      const prepared = await entry.promise.catch(() => null);
+      if (prepared?.owned) await entry.io.remove(prepared.uri);
+    } finally {
+      if (SHARED_SOURCE_PREPARATIONS.get(entry.key) === entry) {
+        SHARED_SOURCE_PREPARATIONS.delete(entry.key);
+      }
+    }
+  })();
+  entry.finalization = finalization;
+  await finalization;
+}
+
 export class MemeEditSourcePreparationController {
+  private entry: SharedPreparationEntry | null = null;
+  private acquisition: Promise<SharedPreparationEntry> | null = null;
   private preparation: Promise<PreparedResource> | null = null;
   private closed = false;
-  private removed = false;
+  private released = false;
 
   constructor(
     private readonly io: MemeEditSourcePreparationIo,
@@ -587,31 +701,27 @@ export class MemeEditSourcePreparationController {
     assertIdentity(identity);
   }
 
+  private acquireEntry(): Promise<SharedPreparationEntry> {
+    if (this.entry) return Promise.resolve(this.entry);
+    if (this.acquisition) return this.acquisition;
+    const acquisition = acquireSharedPreparation(this.io, this.identity).then((entry) => {
+      this.entry = entry;
+      return entry;
+    });
+    this.acquisition = acquisition;
+    return acquisition;
+  }
+
   private prepareResource(): Promise<PreparedResource> {
     if (this.preparation) return this.preparation;
-    const source = this.identity.source;
-    const isFile = source.uri.startsWith('file://');
-    const extensionMatch = /\.([a-zA-Z0-9]{1,10})$/.exec(source.name);
-    const extension = (extensionMatch?.[1] ?? (source.kind === 'video' ? 'mp4' : 'jpg')).toLowerCase();
-    const paths = draftStoragePaths(this.io.cacheDirectory, this.identity);
-    const destination = `${cacheRoot(this.io.cacheDirectory)}${paths.ownedAssetPrefix}materialized_source.${extension}`;
-    const operation = (async (): Promise<PreparedResource> => {
-      if (isFile) {
-        return { uri: source.uri, probe: await this.io.probe(source.uri), owned: false };
-      }
-      try {
-        await this.io.remove(destination);
-        await this.io.materialize(source.uri, destination);
-        const probe = await this.io.probe(destination);
-        return { uri: destination, probe, owned: true };
-      } catch (error) {
-        await this.io.remove(destination).catch(() => {});
-        throw error;
-      }
-    })();
+    const operation = this.acquireEntry().then((entry) => entry.promise);
     this.preparation = operation;
     void operation.catch(() => {
-      if (this.preparation === operation) this.preparation = null;
+      if (this.preparation === operation) {
+        this.entry = null;
+        this.acquisition = null;
+        this.preparation = null;
+      }
     });
     return operation;
   }
@@ -640,15 +750,13 @@ export class MemeEditSourcePreparationController {
 
   async discard(): Promise<void> {
     this.closed = true;
-    if (this.removed) return;
-    let prepared: PreparedResource | null = null;
-    try {
-      prepared = this.preparation ? await this.preparation : null;
-    } catch {
-      // Failed materialization already cleaned its partial destination.
+    if (this.released) return;
+    this.released = true;
+    let entry = this.entry;
+    if (!entry && this.acquisition) {
+      entry = await this.acquisition.catch(() => null);
     }
-    if (prepared?.owned) await this.io.remove(prepared.uri);
-    this.removed = true;
+    if (entry) await releaseSharedPreparation(entry);
   }
 }
 
