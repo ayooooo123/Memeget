@@ -10,6 +10,7 @@ import {
   createDefaultImageProject,
   createDefaultVideoProject,
   createProjectHistory,
+  evaluateMaskTrackRect,
   interpolateTransformKeyframes,
   interpolateCoverCorrections,
   isLayerActiveAt,
@@ -415,6 +416,51 @@ describe('layer behavior', () => {
       mode: 'pixelate',
     });
   });
+  test('evaluates linear and hold mask corrections at sparse timestamps and boundaries', () => {
+    const track: MaskTrackSpec = {
+      id: 'tracked-object',
+      active: { startUs: 0, endUs: 3 * SECOND_US },
+      corrections: [
+        {
+          timeUs: 500_000,
+          rect: { x: 0.1, y: 0.1, width: 0.2, height: 0.2 },
+          easing: 'linear',
+        },
+        {
+          timeUs: SECOND_US,
+          rect: { x: 0.3, y: 0.3, width: 0.4, height: 0.4 },
+          easing: 'hold',
+        },
+        {
+          timeUs: 2 * SECOND_US,
+          rect: { x: 0.7, y: 0.7, width: 0.2, height: 0.2 },
+          easing: 'linear',
+        },
+      ],
+    };
+
+    expect(evaluateMaskTrackRect(track, 0)).toEqual(track.corrections[0].rect);
+    expect(evaluateMaskTrackRect(track, 750_000)).toEqual({
+      x: 0.2,
+      y: 0.2,
+      width: 0.3,
+      height: 0.3,
+    });
+    expect(evaluateMaskTrackRect(track, 1_500_000)).toEqual(track.corrections[1].rect);
+    expect(evaluateMaskTrackRect(track, 2_500_000)).toEqual(track.corrections[2].rect);
+    expect(evaluateMaskTrackRect(track, -1)).toBeNull();
+    expect(evaluateMaskTrackRect(track, 3 * SECOND_US + 1)).toBeNull();
+  });
+
+  test('returns null for mask tracks without sparse correction metadata', () => {
+    expect(
+      evaluateMaskTrackRect(
+        { id: 'empty', active: null, corrections: [] },
+        SECOND_US
+      )
+    ).toBeNull();
+  });
+
 
 });
 

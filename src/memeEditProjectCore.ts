@@ -514,19 +514,27 @@ export function interpolateTransformKeyframes(
   };
 }
 
-export function interpolateCoverCorrections(
-  corrections: readonly CoverCorrectionKeyframe[],
+interface RectCorrectionEvaluation {
+  rect: NormalizedRect;
+  leftIndex: number;
+}
+
+function interpolateSparseRectCorrections(
+  corrections: readonly RectCorrectionKeyframe[],
   timeUs: number
-): { rect: NormalizedRect; mode: CoverLayer['mode'] } | null {
-  if (corrections.length === 0) return null;
+): RectCorrectionEvaluation | null {
+  if (!Number.isSafeInteger(timeUs) || corrections.length === 0) return null;
   if (timeUs <= corrections[0].timeUs) {
-    return { rect: { ...corrections[0].rect }, mode: corrections[0].mode };
+    return { rect: clampNormalizedRect(corrections[0].rect), leftIndex: 0 };
   }
-  const last = corrections[corrections.length - 1];
-  if (timeUs >= last.timeUs) return { rect: { ...last.rect }, mode: last.mode };
+  const lastIndex = corrections.length - 1;
+  const last = corrections[lastIndex];
+  if (timeUs >= last.timeUs) {
+    return { rect: clampNormalizedRect(last.rect), leftIndex: lastIndex };
+  }
 
   let low = 0;
-  let high = corrections.length - 1;
+  let high = lastIndex;
   while (low + 1 < high) {
     const middle = Math.floor((low + high) / 2);
     if (corrections[middle].timeUs <= timeUs) low = middle;
@@ -534,10 +542,12 @@ export function interpolateCoverCorrections(
   }
   const left = corrections[low];
   const right = corrections[high];
-  if (left.easing === 'hold') return { rect: { ...left.rect }, mode: left.mode };
+  if (left.easing === 'hold') {
+    return { rect: clampNormalizedRect(left.rect), leftIndex: low };
+  }
   const progress = (timeUs - left.timeUs) / (right.timeUs - left.timeUs);
   return {
-    rect: {
+    rect: clampNormalizedRect({
       x: roundGeometry(left.rect.x + (right.rect.x - left.rect.x) * progress),
       y: roundGeometry(left.rect.y + (right.rect.y - left.rect.y) * progress),
       width: roundGeometry(
@@ -546,9 +556,34 @@ export function interpolateCoverCorrections(
       height: roundGeometry(
         left.rect.height + (right.rect.height - left.rect.height) * progress
       ),
-    },
-    mode: left.mode,
+    }),
+    leftIndex: low,
   };
+}
+
+export function interpolateCoverCorrections(
+  corrections: readonly CoverCorrectionKeyframe[],
+  timeUs: number
+): { rect: NormalizedRect; mode: CoverLayer['mode'] } | null {
+  const evaluated = interpolateSparseRectCorrections(corrections, timeUs);
+  if (evaluated === null) return null;
+  return {
+    rect: evaluated.rect,
+    mode: corrections[evaluated.leftIndex].mode,
+  };
+}
+
+export function evaluateMaskTrackRect(
+  track: MaskTrackSpec,
+  timeUs: number
+): NormalizedRect | null {
+  if (
+    track.active !== null &&
+    (timeUs < track.active.startUs || timeUs > track.active.endUs)
+  ) {
+    return null;
+  }
+  return interpolateSparseRectCorrections(track.corrections, timeUs)?.rect ?? null;
 }
 
 function defaultBaseTransform(): BaseTransform {
