@@ -44,16 +44,16 @@ export interface NativeMemeTextLayoutLine {
   text: string;
   start: number;
   end: number;
-  widthPx: number;
-  topPx: number;
-  baselinePx: number;
+  widthDip: number;
+  topDip: number;
+  baselineDip: number;
 }
 
 export interface NativeMemeTextLayoutResult {
-  widthPx: number;
-  heightPx: number;
+  widthDip: number;
+  heightDip: number;
   includeFontPadding: false;
-  tolerancePx: number;
+  toleranceDip: number;
   lines: NativeMemeTextLayoutLine[];
 }
 
@@ -83,10 +83,10 @@ interface MemegetBgNative {
     text: string,
     fontFamily: string,
     fontWeight: number,
-    fontSizePx: number,
-    lineHeightPx: number,
+    fontSizeDip: number,
+    lineHeightDip: number,
     letterSpacingEm: number,
-    widthPx: number,
+    widthDip: number,
     align: string
   ): Promise<NativeMemeTextLayoutResult>;
 }
@@ -210,10 +210,10 @@ export async function measureMemeTextLayout(input: {
   text: string;
   fontFamily: string;
   fontWeight: number;
-  fontSizePx: number;
-  lineHeightPx: number;
+  fontSizeDip: number;
+  lineHeightDip: number;
   letterSpacingEm: number;
-  widthPx: number;
+  widthDip: number;
   align: string;
 }): Promise<NativeMemeTextLayoutResult | null> {
   if (!native || typeof native.measureMemeTextLayout !== 'function') return null;
@@ -221,10 +221,10 @@ export async function measureMemeTextLayout(input: {
     input.text,
     input.fontFamily,
     input.fontWeight,
-    input.fontSizePx,
-    input.lineHeightPx,
+    input.fontSizeDip,
+    input.lineHeightDip,
     input.letterSpacingEm,
-    input.widthPx,
+    input.widthDip,
     input.align
   );
 }

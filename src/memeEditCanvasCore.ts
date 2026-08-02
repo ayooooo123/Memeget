@@ -2,6 +2,8 @@ import {
   applyProjectAction,
   beginProjectTransaction,
   commitProjectTransaction,
+  redoProjectHistory,
+  undoProjectHistory,
   type MemeEditLayer,
   type MemeEditProject,
   type MemeEditProjectAction,
@@ -52,9 +54,37 @@ export interface LayerHandlePoints {
   rotate: ViewPoint;
 }
 
+export interface CanvasLayerVisualDescriptor {
+  center: ViewPoint;
+  content: {
+    baseWidthDip: number;
+    baseHeightDip: number;
+    scale: number;
+    rotationDegrees: number;
+  };
+  controls: {
+    widthDip: number;
+    heightDip: number;
+    handleSizeDip: 44;
+    rotationDegrees: number;
+  };
+}
+
 export type LayerHandleTouchKind = 'resize' | 'rotate';
 export type TransformAccessibilityAction = 'increment' | 'decrement' | 'longpress' | 'escape';
 export type TransformHandleKind = 'resize' | 'rotate';
+
+export interface CapturedTransformGesture {
+  keyframe: TransformKeyframe;
+  timeUs: number;
+}
+
+export type ProjectHistoryCommand = 'undo' | 'redo';
+
+export interface ProjectHistoryCommandAvailability {
+  canUndo: boolean;
+  canRedo: boolean;
+}
 
 export interface CanvasLayerDescriptor {
   id: string;
@@ -96,11 +126,16 @@ const MIN_SCALE = 0.01;
 const MAX_SCALE = 16;
 const TRANSFORM_HANDLE_SIZE = 44;
 const TRANSFORM_HANDLE_HALF = TRANSFORM_HANDLE_SIZE / 2;
-const ROTATE_HANDLE_TOP = -44;
+
+function layerBaseSize(layerWidth: number, mediaRect: ViewRect): { width: number; height: number } {
+  const width = Math.max(TRANSFORM_HANDLE_SIZE, mediaRect.width * Math.max(0.04, layerWidth));
+  return { width, height: width };
+}
 
 function layerRenderedSize(layerWidth: number, mediaRect: ViewRect, scale: number): { width: number; height: number } {
-  const width = Math.max(TRANSFORM_HANDLE_SIZE, mediaRect.width * Math.max(0.04, layerWidth) * clampScale(scale));
-  return { width, height: width };
+  const base = layerBaseSize(layerWidth, mediaRect);
+  const boundedScale = clampScale(scale);
+  return { width: base.width * boundedScale, height: base.height * boundedScale };
 }
 const EPSILON = 1e-6;
 
@@ -301,6 +336,31 @@ export function rotateKeyframeFromHandle(
   return { ...start, rotationDegrees: roundCanvas(start.rotationDegrees + normalizeAngleDelta(currentAngle - startAngle)) };
 }
 
+export function canvasLayerVisualDescriptor(
+  keyframe: TransformKeyframe,
+  layerWidth: number,
+  mediaRect: ViewRect
+): CanvasLayerVisualDescriptor {
+  const center = normalizedPointToViewPoint(keyframe.center, mediaRect);
+  const base = layerBaseSize(layerWidth, mediaRect);
+  const scale = clampScale(keyframe.scale);
+  return {
+    center,
+    content: {
+      baseWidthDip: base.width,
+      baseHeightDip: base.height,
+      scale,
+      rotationDegrees: keyframe.rotationDegrees,
+    },
+    controls: {
+      widthDip: base.width * scale,
+      heightDip: base.height * scale,
+      handleSizeDip: TRANSFORM_HANDLE_SIZE,
+      rotationDegrees: keyframe.rotationDegrees,
+    },
+  };
+}
+
 export function layerHandlePoints(
   keyframe: TransformKeyframe,
   layerWidth: number,
@@ -320,7 +380,7 @@ export function layerHandlePoints(
   return {
     center,
     resize: rotate(width / 2, height / 2),
-    rotate: layerLocalPointToCanvasPoint(keyframe, layerWidth, mediaRect, { x: size.width / 2, y: ROTATE_HANDLE_TOP + TRANSFORM_HANDLE_HALF }),
+    rotate: rotate(0, -height / 2 - TRANSFORM_HANDLE_HALF),
   };
 }
 
@@ -331,11 +391,10 @@ export function layerLocalPointToCanvasPoint(
   localPoint: ViewPoint
 ): ViewPoint {
   const center = normalizedPointToViewPoint(keyframe.center, mediaRect);
-  const size = layerRenderedSize(layerWidth, mediaRect, keyframe.scale);
-  const width = size.width;
-  const height = size.height;
-  const x = localPoint.x - width / 2;
-  const y = localPoint.y - height / 2;
+  const base = layerBaseSize(layerWidth, mediaRect);
+  const scale = clampScale(keyframe.scale);
+  const x = (localPoint.x - base.width / 2) * scale;
+  const y = (localPoint.y - base.height / 2) * scale;
   const radians = keyframe.rotationDegrees * Math.PI / 180;
   const cos = Math.cos(radians);
   const sin = Math.sin(radians);
@@ -362,10 +421,17 @@ export function layerHandleTouchInsideMedia(
   handleLocalPoint: ViewPoint
 ): boolean {
   const size = layerRenderedSize(layerWidth, mediaRect, keyframe.scale);
-  const localPoint = handle === 'resize'
-    ? { x: size.width - TRANSFORM_HANDLE_HALF + handleLocalPoint.x, y: size.height - TRANSFORM_HANDLE_HALF + handleLocalPoint.y }
-    : { x: size.width / 2 - TRANSFORM_HANDLE_HALF + handleLocalPoint.x, y: ROTATE_HANDLE_TOP + handleLocalPoint.y };
-  return gesturePointInsideMedia(layerLocalPointToCanvasPoint(keyframe, layerWidth, mediaRect, localPoint), mediaRect);
+  const offset = { x: handleLocalPoint.x - TRANSFORM_HANDLE_HALF, y: handleLocalPoint.y - TRANSFORM_HANDLE_HALF };
+  const vector = handle === 'resize'
+    ? { x: size.width / 2 + offset.x, y: size.height / 2 + offset.y }
+    : { x: offset.x, y: -size.height / 2 - TRANSFORM_HANDLE_HALF + offset.y };
+  const center = normalizedPointToViewPoint(keyframe.center, mediaRect);
+  const radians = keyframe.rotationDegrees * Math.PI / 180;
+  const point = {
+    x: roundCanvas(center.x + vector.x * Math.cos(radians) - vector.y * Math.sin(radians)),
+    y: roundCanvas(center.y + vector.x * Math.sin(radians) + vector.y * Math.cos(radians)),
+  };
+  return gesturePointInsideMedia(point, mediaRect);
 }
 
 export function transformAccessibilityAction(
@@ -412,6 +478,44 @@ export function nextDuplicateLayerId(prefix: string, ids: readonly string[]): st
     if (Number.isSafeInteger(value) && value > maximum) maximum = value;
   }
   return `${prefix}-dup-${maximum + 1}`;
+}
+
+export function captureTransformGesture(keyframe: TransformKeyframe, timeUs: number): CapturedTransformGesture {
+  return {
+    keyframe: { ...keyframe, center: { ...keyframe.center } },
+    timeUs,
+  };
+}
+
+export function upsertLayerKeyframeAtCapturedTime(
+  keyframes: readonly TransformKeyframe[],
+  keyframe: TransformKeyframe,
+  timeUs: number
+): TransformKeyframe[] {
+  const nextKeyframe = { ...keyframe, center: { ...keyframe.center }, timeUs };
+  const existingIndex = keyframes.findIndex((candidate) => candidate.timeUs === timeUs);
+  if (existingIndex >= 0) {
+    return keyframes.map((candidate, index) => index === existingIndex ? nextKeyframe : candidate);
+  }
+  return [...keyframes, nextKeyframe].sort((left, right) => left.timeUs - right.timeUs);
+}
+
+export function projectHistoryCommandAvailability(history: ProjectHistory): ProjectHistoryCommandAvailability {
+  return {
+    canUndo: history.transaction !== null || history.past.length > 0,
+    canRedo: history.transaction === null && history.future.length > 0,
+  };
+}
+
+export function runProjectHistoryCommand(
+  command: ProjectHistoryCommand,
+  flushPendingText: () => void,
+  updateHistory: (updater: (history: ProjectHistory) => ProjectHistory) => void,
+  announceExternalTextRevision: () => void
+): void {
+  flushPendingText();
+  updateHistory(command === 'undo' ? undoProjectHistory : redoProjectHistory);
+  announceExternalTextRevision();
 }
 
 export function selectedLayerIdAfterDelete(

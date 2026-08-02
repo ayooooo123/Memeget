@@ -148,6 +148,29 @@ function draftWriteEvents(io: MemoryDraftIo): Extract<IoEvent, { type: 'write' }
   return io.events.filter((event): event is Extract<IoEvent, { type: 'write' }> => event.type === 'write');
 }
 
+function rawDraftChecksum(value: string): string {
+  let h1 = 1_779_033_703;
+  let h2 = 3_144_134_277;
+  let h3 = 1_013_904_242;
+  let h4 = 2_773_480_762;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    h1 = h2 ^ Math.imul(h1 ^ code, 597_399_067);
+    h2 = h3 ^ Math.imul(h2 ^ code, 2_869_860_233);
+    h3 = h4 ^ Math.imul(h3 ^ code, 951_274_213);
+    h4 = h1 ^ Math.imul(h4 ^ code, 2_716_044_179);
+  }
+  h1 = Math.imul(h3 ^ (h1 >>> 18), 597_399_067);
+  h2 = Math.imul(h4 ^ (h2 >>> 22), 2_869_860_233);
+  h3 = Math.imul(h1 ^ (h3 >>> 17), 951_274_213);
+  h4 = Math.imul(h2 ^ (h4 >>> 19), 2_716_044_179);
+  h1 ^= h2 ^ h3 ^ h4;
+  h2 ^= h1;
+  h3 ^= h1;
+  h4 ^= h1;
+  return [h1, h2, h3, h4].map((word) => (word >>> 0).toString(16).padStart(8, '0')).join('');
+}
+
 describe('MemeEditDraftStore', () => {
   test('writes a temporary JSON file and atomically replaces the deterministic draft path', async () => {
     const io = new MemoryDraftIo();
@@ -393,6 +416,30 @@ describe('MemeEditDraftStore', () => {
     const restored = await store.restore(identity);
 
     expect(restored).toEqual({ status: 'restored', project: expected, savedAtMs: 20_000 });
+  });
+
+  test('verifies a checksummed raw v1 journal before migrating its project to v2', async () => {
+    const io = new MemoryDraftIo();
+    const store = new MemeEditDraftStore(io, { now: () => 20_000 });
+    const paths = draftStoragePaths(io.cacheDirectory, identity);
+    const legacyProject = { ...project('legacy-v1'), version: 1 };
+    const rawPayload = {
+      version: 1,
+      generation: 1,
+      savedAtMs: 19_000,
+      source: identity.source,
+      project: legacyProject,
+    };
+    io.files.set(paths.draft, JSON.stringify({
+      ...rawPayload,
+      checksum: rawDraftChecksum(JSON.stringify(rawPayload)),
+    }));
+
+    await expect(store.restore(identity)).resolves.toMatchObject({
+      status: 'restored',
+      savedAtMs: 19_000,
+      project: { version: 2, background: { color: 'legacy-v1' } },
+    });
   });
 
   test('returns typed missing and corrupt reasons for absent, malformed, and invalid snapshots', async () => {

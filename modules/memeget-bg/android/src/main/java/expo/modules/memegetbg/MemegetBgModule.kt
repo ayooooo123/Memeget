@@ -31,15 +31,16 @@ class MemegetBgModule : Module() {
       Prop("text") { view: MemeTextPreviewView, value: String -> view.setText(value) }
       Prop("fontFamily") { view: MemeTextPreviewView, value: String -> view.setFontFamily(value) }
       Prop("fontWeight") { view: MemeTextPreviewView, value: Int -> view.setFontWeight(value) }
-      Prop("fontSizePx") { view: MemeTextPreviewView, value: Double -> view.setFontSizePx(value.toFloat()) }
-      Prop("lineHeightPx") { view: MemeTextPreviewView, value: Double -> view.setLineHeightPx(value.toFloat()) }
+      Prop("fontSizeDip") { view: MemeTextPreviewView, value: Double -> view.setFontSizeDip(value.toFloat()) }
+      Prop("lineHeightDip") { view: MemeTextPreviewView, value: Double -> view.setLineHeightDip(value.toFloat()) }
       Prop("letterSpacingEm") { view: MemeTextPreviewView, value: Double -> view.setLetterSpacingEm(value.toFloat()) }
-      Prop("widthPx") { view: MemeTextPreviewView, value: Int -> view.setWidthPx(value) }
+      Prop("widthDip") { view: MemeTextPreviewView, value: Double -> view.setWidthDip(value.toFloat()) }
       Prop("align") { view: MemeTextPreviewView, value: String -> view.setAlign(value) }
       Prop("fillColor") { view: MemeTextPreviewView, value: String -> view.setFillColor(value) }
       Prop("strokeColor") { view: MemeTextPreviewView, value: String -> view.setStrokeColor(value) }
-      Prop("strokeWidthPx") { view: MemeTextPreviewView, value: Double -> view.setStrokeWidthPx(value.toFloat()) }
+      Prop("strokeWidthDip") { view: MemeTextPreviewView, value: Double -> view.setStrokeWidthDip(value.toFloat()) }
       Prop("opacity") { view: MemeTextPreviewView, value: Double -> view.setOpacity(value.toFloat()) }
+      OnViewDidUpdateProps { view: MemeTextPreviewView -> view.commitPendingProps() }
     }
 
     // Put an actual file — in practice a video, which expo-clipboard can't
@@ -232,24 +233,26 @@ class MemegetBgModule : Module() {
       text: String,
       fontFamily: String,
       fontWeight: Int,
-      fontSizePx: Double,
-      lineHeightPx: Double,
+      fontSizeDip: Double,
+      lineHeightDip: Double,
       letterSpacingEm: Double,
-      widthPx: Int,
+      widthDip: Double,
       align: String ->
       val ctx = appContext.reactContext
         ?: throw IllegalStateException("React context unavailable")
+      val density = MemeTextDensity(ctx.resources.displayMetrics.density)
       MemeTextLayout.measure(
         context = ctx,
         text = text,
         fontFamily = fontFamily,
         fontWeight = fontWeight,
-        fontSizePx = fontSizePx.toFloat(),
-        lineHeightPx = lineHeightPx.toFloat(),
+        fontSizeDip = fontSizeDip.toFloat(),
+        lineHeightDip = lineHeightDip.toFloat(),
         letterSpacingEm = letterSpacingEm.toFloat(),
-        widthPx = widthPx,
-        align = align
-      ).toMap()
+        widthDip = widthDip.toFloat(),
+        align = align,
+        density = density
+      ).toDip(density).toMap()
     }
 
     // Battery + thermal snapshot the JS loop polls to decide whether to keep

@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   MEME_TEXT_COLOR_SWATCHES,
-  MEME_TEXT_LAYOUT_TOLERANCE_PX,
+  MEME_TEXT_LAYOUT_TOLERANCE_DIP,
   MEME_TEXT_PRESET_IDS,
   applyMemeTextPreset,
   buildMemeTextLayoutSpec,
@@ -111,8 +111,8 @@ describe('serializable meme text layout contract', () => {
     });
 
     const spec = buildMemeTextLayoutSpec(layer, kf({ center: { x: 0.4, y: 0.8 }, scale: 1.2, rotationDegrees: -8, opacity: 0.8 }), {
-      canvasWidthPx: 1_000,
-      canvasHeightPx: 500,
+      canvasWidthDip: 1_000,
+      canvasHeightDip: 500,
     });
 
     expect(spec).toEqual({
@@ -126,11 +126,11 @@ describe('serializable meme text layout contract', () => {
         fontSize: 0.05,
       },
       canvas: {
-        widthPx: 1_000,
-        heightPx: 500,
-        centerPx: { x: 400, y: 400 },
-        wrapWidthPx: 500,
-        fontSizePx: 25,
+        widthDip: 1_000,
+        heightDip: 500,
+        centerDip: { x: 400, y: 400 },
+        wrapWidthDip: 500,
+        fontSizeDip: 25,
       },
       transform: { scale: 1.2, rotationDegrees: -8, opacity: 0.8 },
       font: {
@@ -142,16 +142,16 @@ describe('serializable meme text layout contract', () => {
       },
       align: 'center',
       fill: { color: '#f2f4f8', opacity: 1 },
-      outline: { color: '#0a0b0e', widthPx: 2 },
-      backing: { color: '#0a0b0e', radiusPx: 6, paddingXPx: 12, paddingYPx: 6, tail: 'none' },
+      outline: { color: '#0a0b0e', widthDip: 2 },
+      backing: { color: '#0a0b0e', radiusDip: 6, paddingXDip: 12, paddingYDip: 6, tail: 'none' },
       layout: {
         lines: [],
-        widthPx: 500,
-        heightPx: 0,
-        lineHeightPx: 29.5,
+        widthDip: 500,
+        heightDip: 0,
+        lineHeightDip: 29.5,
       },
       diagnostics: {
-        androidStaticLayoutTolerancePx: MEME_TEXT_LAYOUT_TOLERANCE_PX,
+        androidStaticLayoutToleranceDip: MEME_TEXT_LAYOUT_TOLERANCE_DIP,
       },
     });
   });
@@ -163,7 +163,7 @@ describe('serializable meme text layout contract', () => {
       fontSize: 0.08,
     });
 
-    const spec = buildMemeTextLayoutSpec(layer, kf(), { canvasWidthPx: 600, canvasHeightPx: 400 });
+    const spec = buildMemeTextLayoutSpec(layer, kf(), { canvasWidthDip: 600, canvasHeightDip: 400 });
 
     expect(spec.displayText).toBe('first line\n\nSupercalifragilisticexpialidocious token');
     expect(spec.layout.lines).toEqual([]);
@@ -173,11 +173,11 @@ describe('serializable meme text layout contract', () => {
     const fixtures = MEME_TEXT_PRESET_IDS.map((preset) => buildMemeTextLayoutSpec(
       createMemeTextLayer(`fixture-${preset}`, preset, { text: `${preset} layout fixture words` }),
       kf(),
-      { canvasWidthPx: 720, canvasHeightPx: 1_280 }
+      { canvasWidthDip: 720, canvasHeightDip: 1_280 }
     ));
 
-    expect(MEME_TEXT_LAYOUT_TOLERANCE_PX).toBe(2);
-    expect(fixtures.map((fixture) => [fixture.preset, fixture.font.includeFontPadding, fixture.diagnostics.androidStaticLayoutTolerancePx])).toEqual([
+    expect(MEME_TEXT_LAYOUT_TOLERANCE_DIP).toBe(2);
+    expect(fixtures.map((fixture) => [fixture.preset, fixture.font.includeFontPadding, fixture.diagnostics.androidStaticLayoutToleranceDip])).toEqual([
       ['impact', false, 2],
       ['subtitle', false, 2],
       ['label', false, 2],
@@ -191,39 +191,39 @@ describe('serializable meme text layout contract', () => {
     const spec = buildMemeTextLayoutSpec(
       createMemeTextLayer('fixture-impact', 'impact', { text: 'native outline words' }),
       kf({ scale: 1.4, rotationDegrees: 3 }),
-      { canvasWidthPx: 720, canvasHeightPx: 1_280 }
+      { canvasWidthDip: 720, canvasHeightDip: 1_280 }
     );
 
     expect(nativeMemeTextLayoutInputFromSpec(spec)).toEqual({
       text: spec.displayText,
       fontFamily: spec.font.family,
       fontWeight: Number(spec.font.weight),
-      fontSizePx: spec.canvas.fontSizePx,
-      lineHeightPx: spec.layout.lineHeightPx,
+      fontSizeDip: spec.canvas.fontSizeDip,
+      lineHeightDip: spec.layout.lineHeightDip,
       letterSpacingEm: spec.font.letterSpacingEm,
-      widthPx: spec.canvas.wrapWidthPx,
+      widthDip: spec.canvas.wrapWidthDip,
       align: spec.align,
     });
 
     const exactNative = {
-      widthPx: spec.canvas.wrapWidthPx,
-      heightPx: spec.layout.heightPx,
+      widthDip: spec.canvas.wrapWidthDip,
+      heightDip: spec.layout.heightDip,
       includeFontPadding: false,
-      tolerancePx: MEME_TEXT_LAYOUT_TOLERANCE_PX,
+      toleranceDip: MEME_TEXT_LAYOUT_TOLERANCE_DIP,
       lines: spec.layout.lines.map((line) => ({ ...line })),
     };
     expect(compareNativeMemeTextLayoutToSpec(spec, exactNative)).toEqual({
       ok: true,
       lineCountDrift: 0,
-      maxWidthDriftPx: 0,
-      maxTopDriftPx: 0,
-      maxBaselineDriftPx: 0,
+      maxWidthDriftDip: 0,
+      maxTopDriftDip: 0,
+      maxBaselineDriftDip: 0,
     });
 
     const measuredNative = {
       ...exactNative,
-      heightPx: 40,
-      lines: [{ text: 'native line', start: 0, end: 11, widthPx: 10, topPx: 0, baselinePx: 30 }],
+      heightDip: 40,
+      lines: [{ text: 'native line', start: 0, end: 11, widthDip: 10, topDip: 0, baselineDip: 30 }],
     };
     expect(compareNativeMemeTextLayoutToSpec(spec, measuredNative)).toMatchObject({
       ok: true,
@@ -232,11 +232,11 @@ describe('serializable meme text layout contract', () => {
 
     const driftedPreview = {
       ...measuredNative,
-      lines: measuredNative.lines.map((line) => ({ ...line, baselinePx: line.baselinePx + 3 })),
+      lines: measuredNative.lines.map((line) => ({ ...line, baselineDip: line.baselineDip + 3 })),
     };
-    expect(compareNativeMemeTextLayoutResults(measuredNative, driftedPreview, spec.transform.scale, MEME_TEXT_LAYOUT_TOLERANCE_PX)).toMatchObject({
+    expect(compareNativeMemeTextLayoutResults(measuredNative, driftedPreview, spec.transform.scale, MEME_TEXT_LAYOUT_TOLERANCE_DIP)).toMatchObject({
       ok: false,
-      maxBaselineDriftPx: 4.199999999999999,
+      maxBaselineDriftDip: 4.199999999999999,
     });
   });
 
@@ -247,9 +247,9 @@ describe('serializable meme text layout contract', () => {
 
   test('keeps native measurement key stable across time-varying transform changes', () => {
     const layer = createMemeTextLayer('stable', 'subtitle', { text: 'same words', width: 0.5, fontSize: 0.05 });
-    const base = buildMemeTextLayoutSpec(layer, kf({ center: { x: 0.2, y: 0.3 }, scale: 1, rotationDegrees: 0 }), { canvasWidthPx: 720, canvasHeightPx: 1_280 });
-    const moved = buildMemeTextLayoutSpec(layer, kf({ center: { x: 0.8, y: 0.7 }, scale: 2, rotationDegrees: 45 }), { canvasWidthPx: 720, canvasHeightPx: 1_280 });
-    const rewrapped = buildMemeTextLayoutSpec({ ...layer, width: 0.7 }, kf(), { canvasWidthPx: 720, canvasHeightPx: 1_280 });
+    const base = buildMemeTextLayoutSpec(layer, kf({ center: { x: 0.2, y: 0.3 }, scale: 1, rotationDegrees: 0 }), { canvasWidthDip: 720, canvasHeightDip: 1_280 });
+    const moved = buildMemeTextLayoutSpec(layer, kf({ center: { x: 0.8, y: 0.7 }, scale: 2, rotationDegrees: 45 }), { canvasWidthDip: 720, canvasHeightDip: 1_280 });
+    const rewrapped = buildMemeTextLayoutSpec({ ...layer, width: 0.7 }, kf(), { canvasWidthDip: 720, canvasHeightDip: 1_280 });
 
     expect(memeTextMeasureKey(moved)).toBe(memeTextMeasureKey(base));
     expect(memeTextMeasureKey(rewrapped)).not.toBe(memeTextMeasureKey(base));
