@@ -95,6 +95,23 @@ class VideoSegmentationDeviceGateTest {
   }
 
   @Test
+  fun recordsDeterministicPlaybackEvidenceForReview() {
+    val instrumentation = InstrumentationRegistry.getInstrumentation()
+    val evidence = VideoSegmentationDeviceGateProbe.generatePlaybackEvidence(instrumentation)
+    assertEquals(6, evidence.length())
+    for (index in 0 until evidence.length()) {
+      val item = evidence.getJSONObject(index)
+      val file = instrumentation.targetContext.filesDir.resolve(item.getString("fileName"))
+      assertTrue("Missing deterministic playback evidence ${file.name}", file.isFile)
+      assertEquals(
+        VideoSegmentationGateContracts.FIXED_ZIP_ENTRY_TIME_MS,
+        item.getLong("zipEntryTimestampMs")
+      )
+      publishDownload(file.name, file.readBytes(), "application/zip")
+    }
+  }
+
+  @Test
   fun recordsPhysicalVideoSegmentationGate() {
     val instrumentation = InstrumentationRegistry.getInstrumentation()
     val result = VideoSegmentationDeviceGateProbe.run(instrumentation)
@@ -126,8 +143,20 @@ class VideoSegmentationDeviceGateTest {
     assertFalse("Emulator results must never become the gate", result.getJSONObject("device").getBoolean("emulator"))
     assertEquals("Pixel 9 Pro", result.getJSONObject("device").getString("model"))
     assertEquals(9, result.getJSONArray("matrix").length())
+    assertEquals(27, result.getJSONArray("maskEvidence").length())
+    for (index in 0 until result.getJSONArray("matrix").length()) {
+      val matrix = result.getJSONArray("matrix").getJSONObject(index)
+      assertEquals("COMPLETED", matrix.getString("status"))
+      assertEquals(3, matrix.getInt("fixtureCount"))
+      assertEquals(3, matrix.getInt("completedFixtureCount"))
+    }
     assertEquals(3, result.getJSONObject("provenance").getJSONArray("fixtures").length())
     assertEquals(6, result.getJSONArray("maskPlaybackEvidence").length())
+    assertTrue(result.getJSONObject("playbackReviews").getBoolean("exactCurrentEvidenceSet"))
+    assertEquals(
+      "PASS",
+      result.getJSONObject("criteria").getJSONObject("matrixComplete").getString("status")
+    )
     assertTrue(result.getString("gateStatus") in setOf("PASS", "FAIL"))
     assertTrue(result.getJSONObject("capabilities").has("videoIsolation"))
     assertTrue(result.getJSONObject("capabilities").has("autoTrack"))

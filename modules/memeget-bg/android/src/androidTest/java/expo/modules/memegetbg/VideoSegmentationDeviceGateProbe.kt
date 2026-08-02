@@ -66,6 +66,8 @@ object VideoSegmentationDeviceGateProbe {
   private const val MAX_AREA_PUMPING_P95 = 0.35
   private val WORKING_SIZES = intArrayOf(256, 384, 512)
   private val MASK_FPS = intArrayOf(8, 12, 15)
+  private val PLAYBACK_SETTINGS = listOf(256 to 8, 512 to 15)
+  private const val PLAYBACK_REVIEW_ASSET = "video_segmentation_playback_reviews.json"
 
   private data class FixtureSpec(val id: String, val assetName: String)
 
@@ -241,9 +243,8 @@ object VideoSegmentationDeviceGateProbe {
       boundary("fixture.$id", expectedKey, observedKey)
     }
 
-    val requiredIds = boundaries.map { it.id }.toSet()
     val allBoundariesMatch =
-      VideoSegmentationGateContracts.provenanceBoundariesComplete(boundaries, requiredIds)
+      VideoSegmentationGateContracts.provenanceBoundariesComplete(boundaries)
     val failedBoundaries = boundaries.filter { it.expected != it.observed }
     val boundariesJson = JSONArray().apply {
       boundaries.forEach {
@@ -337,7 +338,7 @@ object VideoSegmentationDeviceGateProbe {
         checkNotNull(fixtureFiles["fast_motion"]),
         workDir
       )
-      for ((workingSize, maskFps) in listOf(256 to 8, 512 to 15)) {
+      for ((workingSize, maskFps) in PLAYBACK_SETTINGS) {
         for (fixture in fixtures) {
           maskPlaybackEvidence.put(
             renderPlaybackEvidenceSequence(
@@ -356,15 +357,35 @@ object VideoSegmentationDeviceGateProbe {
     }
 
     val cancellationPass = cancellation.getString("status") == "PASS"
-    for (result in matrixResults) {
-      result.json.put(
-        "accepted",
-        VideoSegmentationGateContracts.videoIsolationAccepted(result.contract, cancellationPass)
+    val playbackReviews = resolvePlaybackReviews(instrumentation, maskPlaybackEvidence)
+    val reviewPassBySetting = playbackReviewPassBySetting(playbackReviews)
+    for (index in matrixResults.indices) {
+      val result = matrixResults[index]
+      val setting = result.contract.workingSize to result.contract.maskFps
+      matrixResults[index] = result.copy(
+        contract = result.contract.copy(playbackReviewPass = reviewPassBySetting[setting] == true)
       )
+    }
+    val matrixComplete = VideoSegmentationGateContracts.matrixComplete(
+      matrixResults.map(MatrixResult::contract),
+      maskEvidence.length()
+    )
+    for (result in matrixResults) {
+      result.json
+        .put("playbackReviewPass", result.contract.playbackReviewPass)
+        .put(
+          "accepted",
+          VideoSegmentationGateContracts.videoIsolationAccepted(
+            result.contract,
+            cancellationPass,
+            matrixComplete
+          )
+        )
     }
     val selected = VideoSegmentationGateContracts.selectSmallestAccepted(
       matrixResults.map(MatrixResult::contract),
-      cancellationPass
+      cancellationPass,
+      matrixComplete
     )
     val selectedJson = selected?.let { chosen ->
       matrixResults.first {
@@ -376,10 +397,12 @@ object VideoSegmentationDeviceGateProbe {
     val provenancePass = provenance.getBoolean("allDigestsMatch") &&
       provenance.getBoolean("modelProvenanceComplete") &&
       provenance.getJSONObject("tasksVision").getString("version") == TASKS_VISION_VERSION
-    val matrixComplete = matrixResults.size == WORKING_SIZES.size * MASK_FPS.size
+    val playbackReviewsComplete = playbackReviews.getBoolean("exactCurrentEvidenceSet") &&
+      playbackReviews.getBoolean("allRecordsComplete")
     val artifactObservation = nativeArtifactObservation(instrumentation)
     val pageAlignmentPass = artifactObservation.optBoolean("arm64ApkPageAlignmentPass", false)
-    val gatePass = provenancePass && matrixComplete && cancellationPass && videoIsolationAccepted && pageAlignmentPass
+    val gatePass = provenancePass && matrixComplete && cancellationPass && videoIsolationAccepted &&
+      pageAlignmentPass && playbackReviewsComplete
 
     return JSONObject()
       .put("schemaVersion", 1)
@@ -418,6 +441,7 @@ object VideoSegmentationDeviceGateProbe {
       .put("matrix", JSONArray().apply { matrixResults.forEach { put(it.json) } })
       .put("maskEvidence", maskEvidence)
       .put("maskPlaybackEvidence", maskPlaybackEvidence)
+      .put("playbackReviews", playbackReviews)
       .put("cancellationCleanup", cancellation)
       .put("tracking", tracking)
       .put(
@@ -454,6 +478,13 @@ object VideoSegmentationDeviceGateProbe {
           .put("nativePageAlignment", criterion(pageAlignmentPass, "Packaged arm64 MediaPipe ELF PT_LOAD and actual APK ZIP data offset are both 16 KiB aligned"))
           .put("cancellationCleanup", criterion(cancellationPass, "Cancellation stops work, closes MediaPipe/sequential-decoder resources, removes partial evidence, and permits follow-up inference"))
           .put("videoIsolation", criterion(videoIsolationAccepted, "A selected 10 s 720p configuration is <=3x realtime, under the 128 MiB peak-PSS-delta budget, and motion-aware quality-acceptable on every fixture"))
+          .put(
+            "playbackReview",
+            criterion(
+              playbackReviewsComplete,
+              "Every current playback evidence archive has exactly one complete review record bound to its SHA-256"
+            )
+          )
       )
   }
 
@@ -514,7 +545,10 @@ object VideoSegmentationDeviceGateProbe {
       peakPssDeltaBytes = peakPssDeltaBytes,
       pssDeltaBudgetBytes = MAX_PSS_DELTA_BYTES,
       qualityPass = qualityPass,
-      fixtureCount = fixtureObservations.size
+      complete = allFixturesCompleted,
+      completedFixtureCount = fixtureObservations.size,
+      playbackReviewPass = false,
+      fixtureCount = fixtureJson.length()
     )
     val json = JSONObject()
       .put("workingSize", workingSize)
@@ -531,6 +565,8 @@ object VideoSegmentationDeviceGateProbe {
       .put("pssDeltaBudgetBytes", MAX_PSS_DELTA_BYTES)
       .put("underPssDeltaBudget", peakPssDeltaBytes < MAX_PSS_DELTA_BYTES)
       .put("withinThreeTimesRealtime", worstRuntimeMs <= FIXTURE_DURATION_MS * 3)
+      .put("fixtureCount", fixtureJson.length())
+      .put("completedFixtureCount", fixtureObservations.size)
       .put("fixtures", fixtureJson)
     return MatrixResult(json, contract)
   }
@@ -734,6 +770,7 @@ object VideoSegmentationDeviceGateProbe {
           processedFrames++
         } finally {
           sourceCopy?.let { if (!it.isRecycled) it.recycle() }
+          if (!frame.bitmap.isRecycled) frame.bitmap.recycle()
           sourceCopy = null
         }
       }
@@ -901,7 +938,11 @@ object VideoSegmentationDeviceGateProbe {
             }
             smoothed = current
             overlay = overlayMask(checkNotNull(sourceCopy), current, extracted.width, extracted.height)
-            zip.putNextEntry(ZipEntry("frame_${framesWritten.toString().padStart(4, '0')}.jpg"))
+            zip.putNextEntry(
+              VideoSegmentationGateContracts.deterministicZipEntry(
+                "frame_${framesWritten.toString().padStart(4, '0')}.jpg"
+              )
+            )
             check(overlay.compress(Bitmap.CompressFormat.JPEG, 75, zip)) {
               "Could not encode playback frame $framesWritten"
             }
@@ -910,6 +951,7 @@ object VideoSegmentationDeviceGateProbe {
           } finally {
             overlay?.let { if (!it.isRecycled) it.recycle() }
             sourceCopy?.let { if (!it.isRecycled) it.recycle() }
+            if (!frame.bitmap.isRecycled) frame.bitmap.recycle()
             sourceCopy = null
           }
         }
@@ -920,7 +962,7 @@ object VideoSegmentationDeviceGateProbe {
           .put("frameCount", framesWritten)
           .put("durationMs", FIXTURE_DURATION_MS)
           .put("framePattern", "frame_%04d.jpg")
-        zip.putNextEntry(ZipEntry("manifest.json"))
+        zip.putNextEntry(VideoSegmentationGateContracts.deterministicZipEntry("manifest.json"))
         zip.write(manifest.toString(2).toByteArray())
         zip.closeEntry()
       }
@@ -934,6 +976,7 @@ object VideoSegmentationDeviceGateProbe {
         .put("bytes", file.length())
         .put("frameCount", framesWritten)
         .put("durationMs", FIXTURE_DURATION_MS)
+        .put("zipEntryTimestampMs", VideoSegmentationGateContracts.FIXED_ZIP_ENTRY_TIME_MS)
         .put("generationRuntimeMs", SystemClock.elapsedRealtime() - startMs)
         .put("format", "ZIP JPEG frame sequence with manifest.json")
         .put("playbackCommand", "ffmpeg -framerate $maskFps -i frame_%04d.jpg -c:v libx264 -pix_fmt yuv420p evidence.mp4")
@@ -944,6 +987,130 @@ object VideoSegmentationDeviceGateProbe {
     } finally {
       runCatching { segmenter?.close() }
       runCatching { decoder?.close() }
+    }
+  }
+
+  fun generatePlaybackEvidence(instrumentation: Instrumentation): JSONArray {
+    val targetContext = instrumentation.targetContext
+    val workDir = File(targetContext.cacheDir, "video_segmentation_playback_evidence").apply {
+      deleteRecursively()
+      check(mkdirs()) { "Could not create $absolutePath" }
+    }
+    targetContext.filesDir.listFiles { file -> file.name.startsWith("video-segmentation-playback-") }
+      ?.forEach(File::delete)
+    val evidence = JSONArray()
+    try {
+      val fixtureFiles = linkedMapOf<String, File>()
+      for (fixture in fixtures) {
+        val file = File(workDir, fixture.assetName)
+        instrumentation.context.assets.open(fixture.assetName).use { input ->
+          file.outputStream().use { output -> input.copyTo(output) }
+        }
+        fixtureFiles[fixture.id] = file
+      }
+      for ((workingSize, maskFps) in PLAYBACK_SETTINGS) {
+        for (fixture in fixtures) {
+          evidence.put(
+            renderPlaybackEvidenceSequence(
+              instrumentation,
+              targetContext,
+              fixture,
+              checkNotNull(fixtureFiles[fixture.id]),
+              workingSize,
+              maskFps
+            )
+          )
+        }
+      }
+    } finally {
+      workDir.deleteRecursively()
+    }
+    return evidence
+  }
+
+  private fun resolvePlaybackReviews(
+    instrumentation: Instrumentation,
+    playbackEvidence: JSONArray
+  ): JSONObject {
+    val manifest = JSONObject(
+      instrumentation.context.assets.open(PLAYBACK_REVIEW_ASSET).bufferedReader().use { it.readText() }
+    )
+    val reviewArray = manifest.getJSONArray("reviews")
+    val reviewsByFile = linkedMapOf<String, JSONObject>()
+    var duplicateReviewFiles = 0
+    for (index in 0 until reviewArray.length()) {
+      val review = reviewArray.getJSONObject(index)
+      if (reviewsByFile.put(review.getString("fileName"), review) != null) duplicateReviewFiles++
+    }
+
+    val records = JSONArray()
+    val evidenceFiles = linkedSetOf<String>()
+    var allRecordsComplete = duplicateReviewFiles == 0
+    var allReviewsPass = playbackEvidence.length() > 0
+    for (index in 0 until playbackEvidence.length()) {
+      val evidence = playbackEvidence.getJSONObject(index)
+      val fileName = evidence.getString("fileName")
+      evidenceFiles += fileName
+      val review = reviewsByFile[fileName]
+      val verdict = review?.getString("verdict") ?: "UNREVIEWED"
+      val defects = review?.optJSONArray("observedDefects") ?: JSONArray()
+      val reviewedSha256 = review?.optString("sha256").orEmpty()
+      val evidenceSha256 = evidence.getString("sha256")
+      val recordComplete = review != null &&
+        VideoSegmentationGateContracts.playbackReviewRecordComplete(verdict, defects.length())
+      val reviewPass = recordComplete &&
+        VideoSegmentationGateContracts.playbackReviewPass(evidenceSha256, reviewedSha256, verdict)
+      if (!recordComplete) allRecordsComplete = false
+      if (!reviewPass) allReviewsPass = false
+      records.put(
+        JSONObject()
+          .put("fileName", fileName)
+          .put("fixtureId", evidence.getString("fixtureId"))
+          .put("workingSize", evidence.getInt("workingSize"))
+          .put("maskFps", evidence.getInt("maskFps"))
+          .put("evidenceSha256", evidenceSha256)
+          .put("reviewedEvidenceSha256", reviewedSha256)
+          .put("hashBound", evidenceSha256 == reviewedSha256)
+          .put("verdict", verdict)
+          .put("observedDefects", defects)
+          .put("recordComplete", recordComplete)
+          .put("reviewPass", reviewPass)
+      )
+    }
+
+    return JSONObject()
+      .put("schemaVersion", manifest.optInt("schemaVersion", 0))
+      .put("reviewedAtUtc", manifest.optString("reviewedAtUtc"))
+      .put("reviewMethod", manifest.optString("reviewMethod"))
+      .put("personalMedia", manifest.optBoolean("personalMedia", false))
+      .put("reviewedFileCount", reviewArray.length())
+      .put("duplicateReviewFiles", duplicateReviewFiles)
+      .put(
+        "exactCurrentEvidenceSet",
+        duplicateReviewFiles == 0 &&
+          reviewArray.length() == playbackEvidence.length() &&
+          reviewsByFile.keys == evidenceFiles
+      )
+      .put("allRecordsComplete", allRecordsComplete)
+      .put("allReviewsPass", allReviewsPass)
+      .put("records", records)
+  }
+
+  private fun playbackReviewPassBySetting(
+    playbackReviews: JSONObject
+  ): Map<Pair<Int, Int>, Boolean> {
+    val records = playbackReviews.getJSONArray("records")
+    val totals = mutableMapOf<Pair<Int, Int>, Int>()
+    val passes = mutableMapOf<Pair<Int, Int>, Int>()
+    for (index in 0 until records.length()) {
+      val record = records.getJSONObject(index)
+      val setting = record.getInt("workingSize") to record.getInt("maskFps")
+      totals[setting] = (totals[setting] ?: 0) + 1
+      if (record.getBoolean("reviewPass")) passes[setting] = (passes[setting] ?: 0) + 1
+    }
+    return totals.mapValues { (setting, total) ->
+      total == VideoSegmentationGateContracts.REQUIRED_FIXTURE_COUNT &&
+        passes[setting] == VideoSegmentationGateContracts.REQUIRED_FIXTURE_COUNT
     }
   }
 
@@ -959,6 +1126,8 @@ object VideoSegmentationDeviceGateProbe {
     val segmenterClosed = AtomicBoolean(false)
     val decoderClosed = AtomicBoolean(false)
     val framesProcessed = AtomicInteger(0)
+    val cancellationSchedule = VideoSegmentationGateContracts.evidenceSchedule(15, 10)
+      .map { it.timestampMs }
     val executor = Executors.newSingleThreadExecutor()
     val future = executor.submit {
       var decoder: SequentialVideoFrameDecoder? = null
@@ -968,15 +1137,18 @@ object VideoSegmentationDeviceGateProbe {
         segmenter = createSegmenter(instrumentation, context)
         partial.writeText("partial segmentation evidence")
         decoder.decodeFrames(
-          targetTimestampsMs = VideoSegmentationGateContracts.evidenceSchedule(15, 10)
-            .map { it.timestampMs },
+          targetTimestampsMs = cancellationSchedule,
           targetWidth = 512,
           targetHeight = scaledHeight(512),
           shouldCancel = { cancel.get() }
         ) { frame ->
-          segmentFrame(checkNotNull(segmenter), frame.bitmap, frame.targetTimestampMs)
-          framesProcessed.incrementAndGet()
-          activeLatch.countDown()
+          try {
+            segmentFrame(checkNotNull(segmenter), frame.bitmap, frame.targetTimestampMs)
+            framesProcessed.incrementAndGet()
+            activeLatch.countDown()
+          } finally {
+            if (!frame.bitmap.isRecycled) frame.bitmap.recycle()
+          }
         }
       } finally {
         runCatching { segmenter?.close() }
@@ -1010,7 +1182,11 @@ object VideoSegmentationDeviceGateProbe {
         try {
           var maskObserved = false
           decoder.decodeFrames(listOf(0L), 256, scaledHeight(256), { false }) { frame ->
-            maskObserved = segmentFrame(segmenter, frame.bitmap, frame.targetTimestampMs).values.isNotEmpty()
+            try {
+              maskObserved = segmentFrame(segmenter, frame.bitmap, frame.targetTimestampMs).values.isNotEmpty()
+            } finally {
+              if (!frame.bitmap.isRecycled) frame.bitmap.recycle()
+            }
           }
           maskObserved
         } finally {
@@ -1022,9 +1198,15 @@ object VideoSegmentationDeviceGateProbe {
     }
     val leftovers = workDir.listFiles { file -> file.name.startsWith("cancel-") }?.size ?: 0
     val partialDeleted = !partial.exists()
+    val framesProcessedTotal = framesProcessed.get()
+    val workerErrorAbsent = workerError == null
+    val cancellationObserved = reachedActiveWork &&
+      framesProcessedTotal in 1 until cancellationSchedule.size
     val pass = VideoSegmentationGateContracts.cancellationCleanupPass(
       activeBeforeCancel,
       cancelIssued,
+      cancellationObserved,
+      workerErrorAbsent,
       workerStopped,
       segmenterClosed.get(),
       decoderClosed.get(),
@@ -1036,9 +1218,12 @@ object VideoSegmentationDeviceGateProbe {
       .put("status", if (pass) "PASS" else "FAIL")
       .put("activeBeforeCancel", activeBeforeCancel)
       .put("cancelIssued", cancelIssued)
-      .put("framesProcessedBeforeCancel", framesProcessed.get())
+      .put("cancellationObserved", cancellationObserved)
+      .put("scheduledFrameCount", cancellationSchedule.size)
+      .put("framesProcessedBeforeCancel", framesProcessedTotal)
       .put("cancelLatencyMs", cancelLatencyMs)
       .put("workerStopped", workerStopped)
+      .put("workerErrorAbsent", workerErrorAbsent)
       .put("segmenterClosed", segmenterClosed.get())
       .put("sequentialDecoderClosed", decoderClosed.get())
       .put("partialEvidenceDeleted", partialDeleted)
