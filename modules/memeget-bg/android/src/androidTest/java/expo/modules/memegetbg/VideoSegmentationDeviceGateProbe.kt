@@ -1,13 +1,11 @@
 package expo.modules.memegetbg
 
-import android.app.ActivityManager
 import android.app.Instrumentation
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
-import android.media.MediaMetadataRetriever
 import android.os.Build
 import android.os.Debug
 import android.os.SystemClock
@@ -22,6 +20,7 @@ import com.google.mediapipe.tasks.vision.imagesegmenter.ImageSegmenter
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.io.RandomAccessFile
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.security.MessageDigest
@@ -36,6 +35,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import java.util.zip.ZipFile
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
 import kotlin.concurrent.thread
 import kotlin.math.abs
 import kotlin.math.ceil
@@ -47,6 +48,13 @@ object VideoSegmentationDeviceGateProbe {
   private const val TASKS_VISION_VERSION = "0.10.29"
   private const val MODEL_ASSET = "selfie_segmenter_float16_v1.tflite"
   private const val PROVENANCE_ASSET = "video_segmentation_provenance.json"
+  private const val MODEL_SHA256 = "191ac9529ae506ee0beefa6b2c945a172dab9d07d1e802a290a4e4038226658b"
+  private const val TASKS_VISION_POM_SHA256 = "718c0702d999da9581753b883e3ebdad993e1ba01bfd1e7715187f9050906428"
+  private const val APACHE_LICENSE_SHA256 = "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+  private const val MODEL_CARD_SHA256 = "ef2e8d350891ba71699ac1e079658e697fc8d48c0f9253922990e907ecdade60"
+  private const val FIXTURE_SOURCE_SHA256 = "45cddc9490be69345cbdab64ca583be65987e864ca408038e648db99e10516cf"
+  private const val GENERATOR_SHA256 = "e2d1f046c00f4e7fd1bbaf6775ebd079266ba0e61f95c2ad5fdf8da8404f7a0b"
+  private const val MAX_PSS_DELTA_BYTES = 134_217_728L
   private const val FIXTURE_DURATION_MS = 10_000L
   private const val MASK_THRESHOLD = 0.5f
   private const val SMOOTHING_CURRENT_WEIGHT = 0.65f
@@ -77,8 +85,10 @@ object VideoSegmentationDeviceGateProbe {
   private data class FixtureObservation(
     val json: JSONObject,
     val runtimeMs: Long,
+    val baselinePssBytes: Long,
     val peakPssBytes: Long,
     val qualityPass: Boolean,
+    val peakPssDeltaBytes: Long,
     val evidence: JSONObject
   )
 
@@ -95,6 +105,9 @@ object VideoSegmentationDeviceGateProbe {
     val maskWidth: Int,
     val maskHeight: Int,
     val confidenceMaskCount: Int,
+    val decoderName: String,
+    val decodedSourceFrames: Int,
+    val inputSamplesAdvanced: Int,
     val evidenceSheet: Bitmap
   )
 
@@ -107,45 +120,175 @@ object VideoSegmentationDeviceGateProbe {
   fun validateAssetProvenance(instrumentation: Instrumentation): JSONObject {
     val assets = instrumentation.context.assets
     val provenance = JSONObject(assets.open(PROVENANCE_ASSET).bufferedReader().use { it.readText() })
+    val tasksVision = provenance.getJSONObject("tasksVision")
     val model = provenance.getJSONObject("model")
+    val fixtureSource = provenance.getJSONObject("fixtureSource")
+    val generator = provenance.getJSONObject("generator")
+    val pomText = assets.open(tasksVision.getString("pomAsset")).bufferedReader().use { it.readText() }
+    val observedPomDigest = assets.open(tasksVision.getString("pomAsset")).use(::sha256)
+    val observedDependencyLicenseDigest = assets.open(tasksVision.getString("licenseAsset")).use(::sha256)
     val observedModelDigest = assets.open(model.getString("asset")).use(::sha256)
-    val modelDigestMatches = observedModelDigest == model.getString("sha256")
-    val modelProvenanceComplete = VideoSegmentationGateContracts.provenanceComplete(
-      version = model.getString("version"),
-      downloadUrl = model.getString("downloadUrl"),
-      license = model.getString("license"),
-      licenseUrl = model.getString("licenseUrl"),
-      sha256 = model.getString("sha256")
+    val observedModelLicenseDigest = assets.open(model.getString("licenseAsset")).use(::sha256)
+    val observedModelCardDigest = assets.open(model.getString("modelCardAsset")).use(::sha256)
+    val observedFixtureLicenseDigest = assets.open(fixtureSource.getString("licenseAsset")).use(::sha256)
+    val observedGeneratorDigest = assets.open(generator.getString("scriptAsset")).use(::sha256)
+    val boundaries = mutableListOf<VideoSegmentationGateContracts.ProvenanceBoundary>()
+
+    fun boundary(id: String, expected: String, observed: String) {
+      boundaries += VideoSegmentationGateContracts.ProvenanceBoundary(id, expected, observed)
+    }
+
+    boundary("tasks.group", "com.google.mediapipe", tasksVision.getString("group"))
+    boundary("tasks.artifact", "tasks-vision", tasksVision.getString("artifact"))
+    boundary("tasks.version", TASKS_VISION_VERSION, tasksVision.getString("version"))
+    boundary(
+      "tasks.pomUrl",
+      "https://dl.google.com/dl/android/maven2/com/google/mediapipe/tasks-vision/0.10.29/tasks-vision-0.10.29.pom",
+      tasksVision.getString("pomUrl")
+    )
+    boundary("tasks.pomDigest", TASKS_VISION_POM_SHA256, observedPomDigest)
+    boundary(
+      "tasks.pomCoordinates",
+      "com.google.mediapipe:tasks-vision:0.10.29",
+      if (
+        pomText.contains("<groupId>com.google.mediapipe</groupId>") &&
+        pomText.contains("<artifactId>tasks-vision</artifactId>") &&
+        pomText.contains("<version>0.10.29</version>")
+      ) "com.google.mediapipe:tasks-vision:0.10.29" else "INVALID"
+    )
+    boundary("tasks.license", "Apache-2.0", tasksVision.getString("license"))
+    boundary("tasks.licenseUrl", "https://www.apache.org/licenses/LICENSE-2.0.txt", tasksVision.getString("licenseUrl"))
+    boundary("tasks.licenseDigest", APACHE_LICENSE_SHA256, observedDependencyLicenseDigest)
+    boundary(
+      "tasks.pomLicense",
+      "Apache-2.0",
+      if (pomText.contains("The Apache Software License, Version 2.0")) "Apache-2.0" else "INVALID"
     )
 
-    var allFixtureDigestsMatch = true
-    val observedFixtures = JSONArray()
+    boundary("model.asset", MODEL_ASSET, model.getString("asset"))
+    boundary("model.version", "1", model.getString("version"))
+    boundary(
+      "model.downloadUrl",
+      "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/1/selfie_segmenter.tflite",
+      model.getString("downloadUrl")
+    )
+    boundary("model.digest", MODEL_SHA256, observedModelDigest)
+    boundary("model.license", "Apache-2.0", model.getString("license"))
+    boundary("model.licenseDigest", APACHE_LICENSE_SHA256, observedModelLicenseDigest)
+    boundary("model.output", "single person-confidence mask", model.getString("output"))
+    boundary(
+      "model.modelCardUrl",
+      "https://storage.googleapis.com/mediapipe-assets/Model%20Card%20MediaPipe%20Selfie%20Segmentation.pdf",
+      model.getString("modelCardUrl")
+    )
+    boundary("model.modelCardDigest", MODEL_CARD_SHA256, observedModelCardDigest)
+
+    boundary("fixtureSource.personalMedia", "false", fixtureSource.getBoolean("personalMedia").toString())
+    boundary(
+      "fixtureSource.downloadUrl",
+      "https://raw.githubusercontent.com/opencv/opencv/4.12.0/samples/data/vtest.avi",
+      fixtureSource.getString("downloadUrl")
+    )
+    boundary("fixtureSource.digest", FIXTURE_SOURCE_SHA256, fixtureSource.getString("sha256"))
+    boundary("fixtureSource.license", "Apache-2.0", fixtureSource.getString("license"))
+    boundary(
+      "fixtureSource.licenseUrl",
+      "https://raw.githubusercontent.com/opencv/opencv/4.12.0/LICENSE",
+      fixtureSource.getString("licenseUrl")
+    )
+    boundary("fixtureSource.licenseDigest", APACHE_LICENSE_SHA256, observedFixtureLicenseDigest)
+
+    boundary("generator.script", "fixtures/generate-video-segmentation-fixtures.sh", generator.getString("script"))
+    boundary("generator.scriptDigest", GENERATOR_SHA256, observedGeneratorDigest)
+    boundary("generator.ffmpegVersion", "8.1.2-tessus", generator.getString("ffmpegVersion"))
+    boundary("generator.archiveDigest", "e91df72a1ee7c26606f90dd2dd4dcccc6a75140ff9ea6fdd50faae828b82ba69", generator.getString("archiveSha256"))
+    boundary("generator.binaryDigest", "60725ea0467ccaf900bf294d3567c302a802dc661f03bdde6aa7ecc9ccf05c4f", generator.getString("binarySha256"))
+
+    val expectedFixtures = linkedMapOf(
+      "one_person" to Pair(
+        "video_segmentation_one_person_10s_720p.mp4",
+        "4cae38ceb3c6ff8faab4026b5ff3cb8907ca381e4b44bec47815471e6446453f"
+      ),
+      "two_people_crossing_occluding" to Pair(
+        "video_segmentation_two_crossing_10s_720p.mp4",
+        "12c6173e83dc4ede1b4c016b16612df7b16932243c09cbe1d681a4c1735166d3"
+      ),
+      "fast_motion" to Pair(
+        "video_segmentation_fast_motion_10s_720p.mp4",
+        "f4ff899061b78f5fb204daf68ffe25289d1eba84528ed424e83255995d8b0f67"
+      )
+    )
     val fixtureRecords = provenance.getJSONArray("fixtures")
+    val observedFixtures = JSONArray()
+    val observedFixtureKeys = mutableListOf<String>()
     for (index in 0 until fixtureRecords.length()) {
       val fixture = fixtureRecords.getJSONObject(index)
-      val observedDigest = assets.open(fixture.getString("asset")).use(::sha256)
-      val matches = observedDigest == fixture.getString("sha256")
-      allFixtureDigestsMatch = allFixtureDigestsMatch && matches
+      val id = fixture.getString("id")
+      val asset = fixture.getString("asset")
+      val observedDigest = assets.open(asset).use(::sha256)
+      observedFixtureKeys += "$id|$asset|$observedDigest"
       observedFixtures.put(
         JSONObject(fixture.toString())
           .put("observedSha256", observedDigest)
-          .put("digestMatches", matches)
+          .put("digestMatches", observedDigest == fixture.getString("sha256"))
       )
+    }
+    val expectedFixtureKeys = expectedFixtures.map { (id, value) -> "$id|${value.first}|${value.second}" }
+    boundary("fixtures.exactSet", expectedFixtureKeys.sorted().joinToString(","), observedFixtureKeys.sorted().joinToString(","))
+    for ((id, value) in expectedFixtures) {
+      val expectedKey = "$id|${value.first}|${value.second}"
+      val observedKey = observedFixtureKeys.singleOrNull { it.startsWith("$id|") } ?: "MISSING_OR_DUPLICATE"
+      boundary("fixture.$id", expectedKey, observedKey)
+    }
+
+    val requiredIds = boundaries.map { it.id }.toSet()
+    val allBoundariesMatch =
+      VideoSegmentationGateContracts.provenanceBoundariesComplete(boundaries, requiredIds)
+    val failedBoundaries = boundaries.filter { it.expected != it.observed }
+    val boundariesJson = JSONArray().apply {
+      boundaries.forEach {
+        put(
+          JSONObject()
+            .put("id", it.id)
+            .put("expected", it.expected)
+            .put("observed", it.observed)
+            .put("status", if (it.expected == it.observed) "PASS" else "FAIL")
+        )
+      }
     }
 
     return JSONObject()
-      .put("tasksVision", JSONObject(provenance.getJSONObject("tasksVision").toString()))
+      .put(
+        "tasksVision",
+        JSONObject(tasksVision.toString())
+          .put("observedPomSha256", observedPomDigest)
+          .put("observedLicenseSha256", observedDependencyLicenseDigest)
+      )
       .put(
         "model",
         JSONObject(model.toString())
           .put("observedSha256", observedModelDigest)
-          .put("digestMatches", modelDigestMatches)
+          .put("digestMatches", observedModelDigest == MODEL_SHA256)
+          .put("observedLicenseSha256", observedModelLicenseDigest)
+          .put("observedModelCardSha256", observedModelCardDigest)
+          .put("observedOutputSemantics", model.getString("output"))
       )
-      .put("fixtureSource", JSONObject(provenance.getJSONObject("fixtureSource").toString()))
-      .put("generator", JSONObject(provenance.getJSONObject("generator").toString()))
+      .put(
+        "fixtureSource",
+        JSONObject(fixtureSource.toString())
+          .put("observedLicenseSha256", observedFixtureLicenseDigest)
+      )
+      .put(
+        "generator",
+        JSONObject(generator.toString())
+          .put("observedScriptSha256", observedGeneratorDigest)
+      )
       .put("fixtures", observedFixtures)
-      .put("modelProvenanceComplete", modelProvenanceComplete)
-      .put("allDigestsMatch", modelDigestMatches && allFixtureDigestsMatch)
+      .put("provenanceBoundaries", boundariesJson)
+      .put("failedBoundaries", JSONArray(failedBoundaries.map { it.id }))
+      .put("modelProvenanceComplete", allBoundariesMatch)
+      .put("allDigestsMatch", allBoundariesMatch)
+      .put("allProvenanceBoundariesMatch", allBoundariesMatch)
   }
 
   fun run(instrumentation: Instrumentation): JSONObject {
@@ -157,6 +300,8 @@ object VideoSegmentationDeviceGateProbe {
     }
     targetContext.filesDir.listFiles { file -> file.name.startsWith("video-segmentation-mask-") }
       ?.forEach(File::delete)
+    targetContext.filesDir.listFiles { file -> file.name.startsWith("video-segmentation-playback-") }
+      ?.forEach(File::delete)
 
     val fixtureFiles = linkedMapOf<String, File>()
     for (fixture in fixtures) {
@@ -167,10 +312,9 @@ object VideoSegmentationDeviceGateProbe {
       fixtureFiles[fixture.id] = file
     }
 
-    val activityManager = targetContext.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
-    val memoryCeilingBytes = activityManager.memoryClass.toLong() * 1024L * 1024L
     val matrixResults = mutableListOf<MatrixResult>()
     val maskEvidence = JSONArray()
+    val maskPlaybackEvidence = JSONArray()
     val cancellation: JSONObject
 
     try {
@@ -181,7 +325,6 @@ object VideoSegmentationDeviceGateProbe {
             targetContext,
             workingSize,
             maskFps,
-            memoryCeilingBytes,
             fixtureFiles,
             maskEvidence
           )
@@ -194,6 +337,20 @@ object VideoSegmentationDeviceGateProbe {
         checkNotNull(fixtureFiles["fast_motion"]),
         workDir
       )
+      for ((workingSize, maskFps) in listOf(256 to 8, 512 to 15)) {
+        for (fixture in fixtures) {
+          maskPlaybackEvidence.put(
+            renderPlaybackEvidenceSequence(
+              instrumentation,
+              targetContext,
+              fixture,
+              checkNotNull(fixtureFiles[fixture.id]),
+              workingSize,
+              maskFps
+            )
+          )
+        }
+      }
     } finally {
       workDir.deleteRecursively()
     }
@@ -221,7 +378,7 @@ object VideoSegmentationDeviceGateProbe {
       provenance.getJSONObject("tasksVision").getString("version") == TASKS_VISION_VERSION
     val matrixComplete = matrixResults.size == WORKING_SIZES.size * MASK_FPS.size
     val artifactObservation = nativeArtifactObservation(instrumentation)
-    val pageAlignmentPass = artifactObservation.optBoolean("arm64ElfSupports16KiBPages", false)
+    val pageAlignmentPass = artifactObservation.optBoolean("arm64ApkPageAlignmentPass", false)
     val gatePass = provenancePass && matrixComplete && cancellationPass && videoIsolationAccepted && pageAlignmentPass
 
     return JSONObject()
@@ -241,24 +398,26 @@ object VideoSegmentationDeviceGateProbe {
           .put("maskFps", JSONArray(MASK_FPS.toList()))
           .put("maskThreshold", MASK_THRESHOLD.toDouble())
           .put("temporalSmoothing", "EMA current=$SMOOTHING_CURRENT_WEIGHT previous=${1f - SMOOTHING_CURRENT_WEIGHT}")
-          .put("peakMemoryMetric", "android.os.Debug.getPss process PSS sampled every 20 ms, including model setup and teardown")
-          .put("pipelineRuntimeMetric", "asset decode + scale + VIDEO-mode inference + configured-FPS smoothing + mask metrics + ten contact-sheet panel overlays; PNG encoding excluded")
-          .put("latencyMetric", "per-frame MediaPipe segmentForVideo wall-clock latency")
-          .put("memoryCeilingBytes", memoryCeilingBytes)
-          .put("memoryCeilingSource", "ActivityManager.memoryClass observed on the physical device")
+          .put("decoder", "single-pass MediaExtractor + MediaCodec flexible-YUV decoder; no seeks")
+          .put("peakMemoryMetric", "baseline and peak android.os.Debug.getPss process PSS sampled every 20 ms; capability uses peak-minus-baseline delta")
+          .put("pipelineRuntimeMetric", "single-pass decode + scale + VIDEO-mode inference + configured-FPS smoothing + motion-normalized mask metrics + ten contact-sheet panel overlays; PNG encoding excluded")
+          .put("latencyMetric", "per-frame MediaPipe segmentForVideo wall-clock latency; sequential decode interval between sampled frames")
+          .put("pssDeltaBudgetBytes", MAX_PSS_DELTA_BYTES)
+          .put("pssDeltaBudgetSource", "Task 0.2 explicit 128 MiB process-PSS growth budget")
           .put(
             "qualityThresholds",
             JSONObject()
               .put("foregroundCoverageMeanMin", MIN_FOREGROUND_COVERAGE)
               .put("foregroundCoverageMeanMax", MAX_FOREGROUND_COVERAGE)
               .put("nonEmptyFrameRatioMin", MIN_NON_EMPTY_FRAME_RATIO)
-              .put("temporalMaskIouMeanMin", MIN_TEMPORAL_IOU_MEAN)
-              .put("edgePumpingP95Max", MAX_EDGE_PUMPING_P95)
-              .put("areaPumpingP95Max", MAX_AREA_PUMPING_P95)
+              .put("motionCompensatedMaskIouMeanMin", MIN_TEMPORAL_IOU_MEAN)
+              .put("motionNormalizedBoundaryPumpingP95Max", MAX_EDGE_PUMPING_P95)
+              .put("motionNormalizedAreaPumpingP95Max", MAX_AREA_PUMPING_P95)
           )
       )
       .put("matrix", JSONArray().apply { matrixResults.forEach { put(it.json) } })
       .put("maskEvidence", maskEvidence)
+      .put("maskPlaybackEvidence", maskPlaybackEvidence)
       .put("cancellationCleanup", cancellation)
       .put("tracking", tracking)
       .put(
@@ -271,9 +430,9 @@ object VideoSegmentationDeviceGateProbe {
               .put(
                 "reason",
                 if (videoIsolationAccepted) {
-                  "Smallest observed configuration passes all three fixture quality thresholds, <=3x realtime, measured memory ceiling, and cancellation cleanup."
+                  "Smallest observed configuration passes all three fixture motion-aware quality thresholds, <=3x realtime, the 128 MiB PSS-delta budget, and cancellation cleanup."
                 } else {
-                  "No observed configuration passes all three fixture quality thresholds, <=3x realtime, measured memory ceiling, and cancellation cleanup; no production stub is permitted."
+                  "No observed configuration passes all three fixture motion-aware quality thresholds, <=3x realtime, the 128 MiB PSS-delta budget, and cancellation cleanup; no production stub is permitted."
                 }
               )
               .put("selectedSettings", selectedJson ?: JSONObject.NULL)
@@ -290,11 +449,11 @@ object VideoSegmentationDeviceGateProbe {
       .put(
         "criteria",
         JSONObject()
-          .put("provenance", criterion(provenancePass, "Pinned model/artifact/fixture provenance and SHA-256 digests match packaged assets"))
-          .put("matrixComplete", criterion(matrixComplete, "All 256/384/512 x 8/12/15 observations completed"))
-          .put("nativePageAlignment", criterion(pageAlignmentPass, "Packaged arm64 MediaPipe ELF PT_LOAD alignments support 16 KiB pages"))
-          .put("cancellationCleanup", criterion(cancellationPass, "Cancellation stops work, closes MediaPipe/decoder resources, removes partial evidence, and permits follow-up inference"))
-          .put("videoIsolation", criterion(videoIsolationAccepted, "A selected 10 s 720p configuration is <=3x realtime, below the observed memory ceiling, and quality-acceptable on every fixture"))
+          .put("provenance", criterion(provenancePass, "Every pinned dependency/model/fixture/generator/license boundary and packaged SHA-256 digest matches"))
+          .put("matrixComplete", criterion(matrixComplete, "All 256/384/512 x 8/12/15 sequential-decoder observations completed"))
+          .put("nativePageAlignment", criterion(pageAlignmentPass, "Packaged arm64 MediaPipe ELF PT_LOAD and actual APK ZIP data offset are both 16 KiB aligned"))
+          .put("cancellationCleanup", criterion(cancellationPass, "Cancellation stops work, closes MediaPipe/sequential-decoder resources, removes partial evidence, and permits follow-up inference"))
+          .put("videoIsolation", criterion(videoIsolationAccepted, "A selected 10 s 720p configuration is <=3x realtime, under the 128 MiB peak-PSS-delta budget, and motion-aware quality-acceptable on every fixture"))
       )
   }
 
@@ -303,17 +462,15 @@ object VideoSegmentationDeviceGateProbe {
     context: Context,
     workingSize: Int,
     maskFps: Int,
-    memoryCeilingBytes: Long,
     fixtureFiles: Map<String, File>,
     maskEvidence: JSONArray
   ): MatrixResult {
     val fixtureJson = JSONArray()
     val fixtureObservations = mutableListOf<FixtureObservation>()
-    var failure: Throwable? = null
 
     for (fixture in fixtures) {
-      val observation = try {
-        runFixture(
+      try {
+        val observation = runFixture(
           instrumentation,
           context,
           fixture,
@@ -321,21 +478,22 @@ object VideoSegmentationDeviceGateProbe {
           workingSize,
           maskFps
         )
-      } catch (error: Throwable) {
-        failure = failure ?: error
-        null
-      }
-      if (observation == null) {
-        fixtureJson.put(
-          JSONObject()
-            .put("id", fixture.id)
-            .put("status", "FAILED")
-            .put("error", errorJson(checkNotNull(failure)))
-        )
-      } else {
         fixtureObservations += observation
         fixtureJson.put(observation.json)
         maskEvidence.put(observation.evidence)
+      } catch (error: Throwable) {
+        val failure = VideoSegmentationGateContracts.fixtureFailure(fixture.id, error)
+        fixtureJson.put(
+          JSONObject()
+            .put("id", failure.fixtureId)
+            .put("status", "FAILED")
+            .put(
+              "error",
+              JSONObject()
+                .put("type", failure.type)
+                .put("message", failure.message)
+            )
+        )
       }
     }
 
@@ -343,13 +501,18 @@ object VideoSegmentationDeviceGateProbe {
     val qualityPass = allFixturesCompleted && fixtureObservations.all(FixtureObservation::qualityPass)
     val worstRuntimeMs = fixtureObservations.maxOfOrNull(FixtureObservation::runtimeMs) ?: FIXTURE_DURATION_MS * 3 + 1
     val peakPssBytes = fixtureObservations.maxOfOrNull(FixtureObservation::peakPssBytes) ?: Long.MAX_VALUE
+    val worstPssDelta = fixtureObservations.maxByOrNull(FixtureObservation::peakPssDeltaBytes)
+    val peakPssDeltaBytes = worstPssDelta?.peakPssDeltaBytes ?: Long.MAX_VALUE
+    val baselinePssBytes = worstPssDelta?.baselinePssBytes ?: Long.MAX_VALUE
     val contract = VideoSegmentationGateContracts.MatrixObservation(
       workingSize = workingSize,
       maskFps = maskFps,
       runtimeMs = worstRuntimeMs,
       durationMs = FIXTURE_DURATION_MS,
-      peakPssBytes = peakPssBytes,
-      memoryCeilingBytes = memoryCeilingBytes,
+      baselinePssBytes = baselinePssBytes,
+      peakPssBytes = worstPssDelta?.peakPssBytes ?: Long.MAX_VALUE,
+      peakPssDeltaBytes = peakPssDeltaBytes,
+      pssDeltaBudgetBytes = MAX_PSS_DELTA_BYTES,
       qualityPass = qualityPass,
       fixtureCount = fixtureObservations.size
     )
@@ -363,8 +526,10 @@ object VideoSegmentationDeviceGateProbe {
       .put("worstPipelineRuntimeMs", worstRuntimeMs)
       .put("worstRuntimeXRealtime", worstRuntimeMs.toDouble() / FIXTURE_DURATION_MS)
       .put("peakPssBytes", if (peakPssBytes == Long.MAX_VALUE) JSONObject.NULL else peakPssBytes)
-      .put("memoryCeilingBytes", memoryCeilingBytes)
-      .put("underMemoryCeiling", peakPssBytes < memoryCeilingBytes)
+      .put("baselinePssBytesForWorstDelta", if (baselinePssBytes == Long.MAX_VALUE) JSONObject.NULL else baselinePssBytes)
+      .put("peakPssDeltaBytes", if (peakPssDeltaBytes == Long.MAX_VALUE) JSONObject.NULL else peakPssDeltaBytes)
+      .put("pssDeltaBudgetBytes", MAX_PSS_DELTA_BYTES)
+      .put("underPssDeltaBudget", peakPssDeltaBytes < MAX_PSS_DELTA_BYTES)
       .put("withinThreeTimesRealtime", worstRuntimeMs <= FIXTURE_DURATION_MS * 3)
       .put("fixtures", fixtureJson)
     return MatrixResult(json, contract)
@@ -378,8 +543,8 @@ object VideoSegmentationDeviceGateProbe {
     workingSize: Int,
     maskFps: Int
   ): FixtureObservation {
-    val retriever = MediaMetadataRetriever()
-    val peakPssBytes = AtomicLong(currentPssBytes())
+    val baselinePssBytes = currentPssBytes()
+    val peakPssBytes = AtomicLong(baselinePssBytes)
     val sampling = AtomicBoolean(true)
     val sampler = thread(name = "segmentation-pss", isDaemon = true) {
       while (sampling.get()) {
@@ -389,23 +554,22 @@ object VideoSegmentationDeviceGateProbe {
       updateMax(peakPssBytes, currentPssBytes())
     }
     val startMs = SystemClock.elapsedRealtime()
-    val segmenter = createSegmenter(instrumentation, context)
+    var decoder: SequentialVideoFrameDecoder? = null
+    var segmenter: ImageSegmenter? = null
     val series: MeasuredMaskSeries
     val observedDurationMs: Long
     val observedWidth: Int
     val observedHeight: Int
     try {
-      retriever.setDataSource(source.absolutePath)
-      observedDurationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLong()
-        ?: error("Missing duration for ${fixture.id}")
-      observedWidth = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toInt()
-        ?: error("Missing width for ${fixture.id}")
-      observedHeight = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toInt()
-        ?: error("Missing height for ${fixture.id}")
-      series = measureMaskSeries(retriever, segmenter, workingSize, maskFps)
+      decoder = SequentialVideoFrameDecoder(source)
+      observedDurationMs = decoder.durationMs
+      observedWidth = decoder.width
+      observedHeight = decoder.height
+      segmenter = createSegmenter(instrumentation, context)
+      series = measureMaskSeries(decoder, segmenter, workingSize, maskFps)
     } finally {
-      retriever.release()
-      segmenter.close()
+      runCatching { segmenter?.close() }
+      runCatching { decoder?.close() }
       sampling.set(false)
       sampler.join(5_000)
     }
@@ -419,6 +583,8 @@ object VideoSegmentationDeviceGateProbe {
     )
     val metrics = series.metrics
     val qualityPass = metrics.getBoolean("qualityPass")
+    val peak = peakPssBytes.get()
+    val peakDelta = max(0L, peak - baselinePssBytes)
     val json = JSONObject()
       .put("id", fixture.id)
       .put("status", "COMPLETED")
@@ -427,6 +593,11 @@ object VideoSegmentationDeviceGateProbe {
       .put("observedDurationMs", observedDurationMs)
       .put("observedWidth", observedWidth)
       .put("observedHeight", observedHeight)
+      .put("decoder", "MediaExtractor+MediaCodec sequential")
+      .put("decoderName", series.decoderName)
+      .put("extractorSeekCount", 0)
+      .put("inputSamplesAdvanced", series.inputSamplesAdvanced)
+      .put("decodedSourceFrames", series.decodedSourceFrames)
       .put("framesProcessed", series.framesProcessed)
       .put("maskWidth", series.maskWidth)
       .put("maskHeight", series.maskHeight)
@@ -435,33 +606,49 @@ object VideoSegmentationDeviceGateProbe {
       .put("runtimeXRealtime", runtimeMs.toDouble() / FIXTURE_DURATION_MS)
       .put("throughputFramesPerSecond", series.framesProcessed * 1000.0 / runtimeMs)
       .put("inferenceLatencyMs", latencyJson(series.inferenceLatenciesMs))
-      .put("decodeLatencyMs", latencyJson(series.decodeLatenciesMs))
-      .put("peakPssBytes", peakPssBytes.get())
+      .put("sequentialDecodeIntervalMs", latencyJson(series.decodeLatenciesMs))
+      .put("baselinePssBytes", baselinePssBytes)
+      .put("peakPssBytes", peak)
+      .put("peakPssDeltaBytes", peakDelta)
+      .put("pssDeltaBudgetBytes", MAX_PSS_DELTA_BYTES)
+      .put("underPssDeltaBudget", peakDelta < MAX_PSS_DELTA_BYTES)
       .put("quality", metrics)
       .put("evidenceFileName", evidence.getString("fileName"))
-    return FixtureObservation(json, runtimeMs, peakPssBytes.get(), qualityPass, evidence)
+    return FixtureObservation(
+      json = json,
+      runtimeMs = runtimeMs,
+      baselinePssBytes = baselinePssBytes,
+      peakPssBytes = peak,
+      qualityPass = qualityPass,
+      peakPssDeltaBytes = peakDelta,
+      evidence = evidence
+    )
   }
 
   private fun measureMaskSeries(
-    retriever: MediaMetadataRetriever,
+    decoder: SequentialVideoFrameDecoder,
     segmenter: ImageSegmenter,
     workingSize: Int,
     maskFps: Int
   ): MeasuredMaskSeries {
-    val frameCount = maskFps * (FIXTURE_DURATION_MS / 1000L).toInt()
+    val schedule = VideoSegmentationGateContracts.evidenceSchedule(maskFps, durationSeconds = 10)
+    val frameCount = schedule.size
     val inferenceLatencies = ArrayList<Double>(frameCount)
     val decodeLatencies = ArrayList<Double>(frameCount)
+    val presentationOffsetsMs = ArrayList<Double>(frameCount)
     val coverage = ArrayList<Double>(frameCount)
-    val temporalIous = ArrayList<Double>(frameCount - 1)
-    val edgePumping = ArrayList<Double>(frameCount - 1)
-    val areaPumping = ArrayList<Double>(frameCount - 1)
+    val rawTemporalIous = ArrayList<Double>(frameCount - 1)
+    val motionCompensatedIous = ArrayList<Double>(frameCount - 1)
+    val normalizedBoundaryPumping = ArrayList<Double>(frameCount - 1)
+    val normalizedAreaPumping = ArrayList<Double>(frameCount - 1)
     var smoothed: FloatArray? = null
     var previousStats: BinaryStats? = null
+    var previousNormalizedStats: BinaryStats? = null
     var maskWidth = 0
     var maskHeight = 0
     var confidenceMaskCount = 0
     var nonEmptyFrames = 0
-    val evidenceSchedule = VideoSegmentationGateContracts.evidenceSchedule(maskFps, durationSeconds = 10)
+    var processedFrames = 0
     val evidenceHeight = scaledHeight(workingSize)
     val evidenceSheet = Bitmap.createBitmap(workingSize * 5, evidenceHeight * 2, Bitmap.Config.ARGB_8888)
     val evidenceCanvas = Canvas(evidenceSheet).apply { drawColor(Color.BLACK) }
@@ -471,107 +658,136 @@ object VideoSegmentationDeviceGateProbe {
       setShadowLayer(2f, 1f, 1f, Color.BLACK)
     }
 
-    for (frameIndex in 0 until frameCount) {
-      val timestampMs = frameIndex * 1000L / maskFps
-      val evidenceFrame = evidenceSchedule[frameIndex]
-      val decodeStartNs = SystemClock.elapsedRealtimeNanos()
-      val bitmap = retriever.getScaledFrameAtTime(
-        timestampMs * 1000L,
-        MediaMetadataRetriever.OPTION_CLOSEST,
-        workingSize,
-        scaledHeight(workingSize)
-      ) ?: error("Decoder returned null at ${timestampMs}ms")
-      decodeLatencies += nanosToMillis(SystemClock.elapsedRealtimeNanos() - decodeStartNs)
-      val sourceCopy = evidenceFrame.panelSecond?.let {
-        bitmap.copy(Bitmap.Config.ARGB_8888, false)
-      }
-      val inferenceStartNs = SystemClock.elapsedRealtimeNanos()
-      val extracted = segmentFrame(segmenter, bitmap, timestampMs)
-      inferenceLatencies += nanosToMillis(SystemClock.elapsedRealtimeNanos() - inferenceStartNs)
-      bitmap.recycle()
+    try {
+      decoder.decodeFrames(
+        targetTimestampsMs = schedule.map { it.timestampMs },
+        targetWidth = workingSize,
+        targetHeight = evidenceHeight,
+        shouldCancel = { false }
+      ) { frame ->
+        val evidenceFrame = schedule[processedFrames]
+        decodeLatencies += frame.decodeIntervalMs
+        presentationOffsetsMs += (frame.presentationTimeUs / 1000.0) - frame.targetTimestampMs
+        var sourceCopy: Bitmap? = evidenceFrame.panelSecond?.let {
+          frame.bitmap.copy(Bitmap.Config.ARGB_8888, false)
+        }
+        try {
+          val inferenceStartNs = SystemClock.elapsedRealtimeNanos()
+          val extracted = segmentFrame(segmenter, frame.bitmap, frame.targetTimestampMs)
+          inferenceLatencies += nanosToMillis(SystemClock.elapsedRealtimeNanos() - inferenceStartNs)
+          maskWidth = extracted.width
+          maskHeight = extracted.height
+          confidenceMaskCount = extracted.confidenceMaskCount
+          val priorSmoothed = smoothed
+          val currentSmoothed = if (priorSmoothed == null) {
+            extracted.values.copyOf()
+          } else {
+            FloatArray(extracted.values.size) { index ->
+              SMOOTHING_CURRENT_WEIGHT * extracted.values[index] +
+                (1f - SMOOTHING_CURRENT_WEIGHT) * priorSmoothed[index]
+            }
+          }
+          smoothed = currentSmoothed
 
-      maskWidth = extracted.width
-      maskHeight = extracted.height
-      confidenceMaskCount = extracted.confidenceMaskCount
-      val priorSmoothed = smoothed
-      val currentSmoothed = if (priorSmoothed == null) {
-        extracted.values.copyOf()
-      } else {
-        FloatArray(extracted.values.size) { index ->
-          SMOOTHING_CURRENT_WEIGHT * extracted.values[index] +
-            (1f - SMOOTHING_CURRENT_WEIGHT) * priorSmoothed[index]
+          val panelSecond = evidenceFrame.panelSecond
+          if (panelSecond != null && sourceCopy != null) {
+            var overlay: Bitmap? = null
+            try {
+              overlay = overlayMask(sourceCopy, currentSmoothed, extracted.width, extracted.height)
+              val left = (panelSecond % 5) * workingSize
+              val top = (panelSecond / 5) * evidenceHeight
+              evidenceCanvas.drawBitmap(overlay, left.toFloat(), top.toFloat(), null)
+              evidenceCanvas.drawText(
+                "${panelSecond}s",
+                left + 6f,
+                top + evidenceLabelPaint.textSize + 4f,
+                evidenceLabelPaint
+              )
+            } finally {
+              overlay?.let { if (!it.isRecycled) it.recycle() }
+            }
+          }
+
+          val stats = binaryStats(currentSmoothed, extracted.width, extracted.height)
+          val normalized = VideoSegmentationGateContracts.motionNormalizedMask(
+            stats.binary,
+            extracted.width,
+            extracted.height
+          )
+          val normalizedStats = binaryStats(normalized, 64, 64)
+          val totalPixels = max(1, extracted.width * extracted.height)
+          coverage += stats.foregroundPixels.toDouble() / totalPixels
+          if (stats.foregroundPixels > 0) nonEmptyFrames++
+
+          val priorStats = previousStats
+          val priorNormalized = previousNormalizedStats
+          if (priorStats != null && priorNormalized != null) {
+            rawTemporalIous += VideoSegmentationGateContracts.binaryIou(priorStats.binary, stats.binary)
+            motionCompensatedIous +=
+              VideoSegmentationGateContracts.binaryIou(priorNormalized.binary, normalizedStats.binary)
+            normalizedBoundaryPumping += relativeChange(priorNormalized.edgePixels, normalizedStats.edgePixels)
+            normalizedAreaPumping +=
+              relativeChange(priorNormalized.foregroundPixels, normalizedStats.foregroundPixels)
+          }
+          previousStats = stats
+          previousNormalizedStats = normalizedStats
+          processedFrames++
+        } finally {
+          sourceCopy?.let { if (!it.isRecycled) it.recycle() }
+          sourceCopy = null
         }
       }
-      smoothed = currentSmoothed
-      val panelSecond = evidenceFrame.panelSecond
-      if (panelSecond != null && sourceCopy != null) {
-        val overlay = overlayMask(sourceCopy, currentSmoothed, extracted.width, extracted.height)
-        val left = (panelSecond % 5) * workingSize
-        val top = (panelSecond / 5) * evidenceHeight
-        evidenceCanvas.drawBitmap(overlay, left.toFloat(), top.toFloat(), null)
-        evidenceCanvas.drawText(
-          "${panelSecond}s",
-          left + 6f,
-          top + evidenceLabelPaint.textSize + 4f,
-          evidenceLabelPaint
-        )
-        overlay.recycle()
-        sourceCopy.recycle()
-      }
-      val stats = binaryStats(currentSmoothed, extracted.width, extracted.height)
-      val totalPixels = max(1, extracted.width * extracted.height)
-      val frameCoverage = stats.foregroundPixels.toDouble() / totalPixels
-      coverage += frameCoverage
-      if (stats.foregroundPixels > 0) nonEmptyFrames++
 
-      val priorStats = previousStats
-      if (priorStats != null) {
-        temporalIous += binaryIou(priorStats.binary, stats.binary)
-        edgePumping += relativeChange(priorStats.edgePixels, stats.edgePixels)
-        areaPumping += relativeChange(priorStats.foregroundPixels, stats.foregroundPixels)
-      }
-      previousStats = stats
+      val coverageMean = coverage.average()
+      val motionCompensatedIouMean = motionCompensatedIous.averageOrZero()
+      val boundaryPumpingP95 = percentile(normalizedBoundaryPumping, 0.95)
+      val areaPumpingP95 = percentile(normalizedAreaPumping, 0.95)
+      val nonEmptyFrameRatio = nonEmptyFrames.toDouble() / frameCount
+      val coveragePass = coverageMean in MIN_FOREGROUND_COVERAGE..MAX_FOREGROUND_COVERAGE
+      val nonEmptyPass = nonEmptyFrameRatio >= MIN_NON_EMPTY_FRAME_RATIO
+      val temporalIouPass = motionCompensatedIouMean >= MIN_TEMPORAL_IOU_MEAN
+      val boundaryPumpingPass = boundaryPumpingP95 <= MAX_EDGE_PUMPING_P95
+      val areaPumpingPass = areaPumpingP95 <= MAX_AREA_PUMPING_P95
+      val qualityPass =
+        coveragePass && nonEmptyPass && temporalIouPass && boundaryPumpingPass && areaPumpingPass
+
+      val metrics = JSONObject()
+        .put("foregroundCoverageMean", coverageMean)
+        .put("foregroundCoverageMin", coverage.minOrNull() ?: 0.0)
+        .put("foregroundCoverageMax", coverage.maxOrNull() ?: 0.0)
+        .put("nonEmptyFrameRatio", nonEmptyFrameRatio)
+        .put("motionCompensation", "translate and scale each binary mask bounding box into a 64x64 normalized coordinate space")
+        .put("motionCompensatedMaskIouMean", motionCompensatedIouMean)
+        .put("motionCompensatedMaskIouP05", percentile(motionCompensatedIous, 0.05))
+        .put("motionNormalizedBoundaryPumpingMean", normalizedBoundaryPumping.averageOrZero())
+        .put("motionNormalizedBoundaryPumpingP95", boundaryPumpingP95)
+        .put("motionNormalizedAreaPumpingMean", normalizedAreaPumping.averageOrZero())
+        .put("motionNormalizedAreaPumpingP95", areaPumpingP95)
+        .put("rawTemporalMaskIouMeanDiagnosticOnly", rawTemporalIous.averageOrZero())
+        .put("presentationTimestampOffsetMs", latencyJson(presentationOffsetsMs))
+        .put("foregroundCoveragePass", coveragePass)
+        .put("nonEmptyFramesPass", nonEmptyPass)
+        .put("motionCompensatedTemporalStabilityPass", temporalIouPass)
+        .put("normalPlaybackNoObviousEdgePumping", boundaryPumpingPass)
+        .put("motionNormalizedAreaStabilityPass", areaPumpingPass)
+        .put("qualityPass", qualityPass)
+      return MeasuredMaskSeries(
+        metrics = metrics,
+        inferenceLatenciesMs = inferenceLatencies,
+        decodeLatenciesMs = decodeLatencies,
+        framesProcessed = processedFrames,
+        maskWidth = maskWidth,
+        maskHeight = maskHeight,
+        confidenceMaskCount = confidenceMaskCount,
+        decoderName = decoder.decoderName,
+        decodedSourceFrames = decoder.decodedSourceFrames,
+        inputSamplesAdvanced = decoder.inputSamplesAdvanced,
+        evidenceSheet = evidenceSheet
+      )
+    } catch (error: Throwable) {
+      if (!evidenceSheet.isRecycled) evidenceSheet.recycle()
+      throw error
     }
-
-    val coverageMean = coverage.average()
-    val temporalIouMean = temporalIous.averageOrZero()
-    val edgePumpingP95 = percentile(edgePumping, 0.95)
-    val areaPumpingP95 = percentile(areaPumping, 0.95)
-    val nonEmptyFrameRatio = nonEmptyFrames.toDouble() / frameCount
-    val coveragePass = coverageMean in MIN_FOREGROUND_COVERAGE..MAX_FOREGROUND_COVERAGE
-    val nonEmptyPass = nonEmptyFrameRatio >= MIN_NON_EMPTY_FRAME_RATIO
-    val temporalIouPass = temporalIouMean >= MIN_TEMPORAL_IOU_MEAN
-    val edgePumpingPass = edgePumpingP95 <= MAX_EDGE_PUMPING_P95
-    val areaPumpingPass = areaPumpingP95 <= MAX_AREA_PUMPING_P95
-    val qualityPass = coveragePass && nonEmptyPass && temporalIouPass && edgePumpingPass && areaPumpingPass
-
-    val metrics = JSONObject()
-      .put("foregroundCoverageMean", coverageMean)
-      .put("foregroundCoverageMin", coverage.minOrNull() ?: 0.0)
-      .put("foregroundCoverageMax", coverage.maxOrNull() ?: 0.0)
-      .put("nonEmptyFrameRatio", nonEmptyFrameRatio)
-      .put("temporalMaskIouMean", temporalIouMean)
-      .put("temporalMaskIouP05", percentile(temporalIous, 0.05))
-      .put("edgePumpingMean", edgePumping.averageOrZero())
-      .put("edgePumpingP95", edgePumpingP95)
-      .put("areaPumpingMean", areaPumping.averageOrZero())
-      .put("areaPumpingP95", areaPumpingP95)
-      .put("foregroundCoveragePass", coveragePass)
-      .put("nonEmptyFramesPass", nonEmptyPass)
-      .put("temporalStabilityPass", temporalIouPass)
-      .put("normalPlaybackNoObviousEdgePumping", edgePumpingPass)
-      .put("areaStabilityPass", areaPumpingPass)
-      .put("qualityPass", qualityPass)
-    return MeasuredMaskSeries(
-      metrics,
-      inferenceLatencies,
-      decodeLatencies,
-      frameCount,
-      maskWidth,
-      maskHeight,
-      confidenceMaskCount,
-      evidenceSheet
-    )
   }
 
   private fun writeEvidence(
@@ -585,11 +801,16 @@ object VideoSegmentationDeviceGateProbe {
     val file = File(context.filesDir, fileName)
     val encodingStartMs = SystemClock.elapsedRealtime()
     try {
-      file.outputStream().use { output ->
-        check(sheet.compress(Bitmap.CompressFormat.PNG, 100, output)) { "Could not write $fileName" }
+      try {
+        file.outputStream().use { output ->
+          check(sheet.compress(Bitmap.CompressFormat.PNG, 100, output)) { "Could not write $fileName" }
+        }
+      } catch (error: Throwable) {
+        file.delete()
+        throw error
       }
     } finally {
-      sheet.recycle()
+      if (!sheet.isRecycled) sheet.recycle()
     }
     return JSONObject()
       .put("fixtureId", fixture.id)
@@ -639,6 +860,93 @@ object VideoSegmentationDeviceGateProbe {
     return Bitmap.createBitmap(pixels, width, height, Bitmap.Config.ARGB_8888)
   }
 
+  private fun renderPlaybackEvidenceSequence(
+    instrumentation: Instrumentation,
+    context: Context,
+    fixture: FixtureSpec,
+    source: File,
+    workingSize: Int,
+    maskFps: Int
+  ): JSONObject {
+    val schedule = VideoSegmentationGateContracts.evidenceSchedule(maskFps, durationSeconds = 10)
+    val fileName = "video-segmentation-playback-${fixture.id}-${workingSize}-${maskFps}fps.zip"
+    val file = File(context.filesDir, fileName).apply { delete() }
+    val startMs = SystemClock.elapsedRealtime()
+    var decoder: SequentialVideoFrameDecoder? = null
+    var segmenter: ImageSegmenter? = null
+    var framesWritten = 0
+    try {
+      decoder = SequentialVideoFrameDecoder(source)
+      segmenter = createSegmenter(instrumentation, context)
+      ZipOutputStream(file.outputStream().buffered()).use { zip ->
+        var smoothed: FloatArray? = null
+        decoder.decodeFrames(
+          targetTimestampsMs = schedule.map { it.timestampMs },
+          targetWidth = workingSize,
+          targetHeight = scaledHeight(workingSize),
+          shouldCancel = { false }
+        ) { frame ->
+          var sourceCopy: Bitmap? = frame.bitmap.copy(Bitmap.Config.ARGB_8888, false)
+          var overlay: Bitmap? = null
+          try {
+            val extracted = segmentFrame(checkNotNull(segmenter), frame.bitmap, frame.targetTimestampMs)
+            val prior = smoothed
+            val current = if (prior == null) {
+              extracted.values.copyOf()
+            } else {
+              FloatArray(extracted.values.size) { index ->
+                SMOOTHING_CURRENT_WEIGHT * extracted.values[index] +
+                  (1f - SMOOTHING_CURRENT_WEIGHT) * prior[index]
+              }
+            }
+            smoothed = current
+            overlay = overlayMask(checkNotNull(sourceCopy), current, extracted.width, extracted.height)
+            zip.putNextEntry(ZipEntry("frame_${framesWritten.toString().padStart(4, '0')}.jpg"))
+            check(overlay.compress(Bitmap.CompressFormat.JPEG, 75, zip)) {
+              "Could not encode playback frame $framesWritten"
+            }
+            zip.closeEntry()
+            framesWritten++
+          } finally {
+            overlay?.let { if (!it.isRecycled) it.recycle() }
+            sourceCopy?.let { if (!it.isRecycled) it.recycle() }
+            sourceCopy = null
+          }
+        }
+        val manifest = JSONObject()
+          .put("fixtureId", fixture.id)
+          .put("workingSize", workingSize)
+          .put("playbackFps", maskFps)
+          .put("frameCount", framesWritten)
+          .put("durationMs", FIXTURE_DURATION_MS)
+          .put("framePattern", "frame_%04d.jpg")
+        zip.putNextEntry(ZipEntry("manifest.json"))
+        zip.write(manifest.toString(2).toByteArray())
+        zip.closeEntry()
+      }
+      check(framesWritten == schedule.size)
+      return JSONObject()
+        .put("fixtureId", fixture.id)
+        .put("workingSize", workingSize)
+        .put("maskFps", maskFps)
+        .put("fileName", fileName)
+        .put("sha256", sha256(file))
+        .put("bytes", file.length())
+        .put("frameCount", framesWritten)
+        .put("durationMs", FIXTURE_DURATION_MS)
+        .put("generationRuntimeMs", SystemClock.elapsedRealtime() - startMs)
+        .put("format", "ZIP JPEG frame sequence with manifest.json")
+        .put("playbackCommand", "ffmpeg -framerate $maskFps -i frame_%04d.jpg -c:v libx264 -pix_fmt yuv420p evidence.mp4")
+        .put("visualEncoding", "source RGB with full-cadence EMA-smoothed >=0.5 mask tinted green and boundary red")
+    } catch (error: Throwable) {
+      file.delete()
+      throw error
+    } finally {
+      runCatching { segmenter?.close() }
+      runCatching { decoder?.close() }
+    }
+  }
+
   private fun runCancellationProbe(
     instrumentation: Instrumentation,
     context: Context,
@@ -649,34 +957,32 @@ object VideoSegmentationDeviceGateProbe {
     val activeLatch = CountDownLatch(1)
     val cancel = AtomicBoolean(false)
     val segmenterClosed = AtomicBoolean(false)
-    val retrieverClosed = AtomicBoolean(false)
+    val decoderClosed = AtomicBoolean(false)
     val framesProcessed = AtomicInteger(0)
     val executor = Executors.newSingleThreadExecutor()
     val future = executor.submit {
-      val retriever = MediaMetadataRetriever()
-      val segmenter = createSegmenter(instrumentation, context)
+      var decoder: SequentialVideoFrameDecoder? = null
+      var segmenter: ImageSegmenter? = null
       try {
-        retriever.setDataSource(source.absolutePath)
+        decoder = SequentialVideoFrameDecoder(source)
+        segmenter = createSegmenter(instrumentation, context)
         partial.writeText("partial segmentation evidence")
-        for (frameIndex in 0 until 150) {
-          if (cancel.get()) break
-          val timestampMs = frameIndex * 1000L / 15
-          val bitmap = retriever.getScaledFrameAtTime(
-            timestampMs * 1000L,
-            MediaMetadataRetriever.OPTION_CLOSEST,
-            512,
-            scaledHeight(512)
-          ) ?: error("Cancellation decoder returned null")
-          segmentFrame(segmenter, bitmap, timestampMs)
-          bitmap.recycle()
+        decoder.decodeFrames(
+          targetTimestampsMs = VideoSegmentationGateContracts.evidenceSchedule(15, 10)
+            .map { it.timestampMs },
+          targetWidth = 512,
+          targetHeight = scaledHeight(512),
+          shouldCancel = { cancel.get() }
+        ) { frame ->
+          segmentFrame(checkNotNull(segmenter), frame.bitmap, frame.targetTimestampMs)
           framesProcessed.incrementAndGet()
           activeLatch.countDown()
         }
       } finally {
-        retriever.release()
-        retrieverClosed.set(true)
-        segmenter.close()
+        runCatching { segmenter?.close() }
         segmenterClosed.set(true)
+        runCatching { decoder?.close() }
+        decoderClosed.set(true)
         partial.delete()
       }
     }
@@ -699,18 +1005,17 @@ object VideoSegmentationDeviceGateProbe {
     }
     val cancelLatencyMs = SystemClock.elapsedRealtime() - cancelStartMs
     val followUpSucceeded = try {
-      val retriever = MediaMetadataRetriever()
-      val segmenter = createSegmenter(instrumentation, context)
-      try {
-        retriever.setDataSource(source.absolutePath)
-        val bitmap = retriever.getScaledFrameAtTime(0L, MediaMetadataRetriever.OPTION_CLOSEST, 256, scaledHeight(256))
-          ?: error("Follow-up decoder returned null")
-        val mask = segmentFrame(segmenter, bitmap, 0L)
-        bitmap.recycle()
-        mask.values.isNotEmpty()
-      } finally {
-        retriever.release()
-        segmenter.close()
+      SequentialVideoFrameDecoder(source).use { decoder ->
+        val segmenter = createSegmenter(instrumentation, context)
+        try {
+          var maskObserved = false
+          decoder.decodeFrames(listOf(0L), 256, scaledHeight(256), { false }) { frame ->
+            maskObserved = segmentFrame(segmenter, frame.bitmap, frame.targetTimestampMs).values.isNotEmpty()
+          }
+          maskObserved
+        } finally {
+          segmenter.close()
+        }
       }
     } catch (_: Throwable) {
       false
@@ -722,7 +1027,7 @@ object VideoSegmentationDeviceGateProbe {
       cancelIssued,
       workerStopped,
       segmenterClosed.get(),
-      retrieverClosed.get(),
+      decoderClosed.get(),
       partialDeleted,
       followUpSucceeded,
       leftovers
@@ -735,7 +1040,7 @@ object VideoSegmentationDeviceGateProbe {
       .put("cancelLatencyMs", cancelLatencyMs)
       .put("workerStopped", workerStopped)
       .put("segmenterClosed", segmenterClosed.get())
-      .put("retrieverClosed", retrieverClosed.get())
+      .put("sequentialDecoderClosed", decoderClosed.get())
       .put("partialEvidenceDeleted", partialDeleted)
       .put("followUpInferenceSucceeded", followUpSucceeded)
       .put("leftoverCancellationFiles", leftovers)
@@ -835,8 +1140,11 @@ object VideoSegmentationDeviceGateProbe {
     }
   }
 
-  private fun binaryStats(mask: FloatArray, width: Int, height: Int): BinaryStats {
-    val binary = BooleanArray(mask.size) { mask[it] >= MASK_THRESHOLD }
+  private fun binaryStats(mask: FloatArray, width: Int, height: Int): BinaryStats =
+    binaryStats(BooleanArray(mask.size) { mask[it] >= MASK_THRESHOLD }, width, height)
+
+  private fun binaryStats(binary: BooleanArray, width: Int, height: Int): BinaryStats {
+    check(binary.size == width * height)
     var foreground = 0
     var edges = 0
     for (y in 0 until height) {
@@ -851,16 +1159,6 @@ object VideoSegmentationDeviceGateProbe {
     return BinaryStats(foreground, edges, binary)
   }
 
-  private fun binaryIou(first: BooleanArray, second: BooleanArray): Double {
-    check(first.size == second.size)
-    var intersection = 0
-    var union = 0
-    for (index in first.indices) {
-      if (first[index] && second[index]) intersection++
-      if (first[index] || second[index]) union++
-    }
-    return if (union == 0) 1.0 else intersection.toDouble() / union
-  }
 
   private fun nativeArtifactObservation(instrumentation: Instrumentation): JSONObject {
     val libraryName = "libmediapipe_tasks_vision_jni.so"
@@ -870,24 +1168,39 @@ object VideoSegmentationDeviceGateProbe {
     ).distinct()
     val packaged = JSONArray()
     var arm64Alignments = emptyList<Long>()
+    var arm64ZipDataOffset = -1L
+    var arm64ApkSha256: String? = null
     for (apkPath in apkPaths) {
-      ZipFile(apkPath).use { zip ->
+      val apkFile = File(apkPath)
+      val apkSha256 = sha256(apkFile)
+      ZipFile(apkFile).use { zip ->
         val entries = zip.entries()
         while (entries.hasMoreElements()) {
           val entry = entries.nextElement()
           if (!entry.name.endsWith("/$libraryName")) continue
           val bytes = zip.getInputStream(entry).use { it.readBytes() }
           val alignments = elfLoadAlignments(bytes)
-          if (entry.name == "lib/arm64-v8a/$libraryName") arm64Alignments = alignments
+          val dataOffset = zipEntryDataOffset(apkFile, entry.name)
+          val pagePass = VideoSegmentationGateContracts.pageAlignmentPass(alignments, dataOffset)
+          if (entry.name == "lib/arm64-v8a/$libraryName") {
+            arm64Alignments = alignments
+            arm64ZipDataOffset = dataOffset
+            arm64ApkSha256 = apkSha256
+          }
           packaged.put(
             JSONObject()
-              .put("apk", File(apkPath).name)
+              .put("apk", apkFile.name)
+              .put("apkSha256", apkSha256)
               .put("entry", entry.name)
               .put("abi", entry.name.split('/').getOrNull(1) ?: "unknown")
               .put("bytes", bytes.size)
-              .put("zipMethod", if (entry.method == java.util.zip.ZipEntry.STORED) "STORED" else "DEFLATED")
+              .put("zipMethod", if (entry.method == ZipEntry.STORED) "STORED" else "DEFLATED")
+              .put("zipDataOffsetBytes", dataOffset)
+              .put("zipDataOffsetModulo16384", if (dataOffset >= 0) dataOffset % 16_384L else JSONObject.NULL)
+              .put("zipDataOffsetAligned16KiB", dataOffset >= 0 && dataOffset % 16_384L == 0L)
               .put("elfLoadSegmentAlignmentsBytes", JSONArray(alignments))
               .put("elfSupports16KiBPages", alignments.isNotEmpty() && alignments.all { it >= 16_384L })
+              .put("apkPageAlignmentPass", pagePass)
           )
         }
       }
@@ -896,6 +1209,8 @@ object VideoSegmentationDeviceGateProbe {
       .map { File(it).parentFile?.resolve("lib/arm64/$libraryName") }
       .filterNotNull()
       .firstOrNull(File::isFile)
+    val arm64PagePass =
+      VideoSegmentationGateContracts.pageAlignmentPass(arm64Alignments, arm64ZipDataOffset)
     return JSONObject()
       .put("tasksVisionArtifactVersion", TASKS_VISION_VERSION)
       .put("runtimeClassPresent", runCatching { Class.forName("com.google.mediapipe.tasks.vision.imagesegmenter.ImageSegmenter") }.isSuccess)
@@ -903,10 +1218,68 @@ object VideoSegmentationDeviceGateProbe {
       .put("packagedAbis", JSONArray(packagedAbis(packaged)))
       .put("deviceSupportedAbis", JSONArray(Build.SUPPORTED_ABIS.toList()))
       .put("devicePageSizeBytes", Os.sysconf(OsConstants._SC_PAGESIZE))
+      .put("arm64ApkSha256", arm64ApkSha256 ?: JSONObject.NULL)
       .put("arm64ElfLoadSegmentAlignmentsBytes", JSONArray(arm64Alignments))
       .put("arm64ElfSupports16KiBPages", arm64Alignments.isNotEmpty() && arm64Alignments.all { it >= 16_384L })
+      .put("arm64ZipDataOffsetBytes", arm64ZipDataOffset)
+      .put("arm64ZipDataOffsetModulo16384", if (arm64ZipDataOffset >= 0) arm64ZipDataOffset % 16_384L else JSONObject.NULL)
+      .put("arm64ZipDataOffsetAligned16KiB", arm64ZipDataOffset >= 0 && arm64ZipDataOffset % 16_384L == 0L)
+      .put("arm64ApkPageAlignmentPass", arm64PagePass)
       .put("installedArm64LibraryObserved", installedLibrary?.absolutePath ?: JSONObject.NULL)
   }
+
+  private fun zipEntryDataOffset(apk: File, targetEntry: String): Long {
+    RandomAccessFile(apk, "r").use { file ->
+      val tailSize = min(file.length(), 65_557L).toInt()
+      val tail = ByteArray(tailSize)
+      file.seek(file.length() - tailSize)
+      file.readFully(tail)
+      var eocdIndex = tailSize - 22
+      while (eocdIndex >= 0) {
+        if (
+          tail[eocdIndex] == 0x50.toByte() &&
+          tail[eocdIndex + 1] == 0x4b.toByte() &&
+          tail[eocdIndex + 2] == 0x05.toByte() &&
+          tail[eocdIndex + 3] == 0x06.toByte()
+        ) break
+        eocdIndex--
+      }
+      if (eocdIndex < 0) return -1L
+      val entryCount = littleUnsignedShort(tail, eocdIndex + 10)
+      var centralOffset = littleUnsignedInt(tail, eocdIndex + 16)
+      repeat(entryCount) {
+        file.seek(centralOffset)
+        val header = ByteArray(46)
+        file.readFully(header)
+        if (littleUnsignedInt(header, 0) != 0x02014b50L) return -1L
+        val nameLength = littleUnsignedShort(header, 28)
+        val extraLength = littleUnsignedShort(header, 30)
+        val commentLength = littleUnsignedShort(header, 32)
+        val localHeaderOffset = littleUnsignedInt(header, 42)
+        val nameBytes = ByteArray(nameLength)
+        file.readFully(nameBytes)
+        val entryName = nameBytes.toString(Charsets.UTF_8)
+        if (entryName == targetEntry) {
+          file.seek(localHeaderOffset)
+          val localHeader = ByteArray(30)
+          file.readFully(localHeader)
+          if (littleUnsignedInt(localHeader, 0) != 0x04034b50L) return -1L
+          val localNameLength = littleUnsignedShort(localHeader, 26)
+          val localExtraLength = littleUnsignedShort(localHeader, 28)
+          return localHeaderOffset + 30L + localNameLength + localExtraLength
+        }
+        centralOffset += 46L + nameLength + extraLength + commentLength
+      }
+      return -1L
+    }
+  }
+
+  private fun littleUnsignedShort(bytes: ByteArray, offset: Int): Int =
+    (bytes[offset].toInt() and 0xff) or ((bytes[offset + 1].toInt() and 0xff) shl 8)
+
+  private fun littleUnsignedInt(bytes: ByteArray, offset: Int): Long =
+    littleUnsignedShort(bytes, offset).toLong() or
+      (littleUnsignedShort(bytes, offset + 2).toLong() shl 16)
 
   private fun packagedAbis(entries: JSONArray): List<String> {
     val result = linkedSetOf<String>()

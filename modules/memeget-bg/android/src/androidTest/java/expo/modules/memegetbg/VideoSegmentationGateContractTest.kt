@@ -45,8 +45,10 @@ class VideoSegmentationGateContractTest {
       maskFps = 12,
       runtimeMs = 30_000,
       durationMs = 10_000,
-      peakPssBytes = 400_000_000,
-      memoryCeilingBytes = 536_870_912,
+      baselinePssBytes = 400_000_000,
+      peakPssBytes = 500_000_000,
+      peakPssDeltaBytes = 100_000_000,
+      pssDeltaBudgetBytes = 134_217_728,
       qualityPass = true,
       fixtureCount = 3
     )
@@ -55,7 +57,7 @@ class VideoSegmentationGateContractTest {
     assertFalse(VideoSegmentationGateContracts.videoIsolationAccepted(passing.copy(runtimeMs = 30_001), true))
     assertFalse(
       VideoSegmentationGateContracts.videoIsolationAccepted(
-        passing.copy(peakPssBytes = passing.memoryCeilingBytes),
+        passing.copy(peakPssDeltaBytes = passing.pssDeltaBudgetBytes),
         true
       )
     )
@@ -93,7 +95,7 @@ class VideoSegmentationGateContractTest {
         cancelIssued = true,
         workerStopped = true,
         segmenterClosed = true,
-        retrieverClosed = true,
+        decoderClosed = true,
         partialEvidenceDeleted = true,
         followUpSucceeded = true,
         leftovers = 0
@@ -105,7 +107,7 @@ class VideoSegmentationGateContractTest {
         cancelIssued = true,
         workerStopped = true,
         segmenterClosed = false,
-        retrieverClosed = true,
+        decoderClosed = true,
         partialEvidenceDeleted = true,
         followUpSucceeded = true,
         leftovers = 0
@@ -117,7 +119,7 @@ class VideoSegmentationGateContractTest {
         cancelIssued = true,
         workerStopped = true,
         segmenterClosed = true,
-        retrieverClosed = true,
+        decoderClosed = true,
         partialEvidenceDeleted = true,
         followUpSucceeded = true,
         leftovers = 1
@@ -181,14 +183,78 @@ class VideoSegmentationGateContractTest {
     assertFalse(schedules.getValue(12).map { it.timestampMs } == schedules.getValue(15).map { it.timestampMs })
   }
 
+  @Test
+  fun temporalQualityCompensatesTranslationAndScaleButNotShapeChange() {
+    val first = lShapeMask(width = 40, height = 30, left = 4, top = 3, scale = 1)
+    val translatedScaled = lShapeMask(width = 80, height = 60, left = 20, top = 12, scale = 2)
+    val changed = BooleanArray(40 * 30).also { mask ->
+      for (y in 3 until 22) for (x in 4 until 23) mask[y * 40 + x] = true
+    }
+
+    assertTrue(VideoSegmentationGateContracts.motionCompensatedIou(first, 40, 30, translatedScaled, 80, 60) > 0.95)
+    assertTrue(VideoSegmentationGateContracts.motionCompensatedIou(first, 40, 30, changed, 40, 30) < 0.80)
+  }
+
+  @Test
+  fun apkPageAlignmentRequiresElfAndZipDataOffset() {
+    assertTrue(VideoSegmentationGateContracts.pageAlignmentPass(listOf(16_384L, 16_384L), 32_768L))
+    assertFalse(VideoSegmentationGateContracts.pageAlignmentPass(listOf(16_384L, 16_384L), 32_772L))
+    assertFalse(VideoSegmentationGateContracts.pageAlignmentPass(listOf(4_096L, 16_384L), 32_768L))
+  }
+
+  @Test
+  fun provenanceRequiresEveryExpectedBoundaryAndExactValue() {
+    val complete = listOf(
+      VideoSegmentationGateContracts.ProvenanceBoundary("version", "0.10.29", "0.10.29"),
+      VideoSegmentationGateContracts.ProvenanceBoundary("pomDigest", "a".repeat(64), "a".repeat(64)),
+      VideoSegmentationGateContracts.ProvenanceBoundary("licenseDigest", "b".repeat(64), "b".repeat(64))
+    )
+    assertTrue(VideoSegmentationGateContracts.provenanceBoundariesComplete(complete, setOf("version", "pomDigest", "licenseDigest")))
+    assertFalse(VideoSegmentationGateContracts.provenanceBoundariesComplete(complete.dropLast(1), setOf("version", "pomDigest", "licenseDigest")))
+    assertFalse(
+      VideoSegmentationGateContracts.provenanceBoundariesComplete(
+        complete.map { if (it.id == "version") it.copy(observed = "latest") else it },
+        setOf("version", "pomDigest", "licenseDigest")
+      )
+    )
+  }
+
+  @Test
+  fun fixtureFailuresRetainTheirOwnException() {
+    val first = VideoSegmentationGateContracts.fixtureFailure("one_person", IllegalStateException("first"))
+    val second = VideoSegmentationGateContracts.fixtureFailure("fast_motion", IllegalArgumentException("second"))
+
+    assertEquals("one_person", first.fixtureId)
+    assertEquals("first", first.message)
+    assertEquals("java.lang.IllegalArgumentException", second.type)
+    assertEquals("second", second.message)
+  }
+
+  private fun lShapeMask(
+    width: Int,
+    height: Int,
+    left: Int,
+    top: Int,
+    scale: Int
+  ): BooleanArray = BooleanArray(width * height).also { mask ->
+    for (y in 0 until 12 * scale) {
+      for (x in 0 until 4 * scale) mask[(top + y) * width + left + x] = true
+    }
+    for (y in 8 * scale until 12 * scale) {
+      for (x in 0 until 10 * scale) mask[(top + y) * width + left + x] = true
+    }
+  }
+
   private fun observation(size: Int, fps: Int, qualityPass: Boolean) =
     VideoSegmentationGateContracts.MatrixObservation(
       workingSize = size,
       maskFps = fps,
       runtimeMs = 10_000,
       durationMs = 10_000,
-      peakPssBytes = 300_000_000,
-      memoryCeilingBytes = 536_870_912,
+      baselinePssBytes = 300_000_000,
+      peakPssBytes = 360_000_000,
+      peakPssDeltaBytes = 60_000_000,
+      pssDeltaBudgetBytes = 134_217_728,
       qualityPass = qualityPass,
       fixtureCount = 3
     )

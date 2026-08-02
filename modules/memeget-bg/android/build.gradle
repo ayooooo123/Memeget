@@ -18,6 +18,11 @@ android {
   defaultConfig {
     testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
   }
+  sourceSets {
+    androidTest {
+      assets.srcDir 'src/androidTest/fixtures'
+    }
+  }
 }
 
 dependencies {
