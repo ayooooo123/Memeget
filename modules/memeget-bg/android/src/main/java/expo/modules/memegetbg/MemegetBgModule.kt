@@ -212,6 +212,28 @@ class MemegetBgModule : Module() {
       VideoPlayerFrameExtractor.extract(ctx, source, seconds)
     }
 
+    AsyncFunction("measureMemeTextLayout") {
+      text: String,
+      fontFamily: String,
+      fontWeight: Int,
+      fontSizePx: Double,
+      letterSpacingEm: Double,
+      widthPx: Int,
+      align: String ->
+      val ctx = appContext.reactContext
+        ?: throw IllegalStateException("React context unavailable")
+      MemeTextLayout.measure(
+        context = ctx,
+        text = text,
+        fontFamily = fontFamily,
+        fontWeight = fontWeight,
+        fontSizePx = fontSizePx.toFloat(),
+        letterSpacingEm = letterSpacingEm.toFloat(),
+        widthPx = widthPx,
+        align = align
+      ).toMap()
+    }
+
     // Battery + thermal snapshot the JS loop polls to decide whether to keep
     // describing. Cheap, synchronous reads.
     Function("getPower") {

@@ -1,0 +1,111 @@
+package expo.modules.memegetbg
+
+import android.content.Context
+import android.graphics.Typeface
+import android.os.Build
+import android.text.Layout
+import android.text.StaticLayout
+import android.text.TextPaint
+import kotlin.math.max
+import kotlin.math.roundToInt
+
+internal data class MemeTextLayoutLine(
+  val text: String,
+  val start: Int,
+  val end: Int,
+  val widthPx: Float,
+  val topPx: Int,
+  val baselinePx: Int
+) {
+  fun toMap(): Map<String, Any> = mapOf(
+    "text" to text,
+    "start" to start,
+    "end" to end,
+    "widthPx" to widthPx,
+    "topPx" to topPx,
+    "baselinePx" to baselinePx
+  )
+}
+
+internal data class MemeTextLayoutResult(
+  val widthPx: Int,
+  val heightPx: Int,
+  val includeFontPadding: Boolean,
+  val tolerancePx: Int,
+  val lines: List<MemeTextLayoutLine>
+) {
+  fun toMap(): Map<String, Any> = mapOf(
+    "widthPx" to widthPx,
+    "heightPx" to heightPx,
+    "includeFontPadding" to includeFontPadding,
+    "tolerancePx" to tolerancePx,
+    "lines" to lines.map { it.toMap() }
+  )
+}
+
+internal object MemeTextLayout {
+  const val TOLERANCE_PX = 2
+  private const val ANTON_ASSET = "fonts/Anton-Regular.ttf"
+  private const val NOTO_SANS_ASSET = "fonts/NotoSans.ttf"
+
+  fun measure(
+    context: Context,
+    text: String,
+    fontFamily: String,
+    fontWeight: Int,
+    fontSizePx: Float,
+    letterSpacingEm: Float,
+    widthPx: Int,
+    align: String
+  ): MemeTextLayoutResult {
+    val boundedWidth = max(1, widthPx)
+    val paint = TextPaint(TextPaint.ANTI_ALIAS_FLAG).apply {
+      textSize = max(1f, fontSizePx)
+      letterSpacing = letterSpacingEm
+      typeface = weightedTypeface(context, fontFamily, fontWeight)
+    }
+    val layout = StaticLayout.Builder.obtain(text, 0, text.length, paint, boundedWidth)
+      .setAlignment(androidAlignment(align))
+      .setIncludePad(false)
+      .setBreakStrategy(Layout.BREAK_STRATEGY_HIGH_QUALITY)
+      .setHyphenationFrequency(Layout.HYPHENATION_FREQUENCY_NONE)
+      .build()
+    val lines = (0 until layout.lineCount).map { index ->
+      val start = layout.getLineStart(index)
+      val end = layout.getLineEnd(index).coerceAtLeast(start)
+      MemeTextLayoutLine(
+        text = text.substring(start, end).trimEnd('\n'),
+        start = start,
+        end = end,
+        widthPx = layout.getLineWidth(index),
+        topPx = layout.getLineTop(index),
+        baselinePx = layout.getLineBaseline(index)
+      )
+    }.filter { it.text.isNotEmpty() || text.isEmpty() }
+    return MemeTextLayoutResult(
+      widthPx = boundedWidth,
+      heightPx = layout.height,
+      includeFontPadding = false,
+      tolerancePx = TOLERANCE_PX,
+      lines = lines
+    )
+  }
+
+  private fun weightedTypeface(context: Context, fontFamily: String, weight: Int): Typeface {
+    val asset = if (fontFamily == "Anton") ANTON_ASSET else NOTO_SANS_ASSET
+    val base = Typeface.createFromAsset(context.assets, asset)
+    return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+      Typeface.create(base, weight.coerceIn(100, 900), false)
+    } else if (weight >= 700) {
+      Typeface.create(base, Typeface.BOLD)
+    } else {
+      base
+    }
+  }
+
+  private fun androidAlignment(align: String): Layout.Alignment = when (align) {
+    "left" -> Layout.Alignment.ALIGN_NORMAL
+    "right" -> Layout.Alignment.ALIGN_OPPOSITE
+    else -> Layout.Alignment.ALIGN_CENTER
+  }
+}

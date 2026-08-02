@@ -15,6 +15,7 @@ import {
   interpolateCoverCorrections,
   isLayerActiveAt,
   mapPointToCroppedCanvas,
+  migrateMemeEditProject,
   mapRectToCroppedCanvas,
   normalizeRetainedRanges,
   outputDurationUs,
@@ -140,7 +141,7 @@ describe('default projects', () => {
     const project = createDefaultImageProject(imageSource);
 
     expect(project).toEqual({
-      version: 1,
+      version: 2,
       source: { ...imageSource, kind: 'image', durationUs: null },
       base: {
         rotation: 0,
@@ -645,7 +646,7 @@ describe('persisted project validation', () => {
       expectInvalid(project, path);
     }
   );
-  test('validates normalized text font size bounds and upgrades unambiguous version-1 text layers', () => {
+  test('validates v2 text font size bounds strictly and migrates unambiguous v1 text layers', () => {
     const project = createDefaultImageProject(imageSource);
     const valid = textLayer('caption');
     project.layers = [valid];
@@ -659,14 +660,18 @@ describe('persisted project validation', () => {
     requireTextLayer(tooLarge.layers[0]).fontSize = 0.5;
     expectInvalid(tooLarge, 'layers[0].fontSize', 'out_of_bounds');
 
-    const legacy = cloneProject(project) as Omit<MemeEditProject, 'layers'> & {
+    const missingCurrent = cloneProject(project) as Omit<MemeEditProject, 'layers'> & {
       layers: Array<Omit<TextLayer, 'fontSize'>>;
     };
-    delete (legacy.layers[0] as Partial<TextLayer>).fontSize;
+    delete (missingCurrent.layers[0] as Partial<TextLayer>).fontSize;
+    expectInvalid(missingCurrent, 'layers[0].fontSize', 'invalid_type');
 
-    const restored = validateMemeEditProject(legacy);
-    expect(restored.ok).toBe(true);
-    expect(restored.ok ? requireTextLayer(restored.value.layers[0]).fontSize : null).toBe(0.118);
+    const legacy = { ...missingCurrent, version: 1 };
+    const migrated = migrateMemeEditProject(legacy);
+    expect(migrated.ok).toBe(true);
+    expect(migrated.ok ? migrated.value.version : null).toBe(2);
+    expect(migrated.ok ? requireTextLayer(migrated.value.layers[0]).fontSize : null).toBe(0.118);
+    expect(validateMemeEditProject(legacy).ok).toBe(false);
   });
 
   test('requires persistent normalized correction metadata for referenced mask tracks', () => {
@@ -707,7 +712,7 @@ describe('persisted project validation', () => {
 
   test('returns actionable errors for malformed version and non-finite geometry', () => {
     const imageProject = cloneProject(createDefaultImageProject(imageSource));
-    const malformedVersion: unknown = { ...imageProject, version: 2 };
+    const malformedVersion: unknown = { ...imageProject, version: 3 };
     expectInvalid(malformedVersion, 'version', 'unsupported_version');
 
     const nanPoint = cloneProject(createDefaultImageProject(imageSource));

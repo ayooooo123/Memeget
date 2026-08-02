@@ -4,6 +4,7 @@ import { probeMedia, type MediaProbeResult } from '../modules/memeget-bg';
 import {
   createDefaultImageProject,
   createDefaultVideoProject,
+  migrateMemeEditProject,
   validateMemeEditProject,
   type MediaEditKind,
   type MemeEditProject,
@@ -354,7 +355,7 @@ function parseSerializedDraft(text: string): SerializedDraft | null {
   }
   const source = parseSourceIdentity(input.source);
   if (!source) return null;
-  const validation = validateMemeEditProject(input.project);
+  const validation = migrateMemeEditProject(input.project);
   if (!validation.ok) return null;
   const payload: DraftPayload = {
     version: 1,

@@ -4,6 +4,8 @@ import {
   MEME_TEXT_PRESET_IDS,
   applyMemeTextPreset,
   buildMemeTextLayoutSpec,
+  MEME_TEXT_MAX_LENGTH,
+  clampMemeTextContent,
   createMemeTextLayer,
   getMemeTextPresetDefaults,
   textDisplayText,
@@ -85,6 +87,12 @@ describe('meme text presets', () => {
     expect(textDisplayText(layer)).toBe('DO NOT OVERWRITE IPHONE SLANG');
     expect(layer.text).toBe('Do not overwrite iPhone slang');
   });
+
+  test('exports and applies the shared maximum text length', () => {
+    expect(MEME_TEXT_MAX_LENGTH).toBe(20_000);
+    expect(clampMemeTextContent('ok')).toBe('ok');
+    expect(clampMemeTextContent('x'.repeat(MEME_TEXT_MAX_LENGTH + 10))).toHaveLength(MEME_TEXT_MAX_LENGTH);
+  });
 });
 
 describe('serializable meme text layout contract', () => {
@@ -119,7 +127,7 @@ describe('serializable meme text layout contract', () => {
       },
       transform: { scale: 1.2, rotationDegrees: -8, opacity: 0.8 },
       font: {
-        family: 'System',
+        family: 'NotoSans',
         weight: '700',
         lineHeightRatio: 1.18,
         letterSpacingEm: 0,
