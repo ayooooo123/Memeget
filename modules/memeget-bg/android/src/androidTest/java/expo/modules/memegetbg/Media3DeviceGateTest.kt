@@ -1,6 +1,8 @@
 package expo.modules.memegetbg
 
+import android.app.Instrumentation
 import android.content.ContentValues
+import android.net.Uri
 import android.os.Environment
 import android.provider.MediaStore
 
@@ -11,6 +13,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
+import java.io.File
 
 @RunWith(AndroidJUnit4::class)
 class Media3DeviceGateTest {
@@ -112,23 +115,7 @@ class Media3DeviceGateTest {
     val result = Media3DeviceGateProbe.run(instrumentation)
     val output = instrumentation.targetContext.filesDir.resolve("media3-1.9-device-gate.json")
     output.writeText(result.toString(2))
-    val resolver = instrumentation.targetContext.contentResolver
-    resolver.delete(
-      MediaStore.Downloads.EXTERNAL_CONTENT_URI,
-      "${MediaStore.MediaColumns.DISPLAY_NAME} = ?",
-      arrayOf(output.name)
-    )
-    val downloadUri = resolver.insert(
-      MediaStore.Downloads.EXTERNAL_CONTENT_URI,
-      ContentValues().apply {
-        put(MediaStore.MediaColumns.DISPLAY_NAME, output.name)
-        put(MediaStore.MediaColumns.MIME_TYPE, "application/json")
-        put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
-      }
-    ) ?: error("Could not create Downloads gate output")
-    resolver.openOutputStream(downloadUri)?.use { stream ->
-      stream.write(output.readBytes())
-    } ?: error("Could not write Downloads gate output")
+    val downloadUri = publishDownload(instrumentation, output)
     println("MEDIA3_GATE_DOWNLOAD_URI=$downloadUri")
     println("MEDIA3_GATE_PACKAGE=${instrumentation.targetContext.packageName}")
     println("MEDIA3_GATE_PATH=${output.absolutePath}")
@@ -143,25 +130,59 @@ class Media3DeviceGateTest {
     val instrumentation = InstrumentationRegistry.getInstrumentation()
     val result = Media3DeviceGateProbe.runDriftMatrix(instrumentation)
     // Shared Downloads, not getExternalFilesDir: the instrumentation APK is uninstalled after the
-    // run, which takes its app-private external dir with it. Downloads de-duplicates a repeated
-    // DISPLAY_NAME into "name (1).json", so the caller must delete the old file before re-running.
+    // run, which takes its app-private external dir with it.
     val output = instrumentation.targetContext.filesDir.resolve("media3-av-drift-matrix.json")
     output.writeText(result.toString(2))
-    val resolver = instrumentation.targetContext.contentResolver
-    val downloadUri = resolver.insert(
-      MediaStore.Downloads.EXTERNAL_CONTENT_URI,
-      ContentValues().apply {
-        put(MediaStore.MediaColumns.DISPLAY_NAME, output.name)
-        put(MediaStore.MediaColumns.MIME_TYPE, "application/json")
-        put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
-      }
-    ) ?: error("Could not create Downloads matrix output")
-    resolver.openOutputStream(downloadUri)?.use { stream ->
-      stream.write(output.readBytes())
-    } ?: error("Could not write Downloads matrix output")
-    println("MEDIA3_MATRIX_DOWNLOAD_URI=$downloadUri")
+    println("MEDIA3_MATRIX_DOWNLOAD_URI=${publishDownload(instrumentation, output)}")
 
     assertTrue("Matrix output was not written", output.isFile)
     assertEquals(2, result.getJSONArray("fixtures").length())
+  }
+
+  /**
+   * Copies [file] into shared Downloads and returns its content URI.
+   *
+   * The delete below only matches rows this install still owns. Gradle uninstalls and reinstalls
+   * the instrumentation APK on every connected run, which drops that owner attribution, so an
+   * artifact left by an earlier run survives the delete and MediaStore silently de-duplicates
+   * this insert into "name (1).json". A host-side pull of the exact name then returns the
+   * PREVIOUS run's bytes - which, for the gate JSON, would be committed to
+   * docs/editing/media3-1.9-device-gate.json as evidence from a run that never produced it.
+   * Read the name back and fail loudly instead. Clearing the device host-side before a run
+   * remains the documented contract; this is the backstop for forgetting.
+   */
+  private fun publishDownload(instrumentation: Instrumentation, file: File): Uri {
+    val resolver = instrumentation.targetContext.contentResolver
+    resolver.delete(
+      MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+      "${MediaStore.MediaColumns.DISPLAY_NAME} = ?",
+      arrayOf(file.name)
+    )
+    val uri = resolver.insert(
+      MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+      ContentValues().apply {
+        put(MediaStore.MediaColumns.DISPLAY_NAME, file.name)
+        put(MediaStore.MediaColumns.MIME_TYPE, "application/json")
+        put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+      }
+    ) ?: error("Could not create Downloads/${file.name}")
+    resolver.openOutputStream(uri)?.use { stream -> stream.write(file.readBytes()) }
+      ?: error("Could not write Downloads/${file.name}")
+
+    val publishedName = resolver.query(
+      uri,
+      arrayOf(MediaStore.MediaColumns.DISPLAY_NAME),
+      null,
+      null,
+      null
+    )?.use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else null }
+    assertEquals(
+      "MediaStore de-duplicated Downloads/${file.name}, so a stale artifact from an earlier " +
+        "install is still on the device and this run's bytes were written elsewhere. " +
+        "Clear it first: adb shell rm -f \"/sdcard/Download/media3-*\"",
+      file.name,
+      publishedName
+    )
+    return uri
   }
 }
