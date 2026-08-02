@@ -2,10 +2,16 @@ import {
   containedMediaRect,
   commitGestureTransaction,
   dragKeyframeByViewDelta,
+  gesturePointInsideMedia,
+  layerHandlePoints,
+  nextDuplicateLayerId,
   normalizedPointToViewPoint,
   resizeKeyframeFromHandle,
   rotateKeyframeFromHandle,
+  transformAccessibilityAction,
+  transformHandleAccessibilityAction,
   viewPointToNormalizedPoint,
+  viewRectToAbsoluteStyle,
 } from './memeEditCanvasCore';
 import {
   applyProjectAction,
@@ -77,6 +83,23 @@ describe('view and normalized coordinates', () => {
   });
 });
 
+  test('converts view rect origins to React Native absolute layout keys', () => {
+    expect(viewRectToAbsoluteStyle({ x: 125, y: 40, width: 150, height: 300 })).toEqual({
+      left: 125,
+      top: 40,
+      width: 150,
+      height: 300,
+    });
+  });
+
+  test('gates child gestures against actual media bounds with nonzero letterbox origin', () => {
+    const media = { x: 125, y: 40, width: 150, height: 300 };
+    expect(gesturePointInsideMedia({ x: 126, y: 41 }, media)).toBe(true);
+    expect(gesturePointInsideMedia({ x: 124.5, y: 120 }, media)).toBe(false);
+    expect(gesturePointInsideMedia({ x: 276, y: 120 }, media)).toBe(false);
+    expect(gesturePointInsideMedia({ x: 150, y: 39.5 }, media)).toBe(false);
+  });
+
 describe('transform gesture math', () => {
   const rect = { x: 20, y: 10, width: 200, height: 100 };
 
@@ -107,6 +130,30 @@ describe('transform gesture math', () => {
     expect(rotateKeyframeFromHandle(start, { x: 100, y: 100 }, { x: 130, y: 100 }, { x: 100, y: 130 }).rotationDegrees).toBe(100);
     expect(rotateKeyframeFromHandle(start, { x: 100, y: 100 }, { x: 100, y: 100 }, { x: 100, y: 130 })).toBe(start);
   });
+
+  test('computes screen-space handles from a rotated layer without jumping', () => {
+    const handles = layerHandlePoints(kf({ rotationDegrees: 90, scale: 1, center: { x: 0.5, y: 0.5 } }), 0.2, rect);
+    expect(handles.center).toEqual({ x: 120, y: 60 });
+    expect(handles.resize.x).toBeCloseTo(98);
+    expect(handles.resize.y).toBeCloseTo(82);
+    expect(handles.rotate.x).toBeCloseTo(170);
+    expect(handles.rotate.y).toBeCloseTo(60);
+    const resized = resizeKeyframeFromHandle(kf({ rotationDegrees: 90 }), handles.center, handles.resize, {
+      x: handles.resize.x - 10,
+      y: handles.resize.y + 20,
+    });
+    expect(resized.scale).toBeGreaterThan(1);
+  });
+
+  test('accessibility transform actions commit bounded keyframe changes', () => {
+    expect(transformAccessibilityAction('increment', kf(), rect).center).toEqual({ x: 0.51, y: 0.5 });
+    expect(transformAccessibilityAction('decrement', kf(), rect).center).toEqual({ x: 0.49, y: 0.5 });
+    expect(transformAccessibilityAction('escape', kf({ scale: 16 }), rect).scale).toBe(16);
+    expect(transformHandleAccessibilityAction('resize', 'increment', kf({ scale: 1 }), rect).scale).toBe(1.05);
+    expect(transformHandleAccessibilityAction('resize', 'decrement', kf({ scale: 0.01 }), rect).scale).toBe(0.01);
+    expect(transformHandleAccessibilityAction('rotate', 'increment', kf({ rotationDegrees: 0 }), rect).rotationDegrees).toBe(5);
+    expect(transformHandleAccessibilityAction('rotate', 'decrement', kf({ rotationDegrees: 0 }), rect).rotationDegrees).toBe(-5);
+  });
 });
 
 describe('gesture transaction coalescing', () => {
@@ -129,5 +176,11 @@ describe('gesture transaction coalescing', () => {
   test('empty or no-op gesture transactions do not add undo history', () => {
     const history = createProjectHistory(createDefaultImageProject({ uri: 'file:///source.jpg', name: 'source.jpg', width: 100, height: 100 }));
     expect(commitGestureTransaction(history, [])).toBe(history);
+  });
+});
+
+describe('deterministic layer IDs', () => {
+  test('continues duplicate suffixes after restoring a draft with existing duplicates', () => {
+    expect(nextDuplicateLayerId('studio-42', ['caption', 'studio-42-dup-1', 'studio-42-dup-3'])).toBe('studio-42-dup-4');
   });
 });

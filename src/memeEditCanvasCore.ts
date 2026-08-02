@@ -37,6 +37,22 @@ export interface ViewRect {
   height: number;
 }
 
+export interface AbsoluteRectStyle {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+
+export interface LayerHandlePoints {
+  center: ViewPoint;
+  resize: ViewPoint;
+  rotate: ViewPoint;
+}
+
+export type TransformAccessibilityAction = 'increment' | 'decrement' | 'longpress' | 'escape';
+export type TransformHandleKind = 'resize' | 'rotate';
+
 const MIN_SCALE = 0.01;
 const MAX_SCALE = 16;
 const EPSILON = 1e-6;
@@ -89,6 +105,14 @@ export function containedMediaRect(view: ViewSize, media: MediaDisplaySize): Vie
     width: roundCanvas(width),
     height: roundCanvas(height),
   };
+}
+
+export function viewRectToAbsoluteStyle(rect: ViewRect): AbsoluteRectStyle {
+  return { left: rect.x, top: rect.y, width: rect.width, height: rect.height };
+}
+
+export function gesturePointInsideMedia(point: ViewPoint, mediaRect: ViewRect): boolean {
+  return viewPointToNormalizedPoint(point, mediaRect) !== null;
 }
 
 export function viewPointToNormalizedPoint(point: ViewPoint, mediaRect: ViewRect): NormalizedPoint | null {
@@ -173,6 +197,74 @@ export function rotateKeyframeFromHandle(
   const currentAngle = angleDegrees(center, currentHandle);
   if (!finite(startAngle) || !finite(currentAngle)) return start;
   return { ...start, rotationDegrees: roundCanvas(start.rotationDegrees + normalizeAngleDelta(currentAngle - startAngle)) };
+}
+
+export function layerHandlePoints(
+  keyframe: TransformKeyframe,
+  layerWidth: number,
+  mediaRect: ViewRect
+): LayerHandlePoints {
+  const center = normalizedPointToViewPoint(keyframe.center, mediaRect);
+  const width = Math.max(44, mediaRect.width * Math.max(0.04, layerWidth) * clampScale(keyframe.scale));
+  const height = width;
+  const radians = keyframe.rotationDegrees * Math.PI / 180;
+  const cos = Math.cos(radians);
+  const sin = Math.sin(radians);
+  const rotate = (x: number, y: number): ViewPoint => ({
+    x: roundCanvas(center.x + x * cos - y * sin),
+    y: roundCanvas(center.y + x * sin + y * cos),
+  });
+  return {
+    center,
+    resize: rotate(width / 2, height / 2),
+    rotate: rotate(0, -height / 2 - 28),
+  };
+}
+
+export function transformAccessibilityAction(
+  action: TransformAccessibilityAction,
+  keyframe: TransformKeyframe,
+  mediaRect: ViewRect
+): TransformKeyframe {
+  if (action === 'increment') {
+    return dragKeyframeByViewDelta(keyframe, { dx: mediaRect.width * 0.01, dy: 0 }, mediaRect);
+  }
+  if (action === 'decrement') {
+    return dragKeyframeByViewDelta(keyframe, { dx: -mediaRect.width * 0.01, dy: 0 }, mediaRect);
+  }
+  if (action === 'longpress') {
+    return { ...keyframe, scale: clampScale(keyframe.scale * 1.05) };
+  }
+  return keyframe;
+}
+
+export function transformHandleAccessibilityAction(
+  handle: TransformHandleKind,
+  action: TransformAccessibilityAction,
+  keyframe: TransformKeyframe,
+  _mediaRect: ViewRect
+): TransformKeyframe {
+  if (handle === 'resize') {
+    if (action === 'increment') return { ...keyframe, scale: clampScale(keyframe.scale * 1.05) };
+    if (action === 'decrement') return { ...keyframe, scale: clampScale(keyframe.scale / 1.05) };
+    return keyframe;
+  }
+  if (action === 'increment') return { ...keyframe, rotationDegrees: roundCanvas(keyframe.rotationDegrees + 5) };
+  if (action === 'decrement') return { ...keyframe, rotationDegrees: roundCanvas(keyframe.rotationDegrees - 5) };
+  return keyframe;
+}
+
+export function nextDuplicateLayerId(prefix: string, ids: readonly string[]): string {
+  const escaped = prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const suffixPattern = new RegExp(`^${escaped}-dup-(\\d+)$`);
+  let maximum = 0;
+  for (const id of ids) {
+    const match = suffixPattern.exec(id);
+    if (!match) continue;
+    const value = Number(match[1]);
+    if (Number.isSafeInteger(value) && value > maximum) maximum = value;
+  }
+  return `${prefix}-dup-${maximum + 1}`;
 }
 
 export function commitGestureTransaction(

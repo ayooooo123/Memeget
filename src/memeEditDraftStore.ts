@@ -2,6 +2,8 @@ import * as FileSystem from 'expo-file-system/legacy';
 
 import { probeMedia, type MediaProbeResult } from '../modules/memeget-bg';
 import {
+  createDefaultImageProject,
+  createDefaultVideoProject,
   validateMemeEditProject,
   type MediaEditKind,
   type MemeEditProject,
@@ -85,6 +87,18 @@ export interface PreparedMemeEditSource {
   probe: MediaProbeResult | null;
   materializedSourceUri: string;
   owned: boolean;
+}
+
+export interface MemeEditSourceSessionSeed {
+  sessionId: string;
+  uri: string;
+  name: string;
+  indexedKind: MediaEditKind;
+  modifiedTimeMs: number | null;
+}
+
+export interface PreparedMemeEditSourceSession extends PreparedMemeEditSource {
+  identity: MemeEditDraftIdentity;
 }
 
 interface DraftPayload {
@@ -697,6 +711,122 @@ async function releaseSharedPreparation(entry: SharedPreparationEntry): Promise<
   })();
   entry.finalization = finalization;
   await finalization;
+}
+
+function projectFromPreparedProbe(uri: string, name: string, probe: MediaProbeResult): MemeEditProject {
+  const width = probe.rotationDegrees === 90 || probe.rotationDegrees === 270 ? probe.height : probe.width;
+  const height = probe.rotationDegrees === 90 || probe.rotationDegrees === 270 ? probe.width : probe.height;
+  if (probe.kind === 'video') {
+    if (probe.durationUs === null || probe.durationUs <= 0) {
+      throw new Error('Prepared video source has no usable duration.');
+    }
+    return createDefaultVideoProject({ uri, name, width, height, durationUs: probe.durationUs });
+  }
+  return createDefaultImageProject({ uri, name, width, height });
+}
+
+export class MemeEditSourceSessionController {
+  private preparation: Promise<PreparedMemeEditSourceSession> | null = null;
+  private destination: string | null = null;
+  private owned = false;
+  private closed = false;
+  private released = false;
+
+  constructor(
+    private readonly io: MemeEditSourcePreparationIo,
+    private readonly seed: MemeEditSourceSessionSeed
+  ) {
+    if (!isBoundedString(seed.sessionId, MAX_SESSION_ID_LENGTH)) {
+      throw new Error('Source session ID must be a bounded non-empty string.');
+    }
+    if (!isBoundedString(seed.uri) || !isBoundedString(seed.name)) {
+      throw new Error('Source session URI and name must be bounded non-empty strings.');
+    }
+  }
+
+  private destinationForSeed(): PreparationLocation {
+    if (this.seed.uri.startsWith('file://')) {
+      return { key: `unowned:${identityToken(this.seed.sessionId + this.seed.uri)}`, destination: this.seed.uri, isFile: true };
+    }
+    const extensionMatch = /\.([a-zA-Z0-9]{1,10})$/.exec(this.seed.name);
+    const extension = (extensionMatch?.[1] ?? (this.seed.indexedKind === 'video' ? 'mp4' : 'jpg')).toLowerCase();
+    const token = identityToken(JSON.stringify({
+      sessionId: this.seed.sessionId,
+      uri: this.seed.uri,
+      name: this.seed.name,
+      indexedKind: this.seed.indexedKind,
+      modifiedTimeMs: this.seed.modifiedTimeMs,
+    }));
+    return {
+      key: token,
+      destination: `${cacheRoot(this.io.cacheDirectory)}meme_work_${token}_materialized_source.${extension}`,
+      isFile: false,
+    };
+  }
+
+  prepare(): Promise<PreparedMemeEditSourceSession> {
+    if (this.closed) return Promise.reject(new Error('Source session was cancelled.'));
+    if (this.preparation) return this.preparation;
+    this.preparation = this.prepareUnlocked();
+    return this.preparation;
+  }
+
+  private async prepareUnlocked(): Promise<PreparedMemeEditSourceSession> {
+    const location = this.destinationForSeed();
+    this.destination = location.destination;
+    this.owned = !location.isFile;
+    if (!location.isFile) {
+      await this.io.remove(location.destination);
+      await this.io.materialize(this.seed.uri, location.destination);
+      if (this.closed) {
+        await this.io.remove(location.destination).catch(() => {});
+        throw new Error('Source session preparation was cancelled.');
+      }
+    }
+    const probe = await this.io.probe(location.destination);
+    if (this.closed) {
+      if (!location.isFile) await this.io.remove(location.destination).catch(() => {});
+      throw new Error('Source session preparation was cancelled.');
+    }
+    if (probe === null) throw new Error('Media probe is unavailable for this source.');
+    const displayName = probe.displayName || this.seed.name;
+    const project = projectFromPreparedProbe(this.seed.uri, displayName, probe);
+    const identity: MemeEditDraftIdentity = {
+      sessionId: this.seed.sessionId,
+      source: {
+        stableId: probe.stableId,
+        uri: this.seed.uri,
+        name: displayName,
+        kind: project.source.kind,
+        width: project.source.width,
+        height: project.source.height,
+        durationUs: project.source.durationUs,
+        byteSize: probe.byteSize,
+        modifiedTimeMs: this.seed.modifiedTimeMs ?? probe.modifiedTimeMs,
+      },
+    };
+    assertIdentity(identity);
+    return {
+      identity,
+      project: { ...project, transient: { ...project.transient, materializedSourceUri: location.destination } },
+      probe,
+      materializedSourceUri: location.destination,
+      owned: !location.isFile,
+    };
+  }
+
+  async cancel(): Promise<void> {
+    this.closed = true;
+    if (this.released) return;
+    this.released = true;
+    const destination = this.destination;
+    if (this.preparation) await this.preparation.catch(() => {});
+    if (this.owned && destination) await this.io.remove(destination);
+  }
+
+  discard(): Promise<void> {
+    return this.cancel();
+  }
 }
 
 export class MemeEditSourcePreparationController {

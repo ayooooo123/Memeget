@@ -6,10 +6,16 @@ import { useVideoPlayer, VideoView } from 'expo-video';
 import {
   containedMediaRect,
   dragKeyframeByViewDelta,
+  gesturePointInsideMedia,
+  layerHandlePoints,
   normalizedPointToViewPoint,
   resizeKeyframeFromHandle,
   rotateKeyframeFromHandle,
+  transformAccessibilityAction,
+  transformHandleAccessibilityAction,
   viewPointToNormalizedPoint,
+  viewRectToAbsoluteStyle,
+  type AbsoluteRectStyle,
   type ViewDelta,
   type ViewPoint,
   type ViewRect,
@@ -78,7 +84,7 @@ function keyframeLayerBox(keyframe: TransformKeyframe, layerWidth: number, media
   return { x: center.x - width / 2, y: center.y - height / 2, width, height };
 }
 
-const SourceVideo = React.memo(function SourceVideo({ uri, style }: { uri: string; style: ViewRect }) {
+const SourceVideo = React.memo(function SourceVideo({ uri, style }: { uri: string; style: AbsoluteRectStyle }) {
   const player = useVideoPlayer(uri, (instance) => {
     instance.loop = true;
     instance.play();
@@ -130,7 +136,7 @@ const TransformableLayerView = React.memo(function TransformableLayerView({
   const keyframe = firstKeyframe(layer);
   const visualWidth = layer.kind === 'text' ? layer.width : 0.28;
   const box = keyframeLayerBox(keyframe, visualWidth, mediaRect);
-  const center = layerCenterPoint(keyframe, mediaRect);
+  const handles = layerHandlePoints(keyframe, visualWidth, mediaRect);
 
   useEffect(() => {
     translate.setValue({ x: 0, y: 0 });
@@ -146,11 +152,11 @@ const TransformableLayerView = React.memo(function TransformableLayerView({
   }, [layer, onCommitLayerKeyframes, rotatePreview, scalePreview, translate]);
 
   const dragPan = useMemo(() => PanResponder.create({
-    onStartShouldSetPanResponder: () => true,
+    onStartShouldSetPanResponder: (event) => gesturePointInsideMedia({ x: box.x + event.nativeEvent.locationX, y: box.y + event.nativeEvent.locationY }, mediaRect),
     onMoveShouldSetPanResponder: (_event, gesture) => Math.abs(gesture.dx) + Math.abs(gesture.dy) > 2,
     onPanResponderGrant: () => {
       onSelectLayer(layer.id);
-      gestureStart.current = { keyframe, center, handle: { x: box.x + box.width, y: box.y + box.height } };
+      gestureStart.current = { keyframe, center: handles.center, handle: handles.resize };
       translate.setValue({ x: 0, y: 0 });
     },
     onPanResponderMove: (_event, gesture) => {
@@ -165,13 +171,13 @@ const TransformableLayerView = React.memo(function TransformableLayerView({
       translate.setValue({ x: 0, y: 0 });
       gestureStart.current = null;
     },
-  }), [box.height, box.width, box.x, box.y, center, commit, keyframe, layer.id, mediaRect, onSelectLayer, translate]);
+  }), [box.x, box.y, commit, handles.center, handles.resize, keyframe, layer.id, mediaRect, onSelectLayer, translate]);
 
   const resizePan = useMemo(() => PanResponder.create({
-    onStartShouldSetPanResponder: () => selected,
+    onStartShouldSetPanResponder: (event) => selected && gesturePointInsideMedia({ x: box.x + box.width - 22 + event.nativeEvent.locationX, y: box.y + box.height - 22 + event.nativeEvent.locationY }, mediaRect),
     onMoveShouldSetPanResponder: () => selected,
     onPanResponderGrant: () => {
-      gestureStart.current = { keyframe, center, handle: { x: box.x + box.width, y: box.y + box.height } };
+      gestureStart.current = { keyframe, center: handles.center, handle: handles.resize };
       scalePreview.setValue(1);
     },
     onPanResponderMove: (_event, gesture) => {
@@ -189,13 +195,13 @@ const TransformableLayerView = React.memo(function TransformableLayerView({
       scalePreview.setValue(1);
       gestureStart.current = null;
     },
-  }), [box.height, box.width, box.x, box.y, center, commit, keyframe, scalePreview, selected]);
+  }), [box.height, box.width, box.x, box.y, commit, handles.center, handles.resize, keyframe, mediaRect, scalePreview, selected]);
 
   const rotatePan = useMemo(() => PanResponder.create({
-    onStartShouldSetPanResponder: () => selected,
+    onStartShouldSetPanResponder: (event) => selected && gesturePointInsideMedia({ x: box.x + box.width / 2 - 22 + event.nativeEvent.locationX, y: box.y - 44 + event.nativeEvent.locationY }, mediaRect),
     onMoveShouldSetPanResponder: () => selected,
     onPanResponderGrant: () => {
-      gestureStart.current = { keyframe, center, handle: { x: center.x, y: box.y - 28 } };
+      gestureStart.current = { keyframe, center: handles.center, handle: handles.rotate };
       rotatePreview.setValue(0);
     },
     onPanResponderMove: (_event, gesture) => {
@@ -213,7 +219,7 @@ const TransformableLayerView = React.memo(function TransformableLayerView({
       rotatePreview.setValue(0);
       gestureStart.current = null;
     },
-  }), [box.y, center, commit, keyframe, rotatePreview, selected]);
+  }), [box.height, box.width, box.x, box.y, commit, handles.center, handles.rotate, keyframe, mediaRect, rotatePreview, selected]);
 
   if (hidden) return null;
 
@@ -248,19 +254,30 @@ const TransformableLayerView = React.memo(function TransformableLayerView({
         { name: 'decrement', label: 'Nudge left' },
       ]}
       onAccessibilityAction={(event) => {
-        if (event.nativeEvent.actionName === 'increment') commit(dragKeyframeByViewDelta(keyframe, { dx: mediaRect.width * 0.01, dy: 0 }, mediaRect));
-        else if (event.nativeEvent.actionName === 'decrement') commit(dragKeyframeByViewDelta(keyframe, { dx: -mediaRect.width * 0.01, dy: 0 }, mediaRect));
+        const next = transformAccessibilityAction(event.nativeEvent.actionName as 'increment' | 'decrement' | 'longpress' | 'escape', keyframe, mediaRect);
+        if (next !== keyframe) commit(next);
         else onSelectLayer(layer.id);
       }}
     >
-      {layer.kind === 'text' && <TextLayerContent layer={layer} />}
-      {layer.kind === 'subject' && <SubjectLayerContent project={project} layer={layer} />}
       {layer.kind === 'media' && <MediaLayerContent layer={layer} />}
       {selected && (
         <>
-          <View style={styles.rotateArm} pointerEvents="none" />
-          <Animated.View style={styles.rotateHandle} {...rotatePan.panHandlers} accessibilityRole="adjustable" accessibilityLabel="Rotate selected layer" />
-          <Animated.View style={styles.resizeHandle} {...resizePan.panHandlers} accessibilityRole="adjustable" accessibilityLabel="Resize selected layer" />
+          <Animated.View
+            style={styles.rotateHandle}
+            {...rotatePan.panHandlers}
+            accessibilityRole="adjustable"
+            accessibilityLabel="Rotate selected layer"
+            accessibilityActions={[{ name: 'increment', label: 'Rotate clockwise' }, { name: 'decrement', label: 'Rotate counter-clockwise' }]}
+            onAccessibilityAction={(event) => commit(transformHandleAccessibilityAction('rotate', event.nativeEvent.actionName as 'increment' | 'decrement', keyframe, mediaRect))}
+          />
+          <Animated.View
+            style={styles.resizeHandle}
+            {...resizePan.panHandlers}
+            accessibilityRole="adjustable"
+            accessibilityLabel="Resize selected layer"
+            accessibilityActions={[{ name: 'increment', label: 'Make larger' }, { name: 'decrement', label: 'Make smaller' }]}
+            onAccessibilityAction={(event) => commit(transformHandleAccessibilityAction('resize', event.nativeEvent.actionName as 'increment' | 'decrement', keyframe, mediaRect))}
+          />
         </>
       )}
     </Animated.View>
@@ -330,9 +347,9 @@ export const MemeEditCanvas = React.memo(function MemeEditCanvas({
       <View style={styles.checker} pointerEvents="none" />
       {mediaRect ? (
         project.source.kind === 'video' ? (
-          <SourceVideo uri={sourceUri} style={mediaRect} />
+          <SourceVideo uri={sourceUri} style={viewRectToAbsoluteStyle(mediaRect)} />
         ) : (
-          <Image source={{ uri: sourceUri }} style={[styles.sourceMedia, mediaRect]} contentFit="contain" cachePolicy="none" />
+          <Image source={{ uri: sourceUri }} style={[styles.sourceMedia, viewRectToAbsoluteStyle(mediaRect)]} contentFit="contain" cachePolicy="none" />
         )
       ) : (
         <View style={styles.loadingBox}><Text style={styles.unavailableText}>Measuring canvas…</Text></View>
@@ -344,7 +361,7 @@ export const MemeEditCanvas = React.memo(function MemeEditCanvas({
         return <TransformableLayerView key={layer.id} project={project} layer={layer} mediaRect={mediaRect} selected={selectedLayerId === layer.id} hidden={before} onSelectLayer={onSelectLayer} onCommitLayerKeyframes={onCommitLayerKeyframes} />;
       })}
       <View style={styles.bounds} pointerEvents="none">
-        {mediaRect && <View style={[styles.mediaBounds, mediaRect]} />}
+        {mediaRect && <View style={[styles.mediaBounds, viewRectToAbsoluteStyle(mediaRect)]} />}
       </View>
     </View>
   );

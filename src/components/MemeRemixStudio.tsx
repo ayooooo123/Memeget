@@ -17,15 +17,13 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
   MemeEditAutosaveController,
   MemeEditDraftStore,
-  MemeEditSourcePreparationController,
+  MemeEditSourceSessionController,
   createExpoMemeEditDraftIo,
   createExpoMemeEditSourcePreparationIo,
   type MemeEditDraftIdentity,
 } from '../memeEditDraftStore';
 import {
   applyProjectAction,
-  createDefaultImageProject,
-  createDefaultVideoProject,
   createProjectHistory,
   redoProjectHistory,
   undoProjectHistory,
@@ -34,11 +32,10 @@ import {
   type ProjectHistory,
   type TransformKeyframe,
 } from '../memeEditProjectCore';
-import { commitGestureTransaction } from '../memeEditCanvasCore';
+import { commitGestureTransaction, nextDuplicateLayerId } from '../memeEditCanvasCore';
 import { tap, warn } from '../haptics';
 import { colors, radius, space, type } from '../theme';
 import type { MemeRecord } from '../types';
-import type { MediaProbeResult } from '../../modules/memeget-bg';
 import { PressableScale } from './ui';
 import { MemeEditCanvas } from './MemeEditCanvas';
 import { MemeEditToolRail, type MemeEditTool } from './MemeEditToolRail';
@@ -53,38 +50,6 @@ type LoadState =
   | { kind: 'ready'; identity: MemeEditDraftIdentity; history: ProjectHistory }
   | { kind: 'error'; message: string };
 
-function createProjectFromProbe(item: StudioItem, probe: MediaProbeResult | null): MemeEditProject {
-  if (!probe) throw new Error('Media probe is unavailable in this build. Open this studio in the installed native editor build.');
-  if (probe.kind !== item.kind) throw new Error(`Media probe read this file as ${probe.kind}, but the library indexed it as ${item.kind}.`);
-  const base = {
-    uri: item.uri,
-    name: probe.displayName || item.name,
-    width: probe.rotationDegrees === 90 || probe.rotationDegrees === 270 ? probe.height : probe.width,
-    height: probe.rotationDegrees === 90 || probe.rotationDegrees === 270 ? probe.width : probe.height,
-  };
-  if (item.kind === 'video') {
-    if (probe.durationUs == null || probe.durationUs <= 0) throw new Error('Video duration is unknown, so a safe edit project cannot be created.');
-    return createDefaultVideoProject({ ...base, durationUs: probe.durationUs });
-  }
-  return createDefaultImageProject(base);
-}
-
-function identityFromProject(item: StudioItem, project: MemeEditProject, stableId: string, byteSize: number | null): MemeEditDraftIdentity {
-  return {
-    sessionId: `meme-remix/${item.id}`,
-    source: {
-      stableId,
-      uri: item.uri,
-      name: project.source.name,
-      kind: project.source.kind,
-      width: project.source.width,
-      height: project.source.height,
-      durationUs: project.source.durationUs,
-      byteSize,
-      modifiedTimeMs: item.modifiedAt ?? null,
-    },
-  };
-}
 
 function selectedLayerSummary(project: MemeEditProject, selectedLayerId: string | null): string {
   const layer = selectedLayerId ? project.layers.find((candidate) => candidate.id === selectedLayerId) : null;
@@ -162,9 +127,8 @@ export function MemeRemixStudio({
   const [before, setBefore] = useState(false);
   const [inlineError, setInlineError] = useState('');
   const autosaveRef = useRef<MemeEditAutosaveController | null>(null);
-  const sourceControllerRef = useRef<MemeEditSourcePreparationController | null>(null);
+  const sourceControllerRef = useRef<MemeEditSourceSessionController | null>(null);
   const closedRef = useRef(true);
-  const duplicateCounterRef = useRef(1);
 
   const ready = state.kind === 'ready' ? state : null;
   const project = ready?.history.present ?? null;
@@ -174,7 +138,7 @@ export function MemeRemixStudio({
     autosaveRef.current = null;
     const controller = sourceControllerRef.current;
     sourceControllerRef.current = null;
-    if (controller) await controller.cancel().catch(() => {});
+    if (controller) await controller.cancel();
   }, []);
 
   useEffect(() => {
@@ -184,7 +148,9 @@ export function MemeRemixStudio({
       setInlineError('');
       setSelectedLayerId(null);
       setState({ kind: 'closed' });
-      void closeSessionAssets();
+      void closeSessionAssets().catch((error) => {
+        if (!closedRef.current) setInlineError(`Could not close edit session: ${String(error)}`);
+      });
       return;
     }
 
@@ -192,27 +158,10 @@ export function MemeRemixStudio({
     let cancelled = false;
     setState({ kind: 'loading', message: 'Preparing source…' });
     setInlineError('');
-    duplicateCounterRef.current = 1;
 
     const safeSetState = (next: LoadState) => {
       if (!cancelled && !closedRef.current) setState(next);
     };
-
-    const chooseDraft = (identity: MemeEditDraftIdentity, defaultProject: MemeEditProject, restoredProject: MemeEditProject, savedAtMs: number) => {
-      safeSetState({ kind: 'prompting', message: 'A matching draft is available.' });
-      Alert.alert('Restore edit draft?', `Saved ${new Date(savedAtMs).toLocaleString()}.`, [
-        {
-          text: 'Discard draft',
-          style: 'destructive',
-          onPress: () => {
-            draftStore.discard(identity).catch(() => {});
-            beginReady(identity, defaultProject);
-          },
-        },
-        { text: 'Restore', onPress: () => beginReady(identity, restoredProject) },
-      ]);
-    };
-
     const beginReady = (identity: MemeEditDraftIdentity, initialProject: MemeEditProject) => {
       if (cancelled || closedRef.current) return;
       const autosave = new MemeEditAutosaveController(draftStore, identity, {
@@ -221,32 +170,65 @@ export function MemeRemixStudio({
         },
       });
       autosaveRef.current = autosave;
-      const sourceController = new MemeEditSourcePreparationController(sourceIo, identity);
-      sourceControllerRef.current = sourceController;
-      safeSetState({ kind: 'loading', message: 'Materializing source…' });
-      sourceController.prepare(initialProject)
-        .then((prepared) => {
-          if (cancelled || closedRef.current) return;
-          const history = createProjectHistory(prepared.project);
-          autosave.schedule(prepared.project);
-          setSelectedLayerId(prepared.project.layers[prepared.project.layers.length - 1]?.id ?? null);
-          safeSetState({ kind: 'ready', identity, history });
-        })
-        .catch((error) => safeSetState({ kind: 'error', message: `Could not prepare source: ${String(error)}` }));
+      const history = createProjectHistory(initialProject);
+      autosave.schedule(initialProject);
+      setSelectedLayerId(initialProject.layers[initialProject.layers.length - 1]?.id ?? null);
+      safeSetState({ kind: 'ready', identity, history });
+    };
+    const chooseDraft = (
+      identity: MemeEditDraftIdentity,
+      defaultProject: MemeEditProject,
+      restoredProject: MemeEditProject,
+      savedAtMs: number,
+      materializedSourceUri: string
+    ) => {
+      safeSetState({ kind: 'prompting', message: 'A matching draft is available.' });
+      Alert.alert('Restore edit draft?', `Saved ${new Date(savedAtMs).toLocaleString()}.`, [
+        {
+          text: 'Discard draft',
+          style: 'destructive',
+          onPress: () => {
+            draftStore.discard(identity)
+              .then(() => beginReady(identity, defaultProject))
+              .catch((error) => safeSetState({ kind: 'error', message: `Could not discard draft: ${String(error)}` }));
+          },
+        },
+        {
+          text: 'Restore',
+          onPress: () => beginReady(identity, {
+            ...restoredProject,
+            transient: { ...restoredProject.transient, materializedSourceUri },
+          }),
+        },
+      ]);
     };
 
-    sourceIo.probe(item.uri)
-      .then(async (probe) => {
-        const defaultProject = createProjectFromProbe(item, probe);
-        const identity = identityFromProject(item, defaultProject, probe?.stableId ?? String(item.id), probe?.byteSize ?? null);
-        const restored = await draftStore.restore(identity);
-        if (restored.status === 'restored') chooseDraft(identity, defaultProject, restored.project, restored.savedAtMs);
-        else beginReady(identity, defaultProject);
+    const sourceController = new MemeEditSourceSessionController(sourceIo, {
+      sessionId: `meme-remix/${item.id}`,
+      uri: item.uri,
+      name: item.name,
+      indexedKind: item.kind,
+      modifiedTimeMs: item.modifiedAt ?? null,
+    });
+    sourceControllerRef.current = sourceController;
+    sourceController.prepare()
+      .then(async (prepared) => {
+        const restored = await draftStore.restore(prepared.identity);
+        if (cancelled || closedRef.current) return;
+        if (restored.status === 'restored') {
+          chooseDraft(prepared.identity, prepared.project, restored.project, restored.savedAtMs, prepared.materializedSourceUri);
+        } else {
+          beginReady(prepared.identity, prepared.project);
+        }
       })
-      .catch((error) => safeSetState({ kind: 'error', message: `Could not inspect source: ${String(error)}` }));
+      .catch((error) => safeSetState({ kind: 'error', message: `Could not prepare source: ${String(error)}` }));
 
     return () => {
       cancelled = true;
+      autosaveRef.current?.cancel();
+      autosaveRef.current = null;
+      if (sourceControllerRef.current === sourceController) sourceControllerRef.current = null;
+      void sourceController.cancel().catch(() => {});
     };
   }, [closeSessionAssets, draftStore, item, retryNonce, sourceIo, visible]);
 
@@ -291,11 +273,12 @@ export function MemeRemixStudio({
   }, [setHistory]);
   const moveLayer = useCallback((id: string, toIndex: number) => applyAction({ type: 'move-layer', id, toIndex }), [applyAction]);
   const duplicateLayer = useCallback((id: string) => {
+    if (!project) return;
     const prefix = `studio-${item?.id ?? 'session'}`;
-    const newId = `${prefix}-dup-${duplicateCounterRef.current++}`;
+    const newId = nextDuplicateLayerId(prefix, project.layers.map((layer) => layer.id));
     applyAction({ type: 'duplicate-layer', id, newId });
     setSelectedLayerId(newId);
-  }, [applyAction, item?.id]);
+  }, [applyAction, item?.id, project]);
   const deleteLayer = useCallback((id: string) => {
     applyAction({ type: 'remove-layer', id });
     setSelectedLayerId((current) => current === id ? null : current);
@@ -303,10 +286,15 @@ export function MemeRemixStudio({
   }, [applyAction]);
 
   const cancel = useCallback(() => {
-    void autosaveRef.current?.flush().finally(() => {
-      void closeSessionAssets();
-      onClose();
-    });
+    void (async () => {
+      try {
+        await autosaveRef.current?.flush();
+        await closeSessionAssets();
+        onClose();
+      } catch (error) {
+        setInlineError(`Could not close edit session: ${String(error)}`);
+      }
+    })();
   }, [closeSessionAssets, onClose]);
 
   const discard = useCallback(() => {
@@ -317,10 +305,15 @@ export function MemeRemixStudio({
         text: 'Discard',
         style: 'destructive',
         onPress: () => {
-          void autosaveRef.current?.discard().finally(() => {
-            void closeSessionAssets();
-            onClose();
-          });
+          void (async () => {
+            try {
+              await autosaveRef.current?.discard();
+              await closeSessionAssets();
+              onClose();
+            } catch (error) {
+              setInlineError(`Could not discard draft: ${String(error)}`);
+            }
+          })();
         },
       },
     ]);
@@ -363,7 +356,7 @@ export function MemeRemixStudio({
     <Modal visible={visible} animationType="slide" statusBarTranslucent onRequestClose={cancel}>
       <KeyboardAvoidingView style={styles.root} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
         <View style={[styles.topBar, { paddingTop: insets.top + space.sm }]}> 
-          <HeaderButton label="Cancel" hint="Close and keep a recoverable draft" onPress={cancel} disabled={state.kind === 'loading'} />
+          <HeaderButton label="Cancel" hint="Close and keep a recoverable draft" onPress={cancel} />
           <View style={styles.titleBlock}>
             <Text style={styles.title} numberOfLines={1}>{item?.name ?? 'Meme remix'}</Text>
             <Text style={styles.status} numberOfLines={1}>{headerStatus}</Text>
