@@ -65,9 +65,16 @@ interface NativeMemeTextPreviewProps {
   style?: unknown;
 }
 
-const NativeMemeTextPreviewView = Platform.OS === 'android'
-  ? requireNativeViewManager<NativeMemeTextPreviewProps>('MemegetBg')
-  : null;
+function resolveNativeMemeTextPreviewView() {
+  if (Platform.OS !== 'android') return null;
+  try {
+    return requireNativeViewManager<NativeMemeTextPreviewProps>('MemegetBg');
+  } catch {
+    return null;
+  }
+}
+
+const NativeMemeTextPreviewView = resolveNativeMemeTextPreviewView();
 
 type CanvasLayerProps = {
   project: MemeEditProject;
@@ -377,7 +384,6 @@ const TextLayerContent = React.memo(function TextLayerContent({ spec }: { spec: 
     borderRadius: memeTextBackingRadiusForPreview(spec),
     paddingHorizontal: spec.backing.paddingXPx,
     paddingVertical: spec.backing.paddingYPx,
-    opacity: spec.fill.opacity,
   }), [spec]);
   const textStyle = useMemo(() => ({
     color: spec.fill.color,
@@ -409,6 +415,10 @@ const TextLayerContent = React.memo(function TextLayerContent({ spec }: { spec: 
   specRef.current = spec;
 
   useEffect(() => {
+    if (!NativeMemeTextPreviewView) {
+      setNativeLayout(null);
+      return;
+    }
     let cancelled = false;
     const currentSpec = specRef.current;
     setNativeLayout(null);
@@ -434,7 +444,7 @@ const TextLayerContent = React.memo(function TextLayerContent({ spec }: { spec: 
   }, [nativeLayout, previewLayout, spec.transform.scale]);
 
   return (
-    <View style={styles.textFill} pointerEvents="none">
+    <View style={[styles.textFill, { opacity: spec.fill.opacity }]} pointerEvents="none">
       <View style={[styles.textBacking, boxStyle]}>
         {NativeMemeTextPreviewView ? (
           <NativeMemeTextPreviewView
@@ -449,7 +459,7 @@ const TextLayerContent = React.memo(function TextLayerContent({ spec }: { spec: 
             fillColor={spec.fill.color}
             strokeColor={spec.outline.color}
             strokeWidthPx={spec.outline.widthPx}
-            opacity={spec.fill.opacity}
+            opacity={1}
             onMetrics={(event) => setPreviewLayout(event.nativeEvent)}
             style={{ width: spec.canvas.wrapWidthPx, height: previewLayout?.heightPx ?? Math.max(spec.layout.lineHeightPx, spec.canvas.fontSizePx) }}
           />
