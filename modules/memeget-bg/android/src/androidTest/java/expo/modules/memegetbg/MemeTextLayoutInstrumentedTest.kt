@@ -65,6 +65,40 @@ class MemeTextLayoutInstrumentedTest {
   }
 
   @Test
+  fun previewMetricsComeFromDrawnLayoutAndCatchConfigurationDrift() {
+    val context = InstrumentationRegistry.getInstrumentation().targetContext
+    val helper = MemeTextLayout.measure(
+      context = context,
+      text = "drift\n\nprobe words",
+      fontFamily = "Anton",
+      fontWeight = 900,
+      fontSizePx = 48f,
+      lineHeightPx = 46f,
+      letterSpacingEm = 0.018f,
+      widthPx = 360,
+      align = "center"
+    )
+    val preview = MemeTextPreviewView(context).apply {
+      configure(
+        text = "drift\n\nprobe words",
+        fontFamily = "Anton",
+        fontWeight = 900,
+        fontSizePx = 48f,
+        lineHeightPx = 46f,
+        letterSpacingEm = 0.018f,
+        widthPx = 360,
+        align = "center",
+        fillColor = android.graphics.Color.WHITE,
+        outlineColor = android.graphics.Color.BLACK,
+        outlineWidthPx = 8f
+      )
+    }
+    assertEquals("preview initially mirrors helper", helper.heightPx, preview.layoutResult().heightPx)
+    preview.forceDiagnosticsLineSpacingExtra(32f)
+    assertTrue("drawn preview drift is observable", kotlin.math.abs(helper.heightPx - preview.layoutResult().heightPx) > 2)
+  }
+
+  @Test
   fun serializedPreviewFixturesMatchTextViewPlacementWithinTwoPreviewPixels() {
     val context = InstrumentationRegistry.getInstrumentation().targetContext
     val json = context.assets.open("text_layout_preview_fixtures.json").bufferedReader().use { it.readText() }

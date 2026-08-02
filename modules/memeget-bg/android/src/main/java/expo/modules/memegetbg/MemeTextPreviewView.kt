@@ -96,7 +96,7 @@ internal class MemeTextPreviewView(context: Context) : View(context) {
     }
     layout = buildLayout(fillPaint)
     strokeLayout = if (strokeWidthPxValue > 0f) buildLayout(strokePaint) else null
-    result = MemeTextLayout.measure(context, textValue, fontFamilyValue, fontWeightValue, fontSizePxValue, lineHeightPxValue, letterSpacingEmValue, widthValue, alignValue)
+    result = layout?.let(::resultFromDrawnLayout)
     requestLayout()
     invalidate()
     emitMetrics()
@@ -110,8 +110,44 @@ internal class MemeTextPreviewView(context: Context) : View(context) {
     .setHyphenationFrequency(Layout.HYPHENATION_FREQUENCY_NONE)
     .build()
 
+  internal fun forceDiagnosticsLineSpacingExtra(lineSpacingExtraPx: Float) {
+    layout = StaticLayout.Builder.obtain(textValue, 0, textValue.length, fillPaint, widthValue)
+      .setAlignment(androidAlignment(alignValue))
+      .setLineSpacing(lineSpacingExtraPx, 1f)
+      .setIncludePad(false)
+      .setBreakStrategy(Layout.BREAK_STRATEGY_HIGH_QUALITY)
+      .setHyphenationFrequency(Layout.HYPHENATION_FREQUENCY_NONE)
+      .build()
+    result = layout?.let(::resultFromDrawnLayout)
+    requestLayout()
+    invalidate()
+    emitMetrics()
+  }
+
+  private fun resultFromDrawnLayout(drawnLayout: StaticLayout): MemeTextLayoutResult {
+    val lines = (0 until drawnLayout.lineCount).map { index ->
+      val start = drawnLayout.getLineStart(index)
+      val end = drawnLayout.getLineEnd(index)
+      MemeTextLayoutLine(
+        text = textValue.substring(start, end).trimEnd('\n'),
+        start = start,
+        end = end,
+        widthPx = max(0f, drawnLayout.getLineWidth(index)),
+        topPx = drawnLayout.getLineTop(index),
+        baselinePx = drawnLayout.getLineBaseline(index)
+      )
+    }
+    return MemeTextLayoutResult(
+      widthPx = widthValue,
+      heightPx = drawnLayout.height,
+      includeFontPadding = false,
+      tolerancePx = MemeTextLayout.TOLERANCE_PX,
+      lines = lines
+    )
+  }
+
   private fun emitMetrics() {
-    val measured = result ?: return
+    val measured = layout?.let(::resultFromDrawnLayout) ?: return
     try {
       onMetrics(
         mapOf(
