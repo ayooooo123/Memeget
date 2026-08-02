@@ -948,6 +948,47 @@ describe('MemeEditAutosaveController', () => {
     expect(refs.released).toBe(true);
   });
 
+  test('blocked teardown after discard rejection can still release retained source without state updates', async () => {
+    const io = new MemoryDraftIo();
+    const store = new MemeEditDraftStore(io, { now: () => 20_000 });
+    const timers = new FakeTimers();
+    const controller = new MemeEditAutosaveController(store, identity, { timers });
+    let releaseRemove!: () => void;
+    const removeGate = new Promise<void>((resolve) => {
+      releaseRemove = resolve;
+    });
+    io.remove = async (path) => {
+      await removeGate;
+      throw new Error(`remove failed: ${path}`);
+    };
+    const refs: { autosave: MemeEditAutosaveController | null; released: boolean } = {
+      autosave: controller,
+      released: false,
+    };
+    const stateUpdate = jest.fn();
+    const closeSessionAssets = async () => {
+      const currentAutosave = refs.autosave;
+      const outcome = await flushAutosaveBeforeSourceRelease(currentAutosave, async () => {
+        refs.released = true;
+      });
+      if (outcome === 'released' && refs.autosave === currentAutosave) refs.autosave = null;
+      return outcome;
+    };
+
+    controller.schedule(project('discard-A'));
+    const discard = controller.discard();
+    await Promise.resolve();
+    await expect(closeSessionAssets()).resolves.toBe('blocked');
+    expect(refs.autosave).toBe(controller);
+    releaseRemove();
+    await expect(discard).rejects.toThrow('remove failed');
+
+    await expect(closeSessionAssets()).resolves.toBe('released');
+    expect(refs.autosave).toBe(null);
+    expect(refs.released).toBe(true);
+    expect(stateUpdate).not.toHaveBeenCalled();
+  });
+
   test('discard failure does not overwrite a newer schedule made while discard is pending', async () => {
     const io = new MemoryDraftIo();
     const store = new MemeEditDraftStore(io, { now: () => 20_000 });
