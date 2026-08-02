@@ -11,6 +11,7 @@ import {
   Text,
   useWindowDimensions,
   View,
+  type AccessibilityActionEvent,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -36,7 +37,7 @@ import {
   type ProjectHistory,
   type TransformKeyframe,
 } from '../memeEditProjectCore';
-import { canDuplicateLayer, commitGestureTransaction, memeRemixHeaderLayout, nextDuplicateLayerId } from '../memeEditCanvasCore';
+import { beforeAfterAccessibilityNextState, beforeAfterPointerNextState, canDuplicateLayer, commitGestureTransaction, memeRemixHeaderLayout, nextDuplicateLayerId } from '../memeEditCanvasCore';
 import { tap, warn } from '../haptics';
 import { colors, radius, space, type } from '../theme';
 import type { MemeRecord } from '../types';
@@ -77,6 +78,8 @@ function HeaderButton({
   selected,
   onPressIn,
   onPressOut,
+  accessibilityActions,
+  onAccessibilityAction,
 }: {
   label: string;
   hint: string;
@@ -87,6 +90,8 @@ function HeaderButton({
   selected?: boolean;
   onPressIn?: () => void;
   onPressOut?: () => void;
+  accessibilityActions?: { name: string; label?: string }[];
+  onAccessibilityAction?: (event: AccessibilityActionEvent) => void;
 }) {
   return (
     <PressableScale
@@ -100,6 +105,8 @@ function HeaderButton({
       accessibilityLabel={label}
       accessibilityHint={hint}
       accessibilityState={{ disabled: !!disabled, selected: !!selected }}
+      accessibilityActions={accessibilityActions}
+      onAccessibilityAction={onAccessibilityAction}
     >
       <Text style={[styles.headerButtonText, primary && styles.headerPrimaryText, danger && styles.headerDangerText, selected && styles.headerSelectedText]}>{label}</Text>
     </PressableScale>
@@ -429,20 +436,48 @@ export function MemeRemixStudio({
   const canUndo = !!ready && ready.history.past.length > 0;
   const canRedo = !!ready && ready.history.future.length > 0;
   const disabled = !ready || !!exportBusy || discarding;
+  const showBefore = useCallback(() => setBefore((value) => beforeAfterPointerNextState(value, 'press-in')), []);
+  const hideBefore = useCallback(() => setBefore((value) => beforeAfterPointerNextState(value, 'press-out')), []);
+  const toggleBeforeForAccessibility = useCallback((event: AccessibilityActionEvent) => {
+    if (event.nativeEvent.actionName === 'activate') {
+      setBefore((value) => beforeAfterAccessibilityNextState(value, 'activate'));
+    }
+  }, []);
+  const exportLabel = onExport ? headerLayout.exportLabel : headerLayout.mode === 'compact-two-row' ? 'No export' : 'Export unavailable';
 
   return (
     <Modal visible={visible} animationType="slide" statusBarTranslucent onRequestClose={cancel}>
       <KeyboardAvoidingView style={styles.root} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
         <View style={[styles.topBar, headerLayout.mode === 'compact-two-row' && styles.topBarCompact, { paddingTop: insets.top + space.sm }]}>
-          <HeaderButton label="Cancel" hint="Close and keep a recoverable draft" onPress={cancel} disabled={discarding} />
-          <View style={[styles.titleBlock, headerLayout.mode === 'compact-two-row' && styles.titleBlockCompact]}>
-            <Text style={styles.title} numberOfLines={1}>{item?.name ?? 'Meme remix'}</Text>
-            <Text style={styles.status} numberOfLines={1}>{headerStatus}</Text>
-          </View>
-          <HeaderButton label="Before" hint="Press to toggle layer visibility. Hold to hide all edit layers without resetting video playback." disabled={!ready} selected={before} onPress={() => setBefore((value) => !value)} onPressIn={() => setBefore(true)} onPressOut={() => setBefore(false)} />
-          <HeaderButton label="Undo" hint="Undo the last edit transaction" onPress={undo} disabled={!canUndo || disabled} />
-          <HeaderButton label="Redo" hint="Redo the next edit transaction" onPress={redo} disabled={!canRedo || disabled} />
-          <HeaderButton label={onExport ? (headerLayout.showFullExportLabel ? 'Export' : 'Out') : 'Export unavailable'} hint="Hand the structured project to the export pipeline" onPress={exportProject} disabled={!ready || !!exportBusy} primary={!!onExport} />
+          {headerLayout.mode === 'compact-two-row' ? (
+            <>
+              <View style={styles.topBarRow}>
+                <HeaderButton label="Cancel" hint="Close and keep a recoverable draft" onPress={cancel} disabled={discarding} />
+                <View style={styles.titleBlock}>
+                  <Text style={styles.title} numberOfLines={1}>{item?.name ?? 'Meme remix'}</Text>
+                  <Text style={styles.status} numberOfLines={1}>{headerStatus}</Text>
+                </View>
+              </View>
+              <View style={[styles.topBarRow, styles.commandRow]}>
+                <HeaderButton label="Before" hint="Hold to hide all edit layers without resetting video playback. Screen reader activate toggles before and after." disabled={!ready} selected={before} onPressIn={showBefore} onPressOut={hideBefore} accessibilityActions={[{ name: 'activate', label: before ? 'Show edited layers' : 'Show original media' }]} onAccessibilityAction={toggleBeforeForAccessibility} />
+                <HeaderButton label="Undo" hint="Undo the last edit transaction" onPress={undo} disabled={!canUndo || disabled} />
+                <HeaderButton label="Redo" hint="Redo the next edit transaction" onPress={redo} disabled={!canRedo || disabled} />
+                <HeaderButton label={exportLabel} hint="Hand the structured project to the export pipeline" onPress={exportProject} disabled={!ready || !!exportBusy} primary={!!onExport} />
+              </View>
+            </>
+          ) : (
+            <View style={styles.topBarRow}>
+              <HeaderButton label="Cancel" hint="Close and keep a recoverable draft" onPress={cancel} disabled={discarding} />
+              <View style={styles.titleBlock}>
+                <Text style={styles.title} numberOfLines={1}>{item?.name ?? 'Meme remix'}</Text>
+                <Text style={styles.status} numberOfLines={1}>{headerStatus}</Text>
+              </View>
+              <HeaderButton label="Before" hint="Hold to hide all edit layers without resetting video playback. Screen reader activate toggles before and after." disabled={!ready} selected={before} onPressIn={showBefore} onPressOut={hideBefore} accessibilityActions={[{ name: 'activate', label: before ? 'Show edited layers' : 'Show original media' }]} onAccessibilityAction={toggleBeforeForAccessibility} />
+              <HeaderButton label="Undo" hint="Undo the last edit transaction" onPress={undo} disabled={!canUndo || disabled} />
+              <HeaderButton label="Redo" hint="Redo the next edit transaction" onPress={redo} disabled={!canRedo || disabled} />
+              <HeaderButton label={exportLabel} hint="Hand the structured project to the export pipeline" onPress={exportProject} disabled={!ready || !!exportBusy} primary={!!onExport} />
+            </View>
+          )}
         </View>
 
         {state.kind === 'ready' && project ? (
@@ -514,9 +549,7 @@ const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.bg },
   topBar: {
     minHeight: 74,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: space.sm,
+    gap: space.xs,
     paddingHorizontal: space.md,
     paddingBottom: space.sm,
     backgroundColor: colors.surface,
@@ -525,11 +558,16 @@ const styles = StyleSheet.create({
   },
   topBarCompact: {
     minHeight: 118,
-    flexWrap: 'wrap',
-    alignItems: 'flex-start',
   },
+  topBarRow: {
+    minHeight: 44,
+    width: '100%',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: space.sm,
+  },
+  commandRow: { justifyContent: 'space-between' },
   titleBlock: { flex: 1, minWidth: 0, gap: 2, paddingHorizontal: space.xs },
-  titleBlockCompact: { flexBasis: '100%' },
   title: { ...type.title, color: colors.text },
   status: { ...type.caption, color: colors.muted, fontVariant: ['tabular-nums'] },
   headerButton: {

@@ -2,6 +2,8 @@ import {
   containedMediaRect,
   commitGestureTransaction,
   canDuplicateLayer,
+  beforeAfterAccessibilityNextState,
+  beforeAfterPointerNextState,
   describeCanvasLayers,
   dragKeyframeByViewDelta,
   gestureMoveShouldClaim,
@@ -248,9 +250,38 @@ describe('studio shell UI contracts', () => {
     expect(canDuplicateLayer(64, 64)).toBe(false);
   });
 
-  test('uses compact two-row header at narrow phone widths', () => {
-    expect(memeRemixHeaderLayout(360)).toEqual({ mode: 'compact-two-row', showFullExportLabel: false });
-    expect(memeRemixHeaderLayout(390)).toEqual({ mode: 'single-row', showFullExportLabel: true });
+  test('uses explicit compact header rows below 430dp and single row at 430dp', () => {
+    for (const width of [320, 360, 375, 390]) {
+      const layout = memeRemixHeaderLayout(width);
+      expect(layout.mode).toBe('compact-two-row');
+      expect(layout.showFullExportLabel).toBe(false);
+      expect(layout.exportLabel).toBe('Out');
+      expect(layout.rows).toEqual([
+        { key: 'identity', controls: ['Cancel', 'TitleStatus'], maxWidth: width, minControlSize: 44 },
+        { key: 'commands', controls: ['Before', 'Undo', 'Redo', 'Out'], maxWidth: width, minControlSize: 44 },
+      ]);
+      for (const row of layout.rows) {
+        expect(row.maxWidth).toBeLessThanOrEqual(width);
+        expect(row.minControlSize).toBeGreaterThanOrEqual(44);
+      }
+    }
+
+    expect(memeRemixHeaderLayout(430)).toEqual({
+      mode: 'single-row',
+      showFullExportLabel: true,
+      exportLabel: 'Export',
+      rows: [
+        { key: 'single', controls: ['Cancel', 'TitleStatus', 'Before', 'Undo', 'Redo', 'Export'], maxWidth: 430, minControlSize: 44 },
+      ],
+    });
+  });
+
+  test('before-after pointer hold ends visible while accessibility activate toggles', () => {
+    expect(beforeAfterPointerNextState(false, 'press-in')).toBe(true);
+    expect(beforeAfterPointerNextState(true, 'press-out')).toBe(false);
+    expect(beforeAfterPointerNextState(false, 'press-out')).toBe(false);
+    expect(beforeAfterAccessibilityNextState(false, 'activate')).toBe(true);
+    expect(beforeAfterAccessibilityNextState(true, 'activate')).toBe(false);
   });
 });
 

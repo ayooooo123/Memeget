@@ -63,9 +63,20 @@ export interface CanvasLayerDescriptor {
   label: string;
 }
 
+export type StudioHeaderRowKey = 'single' | 'identity' | 'commands';
+
+export interface StudioHeaderRowLayout {
+  key: StudioHeaderRowKey;
+  controls: string[];
+  maxWidth: number;
+  minControlSize: number;
+}
+
 export interface StudioHeaderLayout {
   mode: 'single-row' | 'compact-two-row';
   showFullExportLabel: boolean;
+  exportLabel: 'Export' | 'Out';
+  rows: StudioHeaderRowLayout[];
 }
 
 const MIN_SCALE = 0.01;
@@ -88,10 +99,34 @@ export function canDuplicateLayer(layerCount: number, maxLayers: number): boolea
   return finite(layerCount) && finite(maxLayers) && layerCount < maxLayers;
 }
 
+export function beforeAfterPointerNextState(_current: boolean, event: 'press-in' | 'press-out'): boolean {
+  return event === 'press-in';
+}
+
+export function beforeAfterAccessibilityNextState(current: boolean, action: 'activate'): boolean {
+  return action === 'activate' ? !current : current;
+}
+
 export function memeRemixHeaderLayout(width: number): StudioHeaderLayout {
-  return width <= 360
-    ? { mode: 'compact-two-row', showFullExportLabel: false }
-    : { mode: 'single-row', showFullExportLabel: true };
+  if (width < 430) {
+    return {
+      mode: 'compact-two-row',
+      showFullExportLabel: false,
+      exportLabel: 'Out',
+      rows: [
+        { key: 'identity', controls: ['Cancel', 'TitleStatus'], maxWidth: width, minControlSize: 44 },
+        { key: 'commands', controls: ['Before', 'Undo', 'Redo', 'Out'], maxWidth: width, minControlSize: 44 },
+      ],
+    };
+  }
+  return {
+    mode: 'single-row',
+    showFullExportLabel: true,
+    exportLabel: 'Export',
+    rows: [
+      { key: 'single', controls: ['Cancel', 'TitleStatus', 'Before', 'Undo', 'Redo', 'Export'], maxWidth: width, minControlSize: 44 },
+    ],
+  };
 }
 
 function finitePositive(value: number): boolean {

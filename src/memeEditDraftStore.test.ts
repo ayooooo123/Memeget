@@ -1515,6 +1515,74 @@ describe('MemeEditSourcePreparationController', () => {
     ]);
   });
 
+  test('new same-path source preparation waits for old async cancel removal before materializing', async () => {
+    const events: string[] = [];
+    const files = new Set<string>();
+    let removeCalls = 0;
+    let materializeCalls = 0;
+    let releaseOldRemove!: () => void;
+    let noteOldRemoveStarted!: () => void;
+    const oldRemoveStarted = new Promise<void>((resolve) => {
+      noteOldRemoveStarted = resolve;
+    });
+    const oldRemoveGate = new Promise<void>((resolve) => {
+      releaseOldRemove = resolve;
+    });
+    const io: MemeEditSourcePreparationIo = {
+      cacheDirectory: 'file:///cache/',
+      materialize: jest.fn(async (_source, destination) => {
+        materializeCalls += 1;
+        events.push(`materialize:${materializeCalls}`);
+        files.add(destination);
+      }),
+      remove: jest.fn(async (destination) => {
+        removeCalls += 1;
+        if (removeCalls === 2) {
+          events.push('old-remove:start');
+          noteOldRemoveStarted();
+          await oldRemoveGate;
+          events.push('old-remove:finish');
+        } else {
+          events.push(`prepare-remove:${removeCalls}`);
+        }
+        files.delete(destination);
+      }),
+      probe: jest.fn(async () => probeResult),
+    };
+    const seed = {
+      sessionId: 'meme-remix/wait-old-remove',
+      uri: 'content://provider/source.mp4',
+      name: 'source.mp4',
+      indexedKind: 'video' as const,
+      modifiedTimeMs: null,
+    };
+
+    const first = new MemeEditSourceSessionController(io, seed);
+    await first.prepare();
+    const cancelling = first.cancel();
+    await oldRemoveStarted;
+
+    const second = new MemeEditSourceSessionController(io, seed);
+    const preparing = second.prepare();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(events).toEqual(['prepare-remove:1', 'materialize:1', 'old-remove:start']);
+    releaseOldRemove();
+    const prepared = await preparing;
+    await cancelling;
+
+    expect(events).toEqual([
+      'prepare-remove:1',
+      'materialize:1',
+      'old-remove:start',
+      'old-remove:finish',
+      'prepare-remove:3',
+      'materialize:2',
+    ]);
+    expect(files.has(prepared.materializedSourceUri)).toBe(true);
+  });
+
   test('source session cancel retries owned deletion until cleanup succeeds', async () => {
     const remove = jest
       .fn()
