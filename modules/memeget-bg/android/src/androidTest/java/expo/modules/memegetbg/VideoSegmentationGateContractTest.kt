@@ -165,6 +165,22 @@ class VideoSegmentationGateContractTest {
     )
   }
 
+  @Test
+  fun evidenceScheduleRunsEmaAtConfiguredFpsAndCapturesOnePanelPerSecond() {
+    val schedules = listOf(8, 12, 15).associateWith { maskFps ->
+      VideoSegmentationGateContracts.evidenceSchedule(maskFps, durationSeconds = 10)
+    }
+
+    for ((maskFps, schedule) in schedules) {
+      assertEquals(maskFps * 10, schedule.size)
+      assertEquals(0L, schedule.first().timestampMs)
+      assertEquals((maskFps * 10 - 1) * 1000L / maskFps, schedule.last().timestampMs)
+      assertEquals((0 until 10).toList(), schedule.mapNotNull { it.panelSecond })
+    }
+    assertFalse(schedules.getValue(8).map { it.timestampMs } == schedules.getValue(12).map { it.timestampMs })
+    assertFalse(schedules.getValue(12).map { it.timestampMs } == schedules.getValue(15).map { it.timestampMs })
+  }
+
   private fun observation(size: Int, fps: Int, qualityPass: Boolean) =
     VideoSegmentationGateContracts.MatrixObservation(
       workingSize = size,

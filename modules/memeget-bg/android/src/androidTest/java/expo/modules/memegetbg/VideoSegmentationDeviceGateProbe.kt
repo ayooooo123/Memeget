@@ -94,7 +94,8 @@ object VideoSegmentationDeviceGateProbe {
     val framesProcessed: Int,
     val maskWidth: Int,
     val maskHeight: Int,
-    val confidenceMaskCount: Int
+    val confidenceMaskCount: Int,
+    val evidenceSheet: Bitmap
   )
 
   private val fixtures = listOf(
@@ -241,7 +242,7 @@ object VideoSegmentationDeviceGateProbe {
           .put("maskThreshold", MASK_THRESHOLD.toDouble())
           .put("temporalSmoothing", "EMA current=$SMOOTHING_CURRENT_WEIGHT previous=${1f - SMOOTHING_CURRENT_WEIGHT}")
           .put("peakMemoryMetric", "android.os.Debug.getPss process PSS sampled every 20 ms, including model setup and teardown")
-          .put("pipelineRuntimeMetric", "asset decode + scale + VIDEO-mode inference + smoothing + mask metrics; evidence rendering excluded")
+          .put("pipelineRuntimeMetric", "asset decode + scale + VIDEO-mode inference + configured-FPS smoothing + mask metrics + ten contact-sheet panel overlays; PNG encoding excluded")
           .put("latencyMetric", "per-frame MediaPipe segmentForVideo wall-clock latency")
           .put("memoryCeilingBytes", memoryCeilingBytes)
           .put("memoryCeilingSource", "ActivityManager.memoryClass observed on the physical device")
@@ -409,13 +410,12 @@ object VideoSegmentationDeviceGateProbe {
       sampler.join(5_000)
     }
     val runtimeMs = SystemClock.elapsedRealtime() - startMs
-    val evidence = renderEvidence(
-      instrumentation,
+    val evidence = writeEvidence(
       context,
       fixture,
-      source,
       workingSize,
-      maskFps
+      maskFps,
+      series.evidenceSheet
     )
     val metrics = series.metrics
     val qualityPass = metrics.getBoolean("qualityPass")
@@ -461,9 +461,19 @@ object VideoSegmentationDeviceGateProbe {
     var maskHeight = 0
     var confidenceMaskCount = 0
     var nonEmptyFrames = 0
+    val evidenceSchedule = VideoSegmentationGateContracts.evidenceSchedule(maskFps, durationSeconds = 10)
+    val evidenceHeight = scaledHeight(workingSize)
+    val evidenceSheet = Bitmap.createBitmap(workingSize * 5, evidenceHeight * 2, Bitmap.Config.ARGB_8888)
+    val evidenceCanvas = Canvas(evidenceSheet).apply { drawColor(Color.BLACK) }
+    val evidenceLabelPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+      color = Color.WHITE
+      textSize = max(12f, workingSize / 18f)
+      setShadowLayer(2f, 1f, 1f, Color.BLACK)
+    }
 
     for (frameIndex in 0 until frameCount) {
       val timestampMs = frameIndex * 1000L / maskFps
+      val evidenceFrame = evidenceSchedule[frameIndex]
       val decodeStartNs = SystemClock.elapsedRealtimeNanos()
       val bitmap = retriever.getScaledFrameAtTime(
         timestampMs * 1000L,
@@ -472,6 +482,9 @@ object VideoSegmentationDeviceGateProbe {
         scaledHeight(workingSize)
       ) ?: error("Decoder returned null at ${timestampMs}ms")
       decodeLatencies += nanosToMillis(SystemClock.elapsedRealtimeNanos() - decodeStartNs)
+      val sourceCopy = evidenceFrame.panelSecond?.let {
+        bitmap.copy(Bitmap.Config.ARGB_8888, false)
+      }
       val inferenceStartNs = SystemClock.elapsedRealtimeNanos()
       val extracted = segmentFrame(segmenter, bitmap, timestampMs)
       inferenceLatencies += nanosToMillis(SystemClock.elapsedRealtimeNanos() - inferenceStartNs)
@@ -490,6 +503,21 @@ object VideoSegmentationDeviceGateProbe {
         }
       }
       smoothed = currentSmoothed
+      val panelSecond = evidenceFrame.panelSecond
+      if (panelSecond != null && sourceCopy != null) {
+        val overlay = overlayMask(sourceCopy, currentSmoothed, extracted.width, extracted.height)
+        val left = (panelSecond % 5) * workingSize
+        val top = (panelSecond / 5) * evidenceHeight
+        evidenceCanvas.drawBitmap(overlay, left.toFloat(), top.toFloat(), null)
+        evidenceCanvas.drawText(
+          "${panelSecond}s",
+          left + 6f,
+          top + evidenceLabelPaint.textSize + 4f,
+          evidenceLabelPaint
+        )
+        overlay.recycle()
+        sourceCopy.recycle()
+      }
       val stats = binaryStats(currentSmoothed, extracted.width, extracted.height)
       val totalPixels = max(1, extracted.width * extracted.height)
       val frameCoverage = stats.foregroundPixels.toDouble() / totalPixels
@@ -541,70 +569,28 @@ object VideoSegmentationDeviceGateProbe {
       frameCount,
       maskWidth,
       maskHeight,
-      confidenceMaskCount
+      confidenceMaskCount,
+      evidenceSheet
     )
   }
 
-  private fun renderEvidence(
-    instrumentation: Instrumentation,
+  private fun writeEvidence(
     context: Context,
     fixture: FixtureSpec,
-    source: File,
     workingSize: Int,
-    maskFps: Int
+    maskFps: Int,
+    sheet: Bitmap
   ): JSONObject {
-    val tileWidth = workingSize
-    val tileHeight = scaledHeight(workingSize)
-    val sheet = Bitmap.createBitmap(tileWidth * 5, tileHeight * 2, Bitmap.Config.ARGB_8888)
-    val canvas = Canvas(sheet)
-    canvas.drawColor(Color.BLACK)
-    val labelPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-      color = Color.WHITE
-      textSize = max(12f, workingSize / 18f)
-      setShadowLayer(2f, 1f, 1f, Color.BLACK)
-    }
-    val retriever = MediaMetadataRetriever()
-    val segmenter = createSegmenter(instrumentation, context)
-    var priorSmoothed: FloatArray? = null
-    val renderStartMs = SystemClock.elapsedRealtime()
-    try {
-      retriever.setDataSource(source.absolutePath)
-      for (second in 0 until 10) {
-        val timestampMs = second * 1000L
-        val bitmap = retriever.getScaledFrameAtTime(
-          timestampMs * 1000L,
-          MediaMetadataRetriever.OPTION_CLOSEST,
-          tileWidth,
-          tileHeight
-        ) ?: error("Evidence decoder returned null at ${timestampMs}ms")
-        val sourceCopy = bitmap.copy(Bitmap.Config.ARGB_8888, false)
-        val extracted = segmentFrame(segmenter, bitmap, timestampMs)
-        val currentSmoothed = priorSmoothed?.let { prior ->
-          FloatArray(extracted.values.size) { index ->
-            SMOOTHING_CURRENT_WEIGHT * extracted.values[index] +
-              (1f - SMOOTHING_CURRENT_WEIGHT) * prior[index]
-          }
-        } ?: extracted.values.copyOf()
-        priorSmoothed = currentSmoothed
-        val overlay = overlayMask(sourceCopy, currentSmoothed, extracted.width, extracted.height)
-        val left = (second % 5) * tileWidth
-        val top = (second / 5) * tileHeight
-        canvas.drawBitmap(overlay, left.toFloat(), top.toFloat(), null)
-        canvas.drawText("${second}s", left + 6f, top + labelPaint.textSize + 4f, labelPaint)
-        overlay.recycle()
-        sourceCopy.recycle()
-      }
-    } finally {
-      retriever.release()
-      segmenter.close()
-    }
-
     val fileName = "video-segmentation-mask-${fixture.id}-${workingSize}-${maskFps}fps.png"
     val file = File(context.filesDir, fileName)
-    file.outputStream().use { output ->
-      check(sheet.compress(Bitmap.CompressFormat.PNG, 100, output)) { "Could not write $fileName" }
+    val encodingStartMs = SystemClock.elapsedRealtime()
+    try {
+      file.outputStream().use { output ->
+        check(sheet.compress(Bitmap.CompressFormat.PNG, 100, output)) { "Could not write $fileName" }
+      }
+    } finally {
+      sheet.recycle()
     }
-    sheet.recycle()
     return JSONObject()
       .put("fixtureId", fixture.id)
       .put("workingSize", workingSize)
@@ -612,9 +598,10 @@ object VideoSegmentationDeviceGateProbe {
       .put("fileName", fileName)
       .put("sha256", sha256(file))
       .put("bytes", file.length())
-      .put("renderRuntimeMs", SystemClock.elapsedRealtime() - renderStartMs)
-      .put("format", "PNG 5x2 contact sheet at source seconds 0-9")
-      .put("visualEncoding", "source RGB with smoothed >=0.5 mask tinted green and one-pixel mask boundary red")
+      .put("pngEncodingRuntimeMs", SystemClock.elapsedRealtime() - encodingStartMs)
+      .put("format", "PNG 5x2 contact sheet at source seconds 0-9 captured from the measured full configured-FPS series")
+      .put("evidenceFramesProcessed", maskFps * 10)
+      .put("visualEncoding", "source RGB with configured-FPS EMA-smoothed >=0.5 mask tinted green and one-pixel mask boundary red")
   }
 
   private fun overlayMask(
