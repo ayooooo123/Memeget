@@ -559,7 +559,10 @@ export class MemeEditAutosaveController {
     const project = this.pendingProject;
     if (project === null) return this.activeOperation ?? this.queueTail;
     this.pendingProject = null;
-    const operation = this.queueTail.then(() => this.store.save(this.identity, project));
+    const operation = this.queueTail.then(() => this.store.save(this.identity, project)).catch((error) => {
+      if (this.pendingProject === null) this.pendingProject = project;
+      throw error;
+    });
     this.activeOperation = operation;
     this.queueTail = operation.catch(() => {});
     void operation.then(
@@ -582,10 +585,34 @@ export class MemeEditAutosaveController {
   }
 
   async discard(): Promise<void> {
-    this.cancel();
-    await this.queueTail;
-    await this.store.discard(this.identity);
-    this.discarded = true;
+    const pendingProject = this.pendingProject;
+    const hadTimer = this.timerHandle !== null;
+    if (this.timerHandle !== null) {
+      this.timers.clearTimeout(this.timerHandle);
+      this.timerHandle = null;
+    }
+    try {
+      await this.queueTail;
+      await this.store.discard(this.identity);
+      this.pendingProject = null;
+      this.discarded = true;
+    } catch (error) {
+      this.pendingProject = pendingProject;
+      if (hadTimer && pendingProject !== null && this.timerHandle === null) {
+        this.timerHandle = this.timers.setTimeout(() => {
+          this.timerHandle = null;
+          void this.flush().catch((flushError) => {
+            try {
+              this.onError(flushError);
+            } catch {
+              // Error reporting is best-effort and must never create a second
+              // unhandled rejection after the save failure is already contained.
+            }
+          });
+        }, DRAFT_AUTOSAVE_DELAY_MS);
+      }
+      throw error;
+    }
   }
 }
 
@@ -610,6 +637,7 @@ export async function flushAutosaveBeforeSourceRelease(
       await autosave.flush();
     } catch (error) {
       onError(error);
+      return;
     }
   }
   try {

@@ -9,6 +9,7 @@ import {
   gesturePointInsideMedia,
   gestureMoveShouldClaim,
   layerHandlePoints,
+  layerHandleTouchInsideMedia,
   normalizedPointToViewPoint,
   resizeKeyframeFromHandle,
   rotateKeyframeFromHandle,
@@ -188,8 +189,11 @@ const TransformableLayerView = React.memo(function TransformableLayerView({
   }), [box.x, box.y, commit, handles.center, handles.resize, keyframe, layer.id, mediaRect, onSelectLayer, translate]);
 
   const resizePan = useMemo(() => PanResponder.create({
-    onStartShouldSetPanResponder: () => {
-      const accepted = selected && gesturePointInsideMedia(handles.resize, mediaRect);
+    onStartShouldSetPanResponder: (event) => {
+      const accepted = selected && layerHandleTouchInsideMedia(keyframe, visualWidth, mediaRect, 'resize', {
+        x: event.nativeEvent.locationX,
+        y: event.nativeEvent.locationY,
+      });
       resizeStartAccepted.current = accepted;
       return accepted;
     },
@@ -216,11 +220,14 @@ const TransformableLayerView = React.memo(function TransformableLayerView({
       resizeStartAccepted.current = false;
       gestureStart.current = null;
     },
-  }), [commit, handles.center, handles.resize, keyframe, mediaRect, scalePreview, selected]);
+  }), [commit, handles.center, handles.resize, keyframe, mediaRect, scalePreview, selected, visualWidth]);
 
   const rotatePan = useMemo(() => PanResponder.create({
-    onStartShouldSetPanResponder: () => {
-      const accepted = selected && gesturePointInsideMedia(handles.rotate, mediaRect);
+    onStartShouldSetPanResponder: (event) => {
+      const accepted = selected && layerHandleTouchInsideMedia(keyframe, visualWidth, mediaRect, 'rotate', {
+        x: event.nativeEvent.locationX,
+        y: event.nativeEvent.locationY,
+      });
       rotateStartAccepted.current = accepted;
       return accepted;
     },
@@ -247,7 +254,7 @@ const TransformableLayerView = React.memo(function TransformableLayerView({
       rotateStartAccepted.current = false;
       gestureStart.current = null;
     },
-  }), [commit, handles.center, handles.rotate, keyframe, mediaRect, rotatePreview, selected]);
+  }), [commit, handles.center, handles.rotate, keyframe, mediaRect, rotatePreview, selected, visualWidth]);
 
   if (hidden) return null;
 
