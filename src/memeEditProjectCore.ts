@@ -455,6 +455,8 @@ export function outputTimeToSourceTimeUs(
   let retainedBeforeUs = 0;
   for (let index = 0; index < ranges.length; index += 1) {
     const range = ranges[index];
+    const startOutputUs = Math.round(retainedBeforeUs / speed);
+    if (index > 0 && outputTimeUs === startOutputUs) return range.startUs;
     const rangeDurationUs = range.endUs - range.startUs;
     const endOutputUs = Math.round((retainedBeforeUs + rangeDurationUs) / speed);
     const isLast = index === ranges.length - 1;
@@ -485,7 +487,7 @@ export function interpolateTransformKeyframes(
   keyframes: readonly TransformKeyframe[],
   timeUs: number
 ): InterpolatedTransform | null {
-  if (keyframes.length === 0) return null;
+  if (!Number.isSafeInteger(timeUs) || keyframes.length === 0) return null;
   if (timeUs <= keyframes[0].timeUs) return transformAtKeyframe(keyframes[0]);
   const last = keyframes[keyframes.length - 1];
   if (timeUs >= last.timeUs) return transformAtKeyframe(last);
@@ -2054,6 +2056,7 @@ export function reduceMemeEditProject(
         },
       };
     case 'add-layer': {
+      if (action.index !== undefined && !Number.isSafeInteger(action.index)) return project;
       if (project.layers.length >= PROJECT_LIMITS.maxLayers) {
         throw new RangeError(`Project cannot contain more than ${PROJECT_LIMITS.maxLayers} layers.`);
       }
@@ -2081,6 +2084,7 @@ export function reduceMemeEditProject(
       };
     }
     case 'move-layer': {
+      if (!Number.isSafeInteger(action.toIndex)) return project;
       const index = project.layers.findIndex((layer) => layer.id === action.id);
       if (index < 0) return project;
       const toIndex = Math.max(0, Math.min(Math.round(action.toIndex), project.layers.length - 1));
@@ -2285,10 +2289,41 @@ export function applyProjectAction(
   return { past, present, future: [], transaction: null };
 }
 
+function semanticValueEquals(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) return true;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) {
+      return false;
+    }
+    for (let index = 0; index < left.length; index += 1) {
+      if (!semanticValueEquals(left[index], right[index])) return false;
+    }
+    return true;
+  }
+  if (!isRecord(left) || !isRecord(right)) return false;
+  const leftKeys = Object.keys(left);
+  const rightKeys = Object.keys(right);
+  if (leftKeys.length !== rightKeys.length) return false;
+  for (const key of leftKeys) {
+    if (
+      !Object.prototype.hasOwnProperty.call(right, key) ||
+      !semanticValueEquals(left[key], right[key])
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
 export function commitProjectTransaction(history: ProjectHistory): ProjectHistory {
   if (history.transaction === null) return history;
   const baseline = history.transaction.baseline;
-  if (history.present === baseline) return { ...history, transaction: null };
+  if (
+    history.present === baseline ||
+    semanticValueEquals(history.present, baseline)
+  ) {
+    return { ...history, present: baseline, transaction: null };
+  }
   const past = [...history.past, baseline].slice(-MAX_HISTORY_STATES);
   return { past, present: history.present, future: [], transaction: null };
 }
