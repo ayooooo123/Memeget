@@ -15,6 +15,22 @@ object VideoSegmentationGateContracts {
     val fixtureCount: Int
   )
 
+  data class EvidenceFrame(
+    val timestampMs: Long,
+    val panelSecond: Int?
+  )
+
+  fun evidenceSchedule(maskFps: Int, durationSeconds: Int): List<EvidenceFrame> {
+    require(maskFps > 0)
+    require(durationSeconds > 0)
+    return List(maskFps * durationSeconds) { frameIndex ->
+      EvidenceFrame(
+        timestampMs = frameIndex * 1000L / maskFps,
+        panelSecond = if (frameIndex % maskFps == 0) frameIndex / maskFps else null
+      )
+    }
+  }
+
   fun provenanceComplete(
     version: String,
     downloadUrl: String,
