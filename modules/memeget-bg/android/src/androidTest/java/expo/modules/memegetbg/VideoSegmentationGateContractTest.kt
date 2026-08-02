@@ -50,20 +50,33 @@ class VideoSegmentationGateContractTest {
       peakPssDeltaBytes = 100_000_000,
       pssDeltaBudgetBytes = 134_217_728,
       qualityPass = true,
+      complete = true,
+      completedFixtureCount = 3,
+      playbackReviewPass = true,
       fixtureCount = 3
     )
 
-    assertTrue(VideoSegmentationGateContracts.videoIsolationAccepted(passing, cancellationCleanupPass = true))
-    assertFalse(VideoSegmentationGateContracts.videoIsolationAccepted(passing.copy(runtimeMs = 30_001), true))
+    assertTrue(
+      VideoSegmentationGateContracts.videoIsolationAccepted(
+        passing,
+        cancellationCleanupPass = true,
+        matrixComplete = true
+      )
+    )
+    assertFalse(VideoSegmentationGateContracts.videoIsolationAccepted(passing.copy(runtimeMs = 30_001), true, true))
     assertFalse(
       VideoSegmentationGateContracts.videoIsolationAccepted(
         passing.copy(peakPssDeltaBytes = passing.pssDeltaBudgetBytes),
+        true,
         true
       )
     )
-    assertFalse(VideoSegmentationGateContracts.videoIsolationAccepted(passing.copy(qualityPass = false), true))
-    assertFalse(VideoSegmentationGateContracts.videoIsolationAccepted(passing.copy(fixtureCount = 2), true))
-    assertFalse(VideoSegmentationGateContracts.videoIsolationAccepted(passing, cancellationCleanupPass = false))
+    assertFalse(VideoSegmentationGateContracts.videoIsolationAccepted(passing.copy(qualityPass = false), true, true))
+    assertFalse(VideoSegmentationGateContracts.videoIsolationAccepted(passing.copy(fixtureCount = 2), true, true))
+    assertFalse(VideoSegmentationGateContracts.videoIsolationAccepted(passing.copy(complete = false), true, true))
+    assertFalse(VideoSegmentationGateContracts.videoIsolationAccepted(passing.copy(playbackReviewPass = false), true, true))
+    assertFalse(VideoSegmentationGateContracts.videoIsolationAccepted(passing, cancellationCleanupPass = false, true))
+    assertFalse(VideoSegmentationGateContracts.videoIsolationAccepted(passing, true, matrixComplete = false))
   }
 
   @Test
@@ -75,16 +88,101 @@ class VideoSegmentationGateContractTest {
       observation(256, 12, qualityPass = true)
     )
 
-    val selected = VideoSegmentationGateContracts.selectSmallestAccepted(candidates, cancellationCleanupPass = true)
+    val selected = VideoSegmentationGateContracts.selectSmallestAccepted(
+      candidates,
+      cancellationCleanupPass = true,
+      matrixComplete = true
+    )
 
     assertEquals(256, selected?.workingSize)
     assertEquals(12, selected?.maskFps)
     assertNull(
       VideoSegmentationGateContracts.selectSmallestAccepted(
         candidates.map { it.copy(runtimeMs = 30_001) },
-        cancellationCleanupPass = true
+        cancellationCleanupPass = true,
+        matrixComplete = true
       )
     )
+  }
+
+  @Test
+  fun matrixCompletionRequiresExactGridEveryFixtureCompletedAndEveryEvidenceRecord() {
+    val complete = listOf(256, 384, 512).flatMap { size ->
+      listOf(8, 12, 15).map { fps -> observation(size, fps, qualityPass = true) }
+    }
+
+    assertTrue(VideoSegmentationGateContracts.matrixComplete(complete, evidenceCount = 27))
+    assertFalse(VideoSegmentationGateContracts.matrixComplete(complete.dropLast(1), evidenceCount = 27))
+    assertFalse(
+      VideoSegmentationGateContracts.matrixComplete(
+        complete.mapIndexed { index, item -> if (index == 0) item.copy(complete = false) else item },
+        evidenceCount = 27
+      )
+    )
+    assertFalse(
+      VideoSegmentationGateContracts.matrixComplete(
+        complete.mapIndexed { index, item ->
+          if (index == 0) item.copy(completedFixtureCount = 2) else item
+        },
+        evidenceCount = 27
+      )
+    )
+    assertFalse(VideoSegmentationGateContracts.matrixComplete(complete, evidenceCount = 26))
+  }
+
+  @Test
+  fun playbackReviewMustPassAndBindTheCurrentEvidenceDigest() {
+    val digest = "a".repeat(64)
+    assertTrue(VideoSegmentationGateContracts.playbackReviewPass(digest, digest, "PASS"))
+    assertFalse(VideoSegmentationGateContracts.playbackReviewPass(digest, "b".repeat(64), "PASS"))
+    assertFalse(VideoSegmentationGateContracts.playbackReviewPass(digest, digest, "FAIL"))
+    assertFalse(VideoSegmentationGateContracts.playbackReviewPass(digest, "", "PASS"))
+    assertTrue(VideoSegmentationGateContracts.playbackReviewRecordComplete("PASS", defectsCount = 0))
+    assertTrue(VideoSegmentationGateContracts.playbackReviewRecordComplete("FAIL", defectsCount = 1))
+    assertFalse(VideoSegmentationGateContracts.playbackReviewRecordComplete("FAIL", defectsCount = 0))
+    assertFalse(VideoSegmentationGateContracts.playbackReviewRecordComplete("UNKNOWN", defectsCount = 1))
+  }
+
+  @Test
+  fun quantitativelyEligibleConfigurationWithoutCurrentPlaybackReviewRemainsPending() {
+    val pending = observation(256, 8, qualityPass = true).copy(playbackReviewPass = false)
+
+    assertFalse(VideoSegmentationGateContracts.videoIsolationAccepted(pending, true, true))
+    assertNull(VideoSegmentationGateContracts.selectSmallestAccepted(listOf(pending), true, true))
+  }
+
+
+  @Test
+  fun nestedCleanupAttemptsEveryActionAndRetainsAllFailures() {
+    val actionsRun = mutableListOf<String>()
+    val workFailure = IllegalStateException("work")
+    val result = VideoSegmentationGateContracts.cleanupAll(
+      workFailure,
+      listOf(
+        {
+          actionsRun += "segmenter"
+          throw IllegalStateException("segmenter close")
+        },
+        {
+          actionsRun += "decoder"
+          throw IllegalStateException("decoder close")
+        },
+        { actionsRun += "sampler" }
+      )
+    )
+
+    assertTrue(result === workFailure)
+    assertEquals(listOf("segmenter", "decoder", "sampler"), actionsRun)
+    assertEquals(2, result?.suppressed?.size)
+  }
+
+  @Test
+  fun playbackZipEntriesUseOneFixedTimestamp() {
+    val first = VideoSegmentationGateContracts.deterministicZipEntry("frame_0000.jpg")
+    val second = VideoSegmentationGateContracts.deterministicZipEntry("manifest.json")
+
+    assertEquals(VideoSegmentationGateContracts.FIXED_ZIP_ENTRY_TIME_MS, first.time)
+    assertEquals(first.time, second.time)
   }
 
   @Test
@@ -93,6 +191,8 @@ class VideoSegmentationGateContractTest {
       VideoSegmentationGateContracts.cancellationCleanupPass(
         activeBeforeCancel = true,
         cancelIssued = true,
+        cancellationObserved = true,
+        workerErrorAbsent = true,
         workerStopped = true,
         segmenterClosed = true,
         decoderClosed = true,
@@ -105,6 +205,8 @@ class VideoSegmentationGateContractTest {
       VideoSegmentationGateContracts.cancellationCleanupPass(
         activeBeforeCancel = true,
         cancelIssued = true,
+        cancellationObserved = true,
+        workerErrorAbsent = true,
         workerStopped = true,
         segmenterClosed = false,
         decoderClosed = true,
@@ -117,12 +219,42 @@ class VideoSegmentationGateContractTest {
       VideoSegmentationGateContracts.cancellationCleanupPass(
         activeBeforeCancel = true,
         cancelIssued = true,
+        cancellationObserved = true,
+        workerErrorAbsent = true,
         workerStopped = true,
         segmenterClosed = true,
         decoderClosed = true,
         partialEvidenceDeleted = true,
         followUpSucceeded = true,
         leftovers = 1
+      )
+    )
+    assertFalse(
+      VideoSegmentationGateContracts.cancellationCleanupPass(
+        activeBeforeCancel = true,
+        cancelIssued = true,
+        cancellationObserved = false,
+        workerStopped = true,
+        workerErrorAbsent = true,
+        segmenterClosed = true,
+        decoderClosed = true,
+        partialEvidenceDeleted = true,
+        followUpSucceeded = true,
+        leftovers = 0
+      )
+    )
+    assertFalse(
+      VideoSegmentationGateContracts.cancellationCleanupPass(
+        activeBeforeCancel = true,
+        cancelIssued = true,
+        cancellationObserved = true,
+        workerStopped = true,
+        workerErrorAbsent = false,
+        segmenterClosed = true,
+        decoderClosed = true,
+        partialEvidenceDeleted = true,
+        followUpSucceeded = true,
+        leftovers = 0
       )
     )
   }
@@ -203,18 +335,37 @@ class VideoSegmentationGateContractTest {
   }
 
   @Test
-  fun provenanceRequiresEveryExpectedBoundaryAndExactValue() {
-    val complete = listOf(
-      VideoSegmentationGateContracts.ProvenanceBoundary("version", "0.10.29", "0.10.29"),
-      VideoSegmentationGateContracts.ProvenanceBoundary("pomDigest", "a".repeat(64), "a".repeat(64)),
-      VideoSegmentationGateContracts.ProvenanceBoundary("licenseDigest", "b".repeat(64), "b".repeat(64))
-    )
-    assertTrue(VideoSegmentationGateContracts.provenanceBoundariesComplete(complete, setOf("version", "pomDigest", "licenseDigest")))
-    assertFalse(VideoSegmentationGateContracts.provenanceBoundariesComplete(complete.dropLast(1), setOf("version", "pomDigest", "licenseDigest")))
+  fun provenanceRequiresTheFixedBoundarySetAndPinnedUrls() {
+    fun completeBoundaries() =
+      VideoSegmentationGateContracts.EXPECTED_PROVENANCE_BOUNDARY_IDS.map { id ->
+        val value = if (id.endsWith("Url")) "https://example.test/pinned/1" else "pinned"
+        VideoSegmentationGateContracts.ProvenanceBoundary(id, value, value)
+      }
+
+    val complete = completeBoundaries()
+    assertTrue(VideoSegmentationGateContracts.provenanceBoundariesComplete(complete))
+    assertFalse(VideoSegmentationGateContracts.provenanceBoundariesComplete(complete.dropLast(1)))
     assertFalse(
       VideoSegmentationGateContracts.provenanceBoundariesComplete(
-        complete.map { if (it.id == "version") it.copy(observed = "latest") else it },
-        setOf("version", "pomDigest", "licenseDigest")
+        complete + VideoSegmentationGateContracts.ProvenanceBoundary("unexpected", "x", "x")
+      )
+    )
+    assertFalse(
+      VideoSegmentationGateContracts.provenanceBoundariesComplete(
+        complete.map {
+          if (it.id == "generator.downloadUrl") it.copy(observed = "") else it
+        }
+      )
+    )
+    assertFalse(
+      VideoSegmentationGateContracts.provenanceBoundariesComplete(
+        complete.map {
+          if (it.id == "model.licenseUrl") {
+            it.copy(observed = "https://example.test/latest/LICENSE")
+          } else {
+            it
+          }
+        }
       )
     )
   }
@@ -256,6 +407,9 @@ class VideoSegmentationGateContractTest {
       peakPssDeltaBytes = 60_000_000,
       pssDeltaBudgetBytes = 134_217_728,
       qualityPass = qualityPass,
+      complete = true,
+      completedFixtureCount = 3,
+      playbackReviewPass = true,
       fixtureCount = 3
     )
 }
