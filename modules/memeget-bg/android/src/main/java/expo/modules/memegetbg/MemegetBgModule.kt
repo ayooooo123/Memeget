@@ -109,6 +109,17 @@ class MemegetBgModule : Module() {
       }
     }
 
+    // Render a full-resolution still from a structured edit project. The plan
+    // JSON is produced by src/memeImageRenderCore.ts, which resolves every
+    // layer into output pixels first — this call only decodes, draws and
+    // encodes. AsyncFunction keeps the decode/encode off the JS thread; real
+    // failures reject so the studio can show why the export did not happen.
+    AsyncFunction("renderImageProject") { planJson: String ->
+      val ctx = appContext.reactContext
+        ?: throw IllegalStateException("React context unavailable")
+      MemeImageRenderer.render(ctx, planJson)
+    }
+
     // WebM is playable in Memeget but not accepted by several mobile paste
     // targets. Produce genuine H.264/AAC MP4 bytes before clipboard staging.
     AsyncFunction("transcodeVideoToMp4") { source: String, promise: Promise ->

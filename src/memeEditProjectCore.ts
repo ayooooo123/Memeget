@@ -104,8 +104,11 @@ export interface MaskTrackSpec {
   corrections: RectCorrectionKeyframe[];
 }
 
+// `transparent` keeps the output canvas empty where nothing is drawn, which is
+// what makes a real alpha PNG export possible. It is an additive widening of
+// the version 2 format: older projects never carry it, and it needs no asset.
 export interface BackgroundSpec {
-  mode: 'source' | 'solid' | 'blurred-source' | 'image' | 'video';
+  mode: 'source' | 'solid' | 'blurred-source' | 'image' | 'video' | 'transparent';
   color: string;
   assetUri: string | null;
   blurScale: number;
@@ -214,6 +217,7 @@ const BACKGROUND_MODES: Record<BackgroundSpec['mode'], true> = {
   'blurred-source': true,
   image: true,
   video: true,
+  transparent: true,
 };
 
 export type ProjectValidationErrorCode =

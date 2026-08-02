@@ -143,14 +143,12 @@ export function MemeRemixStudio({
   item,
   visible,
   exportBusy,
-  exportError,
   onClose,
   onExport,
 }: {
   item: StudioItem | null;
   visible: boolean;
   exportBusy?: boolean;
-  exportError?: string;
   onClose: () => void;
   onExport?: (project: MemeEditProject) => Promise<void> | void;
 }) {
@@ -584,7 +582,7 @@ export function MemeRemixStudio({
                 <HeaderButton label="Before" hint="Hold to hide all edit layers without resetting video playback. Screen reader activate toggles before and after." disabled={!ready} selected={before} onPressIn={showBefore} onPressOut={hideBefore} accessibilityActions={[{ name: 'activate', label: before ? 'Show edited layers' : 'Show original media' }]} onAccessibilityAction={toggleBeforeForAccessibility} />
                 <HeaderButton label="Undo" hint="Undo the last edit transaction" onPress={undo} disabled={!canUndo || disabled} />
                 <HeaderButton label="Redo" hint="Redo the next edit transaction" onPress={redo} disabled={!canRedo || disabled} />
-                <HeaderButton label={exportControl.label} hint="Hand the structured project to the export pipeline" onPress={exportProject} disabled={exportControl.disabled} primary={!!onExport} />
+                <HeaderButton label={exportControl.label} hint="Render this project at full resolution and save it as a new meme" onPress={exportProject} disabled={exportControl.disabled} primary={!!onExport} />
               </View>
             </>
           ) : (
@@ -597,7 +595,7 @@ export function MemeRemixStudio({
               <HeaderButton label="Before" hint="Hold to hide all edit layers without resetting video playback. Screen reader activate toggles before and after." disabled={!ready} selected={before} onPressIn={showBefore} onPressOut={hideBefore} accessibilityActions={[{ name: 'activate', label: before ? 'Show edited layers' : 'Show original media' }]} onAccessibilityAction={toggleBeforeForAccessibility} />
               <HeaderButton label="Undo" hint="Undo the last edit transaction" onPress={undo} disabled={!canUndo || disabled} />
               <HeaderButton label="Redo" hint="Redo the next edit transaction" onPress={redo} disabled={!canRedo || disabled} />
-              <HeaderButton label={exportControl.label} hint="Hand the structured project to the export pipeline" onPress={exportProject} disabled={exportControl.disabled} primary={!!onExport} />
+              <HeaderButton label={exportControl.label} hint="Render this project at full resolution and save it as a new meme" onPress={exportProject} disabled={exportControl.disabled} primary={!!onExport} />
             </View>
           )}
         </View>
@@ -698,9 +696,9 @@ export function MemeRemixStudio({
           </View>
         )}
 
-        {!!(inlineError || exportError) && (
+        {!!inlineError && (
           <View style={[styles.errorBar, { bottom: insets.bottom + 74 }]} accessibilityRole="alert">
-            <Text style={styles.errorText}>{inlineError || exportError}</Text>
+            <Text style={styles.errorText}>{inlineError}</Text>
             {cleanupPending && <HeaderButton label="Retry close" hint="Retry source cleanup and close the editor" onPress={retryCleanupClose} primary />}
           </View>
         )}

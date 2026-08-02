@@ -42,14 +42,18 @@ import { termsWithLabel, upsertDurableTag } from '../tagMerge';
 import { emitLibraryChanged } from '../events';
 import { guessFacet } from '../facetCoverage';
 import { scoreExemplar } from '../learnCore';
-import { buildExemplarHeads, noteInteractive, type ExemplarModel } from '../indexer';
+import { buildExemplarHeads, noteInteractive, saveSharedFiles, type ExemplarModel } from '../indexer';
 import { noteCodecInteractive } from '../interactive';
 import { success, tap, thud, warn } from '../haptics';
 import {
   copyFileToClipboard,
+  imageRendererNativeAvailable,
+  renderImageProject,
   saveToDownloads,
   transcodeVideoToMp4,
 } from '../../modules/memeget-bg';
+import type { MemeEditProject } from '../memeEditProjectCore';
+import { buildImageRenderPlan, imageRenderPlanUnavailableLayers } from '../memeImageRenderCore';
 import { compatibleCopyTarget } from '../memeActionsCore';
 import { mimeForName } from '../mediaFormats';
 import {
@@ -682,6 +686,48 @@ export const MemeGrid = React.memo(function MemeGrid({
     setStudioOpen(true);
   };
 
+  // Render the studio's structured project into a real full-resolution PNG and
+  // hand it to the same collection path a shared meme takes: saveSharedFiles
+  // writes it into the linked folder and inserts the pending row, onCreated
+  // indexes it. The original file is never touched — the remix lands as its
+  // own single library item.
+  const onStudioExport = useCallback(async (project: MemeEditProject) => {
+    const item = selected;
+    if (!item || busy) return;
+    noteInteractive();
+    setBusy(true);
+    let rendered: string | null = null;
+    try {
+      const plan = buildImageRenderPlan(project, { planId: `meme-remix-${item.id}` });
+      const skipped = imageRenderPlanUnavailableLayers(plan);
+      rendered = await renderImageProject(JSON.stringify(plan));
+      if (!rendered) throw new Error('Image export needs a native build');
+      const stem = item.name.replace(/\.[^./]+$/, '') || 'meme';
+      const saved = await saveSharedFiles([
+        { path: rendered, fileName: `${stem}-remix.png`, mimeType: 'image/png' },
+      ]);
+      if (saved.saved.length === 0) {
+        if (saved.duplicates > 0) {
+          showToast('That exact remix is already in your library', 'info');
+          return;
+        }
+        throw new Error(`Could not save the rendered meme into ${saved.folderName}`);
+      }
+      onCreated?.(saved.saved);
+      success();
+      showToast(
+        skipped.length > 0
+          ? `Saved to ${saved.folderName} — ${skipped.length} layer${skipped.length === 1 ? '' : 's'} could not be rendered`
+          : `Saved to ${saved.folderName}`,
+        skipped.length > 0 ? 'info' : 'success'
+      );
+      setStudioOpen(false);
+    } finally {
+      if (rendered) await deleteCache(rendered).catch(() => {});
+      setBusy(false);
+    }
+  }, [busy, onCreated, selected]);
+
   const onCopy = async () => {
     if (!selected || busy) return;
     const isVideo = selected.kind === 'video';
@@ -1200,6 +1246,7 @@ export const MemeGrid = React.memo(function MemeGrid({
         visible={studioOpen && !!selected}
         exportBusy={busy}
         onClose={() => setStudioOpen(false)}
+        onExport={selected?.kind === 'image' && imageRendererNativeAvailable ? onStudioExport : undefined}
       />
 
       <Modal

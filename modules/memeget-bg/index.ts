@@ -123,6 +123,7 @@ interface MemegetBgNative {
     coverBottom: boolean
   ): Promise<string>;
   transcodeVideoToMp4(source: string): Promise<string>;
+  renderImageProject(planJson: string): Promise<string>;
   copyFileToClipboard(uri: string, name: string, mimeType: string): Promise<void>;
   saveToDownloads(srcPath: string, name: string, mimeType: string): Promise<string>;
   measureMemeTextLayout(
@@ -307,6 +308,21 @@ export const mediaEditorNativeAvailable =
   native != null &&
   typeof native.renderMemeVariation === 'function' &&
   typeof native.transcodeVideoToMp4 === 'function';
+
+// True once the native still renderer is built into the app. The studio gates
+// its export button on this rather than silently producing nothing.
+export const imageRendererNativeAvailable =
+  native != null && typeof native.renderImageProject === 'function';
+
+// Render a full-resolution PNG from a serialized image render plan (see
+// src/memeImageRenderCore.ts) and return its file:// path in the app cache —
+// the caller owns moving or deleting it. Resolves null ONLY when the native
+// module is absent; a genuine decode/draw/encode failure rejects with the
+// native reason so the studio can show it instead of a silent no-op.
+export async function renderImageProject(planJson: string): Promise<string | null> {
+  if (!native || typeof native.renderImageProject !== 'function') return null;
+  return native.renderImageProject(planJson);
+}
 
 export async function measureMemeTextLayout(input: {
   text: string;

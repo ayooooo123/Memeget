@@ -50,6 +50,7 @@ import {
   type TextLayer,
   type TransformKeyframe,
 } from '../memeEditProjectCore';
+import { MEME_MEDIA_LAYER_BASE_WIDTH } from '../memeImageRenderCore';
 import { buildMemeTextLayoutSpec, compareNativeMemeTextLayoutResults, memeTextBackingRadiusForPreview, memeTextMeasureKey, nativeMemeTextLayoutInputFromSpec, type MemeTextLayoutSpec, type NativeMemeTextLayoutResult } from '../memeTextLayoutCore';
 import { colors, radius, space, type } from '../theme';
 import { useConst } from '../reactUtils';
@@ -349,7 +350,7 @@ const TransformableLayerView = React.memo(function TransformableLayerView({
   const rotateStartAccepted = useRef(false);
   const evaluatedKeyframe = firstKeyframe(layer, activeTimeUs);
   const keyframe = gestureStart.current?.keyframe ?? evaluatedKeyframe;
-  const visualWidth = layer.kind === 'text' ? layer.width : 0.28;
+  const visualWidth = layer.kind === 'text' ? layer.width : MEME_MEDIA_LAYER_BASE_WIDTH;
   const visualDescriptor = useMemo(
     () => canvasLayerVisualDescriptor(keyframe, visualWidth, mediaRect),
     [keyframe.center.x, keyframe.center.y, keyframe.rotationDegrees, keyframe.scale, mediaRect, visualWidth]
