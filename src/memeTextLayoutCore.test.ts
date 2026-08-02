@@ -102,7 +102,7 @@ describe('meme text presets', () => {
 });
 
 describe('serializable meme text layout contract', () => {
-  test('converts normalized layer data into deterministic canvas-pixel layout, baselines, and wrapping', () => {
+  test('converts normalized layer data into serializable raw text and native style inputs without TS prewrapping', () => {
     const layer = createMemeTextLayer('subtitle', 'subtitle', {
       text: 'we need a deterministic subtitle wrap for android parity',
       width: 0.5,
@@ -144,12 +144,9 @@ describe('serializable meme text layout contract', () => {
       outline: { color: '#0a0b0e', widthPx: 2 },
       backing: { color: '#0a0b0e', radiusPx: 6, paddingXPx: 12, paddingYPx: 6, tail: 'none' },
       layout: {
-        lines: [
-          { text: 'we need a deterministic subtitle wrap', start: 0, end: 37, widthPx: 483, baselinePx: 23, topPx: 0 },
-          { text: 'for android parity', start: 38, end: 56, widthPx: 216, baselinePx: 52.5, topPx: 29.5 },
-        ],
+        lines: [],
         widthPx: 500,
-        heightPx: 59,
+        heightPx: 0,
         lineHeightPx: 29.5,
       },
       diagnostics: {
@@ -158,25 +155,17 @@ describe('serializable meme text layout contract', () => {
     });
   });
 
-  test('preserves explicit line breaks and wraps long tokens without empty lines', () => {
+  test('preserves raw explicit line breaks for native preview wrapping', () => {
     const layer = createMemeTextLayer('plain', 'plain', {
-      text: 'first line\nSupercalifragilisticexpialidocious token',
+      text: 'first line\n\nSupercalifragilisticexpialidocious token',
       width: 0.22,
       fontSize: 0.08,
     });
 
     const spec = buildMemeTextLayoutSpec(layer, kf(), { canvasWidthPx: 600, canvasHeightPx: 400 });
 
-    expect(spec.layout.lines.map((line) => line.text)).toEqual([
-      'first line',
-      'Superca',
-      'lifragilis',
-      'ticexpia',
-      'lidociou',
-      's token',
-    ]);
-    expect(spec.layout.lines.every((line) => line.text.length > 0)).toBe(true);
-    expect(spec.layout.lines.every((line) => line.widthPx <= spec.canvas.wrapWidthPx)).toBe(true);
+    expect(spec.displayText).toBe('first line\n\nSupercalifragilisticexpialidocious token');
+    expect(spec.layout.lines).toEqual([]);
   });
 
   test('serializes representative Android StaticLayout parity fixtures with a two preview-pixel tolerance target', () => {
@@ -232,11 +221,12 @@ describe('serializable meme text layout contract', () => {
 
     const driftedNative = {
       ...exactNative,
-      lines: exactNative.lines.map((line, index) => index === 0 ? { ...line, baselinePx: line.baselinePx + 3 } : line),
+      heightPx: 3,
+      lines: [{ text: 'native line', start: 0, end: 11, widthPx: 10, topPx: 0, baselinePx: 3 }],
     };
     expect(compareNativeMemeTextLayoutToSpec(spec, driftedNative)).toMatchObject({
       ok: false,
-      maxBaselineDriftPx: 4.199999999999999,
+      lineCountDrift: 1,
     });
   });
 

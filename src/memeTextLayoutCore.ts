@@ -452,9 +452,9 @@ export function buildMemeTextLayoutSpec(
   const fontSizePx = Math.max(1, Math.round(fontSize * canvasHeightPx));
   const wrapWidthPx = Math.max(1, Math.round(width * canvasWidthPx));
   const font = defaults.font;
-  const lines = layoutLines(textDisplayText(layer), wrapWidthPx, fontSizePx, font);
+  const lines: MemeTextLayoutLine[] = [];
   const lineHeightPx = roundPx(fontSizePx * font.lineHeightRatio);
-  const layoutHeightPx = roundPx(lines.length * lineHeightPx);
+  const layoutHeightPx = 0;
   const outlineWidthPx = Math.round(layer.style.outlineScale * fontSizePx);
   const backing = defaults.backing;
   return {

@@ -67,7 +67,7 @@ internal object MemeTextLayout {
     }
     val layout = StaticLayout.Builder.obtain(text, 0, text.length, paint, boundedWidth)
       .setAlignment(androidAlignment(align))
-      .setLineSpacing(0f, max(1f, lineHeightPx) / max(1f, fontSizePx))
+      .setLineSpacing(lineSpacingExtra(paint, lineHeightPx), 1f)
       .setIncludePad(false)
       .setBreakStrategy(Layout.BREAK_STRATEGY_HIGH_QUALITY)
       .setHyphenationFrequency(Layout.HYPHENATION_FREQUENCY_NONE)
@@ -109,5 +109,11 @@ internal object MemeTextLayout {
     "left" -> Layout.Alignment.ALIGN_NORMAL
     "right" -> Layout.Alignment.ALIGN_OPPOSITE
     else -> Layout.Alignment.ALIGN_CENTER
+  }
+
+  internal fun lineSpacingExtra(paint: TextPaint, lineHeightPx: Float): Float {
+    val metrics = paint.fontMetrics
+    val nativeLineHeight = metrics.descent - metrics.ascent
+    return (lineHeightPx - nativeLineHeight).coerceAtLeast(0f)
   }
 }

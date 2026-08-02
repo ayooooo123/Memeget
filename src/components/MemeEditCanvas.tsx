@@ -42,7 +42,7 @@ import { buildMemeTextLayoutSpec, compareNativeMemeTextLayoutToSpec, memeTextBac
 import { colors, radius, space, type } from '../theme';
 import { useConst } from '../reactUtils';
 
-const PREVIEW_TIME_POLL_MS = 250;
+const PREVIEW_TIME_POLL_MS = 33;
 const DEFAULT_LAYER_ASPECT = 1;
 
 type CommitLayerKeyframes = (layerId: string, keyframes: TransformKeyframe[]) => void;
@@ -348,6 +348,7 @@ const TransformableLayerView = React.memo(function TransformableLayerView({
 
 const TextLayerContent = React.memo(function TextLayerContent({ spec }: { spec: MemeTextLayoutSpec }) {
   const [diagnostic, setDiagnostic] = React.useState<string | null>(null);
+  const [nativeLayout, setNativeLayout] = React.useState<Awaited<ReturnType<typeof measureMemeTextLayout>> | null>(null);
   const boxStyle = useMemo(() => ({
     backgroundColor: spec.backing.color ?? 'transparent',
     borderRadius: memeTextBackingRadiusForPreview(spec),
@@ -379,7 +380,7 @@ const TextLayerContent = React.memo(function TextLayerContent({ spec }: { spec: 
       { left: amount, top: amount },
     ];
   }, [spec.outline.widthPx]);
-  const displayText = spec.layout.lines.map((line) => line.text).join('\n');
+  const displayText = spec.displayText;
   const measureKey = useMemo(() => memeTextMeasureKey(spec), [spec]);
   const specRef = useRef(spec);
   specRef.current = spec;
@@ -387,19 +388,27 @@ const TextLayerContent = React.memo(function TextLayerContent({ spec }: { spec: 
   useEffect(() => {
     let cancelled = false;
     const currentSpec = specRef.current;
-    measureMemeTextLayout(nativeMemeTextLayoutInputFromSpec(currentSpec)).then((nativeLayout) => {
-      if (cancelled || !nativeLayout) return;
-      const comparison = compareNativeMemeTextLayoutToSpec(specRef.current, nativeLayout);
-      setDiagnostic(comparison.ok
-        ? null
-        : `Text metrics drift: ${comparison.lineCountDrift} lines, ${comparison.maxBaselineDriftPx.toFixed(1)}px baseline`);
+    setNativeLayout(null);
+    measureMemeTextLayout(nativeMemeTextLayoutInputFromSpec(currentSpec)).then((measuredLayout) => {
+      if (cancelled) return;
+      setNativeLayout(measuredLayout);
     }).catch(() => {
-      if (!cancelled) setDiagnostic(null);
+      if (!cancelled) setNativeLayout(null);
     });
     return () => {
       cancelled = true;
     };
   }, [measureKey]);
+  useEffect(() => {
+    if (!nativeLayout) {
+      setDiagnostic(null);
+      return;
+    }
+    const comparison = compareNativeMemeTextLayoutToSpec(spec, nativeLayout);
+    setDiagnostic(comparison.ok
+      ? null
+      : `Text metrics drift: ${comparison.lineCountDrift} lines, ${comparison.maxBaselineDriftPx.toFixed(1)}px baseline`);
+  }, [nativeLayout, spec]);
 
   return (
     <View style={styles.textFill} pointerEvents="none">
