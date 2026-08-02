@@ -97,12 +97,12 @@ internal object MemeTextLayout {
     )
   }
 
-  private fun weightedTypeface(context: Context, fontFamily: String, weight: Int): Typeface {
+  internal fun weightedTypeface(context: Context, fontFamily: String, fontWeight: Int): Typeface {
     val asset = if (fontFamily == "Anton") ANTON_ASSET else NOTO_SANS_ASSET
     val base = Typeface.createFromAsset(context.assets, asset)
     return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-      Typeface.create(base, weight.coerceIn(100, 900), false)
-    } else if (weight >= 700) {
+      Typeface.create(base, fontWeight.coerceIn(100, 900), false)
+    } else if (fontWeight >= 700) {
       Typeface.create(base, Typeface.BOLD)
     } else {
       base

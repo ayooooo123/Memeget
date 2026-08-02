@@ -74,11 +74,7 @@ internal class MemeTextPreviewView(context: Context) : View(context) {
   fun layoutResult(): MemeTextLayoutResult = result ?: MemeTextLayout.measure(context, textValue, fontFamilyValue, fontWeightValue, fontSizePxValue, lineHeightPxValue, letterSpacingEmValue, widthValue, alignValue)
 
   private fun rebuild() {
-    val typeface = Typeface.create(
-      Typeface.createFromAsset(context.assets, if (fontFamilyValue == "Anton") "fonts/Anton-Regular.ttf" else "fonts/NotoSans.ttf"),
-      fontWeightValue.coerceIn(100, 900),
-      false
-    )
+    val typeface = MemeTextLayout.weightedTypeface(context, fontFamilyValue, fontWeightValue)
     fillPaint.apply {
       color = fillColorValue
       textSize = fontSizePxValue

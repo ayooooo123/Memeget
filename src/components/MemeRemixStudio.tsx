@@ -313,13 +313,14 @@ export function MemeRemixStudio({
   useEffect(() => {
     const sub = AppState.addEventListener('change', (next) => {
       if (next === 'background' || next === 'inactive') {
-        void autosaveRef.current?.flush().catch((error) => {
+        flushPendingTextSnapshot();
+        void flushExactPendingTextAutosave().then(() => autosaveRef.current?.flush()).catch((error) => {
           if (!closedRef.current) setInlineError(`Draft flush failed: ${String(error)}`);
         });
       }
     });
     return () => sub.remove();
-  }, []);
+  }, [flushExactPendingTextAutosave, flushPendingTextSnapshot]);
 
   const setHistory = useCallback((updater: (history: ProjectHistory) => ProjectHistory) => {
     setState((current) => {
@@ -459,10 +460,12 @@ export function MemeRemixStudio({
 
   const exportProject = useCallback(() => {
     if (!project || !onExport || !ready || exportBusy || discarding) return;
-    Promise.resolve(onExport(project)).catch((error) => {
+    const exactProject = flushPendingTextSnapshot() ?? project;
+    if (exactProject !== project && autosaveRef.current) autosaveRef.current.schedule(exactProject);
+    Promise.resolve(onExport(exactProject)).catch((error) => {
       setInlineError(String(error));
     });
-  }, [discarding, exportBusy, onExport, project, ready]);
+  }, [discarding, exportBusy, flushPendingTextSnapshot, onExport, project, ready]);
   const headerLayout = memeRemixHeaderLayout(width);
 
   const status = project

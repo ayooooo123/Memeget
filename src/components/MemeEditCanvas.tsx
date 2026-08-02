@@ -95,9 +95,13 @@ function firstKeyframe(layer: KeyframedLayer, timeUs: number): TransformKeyframe
   return { ...fallback, ...interpolated };
 }
 
-function writeFirstKeyframe(layer: KeyframedLayer, keyframe: TransformKeyframe): TransformKeyframe[] {
-  if (layer.keyframes.length === 0) return [keyframe];
-  return [{ ...keyframe, timeUs: layer.keyframes[0].timeUs }, ...layer.keyframes.slice(1)];
+function writeKeyframeAtTime(layer: KeyframedLayer, keyframe: TransformKeyframe, timeUs: number): TransformKeyframe[] {
+  const nextKeyframe = { ...keyframe, timeUs };
+  const existingIndex = layer.keyframes.findIndex((candidate) => candidate.timeUs === timeUs);
+  if (existingIndex >= 0) {
+    return layer.keyframes.map((candidate, index) => index === existingIndex ? nextKeyframe : candidate);
+  }
+  return [...layer.keyframes, nextKeyframe].sort((left, right) => left.timeUs - right.timeUs);
 }
 
 function rectStyle(rect: NormalizedRect, mediaRect: ViewRect) {
@@ -197,11 +201,11 @@ const TransformableLayerView = React.memo(function TransformableLayerView({
   }, [keyframe.center.x, keyframe.center.y, keyframe.scale, keyframe.rotationDegrees, scalePreview, translate, rotatePreview]);
 
   const commit = useCallback((nextKeyframe: TransformKeyframe) => {
-    onCommitLayerKeyframes(layer.id, writeFirstKeyframe(layer, nextKeyframe));
+    onCommitLayerKeyframes(layer.id, writeKeyframeAtTime(layer, nextKeyframe, activeTimeUs));
     translate.setValue({ x: 0, y: 0 });
     scalePreview.setValue(1);
     rotatePreview.setValue(0);
-  }, [layer, onCommitLayerKeyframes, rotatePreview, scalePreview, translate]);
+  }, [activeTimeUs, layer, onCommitLayerKeyframes, rotatePreview, scalePreview, translate]);
 
   const dragPan = useMemo(() => PanResponder.create({
     onStartShouldSetPanResponder: (event) => {
