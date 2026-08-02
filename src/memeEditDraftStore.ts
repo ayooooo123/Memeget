@@ -524,6 +524,7 @@ export class MemeEditAutosaveController {
   private queueTail: Promise<void> = Promise.resolve();
   private activeOperation: Promise<void> | null = null;
   private discarded = false;
+  private pendingGeneration = 0;
 
   constructor(
     private readonly store: MemeEditDraftStore,
@@ -536,6 +537,7 @@ export class MemeEditAutosaveController {
 
   schedule(project: MemeEditProject): void {
     if (this.discarded) throw new Error('Cannot schedule a discarded autosave controller.');
+    this.pendingGeneration += 1;
     this.pendingProject = project;
     if (this.timerHandle !== null) this.timers.clearTimeout(this.timerHandle);
     this.timerHandle = this.timers.setTimeout(() => {
@@ -585,6 +587,7 @@ export class MemeEditAutosaveController {
   }
 
   async discard(): Promise<void> {
+    const capturedGeneration = this.pendingGeneration;
     const pendingProject = this.pendingProject;
     const hadTimer = this.timerHandle !== null;
     if (this.timerHandle !== null) {
@@ -594,22 +597,26 @@ export class MemeEditAutosaveController {
     try {
       await this.queueTail;
       await this.store.discard(this.identity);
-      this.pendingProject = null;
-      this.discarded = true;
+      if (this.pendingGeneration === capturedGeneration) {
+        this.pendingProject = null;
+        this.discarded = true;
+      }
     } catch (error) {
-      this.pendingProject = pendingProject;
-      if (hadTimer && pendingProject !== null && this.timerHandle === null) {
-        this.timerHandle = this.timers.setTimeout(() => {
-          this.timerHandle = null;
-          void this.flush().catch((flushError) => {
-            try {
-              this.onError(flushError);
-            } catch {
-              // Error reporting is best-effort and must never create a second
-              // unhandled rejection after the save failure is already contained.
-            }
-          });
-        }, DRAFT_AUTOSAVE_DELAY_MS);
+      if (this.pendingGeneration === capturedGeneration) {
+        this.pendingProject = pendingProject;
+        if (hadTimer && pendingProject !== null && this.timerHandle === null) {
+          this.timerHandle = this.timers.setTimeout(() => {
+            this.timerHandle = null;
+            void this.flush().catch((flushError) => {
+              try {
+                this.onError(flushError);
+              } catch {
+                // Error reporting is best-effort and must never create a second
+                // unhandled rejection after the save failure is already contained.
+              }
+            });
+          }, DRAFT_AUTOSAVE_DELAY_MS);
+        }
       }
       throw error;
     }
