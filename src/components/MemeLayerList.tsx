@@ -13,7 +13,7 @@ function layerTitle(layer: MemeEditLayer): string {
 }
 
 function layerMeta(layer: MemeEditLayer): string {
-  if (layer.kind === 'text') return `Text · width ${(layer.width * 100).toFixed(0)}%`;
+  if (layer.kind === 'text') return `${layer.style.preset} · width ${(layer.width * 100).toFixed(0)}% · size ${(layer.fontSize * 100).toFixed(0)}%`;
   if (layer.kind === 'cover') return `Correction · ${(layer.rect.width * 100).toFixed(0)} × ${(layer.rect.height * 100).toFixed(0)}%`;
   if (layer.kind === 'subject') return layer.maskTrackId ? `Mask ${layer.maskTrackId}` : 'Mask unavailable';
   return `${layer.assetKind} · ${layer.fit}`;

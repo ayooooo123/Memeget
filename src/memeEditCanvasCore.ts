@@ -414,6 +414,17 @@ export function nextDuplicateLayerId(prefix: string, ids: readonly string[]): st
   return `${prefix}-dup-${maximum + 1}`;
 }
 
+export function selectedLayerIdAfterDelete(
+  orderedIds: readonly string[],
+  deletedId: string,
+  selectedLayerId: string | null
+): string | null {
+  if (selectedLayerId !== deletedId) return selectedLayerId;
+  const deletedIndex = orderedIds.indexOf(deletedId);
+  if (deletedIndex < 0) return null;
+  return orderedIds[deletedIndex + 1] ?? orderedIds[deletedIndex - 1] ?? null;
+}
+
 export function describeCanvasLayers(project: MemeEditProject): CanvasLayerDescriptor[] {
   return project.layers.map((layer) => {
     if (layer.kind === 'text') return { id: layer.id, kind: layer.kind, unavailable: false, label: 'Text layer' };

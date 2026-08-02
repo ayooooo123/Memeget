@@ -4,7 +4,7 @@ import { StyleSheet, Text, View } from 'react-native';
 import { colors, radius, space, type } from '../theme';
 import { PressableScale } from './ui';
 
-export type MemeEditTool = 'layers' | 'transform';
+export type MemeEditTool = 'layers' | 'text' | 'transform';
 
 interface ToolSpec {
   id: MemeEditTool;
@@ -15,6 +15,7 @@ interface ToolSpec {
 
 const TOOLS: readonly ToolSpec[] = [
   { id: 'layers', label: 'Layers', hint: 'Show layer order and layer actions', mark: 'L' },
+  { id: 'text', label: 'Text', hint: 'Add and style meme text layers', mark: 'A' },
   { id: 'transform', label: 'Transform', hint: 'Move, resize, and rotate the selected layer', mark: 'T' },
 ];
 

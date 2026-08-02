@@ -1,3 +1,10 @@
+import {
+  MEME_TEXT_BOUNDS,
+  defaultMemeTextFontSizeForPreset,
+  normalizeMemeTextFontSize,
+  normalizeMemeTextWrapWidth,
+} from './memeTextLayoutCore';
+
 export type MediaEditKind = 'image' | 'video';
 export type NormalizedPoint = { x: number; y: number };
 export type NormalizedRect = { x: number; y: number; width: number; height: number };
@@ -37,6 +44,7 @@ export interface TextLayer {
   kind: 'text';
   text: string;
   width: number;
+  fontSize: number;
   style: TextStyle;
   active: TimeRangeUs | null;
   keyframes: TransformKeyframe[];
@@ -1227,12 +1235,25 @@ function validateLayer(
     return;
   }
   if (value.kind === 'text') {
-    rejectUnknownFields(value, ['id', 'kind', 'text', 'width', 'style', 'active', 'keyframes'], path, errors);
+    rejectUnknownFields(value, ['id', 'kind', 'text', 'width', 'fontSize', 'style', 'active', 'keyframes'], path, errors);
     validateString(value.text, `${path}.text`, MAX_TEXT_LENGTH, errors, true);
     const width = value.width;
     const validWidth = validateFiniteNumber(width, `${path}.width`, errors);
     if (validWidth && (width <= 0 || width > 1)) {
       addError(errors, `${path}.width`, 'out_of_bounds', `${path}.width must be greater than 0 and at most 1.`);
+    }
+    const fontSize = value.fontSize;
+    const validFontSize = validateFiniteNumber(fontSize, `${path}.fontSize`, errors);
+    if (
+      validFontSize &&
+      (fontSize < MEME_TEXT_BOUNDS.minFontSize || fontSize > MEME_TEXT_BOUNDS.maxFontSize)
+    ) {
+      addError(
+        errors,
+        `${path}.fontSize`,
+        'out_of_bounds',
+        `${path}.fontSize must be between ${MEME_TEXT_BOUNDS.minFontSize} and ${MEME_TEXT_BOUNDS.maxFontSize}.`
+      );
     }
     validateTextStyle(value.style, `${path}.style`, errors);
     const active = readValidActiveRange(value.active, `${path}.active`, sourceKind, durationUs, errors);
@@ -1608,22 +1629,39 @@ function validateExternalAssetCount(root: Record<string, unknown>, errors: Proje
   }
 }
 
+function projectWithLegacyTextFontSizeDefaults(input: Record<string, unknown>): Record<string, unknown> {
+  if (!Array.isArray(input.layers)) return input;
+  let changed = false;
+  const layers = input.layers.map((layer) => {
+    if (!isRecord(layer) || layer.kind !== 'text' || layer.fontSize !== undefined) return layer;
+    const style = isRecord(layer.style) ? layer.style : null;
+    const preset = typeof style?.preset === 'string' && style.preset in TEXT_PRESETS
+      ? style.preset as TextStyle['preset']
+      : 'impact';
+    changed = true;
+    return { ...layer, fontSize: defaultMemeTextFontSizeForPreset(preset) };
+  });
+  return changed ? { ...input, layers } : input;
+}
+
+
 export function validateMemeEditProject(input: unknown): ProjectValidationResult {
   const errors: ProjectValidationError[] = [];
   if (!validateRecord(input, '', errors)) return { ok: false, errors };
+  const projectInput = projectWithLegacyTextFontSizeDefaults(input);
   rejectUnknownFields(
-    input,
+    projectInput,
     ['version', 'source', 'base', 'video', 'layers', 'maskTracks', 'background', 'transient'],
     '',
     errors
   );
-  if (input.version !== 1) {
+  if (projectInput.version !== 1) {
     addError(errors, 'version', 'unsupported_version', 'Only MemeEditProject version 1 is supported.');
   }
-  validateSource(input.source, errors);
-  validateBase(input.base, errors);
+  validateSource(projectInput.source, errors);
+  validateBase(projectInput.base, errors);
 
-  const source = isRecord(input.source) ? input.source : null;
+  const source = isRecord(projectInput.source) ? projectInput.source : null;
   const sourceKind: MediaEditKind | null =
     source?.kind === 'image' || source?.kind === 'video' ? source.kind : null;
   const sourceDurationUs = source?.durationUs;
@@ -1633,18 +1671,18 @@ export function validateMemeEditProject(input: unknown): ProjectValidationResult
     Number.isSafeInteger(sourceDurationUs)
       ? sourceDurationUs
       : 0;
-  validateVideo(input.video, sourceKind, durationUs, errors);
+  validateVideo(projectInput.video, sourceKind, durationUs, errors);
   const maskTrackIds = validateMaskTracks(
-    input.maskTracks,
+    projectInput.maskTracks,
     sourceKind,
     durationUs,
     errors
   );
 
-  if (!Array.isArray(input.layers)) {
+  if (!Array.isArray(projectInput.layers)) {
     addError(errors, 'layers', 'invalid_type', 'layers must be an array.');
   } else {
-    if (input.layers.length > PROJECT_LIMITS.maxLayers) {
+    if (projectInput.layers.length > PROJECT_LIMITS.maxLayers) {
       addError(
         errors,
         'layers',
@@ -1653,7 +1691,7 @@ export function validateMemeEditProject(input: unknown): ProjectValidationResult
       );
     }
     const ids = new Set<string>();
-    input.layers.forEach((layer, index) => {
+    projectInput.layers.forEach((layer, index) => {
       validateLayer(layer, index, sourceKind, durationUs, maskTrackIds, errors);
       if (isRecord(layer) && typeof layer.id === 'string') {
         if (ids.has(layer.id)) {
@@ -1663,12 +1701,12 @@ export function validateMemeEditProject(input: unknown): ProjectValidationResult
       }
     });
   }
-  validateBackground(input.background, errors);
-  validateTransient(input.transient, maskTrackIds, errors);
-  validateExternalAssetCount(input, errors);
+  validateBackground(projectInput.background, errors);
+  validateTransient(projectInput.transient, maskTrackIds, errors);
+  validateExternalAssetCount(projectInput, errors);
 
   if (errors.length > 0) return { ok: false, errors };
-  const validatedProject = input as unknown as MemeEditProject;
+  const validatedProject = projectInput as unknown as MemeEditProject;
   return { ok: true, value: validatedProject };
 }
 
@@ -1755,6 +1793,7 @@ function cloneLayer(layer: MemeEditLayer): MemeEditLayer {
     return {
       ...layer,
       style: { ...layer.style },
+      fontSize: layer.fontSize,
       active: layer.active ? { ...layer.active } : null,
       keyframes,
     };
@@ -1938,7 +1977,8 @@ function normalizeLayer(layer: MemeEditLayer, project: MemeEditProject): MemeEdi
   if (layer.kind === 'text') {
     return {
       ...layer,
-      width: roundGeometry(clampNumber(layer.width, 0.01, 1, 0.5)),
+      width: normalizeMemeTextWrapWidth(layer.width),
+      fontSize: normalizeMemeTextFontSize(layer.fontSize),
       style: {
         ...layer.style,
         outlineScale: clampUnit(layer.style.outlineScale),

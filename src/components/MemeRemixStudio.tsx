@@ -4,6 +4,7 @@ import {
   Alert,
   AppState,
   KeyboardAvoidingView,
+  Keyboard,
   Modal,
   Platform,
   ScrollView,
@@ -37,7 +38,7 @@ import {
   type ProjectHistory,
   type TransformKeyframe,
 } from '../memeEditProjectCore';
-import { beforeAfterAccessibilityNextState, beforeAfterPointerNextState, canDuplicateLayer, commitGestureTransaction, memeRemixExportControlState, memeRemixHeaderLayout, nextDuplicateLayerId } from '../memeEditCanvasCore';
+import { beforeAfterAccessibilityNextState, beforeAfterPointerNextState, canDuplicateLayer, commitGestureTransaction, memeRemixExportControlState, memeRemixHeaderLayout, nextDuplicateLayerId, selectedLayerIdAfterDelete } from '../memeEditCanvasCore';
 import { tap, warn } from '../haptics';
 import { colors, radius, space, type } from '../theme';
 import type { MemeRecord } from '../types';
@@ -45,6 +46,7 @@ import { PressableScale } from './ui';
 import { MemeEditCanvas } from './MemeEditCanvas';
 import { MemeEditToolRail, type MemeEditTool } from './MemeEditToolRail';
 import { MemeLayerList } from './MemeLayerList';
+import { MemeTextInspector } from './MemeTextInspector';
 
 type StudioItem = Pick<MemeRecord, 'id' | 'kind' | 'name' | 'uri' | 'modifiedAt'>;
 
@@ -113,6 +115,21 @@ function HeaderButton({
   );
 }
 
+function useKeyboardHeight(): number {
+  const [keyboardHeight, setKeyboardHeight] = useState(0);
+  useEffect(() => {
+    const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
+    const hideEvent = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
+    const show = Keyboard.addListener(showEvent, (event) => setKeyboardHeight(event.endCoordinates.height));
+    const hide = Keyboard.addListener(hideEvent, () => setKeyboardHeight(0));
+    return () => {
+      show.remove();
+      hide.remove();
+    };
+  }, []);
+  return keyboardHeight;
+}
+
 export function MemeRemixStudio({
   item,
   visible,
@@ -131,6 +148,7 @@ export function MemeRemixStudio({
   const insets = useSafeAreaInsets();
   const { width, height } = useWindowDimensions();
   const compact = width < 430 || height < 720;
+  const keyboardHeight = useKeyboardHeight();
   const draftStore = useMemo(() => new MemeEditDraftStore(createExpoMemeEditDraftIo()), []);
   const sourceIo = useMemo(() => createExpoMemeEditSourcePreparationIo(), []);
   const [state, setState] = useState<LoadState>({ kind: 'closed' });
@@ -313,10 +331,11 @@ export function MemeRemixStudio({
     setSelectedLayerId(newId);
   }, [applyAction, item?.id, project]);
   const deleteLayer = useCallback((id: string) => {
+    const orderedIds = project?.layers.map((layer) => layer.id) ?? [];
     applyAction({ type: 'remove-layer', id });
-    setSelectedLayerId((current) => current === id ? null : current);
+    setSelectedLayerId((current) => selectedLayerIdAfterDelete(orderedIds, id, current));
     warn();
-  }, [applyAction]);
+  }, [applyAction, project?.layers]);
 
   const cancel = useCallback(() => {
     if (discarding) return;
@@ -492,7 +511,7 @@ export function MemeRemixStudio({
             </View>
             <View style={[styles.sidePane, compact && styles.sidePaneCompact]}>
               <View style={styles.sideHead}>
-                <Text style={styles.sideTitle}>{activeTool === 'layers' ? 'Layer tray' : 'Transform'}</Text>
+                <Text style={styles.sideTitle}>{activeTool === 'layers' ? 'Layer tray' : activeTool === 'text' ? 'Text' : 'Transform'}</Text>
                 <Text style={styles.sideMeta}>{project.layers.length} layer{project.layers.length === 1 ? '' : 's'}</Text>
               </View>
               {activeTool === 'layers' ? (
@@ -504,6 +523,19 @@ export function MemeRemixStudio({
                   onDuplicateLayer={duplicateLayer}
                   onDeleteLayer={deleteLayer}
                   disabled={disabled}
+                />
+              ) : activeTool === 'text' ? (
+                <MemeTextInspector
+                  project={project}
+                  selectedLayerId={selectedLayerId}
+                  idPrefix={`studio-${item?.id ?? 'session'}-text`}
+                  disabled={disabled}
+                  bottomInset={Platform.OS === 'android' ? keyboardHeight : 0}
+                  onApplyAction={applyAction}
+                  onSelectLayer={setSelectedLayerId}
+                  onDuplicateLayer={duplicateLayer}
+                  onDeleteLayer={deleteLayer}
+                  onMoveLayer={moveLayer}
                 />
               ) : (
                 <ScrollView contentContainerStyle={styles.transformPanel}>
@@ -534,7 +566,7 @@ export function MemeRemixStudio({
         )}
 
         <MemeEditToolRail activeTool={activeTool} onSelectTool={setActiveTool} disabled={state.kind !== 'ready' || discarding} />
-        <View style={{ height: Math.max(insets.bottom, space.sm) }} />
+        <View style={{ height: Math.max(insets.bottom, space.sm) + (Platform.OS === 'android' ? keyboardHeight : 0) }} />
       </KeyboardAvoidingView>
     </Modal>
   );
