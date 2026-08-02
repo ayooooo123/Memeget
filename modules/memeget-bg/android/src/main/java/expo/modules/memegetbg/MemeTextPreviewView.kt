@@ -2,21 +2,47 @@ package expo.modules.memegetbg
 
 import android.content.Context
 import android.graphics.Canvas
+import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Typeface
 import android.text.Layout
 import android.text.StaticLayout
 import android.text.TextPaint
 import android.view.View
+import expo.modules.kotlin.viewevent.EventDispatcher
 import kotlin.math.max
 
 internal class MemeTextPreviewView(context: Context) : View(context) {
   private val fillPaint = TextPaint(TextPaint.ANTI_ALIAS_FLAG)
   private val strokePaint = TextPaint(TextPaint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
+  private val onMetrics by EventDispatcher<Map<String, Any?>>()
   private var layout: StaticLayout? = null
+  private var strokeLayout: StaticLayout? = null
   private var result: MemeTextLayoutResult? = null
   private var textValue = ""
+  private var fontFamilyValue = "NotoSans"
+  private var fontWeightValue = 400
+  private var fontSizePxValue = 1f
+  private var lineHeightPxValue = 1f
+  private var letterSpacingEmValue = 0f
   private var widthValue = 1
+  private var alignValue = "center"
+  private var fillColorValue = Color.WHITE
+  private var strokeColorValue = Color.BLACK
+  private var strokeWidthPxValue = 0f
+
+  fun setText(value: String) { textValue = value; rebuild() }
+  fun setFontFamily(value: String) { fontFamilyValue = value; rebuild() }
+  fun setFontWeight(value: Int) { fontWeightValue = value; rebuild() }
+  fun setFontSizePx(value: Float) { fontSizePxValue = max(1f, value); rebuild() }
+  fun setLineHeightPx(value: Float) { lineHeightPxValue = max(1f, value); rebuild() }
+  fun setLetterSpacingEm(value: Float) { letterSpacingEmValue = value; rebuild() }
+  fun setWidthPx(value: Int) { widthValue = max(1, value); rebuild() }
+  fun setAlign(value: String) { alignValue = value; rebuild() }
+  fun setFillColor(value: String) { fillColorValue = parseColor(value, Color.WHITE); rebuild() }
+  fun setStrokeColor(value: String) { strokeColorValue = parseColor(value, Color.BLACK); rebuild() }
+  fun setStrokeWidthPx(value: Float) { strokeWidthPxValue = max(0f, value); rebuild() }
+  fun setOpacity(value: Float) { alpha = value.coerceIn(0f, 1f) }
 
   fun configure(
     text: String,
@@ -32,59 +58,98 @@ internal class MemeTextPreviewView(context: Context) : View(context) {
     outlineWidthPx: Float
   ) {
     textValue = text
+    fontFamilyValue = fontFamily
+    fontWeightValue = fontWeight
+    fontSizePxValue = max(1f, fontSizePx)
+    lineHeightPxValue = max(1f, lineHeightPx)
+    letterSpacingEmValue = letterSpacingEm
     widthValue = max(1, widthPx)
+    alignValue = align
+    fillColorValue = fillColor
+    strokeColorValue = outlineColor
+    strokeWidthPxValue = max(0f, outlineWidthPx)
+    rebuild()
+  }
+
+  fun layoutResult(): MemeTextLayoutResult = result ?: MemeTextLayout.measure(context, textValue, fontFamilyValue, fontWeightValue, fontSizePxValue, lineHeightPxValue, letterSpacingEmValue, widthValue, alignValue)
+
+  private fun rebuild() {
     val typeface = Typeface.create(
-      Typeface.createFromAsset(context.assets, if (fontFamily == "Anton") "fonts/Anton-Regular.ttf" else "fonts/NotoSans.ttf"),
-      fontWeight.coerceIn(100, 900),
+      Typeface.createFromAsset(context.assets, if (fontFamilyValue == "Anton") "fonts/Anton-Regular.ttf" else "fonts/NotoSans.ttf"),
+      fontWeightValue.coerceIn(100, 900),
       false
     )
     fillPaint.apply {
-      color = fillColor
-      textSize = max(1f, fontSizePx)
-      letterSpacing = letterSpacingEm
+      color = fillColorValue
+      textSize = fontSizePxValue
+      letterSpacing = letterSpacingEmValue
       this.typeface = typeface
       style = Paint.Style.FILL
     }
     strokePaint.apply {
-      color = outlineColor
+      color = strokeColorValue
       textSize = fillPaint.textSize
-      letterSpacing = letterSpacingEm
+      letterSpacing = letterSpacingEmValue
       this.typeface = typeface
-      strokeWidth = max(0f, outlineWidthPx)
+      strokeWidth = strokeWidthPxValue
+      style = Paint.Style.STROKE
     }
-    layout = StaticLayout.Builder.obtain(text, 0, text.length, fillPaint, widthValue)
-      .setAlignment(when (align) {
-        "left" -> Layout.Alignment.ALIGN_NORMAL
-        "right" -> Layout.Alignment.ALIGN_OPPOSITE
-        else -> Layout.Alignment.ALIGN_CENTER
-      })
-      .setLineSpacing(MemeTextLayout.lineSpacingExtra(fillPaint, lineHeightPx), 1f)
-      .setIncludePad(false)
-      .setBreakStrategy(Layout.BREAK_STRATEGY_HIGH_QUALITY)
-      .setHyphenationFrequency(Layout.HYPHENATION_FREQUENCY_NONE)
-      .build()
-    result = MemeTextLayout.measure(context, text, fontFamily, fontWeight, fontSizePx, lineHeightPx, letterSpacingEm, widthValue, align)
+    layout = buildLayout(fillPaint)
+    strokeLayout = if (strokeWidthPxValue > 0f) buildLayout(strokePaint) else null
+    result = MemeTextLayout.measure(context, textValue, fontFamilyValue, fontWeightValue, fontSizePxValue, lineHeightPxValue, letterSpacingEmValue, widthValue, alignValue)
     requestLayout()
     invalidate()
+    emitMetrics()
   }
 
-  fun layoutResult(): MemeTextLayoutResult = result ?: MemeTextLayout.measure(context, textValue, "NotoSans", 400, 1f, 1f, 0f, widthValue, "center")
+  private fun buildLayout(paint: TextPaint): StaticLayout = StaticLayout.Builder.obtain(textValue, 0, textValue.length, paint, widthValue)
+    .setAlignment(androidAlignment(alignValue))
+    .setLineSpacing(MemeTextLayout.lineSpacingExtra(paint, lineHeightPxValue), 1f)
+    .setIncludePad(false)
+    .setBreakStrategy(Layout.BREAK_STRATEGY_HIGH_QUALITY)
+    .setHyphenationFrequency(Layout.HYPHENATION_FREQUENCY_NONE)
+    .build()
 
-  override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
-    val h = layout?.height ?: 1
-    setMeasuredDimension(widthValue, h)
+  private fun emitMetrics() {
+    val measured = result ?: return
+    try {
+      onMetrics(
+        mapOf(
+          "widthPx" to measured.widthPx,
+          "heightPx" to measured.heightPx,
+          "includeFontPadding" to measured.includeFontPadding,
+          "tolerancePx" to measured.tolerancePx,
+          "lines" to measured.lines.map { line ->
+            mapOf(
+              "text" to line.text,
+              "start" to line.start,
+              "end" to line.end,
+              "widthPx" to line.widthPx,
+              "topPx" to line.topPx,
+              "baselinePx" to line.baselinePx
+            )
+          }
+        )
+      )
+    } catch (_: ClassCastException) {
+      // Plain Android instrumentation contexts are not ReactContexts; JS-hosted views still emit.
+    }
   }
 
   override fun onDraw(canvas: Canvas) {
-    val current = layout ?: return
-    if (strokePaint.strokeWidth > 0f) {
-      val strokeLayout = StaticLayout.Builder.obtain(textValue, 0, textValue.length, strokePaint, widthValue)
-        .setAlignment(current.alignment)
-        .setLineSpacing(0f, 1f)
-        .setIncludePad(false)
-        .build()
-      strokeLayout.draw(canvas)
-    }
-    current.draw(canvas)
+    strokeLayout?.draw(canvas)
+    layout?.draw(canvas)
+  }
+
+  private fun androidAlignment(align: String): Layout.Alignment = when (align) {
+    "left" -> Layout.Alignment.ALIGN_NORMAL
+    "right" -> Layout.Alignment.ALIGN_OPPOSITE
+    else -> Layout.Alignment.ALIGN_CENTER
+  }
+
+  private fun parseColor(value: String, fallback: Int): Int = try {
+    Color.parseColor(value)
+  } catch (_: IllegalArgumentException) {
+    fallback
   }
 }

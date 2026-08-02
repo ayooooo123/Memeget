@@ -546,10 +546,55 @@ export function buildMemeTextPreviewFixtures(): MemeTextPreviewFixture[] {
   });
 }
 
+export function compareNativeMemeTextLayoutResults(
+  expected: NativeMemeTextLayoutResult,
+  actual: NativeMemeTextLayoutResult,
+  scale: number,
+  tolerancePx: number
+): NativeMemeTextLayoutComparison {
+  const count = Math.max(expected.lines.length, actual.lines.length);
+  let maxWidthDriftPx = Math.abs(actual.widthPx - expected.widthPx) * scale;
+  let maxTopDriftPx = Math.abs(actual.heightPx - expected.heightPx) * scale;
+  let maxBaselineDriftPx = 0;
+  let contentMatches = actual.includeFontPadding === expected.includeFontPadding;
+  for (let index = 0; index < count; index += 1) {
+    const left = expected.lines[index];
+    const right = actual.lines[index];
+    if (!left || !right) {
+      contentMatches = false;
+      maxWidthDriftPx = Number.POSITIVE_INFINITY;
+      maxTopDriftPx = Number.POSITIVE_INFINITY;
+      maxBaselineDriftPx = Number.POSITIVE_INFINITY;
+      break;
+    }
+    if (left.text !== right.text || left.start !== right.start || left.end !== right.end) contentMatches = false;
+    maxWidthDriftPx = Math.max(maxWidthDriftPx, Math.abs(right.widthPx - left.widthPx) * scale);
+    maxTopDriftPx = Math.max(maxTopDriftPx, Math.abs(right.topPx - left.topPx) * scale);
+    maxBaselineDriftPx = Math.max(maxBaselineDriftPx, Math.abs(right.baselinePx - left.baselinePx) * scale);
+  }
+  const lineCountDrift = actual.lines.length - expected.lines.length;
+  return {
+    ok: contentMatches && lineCountDrift === 0 && maxWidthDriftPx <= tolerancePx && maxTopDriftPx <= tolerancePx && maxBaselineDriftPx <= tolerancePx,
+    lineCountDrift,
+    maxWidthDriftPx,
+    maxTopDriftPx,
+    maxBaselineDriftPx,
+  };
+}
+
 export function compareNativeMemeTextLayoutToSpec(
   spec: MemeTextLayoutSpec,
   native: NativeMemeTextLayoutResult
 ): NativeMemeTextLayoutComparison {
+  if (spec.layout.lines.length === 0) {
+    return {
+      ok: native.includeFontPadding === false,
+      lineCountDrift: 0,
+      maxWidthDriftPx: 0,
+      maxTopDriftPx: 0,
+      maxBaselineDriftPx: 0,
+    };
+  }
   const scale = spec.transform.scale;
   const limit = spec.diagnostics.androidStaticLayoutTolerancePx;
   const count = Math.max(spec.layout.lines.length, native.lines.length);

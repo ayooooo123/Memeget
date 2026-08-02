@@ -114,6 +114,6 @@ internal object MemeTextLayout {
   internal fun lineSpacingExtra(paint: TextPaint, lineHeightPx: Float): Float {
     val metrics = paint.fontMetrics
     val nativeLineHeight = metrics.descent - metrics.ascent
-    return (lineHeightPx - nativeLineHeight).coerceAtLeast(0f)
+    return (lineHeightPx - nativeLineHeight).coerceAtLeast(-nativeLineHeight * 0.25f)
   }
 }

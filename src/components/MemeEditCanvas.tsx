@@ -1,7 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef } from 'react';
-import { Animated, PanResponder, StyleSheet, Text, View, type LayoutChangeEvent } from 'react-native';
+import { Animated, PanResponder, Platform, StyleSheet, Text, View, type LayoutChangeEvent } from 'react-native';
 import { Image } from 'expo-image';
 import { useVideoPlayer, VideoView } from 'expo-video';
+import { requireNativeViewManager } from 'expo-modules-core';
 
 import { measureMemeTextLayout } from '../../modules/memeget-bg';
 import {
@@ -38,7 +39,7 @@ import {
   type TextLayer,
   type TransformKeyframe,
 } from '../memeEditProjectCore';
-import { buildMemeTextLayoutSpec, compareNativeMemeTextLayoutToSpec, memeTextBackingRadiusForPreview, memeTextMeasureKey, nativeMemeTextLayoutInputFromSpec, type MemeTextLayoutSpec } from '../memeTextLayoutCore';
+import { buildMemeTextLayoutSpec, compareNativeMemeTextLayoutResults, memeTextBackingRadiusForPreview, memeTextMeasureKey, nativeMemeTextLayoutInputFromSpec, type MemeTextLayoutSpec, type NativeMemeTextLayoutResult } from '../memeTextLayoutCore';
 import { colors, radius, space, type } from '../theme';
 import { useConst } from '../reactUtils';
 
@@ -46,6 +47,27 @@ const PREVIEW_TIME_POLL_MS = 33;
 const DEFAULT_LAYER_ASPECT = 1;
 
 type CommitLayerKeyframes = (layerId: string, keyframes: TransformKeyframe[]) => void;
+
+interface NativeMemeTextPreviewProps {
+  text: string;
+  fontFamily: string;
+  fontWeight: number;
+  fontSizePx: number;
+  lineHeightPx: number;
+  letterSpacingEm: number;
+  widthPx: number;
+  align: 'left' | 'center' | 'right';
+  fillColor: string;
+  strokeColor: string;
+  strokeWidthPx: number;
+  opacity: number;
+  onMetrics?: (event: { nativeEvent: NativeMemeTextLayoutResult }) => void;
+  style?: unknown;
+}
+
+const NativeMemeTextPreviewView = Platform.OS === 'android'
+  ? requireNativeViewManager<NativeMemeTextPreviewProps>('MemegetBg')
+  : null;
 
 type CanvasLayerProps = {
   project: MemeEditProject;
@@ -349,6 +371,7 @@ const TransformableLayerView = React.memo(function TransformableLayerView({
 const TextLayerContent = React.memo(function TextLayerContent({ spec }: { spec: MemeTextLayoutSpec }) {
   const [diagnostic, setDiagnostic] = React.useState<string | null>(null);
   const [nativeLayout, setNativeLayout] = React.useState<Awaited<ReturnType<typeof measureMemeTextLayout>> | null>(null);
+  const [previewLayout, setPreviewLayout] = React.useState<NativeMemeTextLayoutResult | null>(null);
   const boxStyle = useMemo(() => ({
     backgroundColor: spec.backing.color ?? 'transparent',
     borderRadius: memeTextBackingRadiusForPreview(spec),
@@ -400,25 +423,46 @@ const TextLayerContent = React.memo(function TextLayerContent({ spec }: { spec: 
     };
   }, [measureKey]);
   useEffect(() => {
-    if (!nativeLayout) {
+    if (!nativeLayout || !previewLayout) {
       setDiagnostic(null);
       return;
     }
-    const comparison = compareNativeMemeTextLayoutToSpec(spec, nativeLayout);
+    const comparison = compareNativeMemeTextLayoutResults(nativeLayout, previewLayout, spec.transform.scale, nativeLayout.tolerancePx);
     setDiagnostic(comparison.ok
       ? null
       : `Text metrics drift: ${comparison.lineCountDrift} lines, ${comparison.maxBaselineDriftPx.toFixed(1)}px baseline`);
-  }, [nativeLayout, spec]);
+  }, [nativeLayout, previewLayout, spec.transform.scale]);
 
   return (
     <View style={styles.textFill} pointerEvents="none">
       <View style={[styles.textBacking, boxStyle]}>
-        {outlineOffsets.map((offset) => (
-          <Text key={`${offset.left}:${offset.top}`} style={[styles.layerText, textStyle, styles.outlineText, { color: spec.outline.color, left: offset.left, top: offset.top }]}>
-            {displayText}
-          </Text>
-        ))}
-        <Text style={[styles.layerText, textStyle]}>{displayText}</Text>
+        {NativeMemeTextPreviewView ? (
+          <NativeMemeTextPreviewView
+            text={displayText}
+            fontFamily={spec.font.family}
+            fontWeight={Number(spec.font.weight)}
+            fontSizePx={spec.canvas.fontSizePx}
+            lineHeightPx={spec.layout.lineHeightPx}
+            letterSpacingEm={spec.font.letterSpacingEm}
+            widthPx={spec.canvas.wrapWidthPx}
+            align={spec.align}
+            fillColor={spec.fill.color}
+            strokeColor={spec.outline.color}
+            strokeWidthPx={spec.outline.widthPx}
+            opacity={spec.fill.opacity}
+            onMetrics={(event) => setPreviewLayout(event.nativeEvent)}
+            style={{ width: spec.canvas.wrapWidthPx, height: previewLayout?.heightPx ?? Math.max(spec.layout.lineHeightPx, spec.canvas.fontSizePx) }}
+          />
+        ) : (
+          <>
+            {outlineOffsets.map((offset) => (
+              <Text key={`${offset.left}:${offset.top}`} style={[styles.layerText, textStyle, styles.outlineText, { color: spec.outline.color, left: offset.left, top: offset.top }]}>
+                {displayText}
+              </Text>
+            ))}
+            <Text style={[styles.layerText, textStyle]}>{displayText}</Text>
+          </>
+        )}
         {spec.backing.tail === 'bottom-left' && <View style={[styles.bubbleTail, { backgroundColor: spec.backing.color ?? colors.text }]} />}
       </View>
       {!!diagnostic && <Text style={styles.textDiagnostic}>{diagnostic}</Text>}
