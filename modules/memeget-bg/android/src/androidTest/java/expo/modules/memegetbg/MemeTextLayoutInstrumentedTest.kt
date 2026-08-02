@@ -1,5 +1,6 @@
 package expo.modules.memegetbg
 
+import android.text.style.LineHeightSpan
 import android.graphics.Typeface
 import android.util.TypedValue
 import android.view.View
@@ -12,8 +13,17 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 
+
 @RunWith(AndroidJUnit4::class)
 class MemeTextLayoutInstrumentedTest {
+  @Test
+  fun absoluteLineHeightSpanDoesNotReferenceApi29StandardSpan() {
+    val styled = MemeTextLayout.withAbsoluteLineHeight("api surface", 46f)
+    val spans = styled.getSpans(0, styled.length, LineHeightSpan::class.java)
+    assertTrue("line-height span installed", spans.isNotEmpty())
+    assertTrue("pre-29 span implementation", spans.none { it.javaClass.name.contains("LineHeightSpan\$Standard") })
+  }
+
   @Test
   fun measuresAllPresetRepresentativesWithBundledFontsAndNoFontPadding() {
     val context = InstrumentationRegistry.getInstrumentation().targetContext

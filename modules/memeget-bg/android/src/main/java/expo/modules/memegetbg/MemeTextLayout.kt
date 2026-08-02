@@ -119,9 +119,22 @@ internal object MemeTextLayout {
   internal fun withAbsoluteLineHeight(text: String, lineHeightPx: Float): SpannableString {
     val styled = SpannableString(text)
     if (styled.isNotEmpty()) {
-      styled.setSpan(LineHeightSpan.Standard(max(1, lineHeightPx.roundToInt())), 0, styled.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+      styled.setSpan(ExactLineHeightSpan(max(1, lineHeightPx.roundToInt())), 0, styled.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
     }
     return styled
+  }
+
+  private class ExactLineHeightSpan(private val requestedHeightPx: Int) : LineHeightSpan {
+    override fun chooseHeight(text: CharSequence, start: Int, end: Int, spanstartv: Int, lineHeight: Int, fm: android.graphics.Paint.FontMetricsInt) {
+      val currentHeight = fm.descent - fm.ascent
+      if (currentHeight <= 0) return
+      val extra = requestedHeightPx - currentHeight
+      val descentAdjustment = kotlin.math.ceil(extra / 2.0).toInt()
+      fm.descent += descentAdjustment
+      fm.ascent = fm.descent - requestedHeightPx
+      fm.bottom = fm.descent
+      fm.top = fm.ascent
+    }
   }
   internal fun lineSpacingExtra(paint: TextPaint, lineHeightPx: Float): Float {
     val metrics = paint.fontMetrics
