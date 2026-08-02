@@ -656,6 +656,48 @@ describe('MemeEditAutosaveController', () => {
     });
   });
 
+  test('failed older flush does not restore over a newer flushed snapshot', async () => {
+    const io = new MemoryDraftIo();
+    const store = new MemeEditDraftStore(io, { now: () => 20_000 });
+    const timers = new FakeTimers();
+    const controller = new MemeEditAutosaveController(store, identity, { timers });
+    const originalWrite = io.writeText.bind(io);
+    let releaseFirstWrite!: () => void;
+    const firstWriteGate = new Promise<void>((resolve) => {
+      releaseFirstWrite = resolve;
+    });
+    let notifyFirstWrite!: () => void;
+    const firstWriteStarted = new Promise<void>((resolve) => {
+      notifyFirstWrite = resolve;
+    });
+    let writeCount = 0;
+    io.writeText = async (path, text) => {
+      writeCount += 1;
+      if (writeCount === 1) {
+        notifyFirstWrite();
+        await firstWriteGate;
+        throw new Error('older flush failed');
+      }
+      await originalWrite(path, text);
+    };
+
+    controller.schedule(project('A'));
+    const flushA = controller.flush();
+    await firstWriteStarted;
+    controller.schedule(project('B'));
+    const flushB = controller.flush();
+    releaseFirstWrite();
+
+    await expect(flushA).rejects.toThrow('older flush failed');
+    await expect(flushB).resolves.toBeUndefined();
+    await controller.flush();
+
+    await expect(store.restore(identity)).resolves.toMatchObject({
+      status: 'restored',
+      project: { background: { color: 'B' } },
+    });
+  });
+
   test('contains an onError callback that throws after a timer-started save failure', async () => {
     const io = new MemoryDraftIo();
     const store = new MemeEditDraftStore(io, { now: () => 20_000 });
@@ -752,6 +794,37 @@ describe('MemeEditAutosaveController', () => {
     await expect(store.restore(identity)).resolves.toMatchObject({
       status: 'restored',
       project: { background: { color: 'pending-latest' } },
+    });
+  });
+
+  test('successful discard wins over a newer schedule made while discard is pending', async () => {
+    const io = new MemoryDraftIo();
+    const store = new MemeEditDraftStore(io, { now: () => 20_000 });
+    const timers = new FakeTimers();
+    const controller = new MemeEditAutosaveController(store, identity, { timers });
+    let releaseRemove!: () => void;
+    const removeGate = new Promise<void>((resolve) => {
+      releaseRemove = resolve;
+    });
+    const originalRemove = io.remove.bind(io);
+    io.remove = async (path) => {
+      await removeGate;
+      await originalRemove(path);
+    };
+    controller.schedule(project('discard-A'));
+    const discard = controller.discard();
+    await Promise.resolve();
+
+    controller.schedule(project('newer-B'));
+    releaseRemove();
+    await expect(discard).resolves.toBeUndefined();
+    expect(() => controller.schedule(project('after-discard'))).toThrow('Cannot schedule a discarded autosave controller.');
+    timers.advanceBy(1_000);
+    await controller.flush();
+
+    await expect(store.restore(identity)).resolves.toEqual({
+      status: 'rejected',
+      reason: 'missing',
     });
   });
 

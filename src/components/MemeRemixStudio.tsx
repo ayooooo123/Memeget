@@ -128,6 +128,7 @@ export function MemeRemixStudio({
   const [selectedLayerId, setSelectedLayerId] = useState<string | null>(null);
   const [before, setBefore] = useState(false);
   const [inlineError, setInlineError] = useState('');
+  const [discarding, setDiscarding] = useState(false);
   const autosaveRef = useRef<MemeEditAutosaveController | null>(null);
   const sourceControllerRef = useRef<MemeEditSourceSessionController | null>(null);
   const closedRef = useRef(true);
@@ -158,6 +159,7 @@ export function MemeRemixStudio({
       closedRef.current = true;
       setBefore(false);
       setInlineError('');
+      setDiscarding(false);
       setSelectedLayerId(null);
       setState({ kind: 'closed' });
       void closeSessionAssets().catch((error) => {
@@ -265,21 +267,23 @@ export function MemeRemixStudio({
   }, []);
 
   const applyAction = useCallback((action: MemeEditProjectAction) => {
-    setHistory((history) => applyProjectAction(history, action));
-  }, [setHistory]);
+    if (!discarding) setHistory((history) => applyProjectAction(history, action));
+  }, [discarding, setHistory]);
 
   const commitLayerKeyframes = useCallback((layerId: string, keyframes: TransformKeyframe[]) => {
-    setHistory((history) => commitGestureTransaction(history, [{ type: 'set-layer-keyframes', id: layerId, keyframes }]));
-  }, [setHistory]);
+    if (!discarding) setHistory((history) => commitGestureTransaction(history, [{ type: 'set-layer-keyframes', id: layerId, keyframes }]));
+  }, [discarding, setHistory]);
 
   const undo = useCallback(() => {
+    if (discarding) return;
     tap();
     setHistory(undoProjectHistory);
-  }, [setHistory]);
+  }, [discarding, setHistory]);
   const redo = useCallback(() => {
+    if (discarding) return;
     tap();
     setHistory(redoProjectHistory);
-  }, [setHistory]);
+  }, [discarding, setHistory]);
   const moveLayer = useCallback((id: string, toIndex: number) => applyAction({ type: 'move-layer', id, toIndex }), [applyAction]);
   const duplicateLayer = useCallback((id: string) => {
     if (!project) return;
@@ -331,12 +335,14 @@ export function MemeRemixStudio({
         onPress: () => {
           void (async () => {
             try {
+              setDiscarding(true);
               await autosaveRef.current?.discard();
               await closeSessionAssets();
               onClose();
             } catch (error) {
               setInlineError(`Could not discard draft: ${String(error)}`);
             }
+              setDiscarding(false);
           })();
         },
       },
@@ -374,7 +380,7 @@ export function MemeRemixStudio({
         : 'Closed';
   const canUndo = !!ready && ready.history.past.length > 0;
   const canRedo = !!ready && ready.history.future.length > 0;
-  const disabled = !ready || !!exportBusy;
+  const disabled = !ready || !!exportBusy || discarding;
 
   return (
     <Modal visible={visible} animationType="slide" statusBarTranslucent onRequestClose={cancel}>
@@ -400,6 +406,7 @@ export function MemeRemixStudio({
                 before={before}
                 onSelectLayer={setSelectedLayerId}
                 onCommitLayerKeyframes={commitLayerKeyframes}
+                disabled={disabled}
               />
               <View style={styles.readout} pointerEvents="none">
                 <Text style={styles.readoutText}>{selectedLayerSummary(project, selectedLayerId)}</Text>
@@ -418,13 +425,14 @@ export function MemeRemixStudio({
                   onMoveLayer={moveLayer}
                   onDuplicateLayer={duplicateLayer}
                   onDeleteLayer={deleteLayer}
+                  disabled={disabled}
                 />
               ) : (
                 <ScrollView contentContainerStyle={styles.transformPanel}>
                   <Text style={styles.transformTitle}>Direct transform</Text>
                   <Text style={styles.transformCopy}>Drag the selected layer on the media. Use the round handle to rotate and the corner handle to resize. Letterbox space is inert.</Text>
                   <Text style={styles.transformMetric}>{selectedLayerSummary(project, selectedLayerId)}</Text>
-                  <HeaderButton label="Discard draft" hint="Delete this source's saved edit draft" onPress={discard} danger />
+                  <HeaderButton label={discarding ? 'Discarding…' : 'Discard draft'} hint="Delete this source's saved edit draft" onPress={discard} disabled={discarding} danger />
                 </ScrollView>
               )}
             </View>
@@ -446,7 +454,7 @@ export function MemeRemixStudio({
           </View>
         )}
 
-        <MemeEditToolRail activeTool={activeTool} onSelectTool={setActiveTool} disabled={state.kind !== 'ready'} />
+        <MemeEditToolRail activeTool={activeTool} onSelectTool={setActiveTool} disabled={state.kind !== 'ready' || discarding} />
         <View style={{ height: Math.max(insets.bottom, space.sm) }} />
       </KeyboardAvoidingView>
     </Modal>
