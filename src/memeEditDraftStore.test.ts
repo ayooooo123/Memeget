@@ -920,6 +920,53 @@ describe('MemeEditSourcePreparationController', () => {
     expect(prepared.owned).toBe(false);
     expect(io.remove).not.toHaveBeenCalled();
   });
+
+  test('does not alias unowned file probes when the same URI has changed source facts', async () => {
+    const firstIdentity: MemeEditDraftIdentity = {
+      ...identity,
+      sessionId: 'editor/session:file-facts-1',
+      source: {
+        ...identity.source,
+        stableId: 'local-file-before',
+        uri: 'file:///documents/shared-source.mp4',
+      },
+    };
+    const changedIdentity: MemeEditDraftIdentity = {
+      ...firstIdentity,
+      sessionId: 'editor/session:file-facts-2',
+      source: {
+        ...firstIdentity.source,
+        stableId: 'local-file-after',
+        byteSize: firstIdentity.source.byteSize! + 1,
+        modifiedTimeMs: firstIdentity.source.modifiedTimeMs! + 1,
+      },
+    };
+    const probe = jest
+      .fn()
+      .mockResolvedValueOnce({ ...probeResult, stableId: 'probe-before' })
+      .mockResolvedValueOnce({ ...probeResult, stableId: 'probe-after' });
+    const io: MemeEditSourcePreparationIo = {
+      cacheDirectory: 'file:///cache/',
+      materialize: jest.fn(async () => {}),
+      remove: jest.fn(async () => {}),
+      probe,
+    };
+    const firstController = new MemeEditSourcePreparationController(io, firstIdentity);
+    const changedController = new MemeEditSourcePreparationController(io, changedIdentity);
+    const fileProject = project();
+    fileProject.source.uri = firstIdentity.source.uri;
+
+    const [before, after] = await Promise.all([
+      firstController.prepare(fileProject),
+      changedController.prepare(fileProject),
+    ]);
+
+    expect(probe).toHaveBeenCalledTimes(2);
+    expect(before.probe?.stableId).toBe('probe-before');
+    expect(after.probe?.stableId).toBe('probe-after');
+    await firstController.discard();
+    await changedController.discard();
+  });
 });
 
 
