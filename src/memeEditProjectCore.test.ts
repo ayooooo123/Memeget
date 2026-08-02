@@ -28,6 +28,7 @@ import {
   transformPointToWorkingCanvas,
   undoProjectHistory,
   validateMemeEditProject,
+  type BackgroundSpec,
   type CoverLayer,
   type CoverCorrectionKeyframe,
   type MediaOverlayLayer,
@@ -709,6 +710,22 @@ describe('persisted project validation', () => {
     );
   });
 
+  test('accepts a transparent background but still rejects an unknown mode or a stray asset', () => {
+    const transparent = cloneProject(createDefaultImageProject(imageSource));
+    transparent.background = { mode: 'transparent', color: '#00000000', assetUri: null, blurScale: 0 };
+    expect(validateMemeEditProject(transparent).ok).toBe(true);
+
+    const strayAsset = cloneProject(transparent);
+    strayAsset.background.assetUri = 'file:///nope.png';
+    expectInvalid(strayAsset, 'background.assetUri', 'invalid_value');
+
+    const unknownMode = cloneProject(transparent) as Omit<MemeEditProject, 'background'> & {
+      background: Omit<BackgroundSpec, 'mode'> & { mode: string };
+    };
+    unknownMode.background.mode = 'see-through';
+    expectInvalid(unknownMode, 'background.mode', 'invalid_value');
+  });
+
 
   test('returns actionable errors for malformed version and non-finite geometry', () => {
     const imageProject = cloneProject(createDefaultImageProject(imageSource));
@@ -1033,7 +1050,7 @@ describe('immutable reducer', () => {
     });
     expect(sourceBackground.background.assetUri).toBeNull();
     expect(validateMemeEditProject(sourceBackground).ok).toBe(true);
-    const nonAssetModes = ['solid', 'blurred-source'] as const;
+    const nonAssetModes = ['solid', 'blurred-source', 'transparent'] as const;
     for (const mode of nonAssetModes) {
       const reduced = reduceMemeEditProject(project, {
         type: 'set-background',
