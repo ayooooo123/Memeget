@@ -26,6 +26,8 @@ class MemegetBgModule : Module() {
   override fun definition() = ModuleDefinition {
     Name("MemegetBg")
 
+    View(MemeTextPreviewView::class) {}
+
     // Put an actual file — in practice a video, which expo-clipboard can't
     // handle — on the system clipboard as a content:// uri. The file is staged
     // into a dedicated cache subdir (cleared on each copy, so it holds at most
