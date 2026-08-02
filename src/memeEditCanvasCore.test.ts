@@ -5,6 +5,8 @@ import {
   beforeAfterAccessibilityNextState,
   beforeAfterPointerNextState,
   describeCanvasLayers,
+  canvasLayerVisualDescriptor,
+  captureTransformGesture,
   dragKeyframeByViewDelta,
   gestureMoveShouldClaim,
   gesturePointInsideMedia,
@@ -12,6 +14,8 @@ import {
   layerBodyTouchInsideMedia,
   layerHandleTouchInsideMedia,
   memeRemixExportControlState,
+  projectHistoryCommandAvailability,
+  runProjectHistoryCommand,
   nextDuplicateLayerId,
   selectedLayerIdAfterDelete,
   memeRemixHeaderLayout,
@@ -21,10 +25,13 @@ import {
   transformAccessibilityAction,
   transformHandleAccessibilityAction,
   viewPointToNormalizedPoint,
+  upsertLayerKeyframeAtCapturedTime,
   viewRectToAbsoluteStyle,
 } from './memeEditCanvasCore';
 import {
   applyProjectAction,
+  beginProjectTransaction,
+  commitProjectTransaction,
   createDefaultImageProject,
   createProjectHistory,
   type TransformKeyframe,
@@ -163,52 +170,39 @@ describe('transform gesture math', () => {
     expect(resized.scale).toBeGreaterThan(1);
   });
 
-  test('gates the transformed local handle touch point, not just the handle center', () => {
-    const rightInside = kf({ center: { x: 0.885, y: 0.5 } });
-    expect(layerHandlePoints(rightInside, 0.2, rect).resize.x).toBeCloseTo(219);
-    expect(layerHandleTouchInsideMedia(rightInside, 0.2, rect, 'resize', { x: 37, y: 22 })).toBe(false);
+  test('gates fixed-size handle touch points against their scaled visual corners', () => {
+    const halfScale = kf({ scale: 0.5, center: { x: 0.885, y: 0.5 } });
+    expect(layerHandlePoints(halfScale, 0.2, rect).resize.x).toBeCloseTo(208);
+    expect(layerHandleTouchInsideMedia(halfScale, 0.2, rect, 'resize', { x: 6, y: 22 })).toBe(true);
+    expect(layerHandleTouchInsideMedia(halfScale, 0.2, rect, 'resize', { x: 37, y: 22 })).toBe(false);
 
-    const centerOutside = kf({ center: { x: 0.895, y: 0.5 } });
-    expect(layerHandlePoints(centerOutside, 0.2, rect).resize.x).toBeCloseTo(221);
-    expect(layerHandleTouchInsideMedia(centerOutside, 0.2, rect, 'resize', { x: 6, y: 22 })).toBe(true);
+    const doubleScale = kf({ scale: 2, center: { x: 0.775, y: 0.5 } });
+    expect(layerHandlePoints(doubleScale, 0.2, rect).resize.x).toBeCloseTo(219);
+    expect(layerHandleTouchInsideMedia(doubleScale, 0.2, rect, 'resize', { x: 6, y: 22 })).toBe(true);
+    expect(layerHandleTouchInsideMedia(doubleScale, 0.2, rect, 'resize', { x: 37, y: 22 })).toBe(false);
 
-    const topInside = kf({ center: { x: 0.5, y: 0.45 } });
-    expect(layerHandlePoints(topInside, 0.2, rect).rotate.y).toBeCloseTo(11);
-    expect(layerHandleTouchInsideMedia(topInside, 0.2, rect, 'rotate', { x: 22, y: 7 })).toBe(false);
-
-    const centerOutsideTop = kf({ center: { x: 0.5, y: 0.42 } });
-    expect(layerHandlePoints(centerOutsideTop, 0.2, rect).rotate.y).toBeCloseTo(8);
-    expect(layerHandleTouchInsideMedia(centerOutsideTop, 0.2, rect, 'rotate', { x: 22, y: 37 })).toBe(true);
-
-    const halfScaleRightInside = kf({ scale: 0.5, center: { x: 0.885, y: 0.5 } });
-    expect(layerHandlePoints(halfScaleRightInside, 0.2, rect).resize.x).toBeCloseTo(219);
-    expect(layerHandleTouchInsideMedia(halfScaleRightInside, 0.2, rect, 'resize', { x: 37, y: 22 })).toBe(false);
-
-    const doubleScaleRightInside = kf({ scale: 2, center: { x: 0.795, y: 0.5 } });
-    expect(layerHandlePoints(doubleScaleRightInside, 0.2, rect).resize.x).toBeCloseTo(219);
-    expect(layerHandleTouchInsideMedia(doubleScaleRightInside, 0.2, rect, 'resize', { x: 37, y: 22 })).toBe(false);
-
-    const doubleScaleCenterOutside = kf({ scale: 2, center: { x: 0.805, y: 0.5 } });
-    expect(layerHandlePoints(doubleScaleCenterOutside, 0.2, rect).resize.x).toBeCloseTo(221);
-    expect(layerHandleTouchInsideMedia(doubleScaleCenterOutside, 0.2, rect, 'resize', { x: 6, y: 22 })).toBe(true);
-
-    const halfScaleTopInside = kf({ scale: 0.5, center: { x: 0.5, y: 0.45 } });
-    expect(layerHandlePoints(halfScaleTopInside, 0.2, rect).rotate.y).toBeCloseTo(11);
-    expect(layerHandleTouchInsideMedia(halfScaleTopInside, 0.2, rect, 'rotate', { x: 22, y: 7 })).toBe(false);
-
-    const doubleScaleTopInside = kf({ scale: 2, center: { x: 0.5, y: 0.63 } });
-    expect(layerHandlePoints(doubleScaleTopInside, 0.2, rect).rotate.y).toBeCloseTo(11);
-    expect(layerHandleTouchInsideMedia(doubleScaleTopInside, 0.2, rect, 'rotate', { x: 22, y: 7 })).toBe(false);
-
-    const doubleScaleCenterOutsideTop = kf({ scale: 2, center: { x: 0.5, y: 0.6 } });
-    expect(layerHandlePoints(doubleScaleCenterOutsideTop, 0.2, rect).rotate.y).toBeCloseTo(8);
-    expect(layerHandleTouchInsideMedia(doubleScaleCenterOutsideTop, 0.2, rect, 'rotate', { x: 22, y: 37 })).toBe(true);
+    const halfScaleTop = kf({ scale: 0.5, center: { x: 0.5, y: 0.45 } });
+    expect(layerHandlePoints(halfScaleTop, 0.2, rect).rotate.y).toBeCloseTo(22);
+    expect(layerHandleTouchInsideMedia(halfScaleTop, 0.2, rect, 'rotate', { x: 22, y: 7 })).toBe(false);
+    expect(layerHandleTouchInsideMedia(halfScaleTop, 0.2, rect, 'rotate', { x: 22, y: 37 })).toBe(true);
   });
 
   test('gates rotated layer body touch points instead of unrotated box coordinates', () => {
     const flippedAtLeftEdge = kf({ rotationDegrees: 180, center: { x: 0.005, y: 0.5 } });
     expect(layerBodyTouchInsideMedia(flippedAtLeftEdge, 0.2, rect, { x: 1, y: 22 })).toBe(true);
     expect(layerBodyTouchInsideMedia(flippedAtLeftEdge, 0.2, rect, { x: 43, y: 22 })).toBe(false);
+  });
+
+  test.each([0.01, 0.5, 2, 16])('keeps fixed 44 DIP handles around the %.2fx visual bounds', (scale) => {
+    const descriptor = canvasLayerVisualDescriptor(kf({ scale, rotationDegrees: 30 }), 0.2, rect);
+
+    expect(descriptor.content.baseWidthDip).toBe(44);
+    expect(descriptor.content.scale).toBe(scale);
+    expect(descriptor.controls.widthDip).toBeCloseTo(44 * scale);
+    expect(descriptor.controls.heightDip).toBeCloseTo(44 * scale);
+    expect(descriptor.controls.handleSizeDip).toBe(44);
+    expect(descriptor.content.rotationDegrees).toBe(30);
+    expect(descriptor.controls.rotationDegrees).toBe(30);
   });
 
   test('accessibility transform actions commit bounded keyframe changes', () => {
@@ -221,6 +215,22 @@ describe('transform gesture math', () => {
     expect(transformHandleAccessibilityAction('rotate', 'decrement', kf({ rotationDegrees: 0 }), rect).rotationDegrees).toBe(-5);
   });
 });
+
+  test('commits a transform at grant time when playback advances before release', () => {
+    const grantTimeUs = 1_000_000;
+    const releaseTimeUs = 2_050_000;
+    const mediaRect = { x: 20, y: 10, width: 200, height: 100 };
+    const original = [kf({ timeUs: 0 }), kf({ timeUs: 3_000_000, center: { x: 0.8, y: 0.5 } })];
+    const gesture = captureTransformGesture(kf({ center: { x: 0.4, y: 0.5 } }), grantTimeUs);
+    const movedAtRelease = dragKeyframeByViewDelta(gesture.keyframe, { dx: 40, dy: 0 }, mediaRect);
+
+    const committed = upsertLayerKeyframeAtCapturedTime(original, movedAtRelease, gesture.timeUs);
+
+    expect(releaseTimeUs - grantTimeUs).toBeGreaterThan(1_000_000);
+    expect(committed.map((frame) => frame.timeUs)).toEqual([0, grantTimeUs, 3_000_000]);
+    expect(committed.find((frame) => frame.timeUs === grantTimeUs)?.center).toEqual({ x: 0.6, y: 0.5 });
+    expect(committed.find((frame) => frame.timeUs === releaseTimeUs)).toBeUndefined();
+  });
 
 describe('gesture transaction coalescing', () => {
   test('commits many reducer updates from one gesture as one undo state', () => {
@@ -250,6 +260,48 @@ describe('studio shell UI contracts', () => {
   test('disables duplicate at the project layer limit', () => {
     expect(canDuplicateLayer(63, 64)).toBe(true);
     expect(canDuplicateLayer(64, 64)).toBe(false);
+  });
+
+  test('one focused pending-text Undo flushes, commits, and navigates; Redo restores it', () => {
+    const source = createDefaultImageProject({ uri: 'file:///source.jpg', name: 'source.jpg', width: 100, height: 100 });
+    source.layers = [{
+      id: 'caption',
+      kind: 'text',
+      text: 'before',
+      width: 0.4,
+      fontSize: 0.1,
+      style: { preset: 'impact', color: '#fff', outlineColor: '#000', outlineScale: 0.05, backgroundColor: null, opacity: 1, align: 'center', uppercase: false },
+      active: null,
+      keyframes: [kf()],
+    }];
+    let history = beginProjectTransaction(createProjectHistory(source));
+    let pendingText: string | null = 'typed while focused';
+    let externalTextRevision = 0;
+    const flushPending = () => {
+      if (pendingText === null) return;
+      const current = history.present.layers[0];
+      if (!current || current.kind !== 'text') throw new Error('missing text layer');
+      history = applyProjectAction(history, { type: 'update-layer', layer: { ...current, text: pendingText } });
+      history = commitProjectTransaction(history);
+      pendingText = null;
+    };
+    const updateHistory = (updater: (current: typeof history) => typeof history) => {
+      history = updater(history);
+    };
+    const announceHistoryNavigation = () => {
+      externalTextRevision += 1;
+    };
+
+    expect(projectHistoryCommandAvailability(history)).toEqual({ canUndo: true, canRedo: false });
+    runProjectHistoryCommand('undo', flushPending, updateHistory, announceHistoryNavigation);
+    expect(history.transaction).toBeNull();
+    expect(history.present.layers[0]).toMatchObject({ text: 'before' });
+    expect(projectHistoryCommandAvailability(history)).toEqual({ canUndo: false, canRedo: true });
+    expect(externalTextRevision).toBe(1);
+
+    runProjectHistoryCommand('redo', flushPending, updateHistory, announceHistoryNavigation);
+    expect(history.present.layers[0]).toMatchObject({ text: 'typed while focused' });
+    expect(externalTextRevision).toBe(2);
   });
 
   test('uses explicit compact header rows below 430dp and single row at 430dp', () => {

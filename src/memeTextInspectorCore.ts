@@ -10,6 +10,34 @@ export interface PendingTextEdit {
   text: string;
 }
 
+export interface LocallyEmittedText {
+  text: string;
+  revision: number;
+}
+
+export interface TextInputSyncInput {
+  incomingText: string;
+  incomingRevision: number;
+  currentText: string;
+  focused: boolean;
+  localDraftActive: boolean;
+  lastLocallyEmitted: LocallyEmittedText | null;
+}
+
+export type TextInputSyncDecision =
+  | { kind: 'none'; reason: 'same-origin' | 'local-draft-active' | 'already-current' }
+  | { kind: 'set-native'; text: string; preserveSelection: boolean };
+
+export function textInputSyncDecision(input: TextInputSyncInput): TextInputSyncDecision {
+  const sameOrigin = input.lastLocallyEmitted !== null &&
+    input.lastLocallyEmitted.revision === input.incomingRevision &&
+    input.lastLocallyEmitted.text === input.incomingText;
+  if (sameOrigin) return { kind: 'none', reason: 'same-origin' };
+  if (input.localDraftActive) return { kind: 'none', reason: 'local-draft-active' };
+  if (input.incomingText === input.currentText) return { kind: 'none', reason: 'already-current' };
+  return { kind: 'set-native', text: input.incomingText, preserveSelection: input.focused };
+}
+
 export function composePendingTextLayer(current: TextLayer, pending: PendingTextEdit | null): TextLayer {
   if (!pending || pending.layerId !== current.id || current.text === pending.text) return current;
   return { ...current, text: pending.text };

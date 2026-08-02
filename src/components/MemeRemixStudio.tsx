@@ -33,14 +33,12 @@ import {
   commitProjectTransaction,
   PROJECT_LIMITS,
   createProjectHistory,
-  redoProjectHistory,
-  undoProjectHistory,
   type MemeEditProject,
   type MemeEditProjectAction,
   type ProjectHistory,
   type TransformKeyframe,
 } from '../memeEditProjectCore';
-import { beforeAfterAccessibilityNextState, beforeAfterPointerNextState, canDuplicateLayer, commitGestureTransaction, memeRemixExportControlState, memeRemixHeaderLayout, nextDuplicateLayerId, selectedLayerIdAfterDelete } from '../memeEditCanvasCore';
+import { beforeAfterAccessibilityNextState, beforeAfterPointerNextState, canDuplicateLayer, commitGestureTransaction, memeRemixExportControlState, memeRemixHeaderLayout, nextDuplicateLayerId, projectHistoryCommandAvailability, runProjectHistoryCommand, selectedLayerIdAfterDelete } from '../memeEditCanvasCore';
 import { tap, warn } from '../haptics';
 import { colors, radius, space, type } from '../theme';
 import type { MemeRecord } from '../types';
@@ -160,6 +158,7 @@ export function MemeRemixStudio({
   const [selectedLayerId, setSelectedLayerId] = useState<string | null>(null);
   const [before, setBefore] = useState(false);
   const [inlineError, setInlineError] = useState('');
+  const [externalTextRevision, setExternalTextRevision] = useState(0);
   const [discarding, setDiscarding] = useState(false);
   const autosaveRef = useRef<MemeEditAutosaveController | null>(null);
   const sourceControllerRef = useRef<MemeEditSourceSessionController | null>(null);
@@ -180,6 +179,12 @@ export function MemeRemixStudio({
     const snapshot = pendingTextFlushRef.current?.() ?? null;
     if (snapshot) pendingTextProjectRef.current = snapshot;
     return snapshot;
+  }, []);
+  const flushPendingTextForHistory = useCallback(() => {
+    pendingTextFlushRef.current?.();
+  }, []);
+  const announceExternalTextRevision = useCallback(() => {
+    setExternalTextRevision((revision) => revision + 1);
   }, []);
   const flushExactPendingTextAutosave = useCallback(async () => {
     const snapshot = pendingTextProjectRef.current;
@@ -346,13 +351,13 @@ export function MemeRemixStudio({
   const undo = useCallback(() => {
     if (discarding) return;
     tap();
-    setHistory(undoProjectHistory);
-  }, [discarding, setHistory]);
+    runProjectHistoryCommand('undo', flushPendingTextForHistory, setHistory, announceExternalTextRevision);
+  }, [announceExternalTextRevision, discarding, flushPendingTextForHistory, setHistory]);
   const redo = useCallback(() => {
     if (discarding) return;
     tap();
-    setHistory(redoProjectHistory);
-  }, [discarding, setHistory]);
+    runProjectHistoryCommand('redo', flushPendingTextForHistory, setHistory, announceExternalTextRevision);
+  }, [announceExternalTextRevision, discarding, flushPendingTextForHistory, setHistory]);
   const moveLayer = useCallback((id: string, toIndex: number) => applyAction({ type: 'move-layer', id, toIndex }), [applyAction]);
   const duplicateLayer = useCallback((id: string) => {
     if (!project) return;
@@ -485,8 +490,8 @@ export function MemeRemixStudio({
       : state.kind === 'loading' || state.kind === 'prompting'
         ? state.message
         : 'Closed';
-  const canUndo = !!ready && ready.history.past.length > 0;
-  const canRedo = !!ready && ready.history.future.length > 0;
+  const historyCommands = ready ? projectHistoryCommandAvailability(ready.history) : { canUndo: false, canRedo: false };
+  const { canUndo, canRedo } = historyCommands;
   const disabled = !ready || !!exportBusy || discarding;
   const showBefore = useCallback(() => setBefore((value) => beforeAfterPointerNextState(value, 'press-in')), []);
   const hideBefore = useCallback(() => setBefore((value) => beforeAfterPointerNextState(value, 'press-out')), []);
@@ -566,6 +571,7 @@ export function MemeRemixStudio({
                 <MemeTextInspector
                   project={project}
                   selectedLayerId={selectedLayerId}
+                  externalTextRevision={externalTextRevision}
                   idPrefix={`studio-${item?.id ?? 'session'}-text`}
                   disabled={disabled}
                   bottomInset={Platform.OS === 'android' ? keyboardHeight : 0}

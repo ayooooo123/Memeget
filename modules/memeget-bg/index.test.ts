@@ -1,4 +1,16 @@
-let mockNative: { probeMedia(source: string): Promise<unknown> } | null = null;
+let mockNative: {
+  probeMedia?(source: string): Promise<unknown>;
+  measureMemeTextLayout?(
+    text: string,
+    fontFamily: string,
+    fontWeight: number,
+    fontSizeDip: number,
+    lineHeightDip: number,
+    letterSpacingEm: number,
+    widthDip: number,
+    align: string
+  ): Promise<unknown>;
+} | null = null;
 
 jest.mock('expo-modules-core', () => ({
   requireOptionalNativeModule: jest.fn(() => mockNative),
@@ -48,5 +60,37 @@ describe('probeMedia bridge', () => {
     await expect(probeMedia('content://provider/broken')).rejects.toBe(nativeError);
     expect(nativeProbe).toHaveBeenNthCalledWith(1, 'content://provider/image');
     expect(nativeProbe).toHaveBeenNthCalledWith(2, 'content://provider/broken');
+  });
+});
+
+describe('meme text layout DIP bridge', () => {
+  beforeEach(() => {
+    jest.resetModules();
+    mockNative = null;
+  });
+
+  test('passes density-independent values to native without JS scaling', async () => {
+    const metrics = {
+      widthDip: 320,
+      heightDip: 91,
+      includeFontPadding: false,
+      toleranceDip: 2,
+      lines: [{ text: 'ÁG py', start: 0, end: 5, widthDip: 88, topDip: 0, baselineDip: 46 }],
+    };
+    const nativeMeasure = jest.fn().mockResolvedValue(metrics);
+    mockNative = { measureMemeTextLayout: nativeMeasure };
+    const { measureMemeTextLayout } = await import('./index');
+
+    await expect(measureMemeTextLayout({
+      text: 'ÁG py',
+      fontFamily: 'Anton',
+      fontWeight: 900,
+      fontSizeDip: 48,
+      lineHeightDip: 45.6,
+      letterSpacingEm: 0.018,
+      widthDip: 320,
+      align: 'center',
+    })).resolves.toEqual(metrics);
+    expect(nativeMeasure).toHaveBeenCalledWith('ÁG py', 'Anton', 900, 48, 45.6, 0.018, 320, 'center');
   });
 });

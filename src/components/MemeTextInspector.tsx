@@ -16,7 +16,7 @@ import {
   normalizeMemeTextWrapWidth,
   type MemeTextPresetId,
 } from '../memeTextLayoutCore';
-import { composePendingTextLayer } from '../memeTextInspectorCore';
+import { composePendingTextLayer, textInputSyncDecision, type LocallyEmittedText } from '../memeTextInspectorCore';
 import { colors, radius, space, type } from '../theme';
 import { PressableScale, Slider } from './ui';
 
@@ -30,6 +30,7 @@ type InspectorAction = Extract<
 interface MemeTextInspectorProps {
   project: MemeEditProject;
   selectedLayerId: string | null;
+  externalTextRevision: number;
   idPrefix: string;
   disabled?: boolean;
   bottomInset?: number;
@@ -168,6 +169,7 @@ function ColorSwatches({
 export const MemeTextInspector = React.memo(function MemeTextInspector({
   project,
   selectedLayerId,
+  externalTextRevision,
   idPrefix,
   disabled = false,
   bottomInset = 0,
@@ -185,6 +187,10 @@ export const MemeTextInspector = React.memo(function MemeTextInspector({
   const selectedLayerRef = useRef<TextLayer | null>(selectedTextLayer(project, selectedLayerId));
   const pendingTextRef = useRef<{ layerId: string; text: string } | null>(null);
   const textTimerRef = useRef<number | null>(null);
+  const focusedRef = useRef(false);
+  const selectionRef = useRef({ start: 0, end: 0 });
+  const incomingRevisionRef = useRef(0);
+  const lastLocallyEmittedRef = useRef<LocallyEmittedText | null>(null);
   const [draftText, setDraftText] = useState(selectedLayerRef.current?.text ?? '');
   const layer = selectedTextLayer(project, selectedLayerId);
   const canAdd = project.layers.length < PROJECT_LIMITS.maxLayers && !disabled;
@@ -221,6 +227,8 @@ export const MemeTextInspector = React.memo(function MemeTextInspector({
       ...projectRef.current,
       layers: projectRef.current.layers.map((candidate) => candidate.id === next.id ? next : candidate),
     };
+    const emittedRevision = incomingRevisionRef.current + 1;
+    lastLocallyEmittedRef.current = { text: pending.text, revision: emittedRevision };
     onApplyAction({ type: 'update-layer', layer: next });
     if (commitTransaction) onCommitTextTransaction?.();
     return nextProject;
@@ -233,6 +241,8 @@ export const MemeTextInspector = React.memo(function MemeTextInspector({
     pendingTextRef.current = null;
     clearTimeout(textTimerRef.current ?? undefined);
     textTimerRef.current = null;
+    const emittedRevision = incomingRevisionRef.current + 1;
+    lastLocallyEmittedRef.current = { text: pending!.text, revision: emittedRevision };
     return { layer: next, consumed: true };
   }, []);
 
@@ -244,11 +254,26 @@ export const MemeTextInspector = React.memo(function MemeTextInspector({
   }, [flushText, selectedLayerId]);
 
   useEffect(() => {
-    if (pendingTextRef.current) return;
     const nextText = layer?.text ?? '';
-    setDraftText(nextText);
-    inputRef.current?.setNativeProps({ text: nextText });
-  }, [layer?.id, layer?.text]);
+    incomingRevisionRef.current += 1;
+    const decision = textInputSyncDecision({
+      incomingText: nextText,
+      incomingRevision: incomingRevisionRef.current,
+      currentText: draftText,
+      focused: focusedRef.current,
+      localDraftActive: pendingTextRef.current !== null,
+      lastLocallyEmitted: lastLocallyEmittedRef.current,
+    });
+    if (decision.kind === 'none') return;
+    setDraftText(decision.text);
+    const selection = decision.preserveSelection
+      ? {
+          start: Math.min(selectionRef.current.start, decision.text.length),
+          end: Math.min(selectionRef.current.end, decision.text.length),
+        }
+      : undefined;
+    inputRef.current?.setNativeProps(selection ? { text: decision.text, selection } : { text: decision.text });
+  }, [externalTextRevision, layer?.id, layer?.text]);
 
   useEffect(() => () => { flushText(true); }, [flushText]);
   useEffect(() => onRegisterPendingTextFlush?.(() => flushText(true)), [flushText, onRegisterPendingTextFlush]);
@@ -321,9 +346,18 @@ export const MemeTextInspector = React.memo(function MemeTextInspector({
           defaultValue={layer?.text ?? ''}
           editable={!!layer && !disabled}
           multiline
+          onFocus={() => {
+            focusedRef.current = true;
+          }}
+          onSelectionChange={(event) => {
+            selectionRef.current = event.nativeEvent.selection;
+          }}
           textAlignVertical="top"
           onChangeText={queueText}
-          onBlur={() => flushText(true)}
+          onBlur={() => {
+            focusedRef.current = false;
+            flushText(true);
+          }}
           maxLength={MEME_TEXT_MAX_LENGTH}
           placeholder="Type a caption"
           placeholderTextColor={colors.faint}

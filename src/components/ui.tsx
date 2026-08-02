@@ -16,6 +16,7 @@ import {
 
 import { colors, radius, type } from '../theme';
 import { useConst } from '../reactUtils';
+import { initialSliderGestureState, reduceSliderGesture, type SliderGestureEvent } from '../sliderCore';
 
 const AnimatedPressable = Animated.createAnimatedComponent(Pressable);
 
@@ -172,28 +173,41 @@ export function Slider({
   const widthRef = useRef(0);
   const onChangeRef = useRef(onChange);
   const onCompleteRef = useRef(onComplete);
+  const gestureRef = useRef(initialSliderGestureState(value));
   onChangeRef.current = onChange;
   onCompleteRef.current = onComplete;
-  const setFromX = (x: number) => {
-    const w = widthRef.current;
-    if (!w) return;
-    onChangeRef.current(Math.max(0, Math.min(1, x / w)));
+  if (!gestureRef.current.active) gestureRef.current = initialSliderGestureState(value);
+  const valueFromX = (x: number): number | null => {
+    const width = widthRef.current;
+    if (width <= 0) return null;
+    return Math.max(0, Math.min(1, x / width));
+  };
+  const transition = (event: SliderGestureEvent) => {
+    const next = reduceSliderGesture(gestureRef.current, event);
+    gestureRef.current = next.state;
+    if (next.displayValue !== null) onChangeRef.current(next.displayValue);
+    if (next.completeValue !== null) onCompleteRef.current?.(next.completeValue);
   };
 
-  // Lazy: PanResponder.create() runs once instead of on every render. The
-  // gesture reads the latest onChange via onChangeRef, so a stable responder is
-  // correct.
+  // Lazy: PanResponder.create() runs once instead of on every render. Mutable
+  // refs keep the responder current without creating a new gesture owner.
   const pan = useConst(() =>
     PanResponder.create({
       onStartShouldSetPanResponder: () => true,
       onMoveShouldSetPanResponder: () => true,
-      onPanResponderGrant: (e) => setFromX(e.nativeEvent.locationX),
-      onPanResponderMove: (e) => setFromX(e.nativeEvent.locationX),
-      onPanResponderRelease: (e) => {
-        const next = Math.max(0, Math.min(1, e.nativeEvent.locationX / Math.max(1, widthRef.current)));
-        setFromX(e.nativeEvent.locationX);
-        onCompleteRef.current?.(next);
+      onPanResponderGrant: (event) => {
+        const next = valueFromX(event.nativeEvent.locationX);
+        if (next !== null) transition({ type: 'grant', value: next });
       },
+      onPanResponderMove: (event) => {
+        const next = valueFromX(event.nativeEvent.locationX);
+        if (next !== null) transition({ type: 'move', value: next });
+      },
+      onPanResponderRelease: (event) => {
+        const next = valueFromX(event.nativeEvent.locationX);
+        if (next !== null) transition({ type: 'release', value: next });
+      },
+      onPanResponderTerminate: () => transition({ type: 'terminate' }),
     })
   );
 

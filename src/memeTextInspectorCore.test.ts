@@ -1,6 +1,11 @@
 import { applyMemeTextPreset, createMemeTextLayer, normalizeMemeTextFontSize } from './memeTextLayoutCore';
 import { createDefaultImageProject, createProjectHistory, undoProjectHistory } from './memeEditProjectCore';
-import { applyTextSessionContent, applyTextSessionLayerUpdate, composePendingTextLayer } from './memeTextInspectorCore';
+import {
+  applyTextSessionContent,
+  applyTextSessionLayerUpdate,
+  composePendingTextLayer,
+  textInputSyncDecision,
+} from './memeTextInspectorCore';
 
 describe('meme text inspector pending content composition', () => {
   test('style updates compose pending typed text before applying the updater', () => {
@@ -24,6 +29,55 @@ describe('meme text inspector pending content composition', () => {
 
     expect(updated.text).toBe('new words');
     expect(updated.fontSize).toBe(0.12);
+  });
+});
+
+describe('uncontrolled text input synchronization', () => {
+  test('does not echo a same-origin focused debounce back into the native input', () => {
+    expect(textInputSyncDecision({
+      incomingText: 'café',
+      incomingRevision: 7,
+      currentText: 'café',
+      focused: true,
+      localDraftActive: false,
+      lastLocallyEmitted: { text: 'café', revision: 7 },
+    })).toEqual({ kind: 'none', reason: 'same-origin' });
+  });
+
+  test('normal keypress then true external revision wins while the input remains focused', () => {
+    const external = {
+      incomingText: 'before local edit',
+      incomingRevision: 9,
+      currentText: 'local edit',
+      focused: true,
+      lastLocallyEmitted: { text: 'local edit', revision: 8 },
+    };
+
+    expect(textInputSyncDecision({ ...external, localDraftActive: true })).toEqual({
+      kind: 'none',
+      reason: 'local-draft-active',
+    });
+    expect(textInputSyncDecision({ ...external, localDraftActive: false })).toEqual({
+      kind: 'set-native',
+      text: 'before local edit',
+      preserveSelection: true,
+    });
+    expect(textInputSyncDecision({
+      ...external,
+      currentText: 'before local edit!',
+      localDraftActive: true,
+    })).toEqual({ kind: 'none', reason: 'local-draft-active' });
+  });
+
+  test('does not touch native selection when a history revision leaves text unchanged', () => {
+    expect(textInputSyncDecision({
+      incomingText: 'same text',
+      incomingRevision: 10,
+      currentText: 'same text',
+      focused: true,
+      localDraftActive: false,
+      lastLocallyEmitted: null,
+    })).toEqual({ kind: 'none', reason: 'already-current' });
   });
 });
 
