@@ -196,11 +196,15 @@ export function getModifiedTime(uri: string): number | null {
 // frames concurrently, and an index-keyed name let two passes silently clobber
 // (and then delete) each other's temp files mid-read. The sweep prefix
 // ('meme_work_') still matches for stale-cache cleanup.
+export async function copyUriToCachePath(source: string, destination: string): Promise<void> {
+  await FileSystem.copyAsync({ from: source, to: destination });
+}
+
 let workSeq = 0;
 export async function copyToCache(file: SafFile, index: number): Promise<string> {
   const ext = extOf(file.name) || (file.kind === 'video' ? 'mp4' : 'jpg');
   const dest = `${FileSystem.cacheDirectory}meme_work_${++workSeq}_${index}.${ext}`;
-  await FileSystem.copyAsync({ from: file.uri, to: dest });
+  await copyUriToCachePath(file.uri, dest);
   return dest;
 }
 

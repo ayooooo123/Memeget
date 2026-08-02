@@ -8,6 +8,13 @@ jest.mock('expo-file-system/legacy', () => ({
   writeAsStringAsync: jest.fn(async () => {}),
 }));
 
+jest.mock('./saf', () => ({
+  copyUriToCachePath: jest.fn(async () => {}),
+}));
+jest.mock('../modules/memeget-bg', () => ({
+  probeMedia: jest.fn(async () => null),
+}));
+
 import {
   createDefaultVideoProject,
   type MemeEditProject,
@@ -16,10 +23,12 @@ import {
   DRAFT_EXPIRY_MS,
   MemeEditAutosaveController,
   MemeEditDraftStore,
+  MemeEditSourcePreparationController,
   createExpoMemeEditDraftIo,
   draftStoragePaths,
   type MemeEditDraftIdentity,
   type MemeEditDraftIo,
+  type MemeEditSourcePreparationIo,
   type MemeEditTimers,
 } from './memeEditDraftStore';
 
@@ -106,19 +115,27 @@ const identity: MemeEditDraftIdentity = {
   sessionId: 'editor/session:alpha',
   source: {
     stableId: 'provider-document:42',
+    uri: 'content://provider/document/42',
+    name: 'source.mp4',
+    kind: 'video',
+    width: 1_280,
+    height: 720,
+    durationUs: 5_000_000,
     byteSize: 1_024,
     modifiedTimeMs: 10_000,
   },
 };
 
-function project(name = 'source.mp4'): MemeEditProject {
-  return createDefaultVideoProject({
-    uri: 'content://provider/document/42',
-    name,
-    width: 1_280,
-    height: 720,
-    durationUs: 5_000_000,
+function project(marker = 'initial'): MemeEditProject {
+  const value = createDefaultVideoProject({
+    uri: identity.source.uri,
+    name: identity.source.name,
+    width: identity.source.width,
+    height: identity.source.height,
+    durationUs: identity.source.durationUs!,
   });
+  value.background.color = marker;
+  return value;
 }
 
 function draftWriteEvents(io: MemoryDraftIo): Extract<IoEvent, { type: 'write' }>[] {
@@ -135,26 +152,83 @@ describe('MemeEditDraftStore', () => {
 
     expect(paths.draft).not.toContain('provider');
     expect(paths.draft).not.toContain('session:alpha');
-    expect(io.events.slice(0, 2).map((event) => event.type)).toEqual(['write', 'replace']);
-    expect(io.events[0]).toMatchObject({ type: 'write', path: paths.temporary });
-    expect(io.events[1]).toEqual({ type: 'replace', from: paths.temporary, to: paths.draft });
+    const commitEvents = io.events.filter(
+      (event) => event.type === 'write' || event.type === 'replace'
+    );
+    expect(commitEvents.map((event) => event.type)).toEqual(['write', 'replace']);
+    expect(commitEvents[0]).toMatchObject({ type: 'write', path: paths.temporary });
+    expect(commitEvents[1]).toEqual({
+      type: 'replace',
+      from: paths.temporary,
+      to: paths.draft,
+    });
     expect(io.files.has(paths.draft)).toBe(true);
     expect(io.files.has(paths.temporary)).toBe(false);
   });
 
-  test('uses distinct deterministic paths for source and session identities without path text', () => {
+  test('keeps the prior valid generation when an overwrite temp write fails', async () => {
+    const io = new MemoryDraftIo();
+    const store = new MemeEditDraftStore(io, { now: () => 20_000 });
+    await store.save(identity, project('prior.mp4'));
+    io.writeError = new Error('disk full');
+
+    await expect(store.save(identity, project('newer.mp4'))).rejects.toThrow('disk full');
+
+    await expect(store.restore(identity)).resolves.toMatchObject({
+      status: 'restored',
+      project: { background: { color: 'prior.mp4' } },
+    });
+  });
+
+  test('keeps the prior valid generation when platform replacement fails', async () => {
+    const io = new MemoryDraftIo();
+    const store = new MemeEditDraftStore(io, { now: () => 20_000 });
+    await store.save(identity, project('prior.mp4'));
+    io.replaceError = new Error('move interrupted');
+
+    await expect(store.save(identity, project('newer.mp4'))).rejects.toThrow('move interrupted');
+
+    await expect(store.restore(identity)).resolves.toMatchObject({
+      status: 'restored',
+      project: { background: { color: 'prior.mp4' } },
+    });
+  });
+
+  test('selects the newest complete checksummed generation and falls back from corruption', async () => {
+    const io = new MemoryDraftIo();
+    let nowMs = 20_000;
+    const store = new MemeEditDraftStore(io, { now: () => nowMs });
+    const paths = draftStoragePaths(io.cacheDirectory, identity);
+    await store.save(identity, project('older.mp4'));
+    nowMs += 1;
+    await store.save(identity, project('newer.mp4'));
+
+    await expect(store.restore(identity)).resolves.toMatchObject({
+      status: 'restored',
+      project: { background: { color: 'newer.mp4' } },
+    });
+
+    io.files.set(paths.slotB, io.files.get(paths.slotB)!.replace('newer.mp4', 'tampered.mp4'));
+    await expect(store.restore(identity)).resolves.toMatchObject({
+      status: 'restored',
+      project: { background: { color: 'older.mp4' } },
+    });
+  });
+
+  test('uses deterministic session journal paths without leaking source or session text', () => {
     const base = draftStoragePaths('file:///cache/', identity);
     expect(draftStoragePaths('file:///cache/', identity)).toEqual(base);
     expect(
       draftStoragePaths('file:///cache/', {
         ...identity,
         source: { ...identity.source, stableId: 'provider-document:43' },
-      }).draft
-    ).not.toBe(base.draft);
+      })
+    ).toEqual(base);
     expect(
       draftStoragePaths('file:///cache/', { ...identity, sessionId: 'editor/session:beta' }).draft
     ).not.toBe(base.draft);
-    expect(base.draft).toMatch(/^file:\/\/\/cache\/meme_edit_draft_[a-f0-9]+\.json$/);
+    expect(base.draft).toMatch(/^file:\/\/\/cache\/meme_edit_draft_[a-f0-9]+_a\.json$/);
+    expect(base.slotB).toMatch(/^file:\/\/\/cache\/meme_edit_draft_[a-f0-9]+_b\.json$/);
   });
 
   test('reads and restores a validated project snapshot', async () => {
@@ -190,16 +264,41 @@ describe('MemeEditDraftStore', () => {
     await expect(store.restore(identity)).resolves.toEqual({ status: 'rejected', reason: 'corrupt' });
   });
 
-  test('rejects a draft when stable source facts no longer match', async () => {
+  test.each([
+    ['stableId', 'provider-document:changed'],
+    ['uri', 'content://provider/document/changed'],
+    ['name', 'renamed.mp4'],
+    ['kind', 'image'],
+    ['width', 1_281],
+    ['height', 721],
+    ['durationUs', 5_000_001],
+    ['byteSize', 1_025],
+    ['modifiedTimeMs', 10_001],
+  ] as const)('rejects a draft when source %s no longer matches', async (field, value) => {
     const io = new MemoryDraftIo();
     const store = new MemeEditDraftStore(io, { now: () => 20_000 });
     await store.save(identity, project());
-
-    const changedSource: MemeEditDraftIdentity = {
+    const changedSource = {
       ...identity,
-      source: { ...identity.source, byteSize: identity.source.byteSize! + 1 },
-    };
+      source: { ...identity.source, [field]: value },
+    } as MemeEditDraftIdentity;
+
     await expect(store.restore(changedSource)).resolves.toEqual({
+      status: 'rejected',
+      reason: 'source-mismatch',
+    });
+  });
+
+  test('treats null source facts as explicit unknown values rather than wildcards', async () => {
+    const io = new MemoryDraftIo();
+    const store = new MemeEditDraftStore(io, { now: () => 20_000 });
+    const unknownIdentity: MemeEditDraftIdentity = {
+      ...identity,
+      source: { ...identity.source, byteSize: null, modifiedTimeMs: null },
+    };
+    await store.save(unknownIdentity, project());
+
+    await expect(store.restore(identity)).resolves.toEqual({
       status: 'rejected',
       reason: 'source-mismatch',
     });
@@ -249,6 +348,16 @@ describe('MemeEditDraftStore', () => {
     expect(restored.project.maskTracks).toEqual(edited.maskTracks);
   });
 
+  test('rejects a project whose source metadata does not match the draft identity', async () => {
+    const io = new MemoryDraftIo();
+    const store = new MemeEditDraftStore(io, { now: () => 20_000 });
+    const mismatched = project();
+    mismatched.source.uri = 'content://provider/document/other';
+
+    await expect(store.save(identity, mismatched)).rejects.toThrow(/source.*does not match/i);
+    expect(draftWriteEvents(io)).toHaveLength(0);
+  });
+
   test('rejects unbounded projects before writing any bytes', async () => {
     const io = new MemoryDraftIo();
     const store = new MemeEditDraftStore(io, { now: () => 20_000 });
@@ -265,6 +374,8 @@ describe('MemeEditDraftStore', () => {
     const paths = draftStoragePaths(io.cacheDirectory, identity);
     await store.save(identity, project());
     io.files.set(paths.temporary, 'partial');
+    io.files.set(paths.slotB, 'older generation');
+    io.files.set(paths.temporaryB, 'interrupted generation');
     io.files.set(`${io.cacheDirectory}${paths.ownedAssetPrefix}source.mp4`, 'owned source');
     io.files.set(`${io.cacheDirectory}${paths.ownedAssetPrefix}mask_1.bin`, 'owned mask');
     io.files.set(`${io.cacheDirectory}meme_work_another-session_source.mp4`, 'other session');
@@ -277,6 +388,8 @@ describe('MemeEditDraftStore', () => {
 
     expect(io.files.has(paths.draft)).toBe(false);
     expect(io.files.has(paths.temporary)).toBe(false);
+    expect(io.files.has(paths.slotB)).toBe(false);
+    expect(io.files.has(paths.temporaryB)).toBe(false);
     expect([...io.files.keys()].sort()).toEqual(
       [
         `${io.cacheDirectory}clipboard/video.mp4`,
@@ -322,7 +435,7 @@ describe('MemeEditAutosaveController', () => {
     expect(draftWriteEvents(io)).toHaveLength(1);
     await expect(store.restore(identity)).resolves.toMatchObject({
       status: 'restored',
-      project: { source: { name: 'latest.mp4' } },
+      project: { background: { color: 'latest.mp4' } },
     });
   });
 
@@ -338,7 +451,7 @@ describe('MemeEditAutosaveController', () => {
     expect(timers.size).toBe(0);
     await expect(store.restore(identity)).resolves.toMatchObject({
       status: 'restored',
-      project: { source: { name: 'background.mp4' } },
+      project: { background: { color: 'background.mp4' } },
     });
   });
 
@@ -347,6 +460,17 @@ describe('MemeEditAutosaveController', () => {
     const store = new MemeEditDraftStore(io, { now: () => 20_000 });
     const timers = new FakeTimers();
     const controller = new MemeEditAutosaveController(store, identity, { timers });
+    let notifyFirstWrite!: () => void;
+    const firstWriteStarted = new Promise<void>((resolve) => {
+      notifyFirstWrite = resolve;
+    });
+    const originalWrite = io.writeText.bind(io);
+    let writeCount = 0;
+    io.writeText = async (path, text) => {
+      await originalWrite(path, text);
+      writeCount += 1;
+      if (writeCount === 1) notifyFirstWrite();
+    };
     let releaseFirstReplace!: () => void;
     const firstReplaceGate = new Promise<void>((resolve) => {
       releaseFirstReplace = resolve;
@@ -361,7 +485,7 @@ describe('MemeEditAutosaveController', () => {
 
     controller.schedule(project('older.mp4'));
     const olderFlush = controller.flush();
-    await Promise.resolve();
+    await firstWriteStarted;
     controller.schedule(project('newer.mp4'));
     const newerFlush = controller.flush();
     await Promise.resolve();
@@ -372,7 +496,29 @@ describe('MemeEditAutosaveController', () => {
 
     await expect(store.restore(identity)).resolves.toMatchObject({
       status: 'restored',
-      project: { source: { name: 'newer.mp4' } },
+      project: { background: { color: 'newer.mp4' } },
+    });
+  });
+
+  test('background flush observes an in-flight timer save failure and the queue later recovers', async () => {
+    const io = new MemoryDraftIo();
+    const store = new MemeEditDraftStore(io, { now: () => 20_000 });
+    const timers = new FakeTimers();
+    const onError = jest.fn();
+    const controller = new MemeEditAutosaveController(store, identity, { timers, onError });
+    io.writeError = new Error('autosave disk failure');
+    controller.schedule(project('failed.mp4'));
+    timers.advanceBy(500);
+
+    await expect(controller.flush()).rejects.toThrow('autosave disk failure');
+    expect(onError).toHaveBeenCalledWith(expect.objectContaining({ message: 'autosave disk failure' }));
+
+    io.writeError = null;
+    controller.schedule(project('recovered.mp4'));
+    await expect(controller.flush()).resolves.toBeUndefined();
+    await expect(store.restore(identity)).resolves.toMatchObject({
+      status: 'restored',
+      project: { background: { color: 'recovered.mp4' } },
     });
   });
 
@@ -409,6 +555,99 @@ describe('MemeEditAutosaveController', () => {
     expect(io.files.has(`${io.cacheDirectory}${paths.ownedAssetPrefix}mask.bin`)).toBe(false);
   });
 });
+
+describe('MemeEditSourcePreparationController', () => {
+  const probeResult = {
+    kind: 'video' as const,
+    width: 1_280,
+    height: 720,
+    rotationDegrees: 0 as const,
+    flipX: false,
+    flipY: false,
+    durationUs: 5_000_000,
+    frameRate: 30,
+    videoMime: 'video/avc',
+    audioMime: 'audio/mp4a-latm',
+    hasAudio: true,
+    seekable: true,
+    byteSize: 1_024,
+    modifiedTimeMs: 10_000,
+    stableId: 'materialized-source',
+    displayName: 'source.mp4',
+  };
+
+  test('materializes content once per session, shares concurrent work, probes the file, and discards it', async () => {
+    let releaseCopy!: () => void;
+    const copyGate = new Promise<void>((resolve) => {
+      releaseCopy = resolve;
+    });
+    const io: MemeEditSourcePreparationIo = {
+      cacheDirectory: 'file:///cache/',
+      materialize: jest.fn(async () => copyGate),
+      remove: jest.fn(async () => {}),
+      probe: jest.fn(async () => probeResult),
+    };
+    const controller = new MemeEditSourcePreparationController(io, identity);
+    const firstProject = project('first-editor-state.mp4');
+    const secondProject = project('second-editor-state.mp4');
+
+    const first = controller.prepare(firstProject);
+    const second = controller.prepare(secondProject);
+    await Promise.resolve();
+    expect(io.materialize).toHaveBeenCalledTimes(1);
+    const destination = (io.materialize as jest.Mock).mock.calls[0][1] as string;
+    expect(destination).toMatch(
+      /^file:\/\/\/cache\/meme_work_[a-f0-9]+_materialized_source\.mp4$/
+    );
+
+    releaseCopy();
+    const [firstPrepared, secondPrepared] = await Promise.all([first, second]);
+    expect(io.probe).toHaveBeenCalledTimes(1);
+    expect(io.probe).toHaveBeenCalledWith(destination);
+    expect(firstPrepared.project.transient.materializedSourceUri).toBe(destination);
+    expect(secondPrepared.project.transient.materializedSourceUri).toBe(destination);
+    expect(firstPrepared.project.background.color).toBe('first-editor-state.mp4');
+    expect(secondPrepared.project.background.color).toBe('second-editor-state.mp4');
+    expect(firstPrepared.probe).toEqual(probeResult);
+    expect(firstPrepared.owned).toBe(true);
+
+    await controller.prepare(project());
+    expect(io.materialize).toHaveBeenCalledTimes(1);
+    expect(io.probe).toHaveBeenCalledTimes(1);
+    await controller.discard();
+    expect(io.remove).toHaveBeenCalledWith(destination);
+  });
+
+  test('reuses file sources without taking ownership or deleting them on cancel', async () => {
+    const fileIdentity: MemeEditDraftIdentity = {
+      ...identity,
+      source: {
+        ...identity.source,
+        stableId: 'local-file-source',
+        uri: 'file:///documents/source.mp4',
+      },
+    };
+    const io: MemeEditSourcePreparationIo = {
+      cacheDirectory: 'file:///cache/',
+      materialize: jest.fn(async () => {}),
+      remove: jest.fn(async () => {}),
+      probe: jest.fn(async () => probeResult),
+    };
+    const controller = new MemeEditSourcePreparationController(io, fileIdentity);
+    const fileProject = project();
+    fileProject.source.uri = fileIdentity.source.uri;
+
+    const prepared = await controller.prepare(fileProject);
+    await controller.cancel();
+
+    expect(io.materialize).not.toHaveBeenCalled();
+    expect(io.probe).toHaveBeenCalledWith(fileIdentity.source.uri);
+    expect(prepared.project.transient.materializedSourceUri).toBe(fileIdentity.source.uri);
+    expect(prepared.owned).toBe(false);
+    expect(io.remove).not.toHaveBeenCalled();
+  });
+});
+
 
 describe('Expo draft IO adapter', () => {
   test('maps cache operations to Expo legacy filesystem primitives', async () => {

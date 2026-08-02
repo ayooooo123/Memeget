@@ -1,10 +1,13 @@
 import * as FileSystem from 'expo-file-system/legacy';
 
+import { probeMedia, type MediaProbeResult } from '../modules/memeget-bg';
 import {
   validateMemeEditProject,
+  type MediaEditKind,
   type MemeEditProject,
   type ProjectValidationError,
 } from './memeEditProjectCore';
+import { copyUriToCachePath } from './saf';
 
 export const DRAFT_EXPIRY_MS = 7 * 24 * 60 * 60 * 1_000;
 export const DRAFT_AUTOSAVE_DELAY_MS = 500;
@@ -12,10 +15,19 @@ export const DRAFT_AUTOSAVE_DELAY_MS = 500;
 const DRAFT_VERSION = 1;
 const MAX_DRAFT_JSON_LENGTH = 4 * 1024 * 1024;
 const MAX_SESSION_ID_LENGTH = 1_024;
-const MAX_STABLE_SOURCE_ID_LENGTH = 4_096;
+const MAX_SOURCE_STRING_LENGTH = 4_096;
 
 export interface MemeEditDraftSourceIdentity {
   stableId: string;
+  uri: string;
+  name: string;
+  kind: MediaEditKind;
+  width: number;
+  height: number;
+  durationUs: number | null;
+  // null is an explicit "unknown" value. A null/non-null transition is a
+  // mismatch, because silently treating unknown as a wildcard can bind a draft
+  // to replaced provider content.
   byteSize: number | null;
   modifiedTimeMs: number | null;
 }
@@ -44,8 +56,13 @@ export interface MemeEditTimers {
 }
 
 export interface MemeEditDraftStoragePaths {
+  // Compatibility aliases for the first journal slot.
   draft: string;
   temporary: string;
+  slotA: string;
+  slotB: string;
+  temporaryA: string;
+  temporaryB: string;
   ownedAssetPrefix: string;
 }
 
@@ -56,16 +73,41 @@ export type MemeEditDraftRestoreResult =
       reason: 'missing' | 'expired' | 'corrupt' | 'source-mismatch';
     };
 
-interface SerializedDraft {
+export interface MemeEditSourcePreparationIo {
+  readonly cacheDirectory: string;
+  materialize(source: string, destination: string): Promise<void>;
+  remove(path: string): Promise<void>;
+  probe(source: string): Promise<MediaProbeResult | null>;
+}
+
+export interface PreparedMemeEditSource {
+  project: MemeEditProject;
+  probe: MediaProbeResult | null;
+  materializedSourceUri: string;
+  owned: boolean;
+}
+
+interface DraftPayload {
   version: 1;
+  generation: number;
   savedAtMs: number;
   source: MemeEditDraftSourceIdentity;
   project: MemeEditProject;
 }
 
+interface SerializedDraft extends DraftPayload {
+  checksum: string;
+}
+
 interface MemeEditAutosaveOptions {
   timers?: MemeEditTimers;
   onError?: (error: unknown) => void;
+}
+
+interface PreparedResource {
+  uri: string;
+  probe: MediaProbeResult | null;
+  owned: boolean;
 }
 
 const SYSTEM_CLOCK: MemeEditDraftClock = { now: () => Date.now() };
@@ -74,36 +116,40 @@ const SYSTEM_TIMERS: MemeEditTimers = {
   clearTimeout: (handle) => globalThis.clearTimeout(handle as number),
 };
 
+function isBoundedString(value: unknown, maximumLength = MAX_SOURCE_STRING_LENGTH): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= maximumLength;
+}
+
+function isNonNegativeSafeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
 function assertIdentity(identity: MemeEditDraftIdentity): void {
-  if (
-    typeof identity.sessionId !== 'string' ||
-    identity.sessionId.length === 0 ||
-    identity.sessionId.length > MAX_SESSION_ID_LENGTH
-  ) {
+  if (!isBoundedString(identity.sessionId, MAX_SESSION_ID_LENGTH)) {
     throw new Error(`Draft sessionId must contain 1-${MAX_SESSION_ID_LENGTH} characters.`);
   }
+  const source = identity.source;
   if (
-    typeof identity.source?.stableId !== 'string' ||
-    identity.source.stableId.length === 0 ||
-    identity.source.stableId.length > MAX_STABLE_SOURCE_ID_LENGTH
+    !source ||
+    !isBoundedString(source.stableId) ||
+    !isBoundedString(source.uri) ||
+    !isBoundedString(source.name) ||
+    (source.kind !== 'image' && source.kind !== 'video') ||
+    !Number.isSafeInteger(source.width) ||
+    source.width <= 0 ||
+    !Number.isSafeInteger(source.height) ||
+    source.height <= 0 ||
+    (source.durationUs !== null && !isNonNegativeSafeInteger(source.durationUs)) ||
+    (source.byteSize !== null && !isNonNegativeSafeInteger(source.byteSize)) ||
+    (source.modifiedTimeMs !== null && !isNonNegativeSafeInteger(source.modifiedTimeMs))
   ) {
-    throw new Error(
-      `Draft source stableId must contain 1-${MAX_STABLE_SOURCE_ID_LENGTH} characters.`
-    );
-  }
-  for (const [label, value] of [
-    ['byteSize', identity.source.byteSize],
-    ['modifiedTimeMs', identity.source.modifiedTimeMs],
-  ] as const) {
-    if (value !== null && (!Number.isSafeInteger(value) || value < 0)) {
-      throw new Error(`Draft source ${label} must be a non-negative safe integer or null.`);
-    }
+    throw new Error('Draft source identity is malformed or unbounded.');
   }
 }
 
-// cyrb128 gives four independently mixed 32-bit words. It is not a security
-// boundary; it keeps source paths/session labels out of cache filenames while
-// making accidental collisions across the bounded identity input negligible.
+// A bounded 128-bit token keeps source/session text out of cache filenames.
+// The same mixer also detects torn/corrupted journal payloads; it is not used
+// as a security boundary.
 function identityToken(value: string): string {
   let h1 = 1_779_033_703;
   let h2 = 3_144_134_277;
@@ -127,19 +173,28 @@ function identityToken(value: string): string {
   return [h1, h2, h3, h4].map((word) => (word >>> 0).toString(16).padStart(8, '0')).join('');
 }
 
+function cacheRoot(cacheDirectory: string): string {
+  if (!cacheDirectory) throw new Error('Expo cache directory is unavailable.');
+  return cacheDirectory.endsWith('/') ? cacheDirectory : `${cacheDirectory}/`;
+}
+
 export function draftStoragePaths(
   cacheDirectory: string,
   identity: MemeEditDraftIdentity
 ): MemeEditDraftStoragePaths {
   assertIdentity(identity);
-  if (!cacheDirectory) throw new Error('Expo cache directory is unavailable.');
-  const directory = cacheDirectory.endsWith('/') ? cacheDirectory : `${cacheDirectory}/`;
-  const draftToken = identityToken(`${identity.sessionId.length}:${identity.sessionId}\0${identity.source.stableId}`);
+  const directory = cacheRoot(cacheDirectory);
   const sessionToken = identityToken(identity.sessionId);
-  const draft = `${directory}meme_edit_draft_${draftToken}.json`;
+  const base = `${directory}meme_edit_draft_${sessionToken}`;
+  const slotA = `${base}_a.json`;
+  const slotB = `${base}_b.json`;
   return {
-    draft,
-    temporary: `${draft}.tmp`,
+    draft: slotA,
+    temporary: `${slotA}.tmp`,
+    slotA,
+    slotB,
+    temporaryA: `${slotA}.tmp`,
+    temporaryB: `${slotB}.tmp`,
     ownedAssetPrefix: `meme_work_${sessionToken}_`,
   };
 }
@@ -148,18 +203,32 @@ function sourceIdentityMatches(
   saved: MemeEditDraftSourceIdentity,
   current: MemeEditDraftSourceIdentity
 ): boolean {
-  if (saved.stableId !== current.stableId) return false;
-  if (saved.byteSize !== null && current.byteSize !== null && saved.byteSize !== current.byteSize) {
-    return false;
-  }
-  if (
-    saved.modifiedTimeMs !== null &&
-    current.modifiedTimeMs !== null &&
-    saved.modifiedTimeMs !== current.modifiedTimeMs
-  ) {
-    return false;
-  }
-  return true;
+  return (
+    saved.stableId === current.stableId &&
+    saved.uri === current.uri &&
+    saved.name === current.name &&
+    saved.kind === current.kind &&
+    saved.width === current.width &&
+    saved.height === current.height &&
+    saved.durationUs === current.durationUs &&
+    saved.byteSize === current.byteSize &&
+    saved.modifiedTimeMs === current.modifiedTimeMs
+  );
+}
+
+function projectSourceMatchesIdentity(
+  project: MemeEditProject,
+  identity: MemeEditDraftSourceIdentity
+): boolean {
+  const source = project.source;
+  return (
+    source.uri === identity.uri &&
+    source.name === identity.name &&
+    source.kind === identity.kind &&
+    source.width === identity.width &&
+    source.height === identity.height &&
+    source.durationUs === identity.durationUs
+  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -172,6 +241,46 @@ function hasExactFields(value: Record<string, unknown>, fields: readonly string[
   return actual.length === expected.length && actual.every((field, index) => field === expected[index]);
 }
 
+function parseSourceIdentity(value: unknown): MemeEditDraftSourceIdentity | null {
+  if (
+    !isRecord(value) ||
+    !hasExactFields(value, [
+      'stableId',
+      'uri',
+      'name',
+      'kind',
+      'width',
+      'height',
+      'durationUs',
+      'byteSize',
+      'modifiedTimeMs',
+    ])
+  ) {
+    return null;
+  }
+  const candidate = value as unknown as MemeEditDraftSourceIdentity;
+  try {
+    assertIdentity({ sessionId: 'validation', source: candidate });
+    return candidate;
+  } catch {
+    return null;
+  }
+}
+
+function payloadText(payload: DraftPayload): string {
+  return JSON.stringify({
+    version: payload.version,
+    generation: payload.generation,
+    savedAtMs: payload.savedAtMs,
+    source: payload.source,
+    project: payload.project,
+  });
+}
+
+function serializeDraft(payload: DraftPayload): string {
+  return JSON.stringify({ ...payload, checksum: identityToken(payloadText(payload)) } satisfies SerializedDraft);
+}
+
 function parseSerializedDraft(text: string): SerializedDraft | null {
   if (text.length === 0 || text.length > MAX_DRAFT_JSON_LENGTH) return null;
   let input: unknown;
@@ -180,47 +289,37 @@ function parseSerializedDraft(text: string): SerializedDraft | null {
   } catch {
     return null;
   }
-  if (!isRecord(input) || !hasExactFields(input, ['version', 'savedAtMs', 'source', 'project'])) {
-    return null;
-  }
   if (
+    !isRecord(input) ||
+    !hasExactFields(input, [
+      'version',
+      'generation',
+      'savedAtMs',
+      'source',
+      'project',
+      'checksum',
+    ]) ||
     input.version !== DRAFT_VERSION ||
-    typeof input.savedAtMs !== 'number' ||
-    !Number.isSafeInteger(input.savedAtMs) ||
-    input.savedAtMs < 0
+    !isNonNegativeSafeInteger(input.generation) ||
+    input.generation < 1 ||
+    !isNonNegativeSafeInteger(input.savedAtMs) ||
+    typeof input.checksum !== 'string'
   ) {
     return null;
   }
-  if (
-    !isRecord(input.source) ||
-    !hasExactFields(input.source, ['stableId', 'byteSize', 'modifiedTimeMs'])
-  ) {
-    return null;
-  }
-  const source = input.source;
-  if (
-    typeof source.stableId !== 'string' ||
-    source.stableId.length === 0 ||
-    source.stableId.length > MAX_STABLE_SOURCE_ID_LENGTH
-  ) {
-    return null;
-  }
-  for (const value of [source.byteSize, source.modifiedTimeMs]) {
-    if (
-      value !== null &&
-      (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0)
-    ) {
-      return null;
-    }
-  }
+  const source = parseSourceIdentity(input.source);
+  if (!source) return null;
   const validation = validateMemeEditProject(input.project);
   if (!validation.ok) return null;
-  return {
+  const payload: DraftPayload = {
     version: 1,
+    generation: input.generation,
     savedAtMs: input.savedAtMs,
-    source: source as unknown as MemeEditDraftSourceIdentity,
+    source,
     project: validation.value,
   };
+  if (input.checksum !== identityToken(payloadText(payload))) return null;
+  return { ...payload, checksum: input.checksum };
 }
 
 function invalidProjectMessage(errors: readonly ProjectValidationError[]): string {
@@ -240,12 +339,24 @@ export class MemeEditDraftStore {
     this.clock = clock;
   }
 
+  private async readDraft(path: string): Promise<SerializedDraft | null> {
+    try {
+      const text = await this.io.readText(path);
+      return text === null ? null : parseSerializedDraft(text);
+    } catch {
+      return null;
+    }
+  }
+
   async save(identity: MemeEditDraftIdentity, project: MemeEditProject): Promise<void> {
     assertIdentity(identity);
     const validation = validateMemeEditProject(project);
     if (!validation.ok) throw new Error(invalidProjectMessage(validation.errors));
+    if (!projectSourceMatchesIdentity(validation.value, identity.source)) {
+      throw new Error('Project source does not match the draft source identity.');
+    }
     const savedAtMs = this.clock.now();
-    if (!Number.isSafeInteger(savedAtMs) || savedAtMs < 0) {
+    if (!isNonNegativeSafeInteger(savedAtMs)) {
       throw new Error('Draft clock must return a non-negative safe integer in milliseconds.');
     }
     const snapshot: MemeEditProject = {
@@ -254,37 +365,60 @@ export class MemeEditDraftStore {
     };
     const sanitizedValidation = validateMemeEditProject(snapshot);
     if (!sanitizedValidation.ok) throw new Error(invalidProjectMessage(sanitizedValidation.errors));
-    const serialized = JSON.stringify({
-      version: DRAFT_VERSION,
+
+    const paths = draftStoragePaths(this.io.cacheDirectory, identity);
+    const [slotA, slotB] = await Promise.all([
+      this.readDraft(paths.slotA),
+      this.readDraft(paths.slotB),
+    ]);
+    const generation = Math.max(slotA?.generation ?? 0, slotB?.generation ?? 0) + 1;
+    if (!Number.isSafeInteger(generation)) throw new Error('Draft generation overflow.');
+    const targetA = (slotA?.generation ?? 0) <= (slotB?.generation ?? 0);
+    const target = targetA ? paths.slotA : paths.slotB;
+    const temporary = targetA ? paths.temporaryA : paths.temporaryB;
+    const serialized = serializeDraft({
+      version: 1,
+      generation,
       savedAtMs,
       source: identity.source,
       project: sanitizedValidation.value,
-    } satisfies SerializedDraft);
+    });
     if (serialized.length > MAX_DRAFT_JSON_LENGTH) {
       throw new Error(`Invalid project snapshot: serialized draft exceeds ${MAX_DRAFT_JSON_LENGTH} characters.`);
     }
 
-    const paths = draftStoragePaths(this.io.cacheDirectory, identity);
     try {
-      await this.io.writeText(paths.temporary, serialized);
-      await this.io.replace(paths.temporary, paths.draft);
+      await this.io.writeText(temporary, serialized);
+      await this.io.replace(temporary, target);
     } finally {
-      await this.io.remove(paths.temporary).catch(() => {});
+      await this.io.remove(temporary).catch(() => {});
     }
   }
 
   async restore(identity: MemeEditDraftIdentity): Promise<MemeEditDraftRestoreResult> {
     assertIdentity(identity);
     const paths = draftStoragePaths(this.io.cacheDirectory, identity);
-    let text: string | null;
-    try {
-      text = await this.io.readText(paths.draft);
-    } catch {
-      return { status: 'rejected', reason: 'corrupt' };
+    const candidatePaths = [paths.slotA, paths.slotB, paths.temporaryA, paths.temporaryB];
+    let foundBytes = false;
+    const candidates: SerializedDraft[] = [];
+    for (const path of candidatePaths) {
+      try {
+        const text = await this.io.readText(path);
+        if (text === null) continue;
+        foundBytes = true;
+        const parsed = parseSerializedDraft(text);
+        if (parsed) candidates.push(parsed);
+      } catch {
+        foundBytes = true;
+      }
     }
-    if (text === null) return { status: 'rejected', reason: 'missing' };
-    const draft = parseSerializedDraft(text);
-    if (!draft) return { status: 'rejected', reason: 'corrupt' };
+    if (candidates.length === 0) {
+      return { status: 'rejected', reason: foundBytes ? 'corrupt' : 'missing' };
+    }
+    candidates.sort(
+      (left, right) => right.generation - left.generation || right.savedAtMs - left.savedAtMs
+    );
+    const draft = candidates[0];
     if (!sourceIdentityMatches(draft.source, identity.source)) {
       return { status: 'rejected', reason: 'source-mismatch' };
     }
@@ -299,12 +433,25 @@ export class MemeEditDraftStore {
 
   async discard(identity: MemeEditDraftIdentity): Promise<void> {
     const paths = draftStoragePaths(this.io.cacheDirectory, identity);
-    const entries = await this.io.listCacheEntries();
+    let firstError: unknown = null;
+    let entries: string[] = [];
+    try {
+      entries = await this.io.listCacheEntries();
+    } catch (error) {
+      firstError = error;
+    }
+    const directory = cacheRoot(this.io.cacheDirectory);
     const ownedAssets = entries
       .filter((name) => !name.includes('/') && name.startsWith(paths.ownedAssetPrefix))
-      .sort();
-    let firstError: unknown = null;
-    for (const path of [paths.draft, paths.temporary, ...ownedAssets.map((name) => `${this.io.cacheDirectory}${name}`)]) {
+      .sort()
+      .map((name) => `${directory}${name}`);
+    for (const path of [
+      paths.slotA,
+      paths.slotB,
+      paths.temporaryA,
+      paths.temporaryB,
+      ...ownedAssets,
+    ]) {
       try {
         await this.io.remove(path);
       } catch (error) {
@@ -321,6 +468,7 @@ export class MemeEditAutosaveController {
   private timerHandle: unknown | null = null;
   private pendingProject: MemeEditProject | null = null;
   private queueTail: Promise<void> = Promise.resolve();
+  private activeOperation: Promise<void> | null = null;
   private discarded = false;
 
   constructor(
@@ -348,10 +496,19 @@ export class MemeEditAutosaveController {
       this.timerHandle = null;
     }
     const project = this.pendingProject;
-    if (project === null) return this.queueTail;
+    if (project === null) return this.activeOperation ?? this.queueTail;
     this.pendingProject = null;
     const operation = this.queueTail.then(() => this.store.save(this.identity, project));
+    this.activeOperation = operation;
     this.queueTail = operation.catch(() => {});
+    void operation.then(
+      () => {
+        if (this.activeOperation === operation) this.activeOperation = null;
+      },
+      () => {
+        if (this.activeOperation === operation) this.activeOperation = null;
+      }
+    );
     return operation;
   }
 
@@ -368,6 +525,82 @@ export class MemeEditAutosaveController {
     this.discarded = true;
     await this.queueTail;
     await this.store.discard(this.identity);
+  }
+}
+
+export class MemeEditSourcePreparationController {
+  private preparation: Promise<PreparedResource> | null = null;
+  private closed = false;
+  private removed = false;
+
+  constructor(
+    private readonly io: MemeEditSourcePreparationIo,
+    private readonly identity: MemeEditDraftIdentity
+  ) {
+    assertIdentity(identity);
+  }
+
+  private prepareResource(): Promise<PreparedResource> {
+    if (this.preparation) return this.preparation;
+    const source = this.identity.source;
+    const isFile = source.uri.startsWith('file://');
+    const extensionMatch = /\.([a-zA-Z0-9]{1,10})$/.exec(source.name);
+    const extension = (extensionMatch?.[1] ?? (source.kind === 'video' ? 'mp4' : 'jpg')).toLowerCase();
+    const paths = draftStoragePaths(this.io.cacheDirectory, this.identity);
+    const destination = `${cacheRoot(this.io.cacheDirectory)}${paths.ownedAssetPrefix}materialized_source.${extension}`;
+    const operation = (async (): Promise<PreparedResource> => {
+      if (isFile) {
+        return { uri: source.uri, probe: await this.io.probe(source.uri), owned: false };
+      }
+      try {
+        await this.io.materialize(source.uri, destination);
+        const probe = await this.io.probe(destination);
+        return { uri: destination, probe, owned: true };
+      } catch (error) {
+        await this.io.remove(destination).catch(() => {});
+        throw error;
+      }
+    })();
+    this.preparation = operation;
+    void operation.catch(() => {
+      if (this.preparation === operation) this.preparation = null;
+    });
+    return operation;
+  }
+
+  async prepare(project: MemeEditProject): Promise<PreparedMemeEditSource> {
+    if (this.closed) throw new Error('Source preparation controller is closed.');
+    if (project.source.uri !== this.identity.source.uri) {
+      throw new Error('Project source does not match the preparation session source.');
+    }
+    const prepared = await this.prepareResource();
+    if (this.closed) throw new Error('Source preparation was cancelled.');
+    return {
+      project: {
+        ...project,
+        transient: { ...project.transient, materializedSourceUri: prepared.uri },
+      },
+      probe: prepared.probe,
+      materializedSourceUri: prepared.uri,
+      owned: prepared.owned,
+    };
+  }
+
+  async cancel(): Promise<void> {
+    await this.discard();
+  }
+
+  async discard(): Promise<void> {
+    this.closed = true;
+    if (this.removed) return;
+    let prepared: PreparedResource | null = null;
+    try {
+      prepared = this.preparation ? await this.preparation : null;
+    } catch {
+      // Failed materialization already cleaned its partial destination.
+    }
+    if (prepared?.owned) await this.io.remove(prepared.uri);
+    this.removed = true;
   }
 }
 
@@ -391,4 +624,15 @@ export function createExpoMemeEditDraftStore(
   clock: MemeEditDraftClock = SYSTEM_CLOCK
 ): MemeEditDraftStore {
   return new MemeEditDraftStore(createExpoMemeEditDraftIo(), clock);
+}
+
+export function createExpoMemeEditSourcePreparationIo(): MemeEditSourcePreparationIo {
+  const cacheDirectory = FileSystem.cacheDirectory;
+  if (!cacheDirectory) throw new Error('Expo cache directory is unavailable.');
+  return {
+    cacheDirectory,
+    materialize: copyUriToCachePath,
+    remove: (path) => FileSystem.deleteAsync(path, { idempotent: true }),
+    probe: probeMedia,
+  };
 }

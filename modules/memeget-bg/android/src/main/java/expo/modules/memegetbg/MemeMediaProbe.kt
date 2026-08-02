@@ -23,6 +23,8 @@ object MemeMediaProbe {
     val width: Int,
     val height: Int,
     val rotationDegrees: Int,
+    val flipX: Boolean,
+    val flipY: Boolean,
     val durationUs: Long?,
     val frameRate: Double?,
     val videoMime: String?,
@@ -40,6 +42,8 @@ object MemeMediaProbe {
         "width" to width,
         "height" to height,
         "rotationDegrees" to rotationDegrees,
+        "flipX" to flipX,
+        "flipY" to flipY,
         "durationUs" to durationUs,
         "frameRate" to frameRate,
         "videoMime" to videoMime,
@@ -67,6 +71,13 @@ object MemeMediaProbe {
     val rotationDegrees: Int?,
     val durationUs: Long?,
     val frameRate: Double?
+  )
+
+  // Flips are applied in encoded-pixel space before the clockwise rotation.
+  private data class ImageOrientation(
+    val rotationDegrees: Int,
+    val flipX: Boolean,
+    val flipY: Boolean
   )
 
   fun probe(context: Context, source: String): Result {
@@ -117,11 +128,14 @@ object MemeMediaProbe {
       ?: throw IOException("Could not open source stream")
     input.use { BitmapFactory.decodeStream(it, null, options) }
     if (options.outWidth <= 0 || options.outHeight <= 0) return null
+    val orientation = readImageOrientation(context, uri)
     return Result(
       kind = "image",
       width = options.outWidth,
       height = options.outHeight,
-      rotationDegrees = readImageRotation(context, uri),
+      rotationDegrees = orientation.rotationDegrees,
+      flipX = orientation.flipX,
+      flipY = orientation.flipY,
       durationUs = null,
       frameRate = null,
       videoMime = null,
@@ -135,7 +149,7 @@ object MemeMediaProbe {
     )
   }
 
-  private fun readImageRotation(context: Context, uri: Uri): Int {
+  private fun readImageOrientation(context: Context, uri: Uri): ImageOrientation {
     return try {
       context.contentResolver.openInputStream(uri)?.use { input ->
         when (
@@ -144,17 +158,18 @@ object MemeMediaProbe {
             ExifInterface.ORIENTATION_NORMAL
           )
         ) {
-          ExifInterface.ORIENTATION_ROTATE_90,
-          ExifInterface.ORIENTATION_TRANSPOSE -> 90
-          ExifInterface.ORIENTATION_ROTATE_180,
-          ExifInterface.ORIENTATION_FLIP_VERTICAL -> 180
-          ExifInterface.ORIENTATION_ROTATE_270,
-          ExifInterface.ORIENTATION_TRANSVERSE -> 270
-          else -> 0
+          ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> ImageOrientation(0, true, false)
+          ExifInterface.ORIENTATION_ROTATE_180 -> ImageOrientation(180, false, false)
+          ExifInterface.ORIENTATION_FLIP_VERTICAL -> ImageOrientation(0, false, true)
+          ExifInterface.ORIENTATION_TRANSPOSE -> ImageOrientation(90, false, true)
+          ExifInterface.ORIENTATION_ROTATE_90 -> ImageOrientation(90, false, false)
+          ExifInterface.ORIENTATION_TRANSVERSE -> ImageOrientation(90, true, false)
+          ExifInterface.ORIENTATION_ROTATE_270 -> ImageOrientation(270, false, false)
+          else -> ImageOrientation(0, false, false)
         }
-      } ?: 0
+      } ?: ImageOrientation(0, false, false)
     } catch (_: IOException) {
-      0
+      ImageOrientation(0, false, false)
     }
   }
 
@@ -207,6 +222,8 @@ object MemeMediaProbe {
       width = width,
       height = height,
       rotationDegrees = normalizeRotation(rotation ?: 0),
+      flipX = false,
+      flipY = false,
       durationUs = durationUs,
       frameRate = frameRate,
       videoMime = videoMime,

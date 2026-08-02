@@ -25,6 +25,10 @@ export interface MediaProbeResult {
   width: number;
   height: number;
   rotationDegrees: 0 | 90 | 180 | 270;
+  // Apply flips in encoded-pixel space before the clockwise rotation. Together
+  // these fields preserve every EXIF orientation, including mirrored variants.
+  flipX: boolean;
+  flipY: boolean;
   durationUs: number | null;
   frameRate: number | null;
   videoMime: string | null;
