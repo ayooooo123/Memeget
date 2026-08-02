@@ -104,6 +104,7 @@ function textLayer(id: string, active: TextLayer['active'] = null): TextLayer {
     kind: 'text',
     text: id,
     width: 0.5,
+    fontSize: 0.1,
     style: defaultStyle,
     active,
     keyframes: [keyframe(active?.startUs ?? 0)],
@@ -644,6 +645,30 @@ describe('persisted project validation', () => {
       expectInvalid(project, path);
     }
   );
+  test('validates normalized text font size bounds and upgrades unambiguous version-1 text layers', () => {
+    const project = createDefaultImageProject(imageSource);
+    const valid = textLayer('caption');
+    project.layers = [valid];
+    expect(validateMemeEditProject(project)).toEqual({ ok: true, value: project });
+
+    const tooSmall = cloneProject(project);
+    requireTextLayer(tooSmall.layers[0]).fontSize = 0.001;
+    expectInvalid(tooSmall, 'layers[0].fontSize', 'out_of_bounds');
+
+    const tooLarge = cloneProject(project);
+    requireTextLayer(tooLarge.layers[0]).fontSize = 0.5;
+    expectInvalid(tooLarge, 'layers[0].fontSize', 'out_of_bounds');
+
+    const legacy = cloneProject(project) as Omit<MemeEditProject, 'layers'> & {
+      layers: Array<Omit<TextLayer, 'fontSize'>>;
+    };
+    delete (legacy.layers[0] as Partial<TextLayer>).fontSize;
+
+    const restored = validateMemeEditProject(legacy);
+    expect(restored.ok).toBe(true);
+    expect(restored.ok ? requireTextLayer(restored.value.layers[0]).fontSize : null).toBe(0.118);
+  });
+
   test('requires persistent normalized correction metadata for referenced mask tracks', () => {
     const project = createDefaultVideoProject(videoSource);
     const active = { startUs: 0, endUs: SECOND_US };
@@ -967,6 +992,28 @@ describe('immutable reducer', () => {
       keyframe(9 * SECOND_US, { center: { x: 1, y: 0 }, opacity: 1 }),
     ]);
     expect(requireTextLayer(added.layers[0]).keyframes).toEqual([keyframe(0)]);
+  });
+  test('normalizes bounded text style and layout updates without mutating input', () => {
+    const initial = createDefaultImageProject(imageSource);
+    const wild = textLayer('wild');
+    wild.width = 2;
+    wild.fontSize = 0.5;
+    wild.style = {
+      ...wild.style,
+      outlineScale: 9,
+      opacity: -1,
+      backgroundColor: '#0a0b0e',
+    };
+
+    const added = reduceMemeEditProject(initial, { type: 'add-layer', layer: wild });
+    const normalized = requireTextLayer(added.layers[0]);
+
+    expect(normalized.width).toBe(1);
+    expect(normalized.fontSize).toBe(0.2);
+    expect(normalized.style.outlineScale).toBe(1);
+    expect(normalized.style.opacity).toBe(0);
+    expect(wild.width).toBe(2);
+    expect(wild.fontSize).toBe(0.5);
   });
   test('keeps background reducer output validator-valid for every mode', () => {
     const project = createDefaultImageProject(imageSource);

@@ -27,6 +27,7 @@ import {
 import {
   evaluateMaskTrackRect,
   interpolateTransformKeyframes,
+  isLayerActiveAt,
   type CoverLayer,
   type KeyframedLayer,
   type MediaOverlayLayer,
@@ -37,6 +38,7 @@ import {
   type TextLayer,
   type TransformKeyframe,
 } from '../memeEditProjectCore';
+import { buildMemeTextLayoutSpec, memeTextBackingRadiusForPreview, type MemeTextLayoutSpec } from '../memeTextLayoutCore';
 import { colors, radius, space, type } from '../theme';
 import { useConst } from '../reactUtils';
 
@@ -147,6 +149,18 @@ const TransformableLayerView = React.memo(function TransformableLayerView({
   const visualWidth = layer.kind === 'text' ? layer.width : 0.28;
   const box = keyframeLayerBox(keyframe, visualWidth, mediaRect);
   const handles = layerHandlePoints(keyframe, visualWidth, mediaRect);
+  const textSpec = useMemo(() => layer.kind === 'text'
+    ? buildMemeTextLayoutSpec(layer, keyframe, { canvasWidthPx: mediaRect.width, canvasHeightPx: mediaRect.height })
+    : null, [
+      keyframe.center.x,
+      keyframe.center.y,
+      keyframe.opacity,
+      keyframe.rotationDegrees,
+      keyframe.scale,
+      layer,
+      mediaRect.height,
+      mediaRect.width,
+    ]);
 
   useEffect(() => {
     translate.setValue({ x: 0, y: 0 });
@@ -306,7 +320,7 @@ const TransformableLayerView = React.memo(function TransformableLayerView({
       }}
     >
       {layer.kind === 'media' && <MediaLayerContent layer={layer} />}
-      {layer.kind === 'text' && <TextLayerContent layer={layer} />}
+      {layer.kind === 'text' && textSpec && <TextLayerContent spec={textSpec} />}
       {layer.kind === 'subject' && <SubjectLayerContent project={project} layer={layer} />}
       {selected && (
         <>
@@ -338,12 +352,32 @@ const TransformableLayerView = React.memo(function TransformableLayerView({
   );
 });
 
-const TextLayerContent = React.memo(function TextLayerContent({ layer }: { layer: TextLayer }) {
+const TextLayerContent = React.memo(function TextLayerContent({ spec }: { spec: MemeTextLayoutSpec }) {
+  const boxStyle = useMemo(() => ({
+    backgroundColor: spec.backing.color ?? 'transparent',
+    borderRadius: memeTextBackingRadiusForPreview(spec),
+    paddingHorizontal: spec.backing.paddingXPx,
+    paddingVertical: spec.backing.paddingYPx,
+    opacity: spec.fill.opacity,
+  }), [spec]);
+  const textStyle = useMemo(() => ({
+    color: spec.fill.color,
+    fontSize: spec.canvas.fontSizePx,
+    lineHeight: spec.layout.lineHeightPx,
+    fontWeight: spec.font.weight,
+    letterSpacing: spec.font.letterSpacingEm * spec.canvas.fontSizePx,
+    textAlign: spec.align,
+    includeFontPadding: false,
+    textShadowColor: spec.outline.widthPx > 0 ? spec.outline.color : 'transparent',
+    textShadowOffset: { width: 0, height: 0 },
+    textShadowRadius: Math.max(0, spec.outline.widthPx),
+  }), [spec]);
   return (
     <View style={styles.textFill} pointerEvents="none">
-      <Text style={[styles.layerText, { color: layer.style.color, opacity: layer.style.opacity, textAlign: layer.style.align }]} numberOfLines={3}>
-        {layer.style.uppercase ? layer.text.toUpperCase() : layer.text}
-      </Text>
+      <View style={[styles.textBacking, boxStyle]}>
+        <Text style={[styles.layerText, textStyle]}>{spec.layout.lines.map((line) => line.text).join('\n')}</Text>
+        {spec.backing.tail === 'bottom-left' && <View style={[styles.bubbleTail, { backgroundColor: spec.backing.color ?? colors.text }]} />}
+      </View>
     </View>
   );
 });
@@ -411,10 +445,11 @@ export const MemeEditCanvas = React.memo(function MemeEditCanvas({
         <View style={styles.loadingBox}><Text style={styles.unavailableText}>Measuring canvas…</Text></View>
       )}
       {mediaRect && project.layers.map((layer) => {
+        const hidden = before || !isLayerActiveAt(layer, ACTIVE_TIME_US);
         if (layer.kind === 'cover') {
-          return <CoverLayerView key={layer.id} project={project} layer={layer} mediaRect={mediaRect} selected={selectedLayerId === layer.id} hidden={before} disabled={disabled} onSelectLayer={onSelectLayer} onCommitLayerKeyframes={onCommitLayerKeyframes} />;
+          return <CoverLayerView key={layer.id} project={project} layer={layer} mediaRect={mediaRect} selected={selectedLayerId === layer.id} hidden={hidden} disabled={disabled} onSelectLayer={onSelectLayer} onCommitLayerKeyframes={onCommitLayerKeyframes} />;
         }
-        return <TransformableLayerView key={layer.id} project={project} layer={layer} mediaRect={mediaRect} selected={selectedLayerId === layer.id} hidden={before} disabled={disabled} onSelectLayer={onSelectLayer} onCommitLayerKeyframes={onCommitLayerKeyframes} />;
+        return <TransformableLayerView key={layer.id} project={project} layer={layer} mediaRect={mediaRect} selected={selectedLayerId === layer.id} hidden={hidden} disabled={disabled} onSelectLayer={onSelectLayer} onCommitLayerKeyframes={onCommitLayerKeyframes} />;
       })}
       <View style={styles.bounds} pointerEvents="none">
         {mediaRect && <View style={[styles.mediaBounds, viewRectToAbsoluteStyle(mediaRect)]} />}
@@ -451,15 +486,23 @@ const styles = StyleSheet.create({
     borderStyle: 'solid',
   },
   textFill: { flex: 1, alignSelf: 'stretch', alignItems: 'center', justifyContent: 'center', padding: space.xs },
+  textBacking: {
+    maxWidth: '100%',
+    alignSelf: 'stretch',
+    justifyContent: 'center',
+  },
+  bubbleTail: {
+    position: 'absolute',
+    left: space.md,
+    bottom: -space.xs,
+    width: space.md,
+    height: space.md,
+    transform: [{ rotate: '45deg' }],
+  },
   layerText: {
     width: '100%',
     color: colors.text,
-    fontSize: 20,
-    lineHeight: 23,
     fontWeight: '900',
-    textShadowColor: colors.bg,
-    textShadowOffset: { width: 1, height: 1 },
-    textShadowRadius: 1,
   },
   subjectFill: {
     flex: 1,

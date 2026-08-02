@@ -252,7 +252,7 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
   },
   fill: { height: '100%', borderRadius: 2 },
-  sliderHit: { height: 28, justifyContent: 'center' },
+  sliderHit: { minHeight: 44, justifyContent: 'center' },
   sliderTrack: {
     height: 6,
     borderRadius: 3,

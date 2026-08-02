@@ -13,6 +13,7 @@ import {
   layerHandleTouchInsideMedia,
   memeRemixExportControlState,
   nextDuplicateLayerId,
+  selectedLayerIdAfterDelete,
   memeRemixHeaderLayout,
   normalizedPointToViewPoint,
   resizeKeyframeFromHandle,
@@ -224,7 +225,7 @@ describe('transform gesture math', () => {
 describe('gesture transaction coalescing', () => {
   test('commits many reducer updates from one gesture as one undo state', () => {
     const project = createDefaultImageProject({ uri: 'file:///source.jpg', name: 'source.jpg', width: 100, height: 100 });
-    const layer = { id: 'caption', kind: 'text' as const, text: 'caption', width: 0.4, style: { preset: 'impact' as const, color: '#fff', outlineColor: '#000', outlineScale: 0.05, backgroundColor: null, opacity: 1, align: 'center' as const, uppercase: true }, active: null, keyframes: [kf()] };
+    const layer = { id: 'caption', kind: 'text' as const, text: 'caption', width: 0.4, fontSize: 0.1, style: { preset: 'impact' as const, color: '#fff', outlineColor: '#000', outlineScale: 0.05, backgroundColor: null, opacity: 1, align: 'center' as const, uppercase: true }, active: null, keyframes: [kf()] };
     const seeded = applyProjectAction(createProjectHistory(project), { type: 'add-layer', layer });
 
 
@@ -319,7 +320,7 @@ describe('canvas layer descriptors', () => {
   test('keeps project layer order and marks missing subject masks unavailable', () => {
     const project = createDefaultImageProject({ uri: 'file:///source.jpg', name: 'source.jpg', width: 100, height: 100 });
     project.layers = [
-      { id: 'text', kind: 'text', text: 'hello', width: 0.4, style: { preset: 'impact', color: '#fff', outlineColor: '#000', outlineScale: 0.05, backgroundColor: null, opacity: 1, align: 'center', uppercase: false }, active: null, keyframes: [kf()] },
+      { id: 'text', kind: 'text', text: 'hello', width: 0.4, fontSize: 0.1, style: { preset: 'impact', color: '#fff', outlineColor: '#000', outlineScale: 0.05, backgroundColor: null, opacity: 1, align: 'center', uppercase: false }, active: null, keyframes: [kf()] },
       { id: 'subject', kind: 'subject', subjectIndex: null, maskTrackId: 'missing-mask', active: null, keyframes: [kf()], outlineColor: null, outlineScale: 0, shadowScale: 0 },
       { id: 'media', kind: 'media', assetUri: 'file:///overlay.png', assetKind: 'image', fit: 'contain', targetMaskTrackId: null, active: null, keyframes: [kf()] },
     ];
@@ -334,5 +335,13 @@ describe('canvas layer descriptors', () => {
 describe('deterministic layer IDs', () => {
   test('continues duplicate suffixes after restoring a draft with existing duplicates', () => {
     expect(nextDuplicateLayerId('studio-42', ['caption', 'studio-42-dup-1', 'studio-42-dup-3'])).toBe('studio-42-dup-4');
+  });
+
+  test('selects a deterministic neighbor after deleting the active layer', () => {
+    const ids = ['bottom', 'middle', 'top'];
+    expect(selectedLayerIdAfterDelete(ids, 'middle', 'middle')).toBe('top');
+    expect(selectedLayerIdAfterDelete(ids, 'top', 'top')).toBe('middle');
+    expect(selectedLayerIdAfterDelete(ids, 'bottom', 'other')).toBe('other');
+    expect(selectedLayerIdAfterDelete(['only'], 'only', 'only')).toBeNull();
   });
 });
