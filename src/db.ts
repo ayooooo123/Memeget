@@ -576,7 +576,13 @@ function rowToRecord(row: MemeRow): MemeRecord & { embedding: Float32Array } {
 
 // Re-tagging reuses already-stored embeddings, so applying new knowledge
 // (exemplars, association edits) costs no re-embedding.
-export async function getAllMemeEmbeddings(): Promise<
+export async function countMemesNeedingEmbeddings(): Promise<number> {
+  const db = await getDb();
+  const row = await db.getFirstAsync<{ c: number }>(`SELECT COUNT(*) AS c FROM memes WHERE pending = 0`);
+  return row?.c ?? 0;
+}
+
+export async function* eachMemeEmbedding(): AsyncGenerator<
   {
     id: number;
     embedding: Float32Array;
@@ -584,24 +590,48 @@ export async function getAllMemeEmbeddings(): Promise<
     tags: Tag[];
     rawTags: string; // the stored JSON, kept so callers can diff without re-stringifying
     extraTerms: string;
-  }[]
+  }
 > {
   const db = await getDb();
-  const rows = await db.getAllAsync<{
+  const stmt = await db.prepareAsync('SELECT id, embedding, ocr_text, tags, extra_terms FROM memes WHERE pending = 0');
+  try {
+    const result = await stmt.executeAsync<{
+      id: number;
+      embedding: Uint8Array;
+      ocr_text: string;
+      tags: string;
+      extra_terms: string;
+    }>();
+    for await (const r of result) {
+      yield {
+        id: r.id,
+        embedding: blobToVec(r.embedding),
+        ocrText: r.ocr_text ?? '',
+        tags: safeParseTags(r.tags),
+        rawTags: r.tags ?? '[]',
+        extraTerms: r.extra_terms ?? '',
+      };
+    }
+  } finally {
+    await stmt.finalizeAsync();
+  }
+}
+
+export async function getAllMemeEmbeddings(): Promise<
+  {
     id: number;
-    embedding: Uint8Array;
-    ocr_text: string;
-    tags: string;
-    extra_terms: string;
-  }>('SELECT id, embedding, ocr_text, tags, extra_terms FROM memes WHERE pending = 0');
-  return rows.map((r) => ({
-    id: r.id,
-    embedding: blobToVec(r.embedding),
-    ocrText: r.ocr_text ?? '',
-    tags: safeParseTags(r.tags),
-    rawTags: r.tags ?? '[]',
-    extraTerms: r.extra_terms ?? '',
-  }));
+    embedding: Float32Array;
+    ocrText: string;
+    tags: Tag[];
+    rawTags: string;
+    extraTerms: string;
+  }[]
+> {
+  const rows = [];
+  for await (const row of eachMemeEmbedding()) {
+    rows.push(row);
+  }
+  return rows;
 }
 
 // Cheap change-stamp over (taught exemplars, indexed library size), used to
@@ -1910,50 +1940,49 @@ export async function propagateTagToSimilarMemes(
   );
   const sources = srcRows.map(toRecord).filter((s) => s.imageEmbedding.length > 0);
   if (sources.length === 0) return { propagated: 0 };
-
-  const candRows = await db.getAllAsync<VectorCols & { id: number; tags: string; extra_terms: string }>(
-    `SELECT id, tags, extra_terms, embedding, visual_embedding, visual_model FROM memes WHERE pending = 0 AND id NOT IN (${marks})`,
-    ...sourceIds
+  const stmt = await db.prepareAsync(
+    `SELECT id, tags, extra_terms, embedding, visual_embedding, visual_model FROM memes WHERE pending = 0 AND id NOT IN (${marks})`
   );
+  let updates: { id: number; tags: Tag[]; extraTerms: string }[] = [];
+  try {
+    const result = await stmt.executeAsync<VectorCols & { id: number; tags: string; extra_terms: string }>(...sourceIds);
+    
+    const labelKey = normalizeLabel(trimmed);
+    const hasDurableLabel = (rawTags: string): boolean =>
+      safeParseTags(rawTags).some((t) => t.label === labelKey && t.source !== 'vision' && t.source !== 'prompt');
 
-  const labelKey = normalizeLabel(trimmed);
-  const hasDurableLabel = (rawTags: string): boolean =>
-    safeParseTags(rawTags).some(
-      (t) =>
-        normalizeLabel(t.label) === labelKey &&
-        (t.source === 'manual' || t.source === 'exemplar' || t.source === 'propagated')
-    );
+    for await (const row of result) {
+      if (hasDurableLabel(row.tags)) continue;
 
-  const hits: PropagationHit[] = [];
-  for (let i = 0; i < candRows.length; i++) {
-    const r = candRows[i];
-    const hit = scorePropagationCandidate(
-      sources,
-      { id: r.id, hasDurableLabel: hasDurableLabel(r.tags), record: toRecord(r) },
-      VISUAL_EMBEDDING_MODEL
-    );
-    if (hit) hits.push(hit);
-    // Same chunked yield as the search scans, so spreading across a big
-    // library never hitches the UI.
-    if ((i & (SEARCH_CHUNK - 1)) === SEARCH_CHUNK - 1) {
-      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      const cand = toRecord(row);
+      if (cand.imageEmbedding.length === 0) continue;
+
+      // selectPairVectors handles space routing (DINO vs CLIP) and vector shape
+      const match = selectPairVectors(sources, cand);
+      if (!match) continue;
+
+      let maxScore = -1;
+      for (const src of match.sources) {
+        const score = dot(src, match.target);
+        if (score > maxScore) maxScore = score;
+      }
+
+      if (maxScore >= match.threshold) {
+        const existing = safeParseTags(row.tags);
+        // Filter out any vision/prompt tag with this label so the manual one
+        // cleanly replaces it, upgrading its durability.
+        const cleaned = existing.filter((t) => t.label !== labelKey);
+        cleaned.push({ label: labelKey, source: 'propagated' });
+        
+        // Extra terms stay intact, new label gets added
+        const extraTerms = unionTerms(row.extra_terms ?? '', labelKey);
+        updates.push({ id: row.id, tags: cleaned, extraTerms });
+      }
     }
+  } finally {
+    await stmt.finalizeAsync();
   }
 
-  const winners = rankPropagationHits(hits);
-  if (winners.length === 0) return { propagated: 0 };
-
-  const byId = new Map(candRows.map((r) => [r.id, r]));
-  const updates = winners.map((w) => {
-    const row = byId.get(w.id)!;
-    const next = upsertDurableTag(safeParseTags(row.tags), row.extra_terms ?? '', {
-      label: trimmed,
-      category: 'user',
-      source: 'propagated',
-      score: w.score,
-    });
-    return { id: w.id, tags: next.tags, extraTerms: next.extraTerms };
-  });
   await bulkUpdateMemeTags(updates);
   return { propagated: updates.length };
 }
