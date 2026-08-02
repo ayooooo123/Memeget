@@ -113,6 +113,28 @@ class MemeMediaProbeInstrumentedTest {
   }
 
   @Test
+  fun preservesExtractorFactsWhenMetadataRetrieverFails() {
+    val video = clipboardFile("probe-retriever-failure.mp4")
+    context.assets.open("synthetic_5s_720p.mp4").use { input ->
+      FileOutputStream(video).use { output -> input.copyTo(output) }
+    }
+
+    val probe =
+      MemeMediaProbe.probeWithRetriever(context, Uri.fromFile(video).toString()) { _, _ ->
+        throw IOException("forced retriever failure")
+      }
+
+    assertEquals("video", probe.kind)
+    assertEquals(1_280, probe.width)
+    assertEquals(720, probe.height)
+    assertTrue(abs(checkNotNull(probe.durationUs) - 5_000_000L) <= 100_000L)
+    assertTrue(abs(checkNotNull(probe.frameRate) - 30.0) <= 0.1)
+    assertEquals("video/avc", probe.videoMime)
+    assertEquals("audio/mp4a-latm", probe.audioMime)
+    assertTrue(probe.hasAudio)
+  }
+
+  @Test
   fun reportsAllExifOrientationsWithoutLosingRotationOrFlipFacts() {
     val expectations =
       listOf(

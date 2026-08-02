@@ -65,7 +65,7 @@ object MemeMediaProbe {
     val displayName: String?
   )
 
-  private data class RetrieverFacts(
+  internal data class RetrieverFacts(
     val width: Int?,
     val height: Int?,
     val rotationDegrees: Int?,
@@ -80,13 +80,20 @@ object MemeMediaProbe {
     val flipY: Boolean
   )
 
-  fun probe(context: Context, source: String): Result {
+  fun probe(context: Context, source: String): Result =
+    probeWithRetriever(context, source, ::readRetrieverFacts)
+
+  internal fun probeWithRetriever(
+    context: Context,
+    source: String,
+    retrieverReader: (Context, Uri) -> RetrieverFacts
+  ): Result {
     val uri = sourceUri(source)
     try {
       val facts = sourceFacts(context, uri)
       probeImage(context, uri, facts)?.let { return it }
-      return probeVideo(context, uri, facts)
-    } catch (error: Throwable) {
+      return probeVideo(context, uri, facts, retrieverReader)
+    } catch (error: Exception) {
       if (error is IOException && error.message.orEmpty().startsWith("Could not probe media")) {
         throw error
       }
@@ -173,7 +180,12 @@ object MemeMediaProbe {
     }
   }
 
-  private fun probeVideo(context: Context, uri: Uri, facts: SourceFacts): Result {
+  private fun probeVideo(
+    context: Context,
+    uri: Uri,
+    facts: SourceFacts,
+    retrieverReader: (Context, Uri) -> RetrieverFacts
+  ): Result {
     val extractor = MediaExtractor()
     var videoMime: String? = null
     var audioMime: String? = null
@@ -207,7 +219,18 @@ object MemeMediaProbe {
     }
     if (videoMime == null) throw IOException("No video track or decodable image was found")
 
-    val retriever = readRetrieverFacts(context, uri)
+    val retriever =
+      try {
+        retrieverReader(context, uri)
+      } catch (_: Exception) {
+        RetrieverFacts(
+          width = null,
+          height = null,
+          rotationDegrees = null,
+          durationUs = null,
+          frameRate = null
+        )
+      }
     width = width?.takeIf { it > 0 } ?: retriever.width
     height = height?.takeIf { it > 0 } ?: retriever.height
     durationUs = durationUs?.takeIf { it > 0L } ?: retriever.durationUs

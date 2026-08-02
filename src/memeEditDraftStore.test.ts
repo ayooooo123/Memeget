@@ -256,6 +256,96 @@ describe('MemeEditDraftStore', () => {
     });
   });
 
+  test('returns typed io-error instead of restoring an older slot when a newer candidate is unreadable', async () => {
+    const io = new MemoryDraftIo();
+    let nowMs = 20_000;
+    const store = new MemeEditDraftStore(io, { now: () => nowMs });
+    const paths = draftStoragePaths(io.cacheDirectory, identity);
+    await store.save(identity, project('older-readable'));
+    nowMs += 1;
+    await store.save(identity, project('newer-unreadable'));
+    io.readFailurePaths.add(paths.slotB);
+
+    await expect(store.restore(identity)).resolves.toEqual({
+      status: 'rejected',
+      reason: 'io-error',
+    });
+  });
+
+  test('serializes concurrent direct saves across store instances with monotonic generations', async () => {
+    const io = new MemoryDraftIo();
+    const firstStore = new MemeEditDraftStore(io, { now: () => 20_000 });
+    const secondStore = new MemeEditDraftStore(io, { now: () => 20_001 });
+    let releaseFirstReplace!: () => void;
+    let notifyFirstReplace!: () => void;
+    const firstReplaceGate = new Promise<void>((resolve) => {
+      releaseFirstReplace = resolve;
+    });
+    const firstReplaceStarted = new Promise<void>((resolve) => {
+      notifyFirstReplace = resolve;
+    });
+    const originalReplace = io.replace.bind(io);
+    let replaceCount = 0;
+    io.replace = async (from, to) => {
+      replaceCount += 1;
+      if (replaceCount === 1) {
+        notifyFirstReplace();
+        await firstReplaceGate;
+      }
+      await originalReplace(from, to);
+    };
+
+    const firstSave = firstStore.save(identity, project('concurrent-1'));
+    await firstReplaceStarted;
+    const readsBeforeSecondSave = io.events.filter((event) => event.type === 'read').length;
+    const secondSave = secondStore.save(identity, project('concurrent-2'));
+    expect(io.events.filter((event) => event.type === 'read')).toHaveLength(
+      readsBeforeSecondSave
+    );
+
+    releaseFirstReplace();
+    await Promise.all([firstSave, secondSave]);
+    await expect(firstStore.restore(identity)).resolves.toMatchObject({
+      status: 'restored',
+      project: { background: { color: 'concurrent-2' } },
+    });
+  });
+
+  test('serializes discard behind an in-flight save from another store instance', async () => {
+    const io = new MemoryDraftIo();
+    const savingStore = new MemeEditDraftStore(io, { now: () => 20_000 });
+    const discardingStore = new MemeEditDraftStore(io, { now: () => 20_001 });
+    let releaseReplace!: () => void;
+    let notifyReplace!: () => void;
+    const replaceGate = new Promise<void>((resolve) => {
+      releaseReplace = resolve;
+    });
+    const replaceStarted = new Promise<void>((resolve) => {
+      notifyReplace = resolve;
+    });
+    const originalReplace = io.replace.bind(io);
+    io.replace = async (from, to) => {
+      notifyReplace();
+      await replaceGate;
+      await originalReplace(from, to);
+    };
+
+    const save = savingStore.save(identity, project('save-before-discard'));
+    await replaceStarted;
+    const listsBeforeDiscard = io.events.filter((event) => event.type === 'list').length;
+    const discard = discardingStore.discard(identity);
+    expect(io.events.filter((event) => event.type === 'list')).toHaveLength(
+      listsBeforeDiscard
+    );
+
+    releaseReplace();
+    await Promise.all([save, discard]);
+    await expect(savingStore.restore(identity)).resolves.toEqual({
+      status: 'rejected',
+      reason: 'missing',
+    });
+  });
+
   test('uses deterministic session journal paths without leaking source or session text', () => {
     const base = draftStoragePaths('file:///cache/', identity);
     expect(draftStoragePaths('file:///cache/', identity)).toEqual(base);
@@ -563,6 +653,25 @@ describe('MemeEditAutosaveController', () => {
     });
   });
 
+  test('contains an onError callback that throws after a timer-started save failure', async () => {
+    const io = new MemoryDraftIo();
+    const store = new MemeEditDraftStore(io, { now: () => 20_000 });
+    const timers = new FakeTimers();
+    const onError = jest.fn(() => {
+      throw new Error('error reporter failed');
+    });
+    const controller = new MemeEditAutosaveController(store, identity, { timers, onError });
+    io.writeError = new Error('timer save failed');
+    controller.schedule(project('failed.mp4'));
+
+    timers.advanceBy(500);
+    await expect(controller.flush()).rejects.toThrow('timer save failed');
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(onError).toHaveBeenCalledWith(expect.objectContaining({ message: 'timer save failed' }));
+  });
+
   test('cancel clears the timer and prevents the pending snapshot from being written', async () => {
     const io = new MemoryDraftIo();
     const store = new MemeEditDraftStore(io, { now: () => 20_000 });
@@ -657,6 +766,37 @@ describe('MemeEditSourcePreparationController', () => {
     expect(io.probe).toHaveBeenCalledTimes(1);
     await controller.discard();
     expect(io.remove).toHaveBeenCalledWith(destination);
+  });
+
+  test('removes a stale owned destination before the first materialization copy', async () => {
+    const paths = draftStoragePaths('file:///cache/', identity);
+    const destination =
+      `file:///cache/${paths.ownedAssetPrefix}materialized_source.mp4`;
+    const files = new Set([destination]);
+    const events: string[] = [];
+    const io: MemeEditSourcePreparationIo = {
+      cacheDirectory: 'file:///cache/',
+      async materialize(_source, target) {
+        events.push(`materialize:${target}`);
+        if (files.has(target)) throw new Error('destination already exists');
+        files.add(target);
+      },
+      async remove(path) {
+        events.push(`remove:${path}`);
+        files.delete(path);
+      },
+      probe: jest.fn(async () => probeResult),
+    };
+    const controller = new MemeEditSourcePreparationController(io, identity);
+
+    await expect(controller.prepare(project())).resolves.toMatchObject({
+      materializedSourceUri: destination,
+      owned: true,
+    });
+    expect(events.slice(0, 2)).toEqual([
+      `remove:${destination}`,
+      `materialize:${destination}`,
+    ]);
   });
 
   test.each([
