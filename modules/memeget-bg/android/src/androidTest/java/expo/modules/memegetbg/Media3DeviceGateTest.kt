@@ -43,12 +43,67 @@ class Media3DeviceGateTest {
         audioEndUs = 2_400_000L
       )
     )
+    assertFalse(
+      Media3DeviceGateProbe.trackEndpointsWithinTolerance(
+        expectedEndUs = 2_400_000L,
+        videoPresent = true,
+        videoEndUs = 2_400_000L,
+        audioPresent = true,
+        audioEndUs = 2_600_000L
+      )
+    )
+    assertFalse(
+      Media3DeviceGateProbe.trackEndpointsWithinTolerance(
+        expectedEndUs = 2_400_000L,
+        videoPresent = true,
+        videoEndUs = 2_400_000L,
+        audioPresent = true,
+        audioEndUs = null
+      )
+    )
   }
 
   @Test
   fun avDriftComparisonUsesRawMicroseconds() {
     assertTrue(Media3DeviceGateProbe.avEndDeltaWithinLimit(0L, 50_000L))
     assertFalse(Media3DeviceGateProbe.avEndDeltaWithinLimit(0L, 50_001L))
+  }
+
+  @Test
+  fun cancellationEvidenceRequiresActiveResourceAndIssuedCancel() {
+    assertFalse(
+      Media3DeviceGateProbe.cancellationCleanupPass(
+        activeBeforeCancel = false,
+        cancelIssued = true,
+        partialOutputDeleteSucceeded = true,
+        partialOutputExistsAfterCleanup = false,
+        resourceReleased = true,
+        followUpSucceeded = true,
+        leftoverCount = 0
+      )
+    )
+    assertFalse(
+      Media3DeviceGateProbe.cancellationCleanupPass(
+        activeBeforeCancel = true,
+        cancelIssued = false,
+        partialOutputDeleteSucceeded = true,
+        partialOutputExistsAfterCleanup = false,
+        resourceReleased = true,
+        followUpSucceeded = true,
+        leftoverCount = 0
+      )
+    )
+    assertTrue(
+      Media3DeviceGateProbe.cancellationCleanupPass(
+        activeBeforeCancel = true,
+        cancelIssued = true,
+        partialOutputDeleteSucceeded = true,
+        partialOutputExistsAfterCleanup = false,
+        resourceReleased = true,
+        followUpSucceeded = true,
+        leftoverCount = 0
+      )
+    )
   }
 
   @Test
