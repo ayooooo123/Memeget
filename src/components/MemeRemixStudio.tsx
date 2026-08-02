@@ -37,7 +37,7 @@ import {
   type ProjectHistory,
   type TransformKeyframe,
 } from '../memeEditProjectCore';
-import { beforeAfterAccessibilityNextState, beforeAfterPointerNextState, canDuplicateLayer, commitGestureTransaction, memeRemixHeaderLayout, nextDuplicateLayerId } from '../memeEditCanvasCore';
+import { beforeAfterAccessibilityNextState, beforeAfterPointerNextState, canDuplicateLayer, commitGestureTransaction, memeRemixExportControlState, memeRemixHeaderLayout, nextDuplicateLayerId } from '../memeEditCanvasCore';
 import { tap, warn } from '../haptics';
 import { colors, radius, space, type } from '../theme';
 import type { MemeRecord } from '../types';
@@ -404,16 +404,11 @@ export function MemeRemixStudio({
   }, [closeSessionAssets, onClose]);
 
   const exportProject = useCallback(() => {
-    if (!project) return;
-    setInlineError('');
-    if (!onExport) {
-      setInlineError('Structured export is unavailable in this branch. No file was rendered.');
-      return;
-    }
+    if (!project || !onExport || !ready || exportBusy || discarding) return;
     Promise.resolve(onExport(project)).catch((error) => {
       setInlineError(String(error));
     });
-  }, [onExport, project]);
+  }, [discarding, exportBusy, onExport, project, ready]);
   const headerLayout = memeRemixHeaderLayout(width);
 
   const status = project
@@ -443,7 +438,7 @@ export function MemeRemixStudio({
       setBefore((value) => beforeAfterAccessibilityNextState(value, 'activate'));
     }
   }, []);
-  const exportLabel = onExport ? headerLayout.exportLabel : headerLayout.mode === 'compact-two-row' ? 'No export' : 'Export unavailable';
+  const exportControl = memeRemixExportControlState(headerLayout, { ready: !!ready, exportBusy: !!exportBusy, discarding, hasExport: !!onExport });
 
   return (
     <Modal visible={visible} animationType="slide" statusBarTranslucent onRequestClose={cancel}>
@@ -462,7 +457,7 @@ export function MemeRemixStudio({
                 <HeaderButton label="Before" hint="Hold to hide all edit layers without resetting video playback. Screen reader activate toggles before and after." disabled={!ready} selected={before} onPressIn={showBefore} onPressOut={hideBefore} accessibilityActions={[{ name: 'activate', label: before ? 'Show edited layers' : 'Show original media' }]} onAccessibilityAction={toggleBeforeForAccessibility} />
                 <HeaderButton label="Undo" hint="Undo the last edit transaction" onPress={undo} disabled={!canUndo || disabled} />
                 <HeaderButton label="Redo" hint="Redo the next edit transaction" onPress={redo} disabled={!canRedo || disabled} />
-                <HeaderButton label={exportLabel} hint="Hand the structured project to the export pipeline" onPress={exportProject} disabled={!ready || !!exportBusy} primary={!!onExport} />
+                <HeaderButton label={exportControl.label} hint="Hand the structured project to the export pipeline" onPress={exportProject} disabled={exportControl.disabled} primary={!!onExport} />
               </View>
             </>
           ) : (
@@ -475,7 +470,7 @@ export function MemeRemixStudio({
               <HeaderButton label="Before" hint="Hold to hide all edit layers without resetting video playback. Screen reader activate toggles before and after." disabled={!ready} selected={before} onPressIn={showBefore} onPressOut={hideBefore} accessibilityActions={[{ name: 'activate', label: before ? 'Show edited layers' : 'Show original media' }]} onAccessibilityAction={toggleBeforeForAccessibility} />
               <HeaderButton label="Undo" hint="Undo the last edit transaction" onPress={undo} disabled={!canUndo || disabled} />
               <HeaderButton label="Redo" hint="Redo the next edit transaction" onPress={redo} disabled={!canRedo || disabled} />
-              <HeaderButton label={exportLabel} hint="Hand the structured project to the export pipeline" onPress={exportProject} disabled={!ready || !!exportBusy} primary={!!onExport} />
+              <HeaderButton label={exportControl.label} hint="Hand the structured project to the export pipeline" onPress={exportProject} disabled={exportControl.disabled} primary={!!onExport} />
             </View>
           )}
         </View>

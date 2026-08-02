@@ -11,6 +11,7 @@ import {
   layerHandlePoints,
   layerBodyTouchInsideMedia,
   layerHandleTouchInsideMedia,
+  memeRemixExportControlState,
   nextDuplicateLayerId,
   memeRemixHeaderLayout,
   normalizedPointToViewPoint,
@@ -273,6 +274,34 @@ describe('studio shell UI contracts', () => {
       rows: [
         { key: 'single', controls: ['Cancel', 'TitleStatus', 'Before', 'Undo', 'Redo', 'Export'], maxWidth: 430, minControlSize: 44 },
       ],
+    });
+  });
+
+  test('export control is disabled whenever the editor or export callback is unavailable', () => {
+    const compact = memeRemixHeaderLayout(390);
+    expect(memeRemixExportControlState(compact, { ready: true, exportBusy: false, discarding: false, hasExport: true })).toEqual({
+      label: 'Out',
+      disabled: false,
+      accessibilityState: { disabled: false },
+    });
+    expect(memeRemixExportControlState(compact, { ready: true, exportBusy: false, discarding: false, hasExport: false })).toEqual({
+      label: 'No export',
+      disabled: true,
+      accessibilityState: { disabled: true },
+    });
+    expect(memeRemixExportControlState(compact, { ready: true, exportBusy: false, discarding: true, hasExport: true }).disabled).toBe(true);
+    expect(memeRemixExportControlState(compact, { ready: true, exportBusy: true, discarding: false, hasExport: true }).disabled).toBe(true);
+
+    const wide = memeRemixHeaderLayout(430);
+    expect(memeRemixExportControlState(wide, { ready: false, exportBusy: false, discarding: false, hasExport: true })).toEqual({
+      label: 'Export',
+      disabled: true,
+      accessibilityState: { disabled: true },
+    });
+    expect(memeRemixExportControlState(wide, { ready: true, exportBusy: false, discarding: false, hasExport: false })).toEqual({
+      label: 'Export unavailable',
+      disabled: true,
+      accessibilityState: { disabled: true },
     });
   });
 
