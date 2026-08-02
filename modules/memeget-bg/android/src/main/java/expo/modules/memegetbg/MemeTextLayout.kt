@@ -54,6 +54,7 @@ internal object MemeTextLayout {
     fontFamily: String,
     fontWeight: Int,
     fontSizePx: Float,
+    lineHeightPx: Float,
     letterSpacingEm: Float,
     widthPx: Int,
     align: String
@@ -66,6 +67,7 @@ internal object MemeTextLayout {
     }
     val layout = StaticLayout.Builder.obtain(text, 0, text.length, paint, boundedWidth)
       .setAlignment(androidAlignment(align))
+      .setLineSpacing(0f, max(1f, lineHeightPx) / max(1f, fontSizePx))
       .setIncludePad(false)
       .setBreakStrategy(Layout.BREAK_STRATEGY_HIGH_QUALITY)
       .setHyphenationFrequency(Layout.HYPHENATION_FREQUENCY_NONE)
@@ -81,7 +83,7 @@ internal object MemeTextLayout {
         topPx = layout.getLineTop(index),
         baselinePx = layout.getLineBaseline(index)
       )
-    }.filter { it.text.isNotEmpty() || text.isEmpty() }
+    }
     return MemeTextLayoutResult(
       widthPx = boundedWidth,
       heightPx = layout.height,

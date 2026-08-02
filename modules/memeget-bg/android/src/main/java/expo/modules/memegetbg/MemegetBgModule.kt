@@ -217,6 +217,7 @@ class MemegetBgModule : Module() {
       fontFamily: String,
       fontWeight: Int,
       fontSizePx: Double,
+      lineHeightPx: Double,
       letterSpacingEm: Double,
       widthPx: Int,
       align: String ->
@@ -228,6 +229,7 @@ class MemegetBgModule : Module() {
         fontFamily = fontFamily,
         fontWeight = fontWeight,
         fontSizePx = fontSizePx.toFloat(),
+        lineHeightPx = lineHeightPx.toFloat(),
         letterSpacingEm = letterSpacingEm.toFloat(),
         widthPx = widthPx,
         align = align

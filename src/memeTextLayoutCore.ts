@@ -56,6 +56,8 @@ export interface MemeTextFontSpec {
 
 export interface MemeTextLayoutLine {
   text: string;
+  start: number;
+  end: number;
   widthPx: number;
   baselinePx: number;
   topPx: number;
@@ -107,6 +109,7 @@ export interface NativeMemeTextLayoutInput {
   letterSpacingEm: number;
   widthPx: number;
   align: TextStyle['align'];
+  lineHeightPx: number;
 }
 
 export interface NativeMemeTextLayoutResult {
@@ -114,7 +117,7 @@ export interface NativeMemeTextLayoutResult {
   heightPx: number;
   includeFontPadding: boolean;
   tolerancePx: number;
-  lines: Array<{ text: string; widthPx: number; topPx: number; baselinePx: number }>;
+  lines: Array<{ text: string; start: number; end: number; widthPx: number; topPx: number; baselinePx: number }>;
 }
 
 export interface NativeMemeTextLayoutComparison {
@@ -123,6 +126,12 @@ export interface NativeMemeTextLayoutComparison {
   maxWidthDriftPx: number;
   maxTopDriftPx: number;
   maxBaselineDriftPx: number;
+}
+
+export interface MemeTextPreviewFixture {
+  preset: MemeTextPresetId;
+  scale: number;
+  input: NativeMemeTextLayoutInput;
 }
 
 
@@ -408,17 +417,25 @@ function wrapParagraph(paragraph: string, maxWidthPx: number, fontSizePx: number
 function layoutLines(text: string, wrapWidthPx: number, fontSizePx: number, font: MemeTextFontSpec): MemeTextLayoutLine[] {
   const lineHeightPx = roundPx(fontSizePx * font.lineHeightRatio);
   const baselineOffsetPx = roundPx(fontSizePx * 0.92);
-  const rawLines = text
-    .replace(/\r\n/g, '\n')
+  const normalizedText = text.replace(/\r\n/g, '\n');
+  const rawLines = normalizedText
     .split('\n')
-    .flatMap((paragraph) => wrapParagraph(paragraph, wrapWidthPx, fontSizePx, font))
-    .filter((line, index, lines) => line.length > 0 || lines.length === 1 || index < lines.length - 1);
-  return rawLines.map((line, index) => ({
-    text: line,
-    widthPx: measureTextPx(line, fontSizePx, font),
-    baselinePx: roundPx(index * lineHeightPx + baselineOffsetPx),
-    topPx: roundPx(index * lineHeightPx),
-  }));
+    .flatMap((paragraph) => wrapParagraph(paragraph, wrapWidthPx, fontSizePx, font));
+  let searchStart = 0;
+  return rawLines.map((line, index) => {
+    const found = line.length === 0 ? searchStart : normalizedText.indexOf(line, searchStart);
+    const start = found < 0 ? searchStart : found;
+    const end = start + line.length;
+    searchStart = end + 1;
+    return {
+      text: line,
+      start,
+      end,
+      widthPx: measureTextPx(line, fontSizePx, font),
+      baselinePx: roundPx(index * lineHeightPx + baselineOffsetPx),
+      topPx: roundPx(index * lineHeightPx),
+    };
+  });
 }
 
 export function buildMemeTextLayoutSpec(
@@ -493,6 +510,7 @@ export function nativeMemeTextLayoutInputFromSpec(spec: MemeTextLayoutSpec): Nat
     text: spec.displayText,
     fontFamily: spec.font.family,
     fontWeight: Number(spec.font.weight),
+    lineHeightPx: spec.layout.lineHeightPx,
     fontSizePx: spec.canvas.fontSizePx,
     letterSpacingEm: spec.font.letterSpacingEm,
     widthPx: spec.canvas.wrapWidthPx,
@@ -500,32 +518,66 @@ export function nativeMemeTextLayoutInputFromSpec(spec: MemeTextLayoutSpec): Nat
   };
 }
 
+export function memeTextMeasureKey(spec: MemeTextLayoutSpec): string {
+  return JSON.stringify(nativeMemeTextLayoutInputFromSpec(spec));
+}
+
+export function buildMemeTextPreviewFixtures(): MemeTextPreviewFixture[] {
+  const texts: Record<MemeTextPresetId, string> = {
+    impact: 'impact layout fixture words',
+    subtitle: 'subtitle layout fixture words',
+    label: 'label layout fixture words',
+    news: 'news layout fixture words',
+    bubble: 'bubble layout fixture words',
+    plain: 'plain layout\n\nfixture words',
+  };
+  const scales: Record<MemeTextPresetId, number> = {
+    impact: 1,
+    subtitle: 1.25,
+    label: 1,
+    news: 1.5,
+    bubble: 1,
+    plain: 1,
+  };
+  return MEME_TEXT_PRESET_IDS.map((preset) => {
+    const layer = createMemeTextLayer(`fixture-${preset}`, preset, { text: texts[preset] });
+    const spec = buildMemeTextLayoutSpec(layer, defaultKeyframe(0, preset), { canvasWidthPx: 720, canvasHeightPx: 1_280 });
+    return { preset, scale: scales[preset], input: nativeMemeTextLayoutInputFromSpec(spec) };
+  });
+}
+
 export function compareNativeMemeTextLayoutToSpec(
   spec: MemeTextLayoutSpec,
   native: NativeMemeTextLayoutResult
 ): NativeMemeTextLayoutComparison {
+  const scale = spec.transform.scale;
   const limit = spec.diagnostics.androidStaticLayoutTolerancePx;
   const count = Math.max(spec.layout.lines.length, native.lines.length);
-  let maxWidthDriftPx = 0;
-  let maxTopDriftPx = 0;
+  let maxWidthDriftPx = Math.abs(native.widthPx - spec.layout.widthPx) * scale;
+  let maxTopDriftPx = Math.abs(native.heightPx - spec.layout.heightPx) * scale;
   let maxBaselineDriftPx = 0;
+  let contentMatches = native.includeFontPadding === false;
   for (let index = 0; index < count; index += 1) {
     const expected = spec.layout.lines[index];
     const actual = native.lines[index];
     if (!expected || !actual) {
+      contentMatches = false;
       maxWidthDriftPx = Number.POSITIVE_INFINITY;
       maxTopDriftPx = Number.POSITIVE_INFINITY;
       maxBaselineDriftPx = Number.POSITIVE_INFINITY;
       break;
     }
-    maxWidthDriftPx = Math.max(maxWidthDriftPx, Math.abs(actual.widthPx - expected.widthPx));
-    maxTopDriftPx = Math.max(maxTopDriftPx, Math.abs(actual.topPx - expected.topPx));
-    maxBaselineDriftPx = Math.max(maxBaselineDriftPx, Math.abs(actual.baselinePx - expected.baselinePx));
+    if (actual.text !== expected.text || actual.start !== expected.start || actual.end !== expected.end) {
+      contentMatches = false;
+    }
+    maxWidthDriftPx = Math.max(maxWidthDriftPx, Math.abs(actual.widthPx - expected.widthPx) * scale);
+    maxTopDriftPx = Math.max(maxTopDriftPx, Math.abs(actual.topPx - expected.topPx) * scale);
+    maxBaselineDriftPx = Math.max(maxBaselineDriftPx, Math.abs(actual.baselinePx - expected.baselinePx) * scale);
   }
   const lineCountDrift = native.lines.length - spec.layout.lines.length;
   return {
-    ok: native.includeFontPadding === false &&
-      Math.abs(lineCountDrift) === 0 &&
+    ok: contentMatches &&
+      lineCountDrift === 0 &&
       maxWidthDriftPx <= limit &&
       maxTopDriftPx <= limit &&
       maxBaselineDriftPx <= limit,

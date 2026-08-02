@@ -38,7 +38,7 @@ import {
   type TextLayer,
   type TransformKeyframe,
 } from '../memeEditProjectCore';
-import { buildMemeTextLayoutSpec, compareNativeMemeTextLayoutToSpec, memeTextBackingRadiusForPreview, nativeMemeTextLayoutInputFromSpec, type MemeTextLayoutSpec } from '../memeTextLayoutCore';
+import { buildMemeTextLayoutSpec, compareNativeMemeTextLayoutToSpec, memeTextBackingRadiusForPreview, memeTextMeasureKey, nativeMemeTextLayoutInputFromSpec, type MemeTextLayoutSpec } from '../memeTextLayoutCore';
 import { colors, radius, space, type } from '../theme';
 import { useConst } from '../reactUtils';
 
@@ -367,7 +367,7 @@ const TextLayerContent = React.memo(function TextLayerContent({ spec }: { spec: 
   }), [spec]);
   const outlineOffsets = useMemo(() => {
     if (spec.outline.widthPx <= 0) return [];
-    const amount = Math.max(1, Math.min(12, spec.outline.widthPx));
+    const amount = Math.max(1, spec.outline.widthPx);
     return [
       { left: -amount, top: 0 },
       { left: amount, top: 0 },
@@ -380,12 +380,16 @@ const TextLayerContent = React.memo(function TextLayerContent({ spec }: { spec: 
     ];
   }, [spec.outline.widthPx]);
   const displayText = spec.layout.lines.map((line) => line.text).join('\n');
+  const measureKey = useMemo(() => memeTextMeasureKey(spec), [spec]);
+  const specRef = useRef(spec);
+  specRef.current = spec;
 
   useEffect(() => {
     let cancelled = false;
-    measureMemeTextLayout(nativeMemeTextLayoutInputFromSpec(spec)).then((nativeLayout) => {
+    const currentSpec = specRef.current;
+    measureMemeTextLayout(nativeMemeTextLayoutInputFromSpec(currentSpec)).then((nativeLayout) => {
       if (cancelled || !nativeLayout) return;
-      const comparison = compareNativeMemeTextLayoutToSpec(spec, nativeLayout);
+      const comparison = compareNativeMemeTextLayoutToSpec(specRef.current, nativeLayout);
       setDiagnostic(comparison.ok
         ? null
         : `Text metrics drift: ${comparison.lineCountDrift} lines, ${comparison.maxBaselineDriftPx.toFixed(1)}px baseline`);
@@ -395,7 +399,7 @@ const TextLayerContent = React.memo(function TextLayerContent({ spec }: { spec: 
     return () => {
       cancelled = true;
     };
-  }, [spec]);
+  }, [measureKey]);
 
   return (
     <View style={styles.textFill} pointerEvents="none">
