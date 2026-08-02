@@ -113,13 +113,17 @@ class MemeMediaProbeInstrumentedTest {
   }
 
   @Test
-  fun reportsMirroredExifOrientationsWithoutLosingFlipFacts() {
+  fun reportsAllExifOrientationsWithoutLosingRotationOrFlipFacts() {
     val expectations =
       listOf(
+        Triple(1, Triple(0, false, false), "normal"),
         Triple(2, Triple(0, true, false), "horizontal"),
+        Triple(3, Triple(180, false, false), "rotate-180"),
         Triple(4, Triple(0, false, true), "vertical"),
         Triple(5, Triple(90, false, true), "transpose"),
-        Triple(7, Triple(90, true, false), "transverse")
+        Triple(6, Triple(90, false, false), "rotate-90"),
+        Triple(7, Triple(90, true, false), "transverse"),
+        Triple(8, Triple(270, false, false), "rotate-270")
       )
     for ((orientation, transform, label) in expectations) {
       val image = clipboardFile("probe-orientation-$orientation.jpg")
@@ -149,6 +153,23 @@ class MemeMediaProbeInstrumentedTest {
     assertNull(probe.audioMime)
     assertFalse(probe.hasAudio)
     assertTrue(probe.seekable)
+  }
+
+  @Test
+  fun reportsRotatedVideoDisplayMetadata() {
+    val video = clipboardFile("probe-rotated.mp4")
+    context.assets.open("synthetic_rotated_1s_240p.mp4").use { input ->
+      FileOutputStream(video).use { output -> input.copyTo(output) }
+    }
+
+    val probe = MemeMediaProbe.probe(context, Uri.fromFile(video).toString())
+
+    assertEquals("video", probe.kind)
+    assertEquals(320, probe.width)
+    assertEquals(240, probe.height)
+    assertEquals(90, probe.rotationDegrees)
+    assertFalse(probe.flipX)
+    assertFalse(probe.flipY)
   }
 
   @Test

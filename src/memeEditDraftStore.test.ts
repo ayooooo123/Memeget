@@ -43,11 +43,13 @@ class MemoryDraftIo implements MemeEditDraftIo {
   readonly cacheDirectory = 'file:///cache/';
   readonly files = new Map<string, string>();
   readonly events: IoEvent[] = [];
+  readonly readFailurePaths = new Set<string>();
   writeError: Error | null = null;
   replaceError: Error | null = null;
 
   async readText(path: string): Promise<string | null> {
     this.events.push({ type: 'read', path });
+    if (this.readFailurePaths.has(path)) throw new Error(`read failed: ${path}`);
     return this.files.get(path) ?? null;
   }
 
@@ -180,17 +182,33 @@ describe('MemeEditDraftStore', () => {
     });
   });
 
-  test('keeps the prior valid generation when platform replacement fails', async () => {
+  test('preserves the latest slot when iOS-style replacement deletes an existing older target then fails', async () => {
     const io = new MemoryDraftIo();
-    const store = new MemeEditDraftStore(io, { now: () => 20_000 });
-    await store.save(identity, project('prior.mp4'));
-    io.replaceError = new Error('move interrupted');
+    let nowMs = 20_000;
+    const store = new MemeEditDraftStore(io, { now: () => nowMs });
+    const paths = draftStoragePaths(io.cacheDirectory, identity);
+    await store.save(identity, project('generation-1'));
+    nowMs += 1;
+    await store.save(identity, project('generation-2'));
+    nowMs += 1;
+    await store.save(identity, project('generation-3-latest'));
+    expect(io.files.has(paths.slotA)).toBe(true);
+    expect(io.files.has(paths.slotB)).toBe(true);
 
-    await expect(store.save(identity, project('newer.mp4'))).rejects.toThrow('move interrupted');
+    io.replace = async (from, to) => {
+      io.events.push({ type: 'replace', from, to });
+      io.files.delete(to);
+      throw new Error('iOS move interrupted after destination delete');
+    };
+    nowMs += 1;
+    await expect(store.save(identity, project('generation-4'))).rejects.toThrow(
+      'iOS move interrupted'
+    );
 
+    expect(io.files.has(paths.slotB)).toBe(false);
     await expect(store.restore(identity)).resolves.toMatchObject({
       status: 'restored',
-      project: { background: { color: 'prior.mp4' } },
+      project: { background: { color: 'generation-3-latest' } },
     });
   });
 
@@ -212,6 +230,29 @@ describe('MemeEditDraftStore', () => {
     await expect(store.restore(identity)).resolves.toMatchObject({
       status: 'restored',
       project: { background: { color: 'older.mp4' } },
+    });
+  });
+
+  test('aborts save when either journal generation cannot be read and preserves the latest', async () => {
+    const io = new MemoryDraftIo();
+    let nowMs = 20_000;
+    const store = new MemeEditDraftStore(io, { now: () => nowMs });
+    const paths = draftStoragePaths(io.cacheDirectory, identity);
+    await store.save(identity, project('generation-1'));
+    nowMs += 1;
+    await store.save(identity, project('generation-2-latest'));
+    const writesBeforeFailure = draftWriteEvents(io).length;
+    io.readFailurePaths.add(paths.slotA);
+
+    await expect(store.save(identity, project('must-not-write'))).rejects.toThrow(
+      /could not read draft journal/i
+    );
+    expect(draftWriteEvents(io)).toHaveLength(writesBeforeFailure);
+
+    io.readFailurePaths.clear();
+    await expect(store.restore(identity)).resolves.toMatchObject({
+      status: 'restored',
+      project: { background: { color: 'generation-2-latest' } },
     });
   });
 
@@ -616,6 +657,28 @@ describe('MemeEditSourcePreparationController', () => {
     expect(io.probe).toHaveBeenCalledTimes(1);
     await controller.discard();
     expect(io.remove).toHaveBeenCalledWith(destination);
+  });
+
+  test.each([
+    ['name', 'same-uri-renamed.mp4'],
+    ['kind', 'image'],
+    ['width', 1_281],
+    ['height', 721],
+    ['durationUs', 5_000_001],
+  ] as const)('rejects same-URI project source %s changes before materializing', async (field, value) => {
+    const io: MemeEditSourcePreparationIo = {
+      cacheDirectory: 'file:///cache/',
+      materialize: jest.fn(async () => {}),
+      remove: jest.fn(async () => {}),
+      probe: jest.fn(async () => probeResult),
+    };
+    const controller = new MemeEditSourcePreparationController(io, identity);
+    const mismatched = project();
+    (mismatched.source as unknown as Record<string, unknown>)[field] = value;
+
+    await expect(controller.prepare(mismatched)).rejects.toThrow(/source does not match/i);
+    expect(io.materialize).not.toHaveBeenCalled();
+    expect(io.probe).not.toHaveBeenCalled();
   });
 
   test('reuses file sources without taking ownership or deleting them on cancel', async () => {

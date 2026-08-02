@@ -343,8 +343,9 @@ export class MemeEditDraftStore {
     try {
       const text = await this.io.readText(path);
       return text === null ? null : parseSerializedDraft(text);
-    } catch {
-      return null;
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(`Could not read draft journal slot ${path}: ${detail}`);
     }
   }
 
@@ -570,7 +571,7 @@ export class MemeEditSourcePreparationController {
 
   async prepare(project: MemeEditProject): Promise<PreparedMemeEditSource> {
     if (this.closed) throw new Error('Source preparation controller is closed.');
-    if (project.source.uri !== this.identity.source.uri) {
+    if (!projectSourceMatchesIdentity(project, this.identity.source)) {
       throw new Error('Project source does not match the preparation session source.');
     }
     const prepared = await this.prepareResource();
