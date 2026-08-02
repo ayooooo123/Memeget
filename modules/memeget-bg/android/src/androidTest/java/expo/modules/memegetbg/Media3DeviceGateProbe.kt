@@ -457,73 +457,96 @@ object Media3DeviceGateProbe {
     val completed = AtomicBoolean(false)
     val failed = AtomicReference<Throwable?>()
 
-    instrumentation.runOnMainSync {
-      val transformer = Transformer.Builder(context)
-        .setVideoMimeType(MimeTypes.VIDEO_H264)
-        .setAudioMimeType(MimeTypes.AUDIO_AAC)
-        .addListener(object : Transformer.Listener {
-          override fun onCompleted(composition: Composition, result: ExportResult) {
-            completed.set(true)
-          }
+    try {
+      instrumentation.runOnMainSync {
+        val transformer = Transformer.Builder(context)
+          .setVideoMimeType(MimeTypes.VIDEO_H264)
+          .setAudioMimeType(MimeTypes.AUDIO_AAC)
+          .addListener(object : Transformer.Listener {
+            override fun onCompleted(composition: Composition, result: ExportResult) {
+              completed.set(true)
+            }
 
-          override fun onError(
-            composition: Composition,
-            result: ExportResult,
-            exception: ExportException
-          ) {
-            failed.set(exception)
-          }
-        })
-        .build()
-      transformerRef.set(transformer)
-      transformer.start(edited, output.absolutePath)
-    }
+            override fun onError(
+              composition: Composition,
+              result: ExportResult,
+              exception: ExportException
+            ) {
+              failed.set(exception)
+            }
+          })
+          .build()
+        transformerRef.set(transformer)
+        transformer.start(edited, output.absolutePath)
+      }
 
-    SystemClock.sleep(200L)
-    val cancelRequestedBeforeCompletion = !completed.get() && failed.get() == null
-    val activeBeforeCancel = mediaResourceManagerHasPid(instrumentation, Process.myPid())
-    val cancelStart = SystemClock.elapsedRealtime()
-    if (cancelRequestedBeforeCompletion) {
-      instrumentation.runOnMainSync { transformerRef.get().cancel() }
-    }
-    val cancelLatencyMs = SystemClock.elapsedRealtime() - cancelStart
-    SystemClock.sleep(400L)
+      SystemClock.sleep(200L)
+      val activeBeforeCancel = mediaResourceManagerHasPid(instrumentation, Process.myPid())
+      val cancelIssued = AtomicBoolean(false)
+      val cancelStart = SystemClock.elapsedRealtime()
+      instrumentation.runOnMainSync {
+        if (!completed.get() && failed.get() == null) {
+          transformerRef.get().cancel()
+          cancelIssued.set(true)
+        }
+      }
+      val cancelLatencyMs = SystemClock.elapsedRealtime() - cancelStart
+      SystemClock.sleep(400L)
 
-    val partialExistedBeforeCleanup = output.exists()
-    val partialDeleteSucceeded = !output.exists() || output.delete()
-    val resourceReleased = waitForMediaResourcesReleased(instrumentation, Process.myPid(), 5_000L)
-    val followUpSucceeded = try {
-      val item = EditedMediaItem.Builder(clippedMediaItem(source, 0L, 1_000_000L)).build()
-      export(context, item, followUp)
-      val probe = inspectMedia(followUp)
-      probe.videoMime == MimeTypes.VIDEO_H264 && probe.audioMime == MimeTypes.AUDIO_AAC
-    } catch (_: Throwable) {
-      false
+      val partialExistedBeforeCleanup = output.exists()
+      val partialDeleteSucceeded = !output.exists() || output.delete()
+      val partialExistsAfterCleanup = output.exists()
+      val resourceReleased = waitForMediaResourcesReleased(instrumentation, Process.myPid(), 5_000L)
+      val followUpSucceeded = try {
+        val item = EditedMediaItem.Builder(clippedMediaItem(source, 0L, 1_000_000L)).build()
+        export(context, item, followUp)
+        val probe = inspectMedia(followUp)
+        probe.videoMime == MimeTypes.VIDEO_H264 && probe.audioMime == MimeTypes.AUDIO_AAC
+      } catch (_: Throwable) {
+        false
+      } finally {
+        followUp.delete()
+      }
+      val leftovers = workDir.listFiles()
+        ?.filter { it.name.startsWith("cancel_") }
+        ?.map { it.name }
+        .orEmpty()
+      val passed = cancellationCleanupPass(
+        activeBeforeCancel = activeBeforeCancel,
+        cancelIssued = cancelIssued.get(),
+        partialOutputDeleteSucceeded = partialDeleteSucceeded,
+        partialOutputExistsAfterCleanup = partialExistsAfterCleanup,
+        resourceReleased = resourceReleased,
+        followUpSucceeded = followUpSucceeded,
+        leftoverCount = leftovers.size
+      )
+
+      return JSONObject()
+        .put("status", if (passed) "PASS" else "FAILED")
+        .put("cancelIssued", cancelIssued.get())
+        .put("cancelLatencyMs", cancelLatencyMs)
+        .put("partialOutputExistedBeforeExplicitCleanup", partialExistedBeforeCleanup)
+        .put("partialOutputDeleteSucceeded", partialDeleteSucceeded)
+        .put("partialOutputExistsAfterCleanup", partialExistsAfterCleanup)
+        .put("mediaResourceManagerReportedActiveBeforeCancel", activeBeforeCancel)
+        .put("mediaResourceManagerReportedReleasedAfterCancel", resourceReleased)
+        .put("followUpH264AacExportSucceeded", followUpSucceeded)
+        .put("leftoverProbeFiles", JSONArray(leftovers))
     } finally {
-      followUp.delete()
+      try {
+        val transformer = transformerRef.get()
+        if (transformer != null) {
+          instrumentation.runOnMainSync {
+            if (!completed.get() && failed.get() == null) {
+              transformer.cancel()
+            }
+          }
+        }
+      } finally {
+        output.delete()
+        followUp.delete()
+      }
     }
-    val leftovers = workDir.listFiles()
-      ?.filter { it.name.startsWith("cancel_") }
-      ?.map { it.name }
-      .orEmpty()
-    val passed = cancelRequestedBeforeCompletion &&
-      partialDeleteSucceeded &&
-      !output.exists() &&
-      resourceReleased &&
-      followUpSucceeded &&
-      leftovers.isEmpty()
-
-    return JSONObject()
-      .put("status", if (passed) "PASS" else "FAILED")
-      .put("cancelRequestedBeforeCompletion", cancelRequestedBeforeCompletion)
-      .put("cancelLatencyMs", cancelLatencyMs)
-      .put("partialOutputExistedBeforeExplicitCleanup", partialExistedBeforeCleanup)
-      .put("partialOutputDeleteSucceeded", partialDeleteSucceeded)
-      .put("partialOutputExistsAfterCleanup", output.exists())
-      .put("mediaResourceManagerReportedActiveBeforeCancel", activeBeforeCancel)
-      .put("mediaResourceManagerReportedReleasedAfterCancel", resourceReleased)
-      .put("followUpH264AacExportSucceeded", followUpSucceeded)
-      .put("leftoverProbeFiles", JSONArray(leftovers))
   }
 
   private fun export(context: Context, item: EditedMediaItem, output: File): ExportRun {
@@ -1013,6 +1036,22 @@ object Media3DeviceGateProbe {
 
   internal fun avEndDeltaWithinLimit(videoEndUs: Long?, audioEndUs: Long?): Boolean =
     videoEndUs != null && audioEndUs != null && abs(videoEndUs - audioEndUs) <= MAX_AV_DELTA_US
+
+  internal fun cancellationCleanupPass(
+    activeBeforeCancel: Boolean,
+    cancelIssued: Boolean,
+    partialOutputDeleteSucceeded: Boolean,
+    partialOutputExistsAfterCleanup: Boolean,
+    resourceReleased: Boolean,
+    followUpSucceeded: Boolean,
+    leftoverCount: Int
+  ): Boolean = activeBeforeCancel &&
+    cancelIssued &&
+    partialOutputDeleteSucceeded &&
+    !partialOutputExistsAfterCleanup &&
+    resourceReleased &&
+    followUpSucceeded &&
+    leftoverCount == 0
 
 
   private fun median(values: List<Double>): Double {

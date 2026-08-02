@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "task": "0.1",
-  "observedAtUtc": "2026-08-02T01:34:56.670Z",
+  "observedAtUtc": "2026-08-02T01:50:34.112Z",
   "gateStatus": "FAIL",
   "device": {
     "manufacturer": "Google",
@@ -72,8 +72,8 @@
       "videoMime": "video\/avc",
       "avEndTimeDeltaMs": 1.334,
       "outputBytes": 2388263,
-      "wallTimeMs": 3074,
-      "peakPssBytes": 238918656,
+      "wallTimeMs": 2891,
+      "peakPssBytes": 229779456,
       "durationWithin150ms": true,
       "aacPreserved": true,
       "avDeltaWithin50ms": true
@@ -112,8 +112,8 @@
     },
     "cancellation": {
       "status": "PASS",
-      "cancelRequestedBeforeCompletion": true,
-      "cancelLatencyMs": 55,
+      "cancelIssued": true,
+      "cancelLatencyMs": 182,
       "partialOutputExistedBeforeExplicitCleanup": true,
       "partialOutputDeleteSucceeded": true,
       "partialOutputExistsAfterCleanup": false,
@@ -149,8 +149,8 @@
       "status": "PASS",
       "observed": {
         "status": "PASS",
-        "cancelRequestedBeforeCompletion": true,
-        "cancelLatencyMs": 55,
+        "cancelIssued": true,
+        "cancelLatencyMs": 182,
         "partialOutputExistedBeforeExplicitCleanup": true,
         "partialOutputDeleteSucceeded": true,
         "partialOutputExistsAfterCleanup": false,
@@ -231,8 +231,8 @@
         "height": 576,
         "audioRms": 0.030536128103421854,
         "observedVolumeRmsRatio": 0.48948582103285526,
-        "medianExportRateXRealtime": 0.5816852513700262,
-        "peakPssBytes": 250387456
+        "medianExportRateXRealtime": 0.4923034886065739,
+        "peakPssBytes": 245169152
       },
       "overlayEvidence": {
         "earlyFrame": {
@@ -272,20 +272,20 @@
         {
           "run": 1,
           "status": "PASS",
-          "wallTimeMs": 4272,
-          "peakPssBytes": 221492224
+          "wallTimeMs": 5308,
+          "peakPssBytes": 217312256
         },
         {
           "run": 2,
           "status": "PASS",
-          "wallTimeMs": 4197,
-          "peakPssBytes": 250387456
+          "wallTimeMs": 4959,
+          "peakPssBytes": 245169152
         },
         {
           "run": 3,
           "status": "PASS",
-          "wallTimeMs": 4090,
-          "peakPssBytes": 219121664
+          "wallTimeMs": 4911,
+          "peakPssBytes": 217257984
         }
       ],
       "checks": {
@@ -354,8 +354,8 @@
         "height": 576,
         "audioRms": 0.03082118079759395,
         "observedVolumeRmsRatio": 0.49405513812413443,
-        "medianExportRateXRealtime": 0.6116606429522541,
-        "peakPssBytes": 288746496
+        "medianExportRateXRealtime": 0.5078174352495262,
+        "peakPssBytes": 283961344
       },
       "overlayEvidence": {
         "earlyFrame": {
@@ -395,20 +395,20 @@
         {
           "run": 1,
           "status": "PASS",
-          "wallTimeMs": 10514,
-          "peakPssBytes": 264331264
+          "wallTimeMs": 11080,
+          "peakPssBytes": 242978816
         },
         {
           "run": 2,
           "status": "PASS",
-          "wallTimeMs": 10246,
-          "peakPssBytes": 288746496
+          "wallTimeMs": 12664,
+          "peakPssBytes": 249662464
         },
         {
           "run": 3,
           "status": "PASS",
-          "wallTimeMs": 12110,
-          "peakPssBytes": 258589696
+          "wallTimeMs": 15077,
+          "peakPssBytes": 283961344
         }
       ],
       "checks": {
@@ -477,8 +477,8 @@
         "height": 864,
         "audioRms": 0.030536128103421854,
         "observedVolumeRmsRatio": 0.48948582103285526,
-        "medianExportRateXRealtime": 0.5390446014572754,
-        "peakPssBytes": 334955520
+        "medianExportRateXRealtime": 0.3629695212607791,
+        "peakPssBytes": 328849408
       },
       "overlayEvidence": {
         "earlyFrame": {
@@ -518,20 +518,20 @@
         {
           "run": 1,
           "status": "PASS",
-          "wallTimeMs": 5001,
-          "peakPssBytes": 330870784
+          "wallTimeMs": 6467,
+          "peakPssBytes": 296566784
         },
         {
           "run": 2,
           "status": "PASS",
-          "wallTimeMs": 4529,
-          "peakPssBytes": 295252992
+          "wallTimeMs": 6726,
+          "peakPssBytes": 328849408
         },
         {
           "run": 3,
           "status": "PASS",
-          "wallTimeMs": 4399,
-          "peakPssBytes": 334955520
+          "wallTimeMs": 6987,
+          "peakPssBytes": 297717760
         }
       ],
       "checks": {
@@ -600,8 +600,8 @@
         "height": 864,
         "audioRms": 0.03082118079759395,
         "observedVolumeRmsRatio": 0.49405513812413443,
-        "medianExportRateXRealtime": 0.5025789309159112,
-        "peakPssBytes": 349893632
+        "medianExportRateXRealtime": 0.4457614195605462,
+        "peakPssBytes": 349329408
       },
       "overlayEvidence": {
         "earlyFrame": {
@@ -641,20 +641,20 @@
         {
           "run": 1,
           "status": "PASS",
-          "wallTimeMs": 11426,
-          "peakPssBytes": 340642816
+          "wallTimeMs": 16310,
+          "peakPssBytes": 336687104
         },
         {
           "run": 2,
           "status": "PASS",
-          "wallTimeMs": 13240,
-          "peakPssBytes": 349893632
+          "wallTimeMs": 14427,
+          "peakPssBytes": 349329408
         },
         {
           "run": 3,
           "status": "PASS",
-          "wallTimeMs": 12796,
-          "peakPssBytes": 333849600
+          "wallTimeMs": 13788,
+          "peakPssBytes": 341175296
         }
       ],
       "checks": {
