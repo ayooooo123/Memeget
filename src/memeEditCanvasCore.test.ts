@@ -172,6 +172,30 @@ describe('transform gesture math', () => {
     const centerOutsideTop = kf({ center: { x: 0.5, y: 0.42 } });
     expect(layerHandlePoints(centerOutsideTop, 0.2, rect).rotate.y).toBeCloseTo(8);
     expect(layerHandleTouchInsideMedia(centerOutsideTop, 0.2, rect, 'rotate', { x: 22, y: 37 })).toBe(true);
+
+    const halfScaleRightInside = kf({ scale: 0.5, center: { x: 0.885, y: 0.5 } });
+    expect(layerHandlePoints(halfScaleRightInside, 0.2, rect).resize.x).toBeCloseTo(219);
+    expect(layerHandleTouchInsideMedia(halfScaleRightInside, 0.2, rect, 'resize', { x: 37, y: 22 })).toBe(false);
+
+    const doubleScaleRightInside = kf({ scale: 2, center: { x: 0.795, y: 0.5 } });
+    expect(layerHandlePoints(doubleScaleRightInside, 0.2, rect).resize.x).toBeCloseTo(219);
+    expect(layerHandleTouchInsideMedia(doubleScaleRightInside, 0.2, rect, 'resize', { x: 37, y: 22 })).toBe(false);
+
+    const doubleScaleCenterOutside = kf({ scale: 2, center: { x: 0.805, y: 0.5 } });
+    expect(layerHandlePoints(doubleScaleCenterOutside, 0.2, rect).resize.x).toBeCloseTo(221);
+    expect(layerHandleTouchInsideMedia(doubleScaleCenterOutside, 0.2, rect, 'resize', { x: 6, y: 22 })).toBe(true);
+
+    const halfScaleTopInside = kf({ scale: 0.5, center: { x: 0.5, y: 0.45 } });
+    expect(layerHandlePoints(halfScaleTopInside, 0.2, rect).rotate.y).toBeCloseTo(11);
+    expect(layerHandleTouchInsideMedia(halfScaleTopInside, 0.2, rect, 'rotate', { x: 22, y: 7 })).toBe(false);
+
+    const doubleScaleTopInside = kf({ scale: 2, center: { x: 0.5, y: 0.63 } });
+    expect(layerHandlePoints(doubleScaleTopInside, 0.2, rect).rotate.y).toBeCloseTo(11);
+    expect(layerHandleTouchInsideMedia(doubleScaleTopInside, 0.2, rect, 'rotate', { x: 22, y: 7 })).toBe(false);
+
+    const doubleScaleCenterOutsideTop = kf({ scale: 2, center: { x: 0.5, y: 0.6 } });
+    expect(layerHandlePoints(doubleScaleCenterOutsideTop, 0.2, rect).rotate.y).toBeCloseTo(8);
+    expect(layerHandleTouchInsideMedia(doubleScaleCenterOutsideTop, 0.2, rect, 'rotate', { x: 22, y: 37 })).toBe(true);
   });
 
   test('accessibility transform actions commit bounded keyframe changes', () => {
