@@ -102,16 +102,20 @@ internal class MemeTextPreviewView(context: Context) : View(context) {
     emitMetrics()
   }
 
-  private fun buildLayout(paint: TextPaint): StaticLayout = StaticLayout.Builder.obtain(textValue, 0, textValue.length, paint, widthValue)
-    .setAlignment(androidAlignment(alignValue))
-    .setLineSpacing(MemeTextLayout.lineSpacingExtra(paint, lineHeightPxValue), 1f)
+  private fun buildLayout(paint: TextPaint): StaticLayout {
+    val styledText = MemeTextLayout.withAbsoluteLineHeight(textValue, lineHeightPxValue)
+    return StaticLayout.Builder.obtain(styledText, 0, styledText.length, paint, widthValue)
+      .setAlignment(androidAlignment(alignValue))
+      .setLineSpacing(0f, 1f)
     .setIncludePad(false)
     .setBreakStrategy(Layout.BREAK_STRATEGY_HIGH_QUALITY)
     .setHyphenationFrequency(Layout.HYPHENATION_FREQUENCY_NONE)
-    .build()
+      .build()
+  }
 
   internal fun forceDiagnosticsLineSpacingExtra(lineSpacingExtraPx: Float) {
-    layout = StaticLayout.Builder.obtain(textValue, 0, textValue.length, fillPaint, widthValue)
+    val styledText = MemeTextLayout.withAbsoluteLineHeight(textValue, lineHeightPxValue)
+    layout = StaticLayout.Builder.obtain(styledText, 0, styledText.length, fillPaint, widthValue)
       .setAlignment(androidAlignment(alignValue))
       .setLineSpacing(lineSpacingExtraPx, 1f)
       .setIncludePad(false)
