@@ -16,6 +16,7 @@ import {
   normalizeMemeTextWrapWidth,
   type MemeTextPresetId,
 } from '../memeTextLayoutCore';
+import { composePendingTextLayer } from '../memeTextInspectorCore';
 import { colors, radius, space, type } from '../theme';
 import { PressableScale, Slider } from './ui';
 
@@ -211,11 +212,12 @@ export const MemeTextInspector = React.memo(function MemeTextInspector({
 
   const layerWithPendingText = useCallback((current: TextLayer): TextLayer => {
     const pending = pendingTextRef.current;
-    if (!pending || pending.layerId !== current.id) return current;
+    const next = composePendingTextLayer(current, pending);
+    if (next === current) return current;
     pendingTextRef.current = null;
     clearTimeout(textTimerRef.current ?? undefined);
     textTimerRef.current = null;
-    return current.text === pending.text ? current : { ...current, text: pending.text };
+    return next;
   }, []);
 
   useEffect(() => {
