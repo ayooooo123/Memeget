@@ -54,6 +54,8 @@ class MemeMediaProbeInstrumentedTest {
       assertEquals(37, probe.width)
       assertEquals(23, probe.height)
       assertEquals(0, probe.rotationDegrees)
+      assertFalse(probe.flipX)
+      assertFalse(probe.flipY)
       assertNull(probe.durationUs)
       assertNull(probe.frameRate)
       assertNull(probe.videoMime)
@@ -87,6 +89,8 @@ class MemeMediaProbeInstrumentedTest {
     assertEquals(1_280, probe.width)
     assertEquals(720, probe.height)
     assertEquals(0, probe.rotationDegrees)
+    assertFalse(probe.flipX)
+    assertFalse(probe.flipY)
     assertTrue(abs(checkNotNull(probe.durationUs) - 5_000_000L) <= 100_000L)
     assertTrue(abs(checkNotNull(probe.frameRate) - 30.0) <= 0.1)
     assertEquals("video/avc", probe.videoMime)
@@ -94,10 +98,69 @@ class MemeMediaProbeInstrumentedTest {
     assertTrue(probe.hasAudio)
     assertTrue(probe.seekable)
     assertEquals(video.length(), probe.byteSize)
+    val fileProbe = MemeMediaProbe.probe(context, Uri.fromFile(video).toString())
+    assertEquals(probe.width, fileProbe.width)
+    assertEquals(probe.height, fileProbe.height)
+    assertEquals(probe.durationUs, fileProbe.durationUs)
+    assertEquals(probe.videoMime, fileProbe.videoMime)
+    assertEquals(probe.audioMime, fileProbe.audioMime)
+    assertTrue(fileProbe.seekable)
+    assertNotEquals(probe.stableId, fileProbe.stableId)
     assertTrue(
       "Probe leaked descriptors: before=$descriptorCountBefore after=$descriptorCountAfter",
       descriptorCountAfter <= descriptorCountBefore + 2
     )
+  }
+
+  @Test
+  fun reportsMirroredExifOrientationsWithoutLosingFlipFacts() {
+    val expectations =
+      listOf(
+        Triple(2, Triple(0, true, false), "horizontal"),
+        Triple(4, Triple(0, false, true), "vertical"),
+        Triple(5, Triple(90, false, true), "transpose"),
+        Triple(7, Triple(90, true, false), "transverse")
+      )
+    for ((orientation, transform, label) in expectations) {
+      val image = clipboardFile("probe-orientation-$orientation.jpg")
+      context.assets.open("probe_orientation_$orientation.jpg").use { input ->
+        FileOutputStream(image).use { output -> input.copyTo(output) }
+      }
+      val probe = MemeMediaProbe.probe(context, Uri.fromFile(image).toString())
+      assertEquals(label, transform.first, probe.rotationDegrees)
+      assertEquals(label, transform.second, probe.flipX)
+      assertEquals(label, transform.third, probe.flipY)
+    }
+  }
+
+  @Test
+  fun reportsSilentVideoWithoutInventingAudio() {
+    val video = clipboardFile("probe-silent.mp4")
+    context.assets.open("synthetic_silent_1s_240p.mp4").use { input ->
+      FileOutputStream(video).use { output -> input.copyTo(output) }
+    }
+
+    val probe = MemeMediaProbe.probe(context, Uri.fromFile(video).toString())
+
+    assertEquals("video", probe.kind)
+    assertEquals(320, probe.width)
+    assertEquals(240, probe.height)
+    assertEquals("video/avc", probe.videoMime)
+    assertNull(probe.audioMime)
+    assertFalse(probe.hasAudio)
+    assertTrue(probe.seekable)
+  }
+
+  @Test
+  fun reportsStreamingProviderAsNonSeekableWithUnknownFileMetadata() {
+    val uri = "content://${context.packageName}.streamprobe/image"
+
+    val probe = MemeMediaProbe.probe(context, uri)
+
+    assertEquals("image", probe.kind)
+    assertFalse(probe.seekable)
+    assertNull(probe.byteSize)
+    assertNull(probe.modifiedTimeMs)
   }
 
   @Test
