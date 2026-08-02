@@ -142,14 +142,21 @@ class Media3DeviceGateTest {
   /**
    * Copies [file] into shared Downloads and returns its content URI.
    *
-   * The delete below only matches rows this install still owns. Gradle uninstalls and reinstalls
-   * the instrumentation APK on every connected run, which drops that owner attribution, so an
-   * artifact left by an earlier run survives the delete and MediaStore silently de-duplicates
-   * this insert into "name (1).json". A host-side pull of the exact name then returns the
-   * PREVIOUS run's bytes - which, for the gate JSON, would be committed to
-   * docs/editing/media3-1.9-device-gate.json as evidence from a run that never produced it.
-   * Read the name back and fail loudly instead. Clearing the device host-side before a run
-   * remains the documented contract; this is the backstop for forgetting.
+   * Observed and reproducible on emulator-5554: an artifact left in Downloads by an earlier run
+   * is NOT removed by the delete below, and MediaStore then de-duplicates this insert into
+   * "name (1).json". A host-side pull of the exact name returns the PREVIOUS run's bytes -
+   * which, for the gate JSON, would be committed to docs/editing/media3-1.9-device-gate.json as
+   * evidence from a run that never produced it.
+   *
+   * The cause is NOT confirmed. The obvious story - Gradle reinstalls the instrumentation APK
+   * each connected run and the row loses its owner attribution - does not survive testing: a
+   * file planted via `adb shell` was attributed to this app's own uid and the delete still did
+   * not match it. So same-package ownership is demonstrably insufficient, and the precise rule
+   * is unknown. This guard deliberately depends on none of that: it asserts only the observable
+   * outcome, that the row we inserted still carries the name we asked for.
+   *
+   * Clearing the device host-side before a run remains the documented contract; this is the
+   * backstop for forgetting.
    */
   private fun publishDownload(instrumentation: Instrumentation, file: File): Uri {
     val resolver = instrumentation.targetContext.contentResolver
