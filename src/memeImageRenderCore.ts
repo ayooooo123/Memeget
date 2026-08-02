@@ -40,6 +40,19 @@ export const MAX_IMAGE_RENDER_PIXELS = 16_000_000;
 // output cannot drift apart.
 export const MEME_MEDIA_LAYER_BASE_WIDTH = 0.28;
 
+// A pixelate cover costs one averaged cell per grid square, so cell size — not
+// region size — is what bounds the work. At pixelSize 1 a full-canvas cover
+// would ask for one cell per output pixel (16M reads plus 16M drawRects) to
+// reproduce the image it started from. Cap the cell COUNT instead and let the
+// cell edge grow with the region; MemeImageRenderer.kt clamps identically, so
+// the plan always states the cell the renderer really uses.
+export const MAX_MOSAIC_CELLS = 65_536;
+
+export function mosaicCellFloorPx(rect: ImageRenderPixelRect): number {
+  const area = Math.max(0, rect.width) * Math.max(0, rect.height);
+  return Math.max(1, Math.ceil(Math.sqrt(area / MAX_MOSAIC_CELLS)));
+}
+
 // Still images are always resolved at the head of the timeline.
 export const IMAGE_RENDER_TIME_US = 0;
 
@@ -213,13 +226,15 @@ function planOutput(
 
 function coverPlan(layer: CoverLayer, output: ImageRenderPlanOutput): ImageRenderCoverLayerPlan {
   const correction = interpolateCoverCorrections(layer.corrections, IMAGE_RENDER_TIME_US);
+  const rect = pixelRect(correction?.rect ?? layer.rect, output);
+  const requested = Math.max(1, Math.round(finite(layer.pixelSize, 1) * output.scale));
   return {
     kind: 'cover',
     id: layer.id,
-    rect: pixelRect(correction?.rect ?? layer.rect, output),
+    rect,
     mode: correction?.mode ?? layer.mode,
     color: layer.color,
-    pixelSizePx: Math.max(1, Math.round(layer.pixelSize * output.scale)),
+    pixelSizePx: Math.max(requested, mosaicCellFloorPx(rect)),
   };
 }
 
