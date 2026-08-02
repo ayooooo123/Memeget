@@ -299,6 +299,7 @@ export function MemeRemixStudio({
   }, [applyAction]);
 
   const cancel = useCallback(() => {
+    if (discarding) return;
     if (state.kind !== 'ready') {
       closedRef.current = true;
       const controller = sourceControllerRef.current;
@@ -323,10 +324,10 @@ export function MemeRemixStudio({
         setInlineError(`Could not close edit session: ${String(error)}`);
       }
     })();
-  }, [closeSessionAssets, onClose, state.kind]);
+  }, [closeSessionAssets, discarding, onClose, state.kind]);
 
   const discard = useCallback(() => {
-    if (!ready) return;
+    if (!ready || discarding) return;
     Alert.alert('Discard draft and close?', 'This removes the saved edit draft for this source. The original file is not changed.', [
       { text: 'Keep editing', style: 'cancel' },
       {
@@ -341,13 +342,14 @@ export function MemeRemixStudio({
               onClose();
             } catch (error) {
               setInlineError(`Could not discard draft: ${String(error)}`);
-            }
+            } finally {
               setDiscarding(false);
+            }
           })();
         },
       },
     ]);
-  }, [closeSessionAssets, onClose, ready]);
+  }, [closeSessionAssets, discarding, onClose, ready]);
 
   const exportProject = useCallback(() => {
     if (!project) return;
@@ -386,7 +388,7 @@ export function MemeRemixStudio({
     <Modal visible={visible} animationType="slide" statusBarTranslucent onRequestClose={cancel}>
       <KeyboardAvoidingView style={styles.root} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
         <View style={[styles.topBar, { paddingTop: insets.top + space.sm }]}> 
-          <HeaderButton label="Cancel" hint="Close and keep a recoverable draft" onPress={cancel} />
+          <HeaderButton label="Cancel" hint="Close and keep a recoverable draft" onPress={cancel} disabled={discarding} />
           <View style={styles.titleBlock}>
             <Text style={styles.title} numberOfLines={1}>{item?.name ?? 'Meme remix'}</Text>
             <Text style={styles.status} numberOfLines={1}>{headerStatus}</Text>

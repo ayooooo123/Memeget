@@ -525,6 +525,7 @@ export class MemeEditAutosaveController {
   private activeOperation: Promise<void> | null = null;
   private discarded = false;
   private pendingGeneration = 0;
+  private discardOperation: Promise<void> | null = null;
 
   constructor(
     private readonly store: MemeEditDraftStore,
@@ -564,6 +565,7 @@ export class MemeEditAutosaveController {
     this.pendingProject = null;
     const operation = this.queueTail.then(() => this.store.save(this.identity, project)).catch((error) => {
       if (this.pendingProject === null && this.pendingGeneration === capturedGeneration) {
+        this.pendingGeneration += 1;
         this.pendingProject = project;
       }
       throw error;
@@ -589,7 +591,26 @@ export class MemeEditAutosaveController {
     this.pendingProject = null;
   }
 
-  async discard(): Promise<void> {
+  isDiscarding(): boolean {
+    return this.discardOperation !== null;
+  }
+
+  discard(): Promise<void> {
+    if (this.discardOperation) return this.discardOperation;
+    const operation = this.discardUnlocked();
+    this.discardOperation = operation;
+    void operation.then(
+      () => {
+        if (this.discardOperation === operation) this.discardOperation = null;
+      },
+      () => {
+        if (this.discardOperation === operation) this.discardOperation = null;
+      }
+    );
+    return operation;
+  }
+
+  private async discardUnlocked(): Promise<void> {
     const capturedGeneration = this.pendingGeneration;
     const pendingProject = this.pendingProject;
     const hadTimer = this.timerHandle !== null;
@@ -645,6 +666,7 @@ export async function flushAutosaveBeforeSourceRelease(
   onError: (error: unknown) => void = () => {}
 ): Promise<void> {
   if (autosave) {
+    if (autosave.isDiscarding()) return;
     try {
       await autosave.flush();
     } catch (error) {

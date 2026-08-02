@@ -698,6 +698,50 @@ describe('MemeEditAutosaveController', () => {
     });
   });
 
+  test('failed in-flight flush restored pending survives a concurrent discard cleanup failure', async () => {
+    const io = new MemoryDraftIo();
+    const store = new MemeEditDraftStore(io, { now: () => 20_000 });
+    const timers = new FakeTimers();
+    const controller = new MemeEditAutosaveController(store, identity, { timers });
+    const originalWrite = io.writeText.bind(io);
+    let releaseWrite!: () => void;
+    const writeGate = new Promise<void>((resolve) => {
+      releaseWrite = resolve;
+    });
+    let notifyWrite!: () => void;
+    const writeStarted = new Promise<void>((resolve) => {
+      notifyWrite = resolve;
+    });
+    let failFirstWrite = true;
+    io.writeText = async (path, text) => {
+      if (failFirstWrite) {
+        failFirstWrite = false;
+        notifyWrite();
+        await writeGate;
+        throw new Error('flush failed');
+      }
+      await originalWrite(path, text);
+    };
+    io.remove = async (path) => {
+      throw new Error(`remove failed: ${path}`);
+    };
+
+    controller.schedule(project('A'));
+    const flushA = controller.flush();
+    await writeStarted;
+    const discard = controller.discard();
+    releaseWrite();
+
+    await expect(flushA).rejects.toThrow('flush failed');
+    await expect(discard).rejects.toThrow('remove failed');
+    await controller.flush();
+
+    await expect(store.restore(identity)).resolves.toMatchObject({
+      status: 'restored',
+      project: { background: { color: 'A' } },
+    });
+  });
+
   test('contains an onError callback that throws after a timer-started save failure', async () => {
     const io = new MemoryDraftIo();
     const store = new MemeEditDraftStore(io, { now: () => 20_000 });
@@ -822,6 +866,40 @@ describe('MemeEditAutosaveController', () => {
     timers.advanceBy(1_000);
     await controller.flush();
 
+    await expect(store.restore(identity)).resolves.toEqual({
+      status: 'rejected',
+      reason: 'missing',
+    });
+  });
+
+  test('teardown is blocked while a successful discard is still in progress', async () => {
+    const io = new MemoryDraftIo();
+    const store = new MemeEditDraftStore(io, { now: () => 20_000 });
+    const timers = new FakeTimers();
+    const controller = new MemeEditAutosaveController(store, identity, { timers });
+    let releaseRemove!: () => void;
+    const removeGate = new Promise<void>((resolve) => {
+      releaseRemove = resolve;
+    });
+    const originalRemove = io.remove.bind(io);
+    io.remove = async (path) => {
+      await removeGate;
+      await originalRemove(path);
+    };
+    const releaseSource = jest.fn(async () => {});
+    controller.schedule(project('discard-A'));
+    const discard = controller.discard();
+    await Promise.resolve();
+
+    await flushAutosaveBeforeSourceRelease(controller, releaseSource);
+
+    expect(releaseSource).not.toHaveBeenCalled();
+    releaseRemove();
+    await expect(discard).resolves.toBeUndefined();
+    timers.advanceBy(1_000);
+    await controller.flush();
+
+    expect(() => controller.schedule(project('after-discard'))).toThrow('Cannot schedule a discarded autosave controller.');
     await expect(store.restore(identity)).resolves.toEqual({
       status: 'rejected',
       reason: 'missing',
