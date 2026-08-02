@@ -20,11 +20,30 @@ export interface ExtractedAudio {
   durationSec: number;
 }
 
+export interface MediaProbeResult {
+  kind: 'image' | 'video';
+  width: number;
+  height: number;
+  rotationDegrees: 0 | 90 | 180 | 270;
+  durationUs: number | null;
+  frameRate: number | null;
+  videoMime: string | null;
+  audioMime: string | null;
+  hasAudio: boolean;
+  seekable: boolean;
+  byteSize: number | null;
+  modifiedTimeMs: number | null;
+  stableId: string;
+  displayName: string | null;
+}
+
+
 interface MemegetBgNative {
   getPower(): NativePower;
   startForeground(title: string, text: string, progress: number, total: number): void;
   stopForeground(): void;
   getModifiedTime(uri: string): number | null;
+  probeMedia(source: string): Promise<MediaProbeResult>;
   extractAudio(source: string, maxSeconds: number): Promise<ExtractedAudio | null>;
   extractVideoFrame(source: string, seconds: number): Promise<string | null>;
   extractVideoFramePlayer(source: string, seconds: number): Promise<string | null>;
@@ -91,6 +110,13 @@ export function getFileModifiedTime(uri: string): number | null {
   } catch {
     return null;
   }
+}
+
+// Probe local media in native code without copying or uploading it. A missing
+// native module is the only null case; readable source/decoder failures reject.
+export async function probeMedia(source: string): Promise<MediaProbeResult | null> {
+  if (!native) return null;
+  return native.probeMedia(source);
 }
 
 // True once the native audio decoder is built into the app — the audio
