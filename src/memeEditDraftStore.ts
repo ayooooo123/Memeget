@@ -835,6 +835,23 @@ function projectFromPreparedProbe(uri: string, name: string, probe: MediaProbeRe
 }
 
 const SESSION_SOURCE_OWNERS = new Map<string, symbol>();
+const SOURCE_SESSION_MUTATION_TAILS = new Map<string, Promise<void>>();
+
+function serializeSourceSessionMutation<T>(destination: string, mutation: () => Promise<T>): Promise<T> {
+  const previous = SOURCE_SESSION_MUTATION_TAILS.get(destination) ?? Promise.resolve();
+  const operation = previous.then(mutation);
+  const recoveredTail = operation.then(
+    () => undefined,
+    () => undefined
+  );
+  SOURCE_SESSION_MUTATION_TAILS.set(destination, recoveredTail);
+  void recoveredTail.then(() => {
+    if (SOURCE_SESSION_MUTATION_TAILS.get(destination) === recoveredTail) {
+      SOURCE_SESSION_MUTATION_TAILS.delete(destination);
+    }
+  });
+  return operation;
+}
 
 export class MemeEditSourceSessionController {
   private preparation: Promise<PreparedMemeEditSourceSession> | null = null;
@@ -886,26 +903,38 @@ export class MemeEditSourceSessionController {
     const location = this.destinationForSeed();
     this.destination = location.destination;
     this.owned = !location.isFile;
-    if (!location.isFile) {
-      SESSION_SOURCE_OWNERS.set(location.destination, this.ownerToken);
-      await this.io.remove(location.destination);
-      await this.io.materialize(this.seed.uri, location.destination);
-      if (this.closed) {
-        if (SESSION_SOURCE_OWNERS.get(location.destination) === this.ownerToken) {
-          await this.io.remove(location.destination).catch(() => {});
-          SESSION_SOURCE_OWNERS.delete(location.destination);
-        }
-        throw new Error('Source session preparation was cancelled.');
-      }
-    }
-    const probe = await this.io.probe(location.destination);
-    if (this.closed) {
-      if (!location.isFile && SESSION_SOURCE_OWNERS.get(location.destination) === this.ownerToken) {
-        await this.io.remove(location.destination).catch(() => {});
-        SESSION_SOURCE_OWNERS.delete(location.destination);
-      }
-      throw new Error('Source session preparation was cancelled.');
-    }
+    const probe = location.isFile
+      ? await this.io.probe(location.destination)
+      : await serializeSourceSessionMutation(location.destination, async () => {
+          SESSION_SOURCE_OWNERS.set(location.destination, this.ownerToken);
+          try {
+            await this.io.remove(location.destination);
+            await this.io.materialize(this.seed.uri, location.destination);
+            if (this.closed) {
+              if (SESSION_SOURCE_OWNERS.get(location.destination) === this.ownerToken) {
+                await this.io.remove(location.destination).catch(() => {});
+                SESSION_SOURCE_OWNERS.delete(location.destination);
+              }
+              throw new Error('Source session preparation was cancelled.');
+            }
+            const preparedProbe = await this.io.probe(location.destination);
+            if (this.closed) {
+              if (SESSION_SOURCE_OWNERS.get(location.destination) === this.ownerToken) {
+                await this.io.remove(location.destination).catch(() => {});
+                SESSION_SOURCE_OWNERS.delete(location.destination);
+              }
+              throw new Error('Source session preparation was cancelled.');
+            }
+            return preparedProbe;
+          } catch (error) {
+            if (SESSION_SOURCE_OWNERS.get(location.destination) === this.ownerToken) {
+              await this.io.remove(location.destination).catch(() => {});
+              SESSION_SOURCE_OWNERS.delete(location.destination);
+            }
+            throw error;
+          }
+        });
+    if (this.closed) throw new Error('Source session preparation was cancelled.');
     if (probe === null) throw new Error('Media probe is unavailable for this source.');
     const displayName = probe.displayName || this.seed.name;
     const project = projectFromPreparedProbe(this.seed.uri, displayName, probe);
@@ -938,9 +967,13 @@ export class MemeEditSourceSessionController {
     if (this.released) return;
     const prepared = this.preparation ? await this.preparation.catch(() => null) : null;
     const destination = this.destination ?? prepared?.materializedSourceUri ?? null;
-    if (this.owned && destination && SESSION_SOURCE_OWNERS.get(destination) === this.ownerToken) {
-      await this.io.remove(destination);
-      SESSION_SOURCE_OWNERS.delete(destination);
+    if (this.owned && destination) {
+      await serializeSourceSessionMutation(destination, async () => {
+        if (SESSION_SOURCE_OWNERS.get(destination) === this.ownerToken) {
+          await this.io.remove(destination);
+          SESSION_SOURCE_OWNERS.delete(destination);
+        }
+      });
     }
     this.released = true;
   }
