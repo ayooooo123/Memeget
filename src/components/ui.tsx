@@ -157,16 +157,19 @@ export function ProgressBar({ value, tint = colors.volt }: { value: number; tint
 export function Slider({
   value,
   onChange,
+  onComplete,
   tint = colors.volt,
 }: {
   value: number;
-  onChange: (v: number) => void;
+  onChange: (value: number) => void;
+  onComplete?: (value: number) => void;
   tint?: string;
 }) {
   const widthRef = useRef(0);
   const onChangeRef = useRef(onChange);
+  const onCompleteRef = useRef(onComplete);
   onChangeRef.current = onChange;
-
+  onCompleteRef.current = onComplete;
   const setFromX = (x: number) => {
     const w = widthRef.current;
     if (!w) return;
@@ -182,6 +185,11 @@ export function Slider({
       onMoveShouldSetPanResponder: () => true,
       onPanResponderGrant: (e) => setFromX(e.nativeEvent.locationX),
       onPanResponderMove: (e) => setFromX(e.nativeEvent.locationX),
+      onPanResponderRelease: (e) => {
+        const next = Math.max(0, Math.min(1, e.nativeEvent.locationX / Math.max(1, widthRef.current)));
+        setFromX(e.nativeEvent.locationX);
+        onCompleteRef.current?.(next);
+      },
     })
   );
 
@@ -193,6 +201,15 @@ export function Slider({
         widthRef.current = e.nativeEvent.layout.width;
       }}
       {...pan.panHandlers}
+      accessibilityRole="adjustable"
+      accessibilityValue={{ min: 0, max: 100, now: Math.round(Math.max(0, Math.min(1, value)) * 100) }}
+      accessibilityActions={[{ name: 'increment', label: 'Increase' }, { name: 'decrement', label: 'Decrease' }]}
+      onAccessibilityAction={(event) => {
+        const delta = event.nativeEvent.actionName === 'decrement' ? -0.05 : 0.05;
+        const next = Math.max(0, Math.min(1, value + delta));
+        onChangeRef.current(next);
+        onCompleteRef.current?.(next);
+      }}
     >
       <View style={styles.sliderTrack}>
         <View style={[styles.sliderFill, { width: pct, backgroundColor: tint }]} />

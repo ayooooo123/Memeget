@@ -38,7 +38,7 @@ import {
   type TextLayer,
   type TransformKeyframe,
 } from '../memeEditProjectCore';
-import { buildMemeTextLayoutSpec, memeTextBackingRadiusForPreview, type MemeTextLayoutSpec } from '../memeTextLayoutCore';
+import { buildMemeTextLayoutSpec, compareNativeMemeTextLayoutToSpec, memeTextBackingRadiusForPreview, nativeMemeTextLayoutInputFromSpec, type MemeTextLayoutSpec } from '../memeTextLayoutCore';
 import { colors, radius, space, type } from '../theme';
 import { useConst } from '../reactUtils';
 
@@ -86,7 +86,7 @@ function layerCenterPoint(keyframe: TransformKeyframe, mediaRect: ViewRect): Vie
 
 function keyframeLayerBox(keyframe: TransformKeyframe, layerWidth: number, mediaRect: ViewRect): ViewRect {
   const center = layerCenterPoint(keyframe, mediaRect);
-  const width = Math.max(44, mediaRect.width * Math.max(0.04, layerWidth) * keyframe.scale);
+  const width = Math.max(44, mediaRect.width * Math.max(0.04, layerWidth));
   const height = Math.max(44, width * DEFAULT_LAYER_ASPECT);
   return { x: center.x - width / 2, y: center.y - height / 2, width, height };
 }
@@ -296,7 +296,7 @@ const TransformableLayerView = React.memo(function TransformableLayerView({
           transform: [
             { translateX: translate.x },
             { translateY: translate.y },
-            { scale: scalePreview },
+            { scale: Animated.multiply(scalePreview, keyframe.scale) },
             { rotate: rotation },
           ],
         },
@@ -383,21 +383,12 @@ const TextLayerContent = React.memo(function TextLayerContent({ spec }: { spec: 
 
   useEffect(() => {
     let cancelled = false;
-    measureMemeTextLayout({
-      text: spec.displayText,
-      fontFamily: spec.font.family,
-      fontWeight: Number(spec.font.weight),
-      fontSizePx: spec.canvas.fontSizePx,
-      letterSpacingEm: spec.font.letterSpacingEm,
-      widthPx: spec.canvas.wrapWidthPx,
-      align: spec.align,
-    }).then((nativeLayout) => {
+    measureMemeTextLayout(nativeMemeTextLayoutInputFromSpec(spec)).then((nativeLayout) => {
       if (cancelled || !nativeLayout) return;
-      const lineCountMatches = nativeLayout.lines.length === spec.layout.lines.length;
-      const baselineDrift = Math.max(0, ...nativeLayout.lines.map((line, index) => Math.abs(line.baselinePx - (spec.layout.lines[index]?.baselinePx ?? line.baselinePx))));
-      setDiagnostic(lineCountMatches && baselineDrift <= spec.diagnostics.androidStaticLayoutTolerancePx
+      const comparison = compareNativeMemeTextLayoutToSpec(spec, nativeLayout);
+      setDiagnostic(comparison.ok
         ? null
-        : `Text metrics drift: ${nativeLayout.lines.length}/${spec.layout.lines.length} lines, ${baselineDrift.toFixed(1)}px baseline`);
+        : `Text metrics drift: ${comparison.lineCountDrift} lines, ${comparison.maxBaselineDriftPx.toFixed(1)}px baseline`);
     }).catch(() => {
       if (!cancelled) setDiagnostic(null);
     });
