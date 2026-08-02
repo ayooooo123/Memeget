@@ -603,7 +603,19 @@ function preparationLocation(
   const isFile = source.uri.startsWith('file://');
   if (isFile) {
     return {
-      key: `unowned:${identityToken(source.uri)}`,
+      key: `unowned:${identityToken(
+        JSON.stringify({
+          stableId: source.stableId,
+          uri: source.uri,
+          name: source.name,
+          kind: source.kind,
+          width: source.width,
+          height: source.height,
+          durationUs: source.durationUs,
+          byteSize: source.byteSize,
+          modifiedTimeMs: source.modifiedTimeMs,
+        })
+      )}`,
       destination: source.uri,
       isFile: true,
     };
