@@ -24,6 +24,7 @@ import {
   MemeEditAutosaveController,
   MemeEditDraftStore,
   MemeEditSourcePreparationController,
+  MemeEditSourceSessionController,
   createExpoMemeEditDraftIo,
   draftStoragePaths,
   type MemeEditDraftIdentity,
@@ -966,6 +967,69 @@ describe('MemeEditSourcePreparationController', () => {
     expect(after.probe?.stableId).toBe('probe-after');
     await firstController.discard();
     await changedController.discard();
+  });
+
+  test('session controller materializes then probes once and lets probed kind win over indexed gif kind', async () => {
+    const io: MemeEditSourcePreparationIo = {
+      cacheDirectory: 'file:///cache/',
+      materialize: jest.fn(async () => {}),
+      remove: jest.fn(async () => {}),
+      probe: jest.fn(async () => ({ ...probeResult, kind: 'video' as const, displayName: 'funny.gif' })),
+    };
+    const controller = new MemeEditSourceSessionController(io, {
+      sessionId: 'meme-remix/99',
+      uri: 'content://provider/funny.gif',
+      name: 'funny.gif',
+      indexedKind: 'image',
+      modifiedTimeMs: 10_000,
+    });
+
+    const prepared = await controller.prepare();
+
+    expect(io.materialize).toHaveBeenCalledTimes(1);
+    const destination = (io.materialize as jest.Mock).mock.calls[0][1] as string;
+    expect(io.probe).toHaveBeenCalledTimes(1);
+    expect(io.probe).toHaveBeenCalledWith(destination);
+    expect(prepared.project.source.kind).toBe('video');
+    expect(prepared.identity.source.kind).toBe('video');
+    expect(prepared.project.transient.materializedSourceUri).toBe(destination);
+    await controller.cancel();
+    expect(io.remove).toHaveBeenLastCalledWith(destination);
+  });
+
+  test('session controller releases owned materialization after in-flight cancel without creating draft state', async () => {
+    let releaseCopy!: () => void;
+    const copyGate = new Promise<void>((resolve) => {
+      releaseCopy = resolve;
+    });
+    const events: string[] = [];
+    const io: MemeEditSourcePreparationIo = {
+      cacheDirectory: 'file:///cache/',
+      async materialize(_source, destination) {
+        events.push(`materialize:${destination}`);
+        await copyGate;
+      },
+      async remove(path) {
+        events.push(`remove:${path}`);
+      },
+      probe: jest.fn(async () => probeResult),
+    };
+    const controller = new MemeEditSourceSessionController(io, {
+      sessionId: 'meme-remix/cancel',
+      uri: 'content://provider/source.mp4',
+      name: 'source.mp4',
+      indexedKind: 'video',
+      modifiedTimeMs: null,
+    });
+
+    const preparing = controller.prepare();
+    const cancelling = controller.cancel();
+    releaseCopy();
+
+    await expect(preparing).rejects.toThrow(/cancelled/i);
+    await cancelling;
+    expect(io.probe).not.toHaveBeenCalled();
+    expect(events.some((event) => event.startsWith('remove:file:///cache/'))).toBe(true);
   });
 });
 

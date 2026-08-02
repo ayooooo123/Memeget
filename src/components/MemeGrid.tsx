@@ -275,7 +275,6 @@ export const MemeGrid = React.memo(function MemeGrid({
 }) {
   const [selected, setSelected] = useState<Item | null>(null);
   const [studioOpen, setStudioOpen] = useState(false);
-  const [studioExportError, setStudioExportError] = useState('');
   // Multi-select: long-press a cell to enter selection mode, tap to toggle, then
   // apply a bulk action (tag / delete) to the whole set. Kept in the grid (not
   // lifted to the screen) so the bar and cell overlays live next to the list.
@@ -680,14 +679,7 @@ export const MemeGrid = React.memo(function MemeGrid({
     if (!selected || busy) return;
     noteInteractive();
     if (selected.kind === 'video') noteCodecInteractive();
-    setStudioExportError('');
     setStudioOpen(true);
-  };
-
-  const exportStudioProject = async () => {
-    const message = 'Structured project export is not implemented in this branch yet. No file was rendered.';
-    setStudioExportError(message);
-    throw new Error(message);
   };
 
   const onCopy = async () => {
@@ -1207,9 +1199,7 @@ export const MemeGrid = React.memo(function MemeGrid({
         item={selected}
         visible={studioOpen && !!selected}
         exportBusy={busy}
-        exportError={studioExportError}
         onClose={() => setStudioOpen(false)}
-        onExport={exportStudioProject}
       />
 
       <Modal
