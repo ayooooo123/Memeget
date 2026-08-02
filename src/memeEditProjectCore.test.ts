@@ -276,6 +276,15 @@ describe('retained ranges and timeline mapping', () => {
     expect(sourceTimeToOutputTimeUs(6 * SECOND_US, ranges, 2)).toBe(2 * SECOND_US);
     expect(outputTimeToSourceTimeUs(2 * SECOND_US, ranges, 2)).toBe(6 * SECOND_US);
   });
+  test('maps a rounded output seam exactly to the next retained range start', () => {
+    const ranges = [
+      { startUs: 0, endUs: 1 },
+      { startUs: 10, endUs: 12 },
+    ];
+
+    expect(outputTimeToSourceTimeUs(1, ranges, 2)).toBe(10);
+  });
+
 
 
   test('uses deterministic integer microseconds at 0.5x speed', () => {
@@ -323,6 +332,43 @@ describe('layer behavior', () => {
       expect(duplicatedOriginal.keyframes).not.toBe(duplicatedCopy.keyframes);
     }
   });
+  test('ignores non-finite add and move indices instead of relying on splice coercion', () => {
+    const initial = createDefaultImageProject(imageSource);
+    expect(
+      reduceMemeEditProject(initial, {
+        type: 'add-layer',
+        layer: textLayer('invalid-index'),
+        index: Number.NaN,
+      })
+    ).toBe(initial);
+    expect(
+      reduceMemeEditProject(initial, {
+        type: 'add-layer',
+        layer: textLayer('invalid-index'),
+        index: Number.POSITIVE_INFINITY,
+      })
+    ).toBe(initial);
+
+    const withLayer = reduceMemeEditProject(initial, {
+      type: 'add-layer',
+      layer: textLayer('move-me'),
+    });
+    expect(
+      reduceMemeEditProject(withLayer, {
+        type: 'move-layer',
+        id: 'move-me',
+        toIndex: Number.NaN,
+      })
+    ).toBe(withLayer);
+    expect(
+      reduceMemeEditProject(withLayer, {
+        type: 'move-layer',
+        id: 'move-me',
+        toIndex: Number.NEGATIVE_INFINITY,
+      })
+    ).toBe(withLayer);
+  });
+
 
   test('checks held active ranges inclusively and treats untimed layers as active', () => {
     const timed = textLayer('timed', { startUs: SECOND_US, endUs: 2 * SECOND_US });
@@ -380,6 +426,13 @@ describe('layer behavior', () => {
       opacity: 1,
     });
   });
+  test('rejects non-finite and fractional transform interpolation timestamps', () => {
+    const frames = [keyframe(0), keyframe(SECOND_US)];
+    expect(interpolateTransformKeyframes(frames, Number.NaN)).toBeNull();
+    expect(interpolateTransformKeyframes(frames, Number.POSITIVE_INFINITY)).toBeNull();
+    expect(interpolateTransformKeyframes(frames, 0.5)).toBeNull();
+  });
+
 
   test('holds the left keyframe until the exact next sparse correction', () => {
     const frames = [
@@ -1130,6 +1183,48 @@ describe('bounded project history', () => {
     expect(history.present).toBe(initial);
     expect(history.past).toEqual([]);
     expect(history.future).toEqual([]);
+  });
+
+  test('commits net-zero transactions without adding undo or clearing redo', () => {
+    const initial = createDefaultImageProject(imageSource);
+    let emptyHistory = beginProjectTransaction(createProjectHistory(initial));
+    emptyHistory = applyProjectAction(emptyHistory, {
+      type: 'set-background',
+      background: { ...initial.background, color: '#ffffff' },
+    });
+    emptyHistory = applyProjectAction(emptyHistory, {
+      type: 'set-background',
+      background: { ...initial.background },
+    });
+    emptyHistory = commitProjectTransaction(emptyHistory);
+    expect(emptyHistory.present).toBe(initial);
+    expect(emptyHistory.past).toEqual([]);
+
+    let history = createProjectHistory(initial);
+    history = applyProjectAction(history, {
+      type: 'set-background',
+      background: { ...initial.background, color: '#111111' },
+    });
+    history = applyProjectAction(history, {
+      type: 'set-background',
+      background: { ...initial.background, color: '#222222' },
+    });
+    history = undoProjectHistory(history);
+    const beforeTransaction = history;
+    history = beginProjectTransaction(history);
+    history = applyProjectAction(history, {
+      type: 'set-background',
+      background: { ...initial.background, color: '#temporary' },
+    });
+    history = applyProjectAction(history, {
+      type: 'set-background',
+      background: { ...initial.background, color: '#111111' },
+    });
+    history = commitProjectTransaction(history);
+
+    expect(history.present).toBe(beforeTransaction.present);
+    expect(history.past).toEqual(beforeTransaction.past);
+    expect(history.future).toEqual(beforeTransaction.future);
   });
 
   test('caps undo history at 30 states', () => {
