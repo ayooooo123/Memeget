@@ -203,8 +203,13 @@ class VideoSegmentationDeviceGateTest {
     )?.use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else null }
     assertEquals(
       "MediaStore de-duplicated Downloads/$name, so a stale artifact from an earlier " +
-        "install is still on the device and this run's bytes were written elsewhere. " +
-        "Clear it first: adb shell rm -f \"/sdcard/Download/video-segmentation-*\"",
+        "run is still on the device and this run's bytes were written elsewhere. " +
+        "Publishing is partial and the device is left dirty: Downloads already holds " +
+        "this run's gate JSON, which is fresh and references all 33 artifacts, plus " +
+        "only the artifacts published before this one, mixed with stale leftovers. " +
+        "Pulling that set yields a current-looking JSON backed by incomplete and " +
+        "possibly stale evidence. Do not salvage it. Clear the device and rerun: " +
+        "adb shell rm -f \"/sdcard/Download/video-segmentation-*\"",
       name,
       publishedName
     )
