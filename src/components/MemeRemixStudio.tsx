@@ -239,6 +239,7 @@ export function MemeRemixStudio({
 
     return () => {
       cancelled = true;
+      closedRef.current = true;
       void closeSessionAssets().catch(() => {});
     };
   }, [closeSessionAssets, draftStore, item, retryNonce, sourceIo, visible]);
