@@ -69,8 +69,8 @@ const TRANSFORM_HANDLE_SIZE = 44;
 const TRANSFORM_HANDLE_HALF = TRANSFORM_HANDLE_SIZE / 2;
 const ROTATE_HANDLE_TOP = -44;
 
-function layerViewSize(layerWidth: number, mediaRect: ViewRect): { width: number; height: number } {
-  const width = Math.max(TRANSFORM_HANDLE_SIZE, mediaRect.width * Math.max(0.04, layerWidth));
+function layerRenderedSize(layerWidth: number, mediaRect: ViewRect, scale: number): { width: number; height: number } {
+  const width = Math.max(TRANSFORM_HANDLE_SIZE, mediaRect.width * Math.max(0.04, layerWidth) * clampScale(scale));
   return { width, height: width };
 }
 const EPSILON = 1e-6;
@@ -227,9 +227,9 @@ export function layerHandlePoints(
   mediaRect: ViewRect
 ): LayerHandlePoints {
   const center = normalizedPointToViewPoint(keyframe.center, mediaRect);
-  const size = layerViewSize(layerWidth, mediaRect);
-  const width = size.width * clampScale(keyframe.scale);
-  const height = size.height * clampScale(keyframe.scale);
+  const size = layerRenderedSize(layerWidth, mediaRect, keyframe.scale);
+  const width = size.width;
+  const height = size.height;
   const radians = keyframe.rotationDegrees * Math.PI / 180;
   const cos = Math.cos(radians);
   const sin = Math.sin(radians);
@@ -251,11 +251,11 @@ export function layerLocalPointToCanvasPoint(
   localPoint: ViewPoint
 ): ViewPoint {
   const center = normalizedPointToViewPoint(keyframe.center, mediaRect);
-  const size = layerViewSize(layerWidth, mediaRect);
-  const width = size.width * clampScale(keyframe.scale);
-  const height = size.height * clampScale(keyframe.scale);
-  const x = localPoint.x * clampScale(keyframe.scale) - width / 2;
-  const y = localPoint.y * clampScale(keyframe.scale) - height / 2;
+  const size = layerRenderedSize(layerWidth, mediaRect, keyframe.scale);
+  const width = size.width;
+  const height = size.height;
+  const x = localPoint.x - width / 2;
+  const y = localPoint.y - height / 2;
   const radians = keyframe.rotationDegrees * Math.PI / 180;
   const cos = Math.cos(radians);
   const sin = Math.sin(radians);
@@ -272,7 +272,7 @@ export function layerHandleTouchInsideMedia(
   handle: LayerHandleTouchKind,
   handleLocalPoint: ViewPoint
 ): boolean {
-  const size = layerViewSize(layerWidth, mediaRect);
+  const size = layerRenderedSize(layerWidth, mediaRect, keyframe.scale);
   const localPoint = handle === 'resize'
     ? { x: size.width - TRANSFORM_HANDLE_HALF + handleLocalPoint.x, y: size.height - TRANSFORM_HANDLE_HALF + handleLocalPoint.y }
     : { x: size.width / 2 - TRANSFORM_HANDLE_HALF + handleLocalPoint.x, y: ROTATE_HANDLE_TOP + handleLocalPoint.y };
