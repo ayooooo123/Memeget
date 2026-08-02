@@ -62,7 +62,7 @@ object Media3DeviceGateProbe {
   private const val EXPORT_RUNS = 3
   private const val SPEED = 1.25f
   private const val GAIN = 0.5f
-  private const val MAX_AV_DELTA_MS = 50L
+  private const val MAX_AV_DELTA_US = 50_000L
   private const val DURATION_TOLERANCE_US = 150_000L
   private const val CROP_SCALE = 0.8f
 
@@ -90,9 +90,9 @@ object Media3DeviceGateProbe {
     val height: Int?
   ) {
     val hasAudio: Boolean get() = audioMime != null
-    val avEndDeltaMs: Long?
+    val avEndDeltaUs: Long?
       get() = if (videoEndTimeUs != null && audioEndTimeUs != null) {
-        abs(videoEndTimeUs - audioEndTimeUs) / 1_000L
+        abs(videoEndTimeUs - audioEndTimeUs)
       } else {
         null
       }
@@ -243,8 +243,8 @@ object Media3DeviceGateProbe {
       val probe = inspectMedia(output)
       val durationPass = abs(probe.durationUs - 4_000_000L) <= DURATION_TOLERANCE_US
       val audioPass = probe.audioMime == MimeTypes.AUDIO_AAC
-      val avDeltaMs = probe.avEndDeltaMs
-      val driftPass = avDeltaMs != null && avDeltaMs <= MAX_AV_DELTA_MS
+      val avDeltaUs = probe.avEndDeltaUs
+      val driftPass = avDeltaUs != null && avDeltaUs <= MAX_AV_DELTA_US
       JSONObject()
         .put("status", if (durationPass && audioPass && driftPass) "PASS" else "FAILED")
         .put("sourceStartMs", 500)
@@ -253,7 +253,7 @@ object Media3DeviceGateProbe {
         .put("observedOutputDurationMs", microsToMillis(probe.durationUs))
         .put("audioMime", probe.audioMime ?: JSONObject.NULL)
         .put("videoMime", probe.videoMime ?: JSONObject.NULL)
-        .put("avEndTimeDeltaMs", avDeltaMs ?: JSONObject.NULL)
+        .put("avEndTimeDeltaMs", avDeltaUs?.let(::microsToMillisExact) ?: JSONObject.NULL)
         .put("outputBytes", probe.bytes)
         .put("wallTimeMs", run.elapsedMs)
         .put("peakPssBytes", run.peakPssBytes)
@@ -332,15 +332,22 @@ object Media3DeviceGateProbe {
       val expectedHeight = (spec.height * CROP_SCALE).roundToInt()
       val rates = successfulRuns.map { exported.durationUs / 1_000.0 / max(1L, it.elapsedMs) }
       val medianRate = median(rates)
-      val exportedAvDeltaMs = exported.avEndDeltaMs
+      val exportedAvDeltaUs = exported.avEndDeltaUs
+      val trackEndpointsPass = trackEndpointsWithinTolerance(
+        expectedEndUs = expectedOutputDurationUs,
+        videoPresent = exported.videoMime != null,
+        videoEndUs = exported.videoEndTimeUs,
+        audioPresent = exported.audioMime != null,
+        audioEndUs = exported.audioEndTimeUs
+      )
 
       val checks = JSONObject()
-        .put("twoRetainedRanges", abs(exported.durationUs - expectedOutputDurationUs) <= DURATION_TOLERANCE_US)
+        .put("twoRetainedRanges", trackEndpointsPass)
         .put("h264Output", exported.videoMime == MimeTypes.VIDEO_H264)
         .put("aacPreserved", exported.audioMime == MimeTypes.AUDIO_AAC)
-        .put("avDeltaWithin50ms", exportedAvDeltaMs != null && exportedAvDeltaMs <= MAX_AV_DELTA_MS)
+        .put("avDeltaWithin50ms", exportedAvDeltaUs != null && avEndDeltaWithinLimit(exported.videoEndTimeUs, exported.audioEndTimeUs))
         .put("volumeApplied", volumeRatio != null && volumeRatio in 0.40..0.60)
-        .put("speedApplied", abs(exported.durationUs - expectedOutputDurationUs) <= DURATION_TOLERANCE_US)
+        .put("speedApplied", trackEndpointsPass)
         .put("staticOverlayObserved", earlyColors.getBoolean("staticMagentaObserved") && lateColors.getBoolean("staticMagentaObserved"))
         .put("timestampOverlayObserved", earlyColors.getBoolean("dynamicCyanObserved") && lateColors.getBoolean("dynamicYellowObserved"))
         .put("cropObserved", exported.width == expectedWidth && exported.height == expectedHeight)
@@ -689,7 +696,7 @@ object Media3DeviceGateProbe {
     .put("durationMs", microsToMillis(probe.durationUs))
     .put("videoEndTimeMs", probe.videoEndTimeUs?.let(::microsToMillis) ?: JSONObject.NULL)
     .put("audioEndTimeMs", probe.audioEndTimeUs?.let(::microsToMillis) ?: JSONObject.NULL)
-    .put("avEndTimeDeltaMs", probe.avEndDeltaMs ?: JSONObject.NULL)
+    .put("avEndTimeDeltaMs", probe.avEndDeltaUs?.let(::microsToMillisExact) ?: JSONObject.NULL)
     .put("videoFormatDurationMs", probe.videoFormatDurationUs?.let(::microsToMillis) ?: JSONObject.NULL)
     .put("audioFormatDurationMs", probe.audioFormatDurationUs?.let(::microsToMillis) ?: JSONObject.NULL)
     .put("bytes", probe.bytes)
@@ -844,11 +851,11 @@ object Media3DeviceGateProbe {
 
     return JSONObject()
       .put("trim", trim)
-      .put("twoRetainedRanges", outcome(allFixtureChecks("twoRetainedRanges"), "two clipped EditedMediaItems concatenated for every fixture"))
+      .put("twoRetainedRanges", outcome(allFixtureChecks("twoRetainedRanges"), "two clipped EditedMediaItems concatenated and every present track end is within 150 ms of expected for every fixture"))
       .put("h264Output", outcome(allFixtureChecks("h264Output"), "MediaExtractor output MIME is video/avc for every fixture"))
       .put("aacPreservation", outcome(allFixtureChecks("aacPreserved"), "MediaExtractor output MIME is audio/mp4a-latm for every unmuted fixture"))
       .put("volume", outcome(allFixtureChecks("volumeApplied"), "decoded output/input PCM RMS ratio is between 0.40 and 0.60 for requested gain 0.50"))
-      .put("speed", outcome(allFixtureChecks("speedApplied"), "measured output duration matches retained duration divided by 1.25 within 150 ms"))
+      .put("speed", outcome(allFixtureChecks("speedApplied"), "every present track end matches retained duration divided by 1.25 within 150 ms"))
       .put("staticOverlay", outcome(allFixtureChecks("staticOverlayObserved"), "magenta static strip sampled in early and late decoded frames"))
       .put("timestampAwareOverlay", outcome(allFixtureChecks("timestampOverlayObserved"), "right strip changes from cyan to yellow across decoded output timestamps"))
       .put("crop", outcome(allFixtureChecks("cropObserved"), "MediaExtractor output dimensions equal the requested 0.8 NDC crop"))
@@ -869,12 +876,14 @@ object Media3DeviceGateProbe {
     val audioPass = fixtures.size == 4 && fixtures.all {
       it.optJSONObject("checks")?.optBoolean("aacPreserved", false) == true
     }
-    val deltas = fixtures.mapNotNull {
+    val deltasMs = fixtures.mapNotNull {
       it.optJSONObject("output")?.let { output ->
-        if (output.isNull("avEndTimeDeltaMs")) null else output.optLong("avEndTimeDeltaMs")
+        if (output.isNull("avEndTimeDeltaMs")) null else output.optDouble("avEndTimeDeltaMs")
       }
     }
-    val driftPass = deltas.size == 4 && deltas.all { it <= MAX_AV_DELTA_MS }
+    val driftPass = fixtures.size == 4 && fixtures.all {
+      it.optJSONObject("checks")?.optBoolean("avDeltaWithin50ms", false) == true
+    }
     val no1080Crash = fixtures.filter { it.optString("id").contains("1080p") }
       .let { selected ->
         selected.size == 2 && selected.all { fixture ->
@@ -917,7 +926,7 @@ object Media3DeviceGateProbe {
       )
       .put(
         "avDrift",
-        criterion("Every output A/V end-time delta must be <= 50 ms", driftPass, JSONArray(deltas))
+        criterion("Every output A/V end-time delta must be <= 50 ms", driftPass, JSONArray(deltasMs))
       )
       .put(
         "cancellationCleanup",
@@ -988,6 +997,23 @@ object Media3DeviceGateProbe {
     }
     return digest.digest().joinToString("") { "%02x".format(it) }
   }
+  internal fun trackEndpointsWithinTolerance(
+    expectedEndUs: Long,
+    videoPresent: Boolean,
+    videoEndUs: Long?,
+    audioPresent: Boolean,
+    audioEndUs: Long?
+  ): Boolean {
+    val videoPass = !videoPresent ||
+      (videoEndUs != null && abs(videoEndUs - expectedEndUs) <= DURATION_TOLERANCE_US)
+    val audioPass = !audioPresent ||
+      (audioEndUs != null && abs(audioEndUs - expectedEndUs) <= DURATION_TOLERANCE_US)
+    return videoPass && audioPass
+  }
+
+  internal fun avEndDeltaWithinLimit(videoEndUs: Long?, audioEndUs: Long?): Boolean =
+    videoEndUs != null && audioEndUs != null && abs(videoEndUs - audioEndUs) <= MAX_AV_DELTA_US
+
 
   private fun median(values: List<Double>): Double {
     check(values.isNotEmpty())
@@ -1004,6 +1030,7 @@ object Media3DeviceGateProbe {
 
 
   private fun microsToMillis(value: Long): Long = value / 1_000L
+  private fun microsToMillisExact(value: Long): Double = value / 1_000.0
 
   private fun utcNow(): String = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US).run {
     timeZone = TimeZone.getTimeZone("UTC")
