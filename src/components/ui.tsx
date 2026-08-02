@@ -158,11 +158,15 @@ export function Slider({
   value,
   onChange,
   onComplete,
+  accessibilityLabel,
+  accessibilityDisabled,
   tint = colors.volt,
 }: {
   value: number;
   onChange: (value: number) => void;
   onComplete?: (value: number) => void;
+  accessibilityLabel?: string;
+  accessibilityDisabled?: boolean;
   tint?: string;
 }) {
   const widthRef = useRef(0);
@@ -201,6 +205,8 @@ export function Slider({
         widthRef.current = e.nativeEvent.layout.width;
       }}
       {...pan.panHandlers}
+      accessibilityLabel={accessibilityLabel}
+      accessibilityState={{ disabled: !!accessibilityDisabled }}
       accessibilityRole="adjustable"
       accessibilityValue={{ min: 0, max: 100, now: Math.round(Math.max(0, Math.min(1, value)) * 100) }}
       accessibilityActions={[{ name: 'increment', label: 'Increase' }, { name: 'decrement', label: 'Decrease' }]}

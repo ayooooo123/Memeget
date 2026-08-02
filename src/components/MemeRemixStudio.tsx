@@ -29,6 +29,8 @@ import {
 } from '../memeEditDraftStore';
 import {
   applyProjectAction,
+  beginProjectTransaction,
+  commitProjectTransaction,
   PROJECT_LIMITS,
   createProjectHistory,
   redoProjectHistory,
@@ -162,10 +164,17 @@ export function MemeRemixStudio({
   const autosaveRef = useRef<MemeEditAutosaveController | null>(null);
   const sourceControllerRef = useRef<MemeEditSourceSessionController | null>(null);
   const closedRef = useRef(true);
+  const pendingTextFlushRef = useRef<(() => void) | null>(null);
 
   const ready = state.kind === 'ready' ? state : null;
   const project = ready?.history.present ?? null;
 
+  const registerPendingTextFlush = useCallback((flush: () => void) => {
+    pendingTextFlushRef.current = flush;
+    return () => {
+      if (pendingTextFlushRef.current === flush) pendingTextFlushRef.current = null;
+    };
+  }, []);
   const closeSessionAssets = useCallback(async () => {
     const autosave = autosaveRef.current;
     const controller = sourceControllerRef.current;
@@ -186,6 +195,7 @@ export function MemeRemixStudio({
 
   useEffect(() => {
     if (!visible || !item) {
+      pendingTextFlushRef.current?.();
       closedRef.current = true;
       setCleanupPending(false);
       setBefore(false);
@@ -308,6 +318,12 @@ export function MemeRemixStudio({
     if (!discarding) setHistory((history) => commitGestureTransaction(history, [{ type: 'set-layer-keyframes', id: layerId, keyframes }]));
   }, [discarding, setHistory]);
 
+  const beginTextTransaction = useCallback(() => {
+    if (!discarding) setHistory(beginProjectTransaction);
+  }, [discarding, setHistory]);
+  const commitTextTransaction = useCallback(() => {
+    if (!discarding) setHistory(commitProjectTransaction);
+  }, [discarding, setHistory]);
   const undo = useCallback(() => {
     if (discarding) return;
     tap();
@@ -338,6 +354,7 @@ export function MemeRemixStudio({
   }, [applyAction, project?.layers]);
 
   const cancel = useCallback(() => {
+    pendingTextFlushRef.current?.();
     if (discarding) return;
     if (state.kind !== 'ready') {
       closedRef.current = true;
@@ -536,6 +553,9 @@ export function MemeRemixStudio({
                   onDuplicateLayer={duplicateLayer}
                   onDeleteLayer={deleteLayer}
                   onMoveLayer={moveLayer}
+                  onRegisterPendingTextFlush={registerPendingTextFlush}
+                  onBeginTextTransaction={beginTextTransaction}
+                  onCommitTextTransaction={commitTextTransaction}
                 />
               ) : (
                 <ScrollView contentContainerStyle={styles.transformPanel}>

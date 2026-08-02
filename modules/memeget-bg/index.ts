@@ -84,6 +84,7 @@ interface MemegetBgNative {
     fontFamily: string,
     fontWeight: number,
     fontSizePx: number,
+    lineHeightPx: number,
     letterSpacingEm: number,
     widthPx: number,
     align: string
@@ -210,6 +211,7 @@ export async function measureMemeTextLayout(input: {
   fontFamily: string;
   fontWeight: number;
   fontSizePx: number;
+  lineHeightPx: number;
   letterSpacingEm: number;
   widthPx: number;
   align: string;
@@ -220,6 +222,7 @@ export async function measureMemeTextLayout(input: {
     input.fontFamily,
     input.fontWeight,
     input.fontSizePx,
+    input.lineHeightPx,
     input.letterSpacingEm,
     input.widthPx,
     input.align

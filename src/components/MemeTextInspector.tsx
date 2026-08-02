@@ -37,6 +37,9 @@ interface MemeTextInspectorProps {
   onDuplicateLayer: (id: string) => void;
   onDeleteLayer: (id: string) => void;
   onMoveLayer: (id: string, toIndex: number) => void;
+  onRegisterPendingTextFlush?: (flush: () => void) => () => void;
+  onBeginTextTransaction?: () => void;
+  onCommitTextTransaction?: () => void;
 }
 
 function selectedTextLayer(project: MemeEditProject, selectedLayerId: string | null): TextLayer | null {
@@ -121,7 +124,7 @@ function LabeledSlider({
         <Text style={styles.sliderLabel}>{label}</Text>
         <Text style={styles.sliderValue}>{valueLabel}</Text>
       </View>
-      <Slider value={boundedValue} onChange={disabled ? () => {} : setDraftValue} onComplete={disabled ? undefined : onChange} />
+      <Slider value={boundedValue} onChange={disabled ? () => {} : setDraftValue} onComplete={disabled ? undefined : onChange} accessibilityLabel={label} accessibilityDisabled={disabled} />
     </View>
   );
 }
@@ -172,8 +175,12 @@ export const MemeTextInspector = React.memo(function MemeTextInspector({
   onDuplicateLayer,
   onDeleteLayer,
   onMoveLayer,
+  onRegisterPendingTextFlush,
+  onBeginTextTransaction,
+  onCommitTextTransaction,
 }: MemeTextInspectorProps) {
   const projectRef = useRef(project);
+  const inputRef = useRef<TextInput | null>(null);
   const selectedLayerRef = useRef<TextLayer | null>(selectedTextLayer(project, selectedLayerId));
   const pendingTextRef = useRef<{ layerId: string; text: string } | null>(null);
   const textTimerRef = useRef<number | null>(null);
@@ -199,7 +206,8 @@ export const MemeTextInspector = React.memo(function MemeTextInspector({
     const current = projectRef.current.layers.find((candidate): candidate is TextLayer => candidate.id === pending.layerId && candidate.kind === 'text');
     if (!current || current.text === pending.text) return;
     onApplyAction({ type: 'update-layer', layer: { ...current, text: pending.text } });
-  }, [onApplyAction]);
+    onCommitTextTransaction?.();
+  }, [onApplyAction, onCommitTextTransaction]);
 
   const layerWithPendingText = useCallback((current: TextLayer): TextLayer => {
     const pending = pendingTextRef.current;
@@ -217,16 +225,25 @@ export const MemeTextInspector = React.memo(function MemeTextInspector({
     pendingTextRef.current = null;
   }, [flushText, selectedLayerId]);
 
-  useEffect(() => () => flushText(), [flushText]);
+  useEffect(() => {
+    if (pendingTextRef.current) return;
+    const nextText = layer?.text ?? '';
+    setDraftText(nextText);
+    inputRef.current?.setNativeProps({ text: nextText });
+  }, [layer?.id, layer?.text]);
+
+  useEffect(() => () => { flushText(); onCommitTextTransaction?.(); }, [flushText, onCommitTextTransaction]);
+  useEffect(() => onRegisterPendingTextFlush?.(() => { flushText(); onCommitTextTransaction?.(); }), [flushText, onCommitTextTransaction, onRegisterPendingTextFlush]);
 
   const queueText = useCallback((text: string) => {
     if (!layer || disabled) return;
     const boundedText = clampMemeTextContent(text);
     setDraftText(boundedText);
+    onBeginTextTransaction?.();
     pendingTextRef.current = { layerId: layer.id, text: boundedText };
     clearTimeout(textTimerRef.current ?? undefined);
     textTimerRef.current = setTimeout(flushText, TEXT_COMMIT_DELAY_MS) as unknown as number;
-  }, [disabled, flushText, layer]);
+  }, [disabled, flushText, layer, onBeginTextTransaction]);
 
   const updateLayer = useCallback((updater: (current: TextLayer) => TextLayer) => {
     const current = selectedLayerRef.current;
@@ -279,7 +296,8 @@ export const MemeTextInspector = React.memo(function MemeTextInspector({
       </Section>
       <Section title="Content">
         <TextInput
-          key={`${layer?.id ?? 'empty-text'}:${layer?.text ?? ''}`}
+          ref={inputRef}
+          key={layer?.id ?? 'empty-text'}
           defaultValue={layer?.text ?? ''}
           editable={!!layer && !disabled}
           multiline

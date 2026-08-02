@@ -1,7 +1,12 @@
 package expo.modules.memegetbg
+import android.graphics.Typeface
+import android.util.TypedValue
+import android.view.View
+import android.widget.TextView
 
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import org.json.JSONArray
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -22,6 +27,7 @@ class MemeTextLayoutInstrumentedTest {
         fontFamily = family,
         fontWeight = if (preset == "plain") 400 else 700,
         fontSizePx = 48f,
+        lineHeightPx = 56f,
         letterSpacingEm = if (preset == "impact") 0.018f else 0f,
         widthPx = 720,
         align = if (preset == "news" || preset == "bubble") "left" else "center"
@@ -42,18 +48,76 @@ class MemeTextLayoutInstrumentedTest {
     val context = InstrumentationRegistry.getInstrumentation().targetContext
     val result = MemeTextLayout.measure(
       context = context,
-      text = "AVATAR kerning\n日本語 fallback test",
+      text = "AVATAR kerning\n\n日本語 fallback test",
       fontFamily = "NotoSans",
       fontWeight = 700,
       fontSizePx = 42f,
+      lineHeightPx = 50f,
       letterSpacingEm = 0f,
       widthPx = 360,
       align = "center"
     )
 
     assertEquals(2, result.tolerancePx)
-    assertFalse(result.lines.map { it.text }.contains(""))
+    assertTrue(result.lines.map { it.text }.contains(""))
     assertTrue(result.lines.any { it.text.contains("AV") })
     assertTrue(result.lines.any { it.text.contains("日本語") })
+  }
+
+  @Test
+  fun serializedPreviewFixturesMatchTextViewPlacementWithinTwoPreviewPixels() {
+    val context = InstrumentationRegistry.getInstrumentation().targetContext
+    val json = context.assets.open("text_layout_preview_fixtures.json").bufferedReader().use { it.readText() }
+    val fixtures = JSONArray(json)
+    for (index in 0 until fixtures.length()) {
+      val fixture = fixtures.getJSONObject(index)
+      val preset = fixture.getString("preset")
+      val scale = fixture.getDouble("scale").toFloat()
+      val input = fixture.getJSONObject("input")
+      val text = input.getString("text")
+      val fontFamily = input.getString("fontFamily")
+      val fontWeight = input.getInt("fontWeight")
+      val fontSizePx = input.getDouble("fontSizePx").toFloat()
+      val lineHeightPx = input.getDouble("lineHeightPx").toFloat()
+      val letterSpacingEm = input.getDouble("letterSpacingEm").toFloat()
+      val widthPx = input.getInt("widthPx")
+      val align = input.getString("align")
+
+      val result = MemeTextLayout.measure(
+        context = context,
+        text = text,
+        fontFamily = fontFamily,
+        fontWeight = fontWeight,
+        fontSizePx = fontSizePx,
+        lineHeightPx = lineHeightPx,
+        letterSpacingEm = letterSpacingEm,
+        widthPx = widthPx,
+        align = align
+      )
+      val textView = TextView(context).apply {
+        includeFontPadding = false
+        setText(text)
+        setTextSize(TypedValue.COMPLEX_UNIT_PX, fontSizePx)
+        letterSpacing = letterSpacingEm
+        typeface = Typeface.create(Typeface.createFromAsset(context.assets, if (fontFamily == "Anton") "fonts/Anton-Regular.ttf" else "fonts/NotoSans.ttf"), fontWeight, false)
+        textAlignment = if (align == "right") View.TEXT_ALIGNMENT_TEXT_END else if (align == "left") View.TEXT_ALIGNMENT_TEXT_START else View.TEXT_ALIGNMENT_CENTER
+        setLineSpacing(0f, lineHeightPx / fontSizePx)
+      }
+      val widthSpec = View.MeasureSpec.makeMeasureSpec(widthPx, View.MeasureSpec.EXACTLY)
+      val heightSpec = View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
+      textView.measure(widthSpec, heightSpec)
+      textView.layout(0, 0, widthPx, textView.measuredHeight)
+      val layout = textView.layout
+      assertEquals("$preset line count", layout.lineCount, result.lines.size)
+      assertTrue("$preset total height", kotlin.math.abs(layout.height - result.heightPx) * scale <= 2f)
+      result.lines.forEachIndexed { lineIndex, line ->
+        assertEquals("$preset line text", text.substring(layout.getLineStart(lineIndex), layout.getLineEnd(lineIndex)).trimEnd('\n'), line.text)
+        assertEquals("$preset line start", layout.getLineStart(lineIndex), line.start)
+        assertEquals("$preset line end", layout.getLineEnd(lineIndex), line.end)
+        assertTrue("$preset width drift", kotlin.math.abs(layout.getLineWidth(lineIndex) - line.widthPx) * scale <= 2f)
+        assertTrue("$preset top drift", kotlin.math.abs(layout.getLineTop(lineIndex) - line.topPx) * scale <= 2f)
+        assertTrue("$preset baseline drift", kotlin.math.abs(layout.getLineBaseline(lineIndex) - line.baselinePx) * scale <= 2f)
+      }
+    }
   }
 }
