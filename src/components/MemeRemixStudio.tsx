@@ -20,12 +20,14 @@ import {
   MemeEditSourceSessionController,
   flushAutosaveBeforeSourceRelease,
   requestSourceSessionClose,
+  shouldStartDefaultAfterDraftRestore,
   createExpoMemeEditDraftIo,
   createExpoMemeEditSourcePreparationIo,
   type MemeEditDraftIdentity,
 } from '../memeEditDraftStore';
 import {
   applyProjectAction,
+  PROJECT_LIMITS,
   createProjectHistory,
   redoProjectHistory,
   undoProjectHistory,
@@ -34,7 +36,7 @@ import {
   type ProjectHistory,
   type TransformKeyframe,
 } from '../memeEditProjectCore';
-import { commitGestureTransaction, nextDuplicateLayerId } from '../memeEditCanvasCore';
+import { canDuplicateLayer, commitGestureTransaction, memeRemixHeaderLayout, nextDuplicateLayerId } from '../memeEditCanvasCore';
 import { tap, warn } from '../haptics';
 import { colors, radius, space, type } from '../theme';
 import type { MemeRecord } from '../types';
@@ -72,6 +74,7 @@ function HeaderButton({
   disabled,
   primary,
   danger,
+  selected,
   onPressIn,
   onPressOut,
 }: {
@@ -81,6 +84,7 @@ function HeaderButton({
   disabled?: boolean;
   primary?: boolean;
   danger?: boolean;
+  selected?: boolean;
   onPressIn?: () => void;
   onPressOut?: () => void;
 }) {
@@ -91,13 +95,13 @@ function HeaderButton({
       onPress={onPress}
       onPressIn={onPressIn}
       onPressOut={onPressOut}
-      style={[styles.headerButton, primary && styles.headerPrimary, danger && styles.headerDanger]}
+      style={[styles.headerButton, primary && styles.headerPrimary, danger && styles.headerDanger, selected && styles.headerSelected]}
       accessibilityRole="button"
       accessibilityLabel={label}
       accessibilityHint={hint}
-      accessibilityState={{ disabled: !!disabled }}
+      accessibilityState={{ disabled: !!disabled, selected: !!selected }}
     >
-      <Text style={[styles.headerButtonText, primary && styles.headerPrimaryText, danger && styles.headerDangerText]}>{label}</Text>
+      <Text style={[styles.headerButtonText, primary && styles.headerPrimaryText, danger && styles.headerDangerText, selected && styles.headerSelectedText]}>{label}</Text>
     </PressableScale>
   );
 }
@@ -125,6 +129,7 @@ export function MemeRemixStudio({
   const [state, setState] = useState<LoadState>({ kind: 'closed' });
   const [retryNonce, setRetryNonce] = useState(0);
   const [activeTool, setActiveTool] = useState<MemeEditTool>('layers');
+  const [cleanupPending, setCleanupPending] = useState(false);
   const [selectedLayerId, setSelectedLayerId] = useState<string | null>(null);
   const [before, setBefore] = useState(false);
   const [inlineError, setInlineError] = useState('');
@@ -157,6 +162,7 @@ export function MemeRemixStudio({
   useEffect(() => {
     if (!visible || !item) {
       closedRef.current = true;
+      setCleanupPending(false);
       setBefore(false);
       setInlineError('');
       setDiscarding(false);
@@ -231,8 +237,10 @@ export function MemeRemixStudio({
         if (cancelled || closedRef.current) return;
         if (restored.status === 'restored') {
           chooseDraft(prepared.identity, prepared.project, restored.project, restored.savedAtMs, prepared.materializedSourceUri);
-        } else {
+        } else if (shouldStartDefaultAfterDraftRestore(restored)) {
           beginReady(prepared.identity, prepared.project);
+        } else {
+          safeSetState({ kind: 'error', message: 'Could not read the saved edit draft. Retry to restore it, or discard it from storage before starting over.' });
         }
       })
       .catch((error) => safeSetState({ kind: 'error', message: `Could not prepare source: ${String(error)}` }));
@@ -288,6 +296,10 @@ export function MemeRemixStudio({
   const moveLayer = useCallback((id: string, toIndex: number) => applyAction({ type: 'move-layer', id, toIndex }), [applyAction]);
   const duplicateLayer = useCallback((id: string) => {
     if (!project) return;
+    if (!canDuplicateLayer(project.layers.length, PROJECT_LIMITS.maxLayers)) {
+      setInlineError(`Project already has the ${PROJECT_LIMITS.maxLayers} layer maximum.`);
+      return;
+    }
     const prefix = `studio-${item?.id ?? 'session'}`;
     const newId = nextDuplicateLayerId(prefix, project.layers.map((layer) => layer.id));
     applyAction({ type: 'duplicate-layer', id, newId });
@@ -336,9 +348,12 @@ export function MemeRemixStudio({
         style: 'destructive',
         onPress: () => {
           void (async () => {
+            let draftDiscarded = false;
+            let keepDiscarding = false;
             try {
               setDiscarding(true);
               await autosaveRef.current?.discard();
+              draftDiscarded = true;
               await closeSessionAssets();
               onClose();
             } catch (error) {
@@ -351,15 +366,35 @@ export function MemeRemixStudio({
                 }
                 return;
               }
-              setInlineError(`Could not discard draft: ${String(error)}`);
+              if (draftDiscarded) {
+                keepDiscarding = true;
+                setCleanupPending(true);
+                setDiscarding(true);
+                setInlineError(`Draft discarded. Retry cleanup to close the editor: ${String(error)}`);
+              } else {
+                setInlineError(`Could not discard draft: ${String(error)}`);
+              }
             } finally {
-              if (!closedRef.current) setDiscarding(false);
+              if (!closedRef.current && !keepDiscarding) setDiscarding(false);
             }
           })();
         },
       },
     ]);
   }, [closeSessionAssets, discarding, onClose, ready]);
+
+  const retryCleanupClose = useCallback(() => {
+    void (async () => {
+      try {
+        setDiscarding(true);
+        await closeSessionAssets();
+        setCleanupPending(false);
+        onClose();
+      } catch (error) {
+        setInlineError(`Still could not close the editor: ${String(error)}`);
+      }
+    })();
+  }, [closeSessionAssets, onClose]);
 
   const exportProject = useCallback(() => {
     if (!project) return;
@@ -372,6 +407,7 @@ export function MemeRemixStudio({
       setInlineError(String(error));
     });
   }, [onExport, project]);
+  const headerLayout = memeRemixHeaderLayout(width);
 
   const status = project
     ? `${project.source.kind.toUpperCase()} · ${project.source.width}×${project.source.height}${project.source.durationUs ? ` · ${(project.source.durationUs / 1_000_000).toFixed(1)}s` : ''}`
@@ -397,16 +433,16 @@ export function MemeRemixStudio({
   return (
     <Modal visible={visible} animationType="slide" statusBarTranslucent onRequestClose={cancel}>
       <KeyboardAvoidingView style={styles.root} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-        <View style={[styles.topBar, { paddingTop: insets.top + space.sm }]}> 
+        <View style={[styles.topBar, headerLayout.mode === 'compact-two-row' && styles.topBarCompact, { paddingTop: insets.top + space.sm }]}>
           <HeaderButton label="Cancel" hint="Close and keep a recoverable draft" onPress={cancel} disabled={discarding} />
-          <View style={styles.titleBlock}>
+          <View style={[styles.titleBlock, headerLayout.mode === 'compact-two-row' && styles.titleBlockCompact]}>
             <Text style={styles.title} numberOfLines={1}>{item?.name ?? 'Meme remix'}</Text>
             <Text style={styles.status} numberOfLines={1}>{headerStatus}</Text>
           </View>
-          <HeaderButton label="Before" hint="Hold to hide all edit layers without resetting video playback" disabled={!ready} onPressIn={() => setBefore(true)} onPressOut={() => setBefore(false)} />
+          <HeaderButton label="Before" hint="Press to toggle layer visibility. Hold to hide all edit layers without resetting video playback." disabled={!ready} selected={before} onPress={() => setBefore((value) => !value)} onPressIn={() => setBefore(true)} onPressOut={() => setBefore(false)} />
           <HeaderButton label="Undo" hint="Undo the last edit transaction" onPress={undo} disabled={!canUndo || disabled} />
           <HeaderButton label="Redo" hint="Redo the next edit transaction" onPress={redo} disabled={!canRedo || disabled} />
-          <HeaderButton label={onExport ? 'Export' : 'Export unavailable'} hint="Hand the structured project to the export pipeline" onPress={exportProject} disabled={!ready || !!exportBusy} primary={!!onExport} />
+          <HeaderButton label={onExport ? (headerLayout.showFullExportLabel ? 'Export' : 'Out') : 'Export unavailable'} hint="Hand the structured project to the export pipeline" onPress={exportProject} disabled={!ready || !!exportBusy} primary={!!onExport} />
         </View>
 
         {state.kind === 'ready' && project ? (
@@ -463,6 +499,7 @@ export function MemeRemixStudio({
         {!!(inlineError || exportError) && (
           <View style={[styles.errorBar, { bottom: insets.bottom + 74 }]} accessibilityRole="alert">
             <Text style={styles.errorText}>{inlineError || exportError}</Text>
+            {cleanupPending && <HeaderButton label="Retry close" hint="Retry source cleanup and close the editor" onPress={retryCleanupClose} primary />}
           </View>
         )}
 
@@ -486,7 +523,13 @@ const styles = StyleSheet.create({
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: colors.border,
   },
+  topBarCompact: {
+    minHeight: 118,
+    flexWrap: 'wrap',
+    alignItems: 'flex-start',
+  },
   titleBlock: { flex: 1, minWidth: 0, gap: 2, paddingHorizontal: space.xs },
+  titleBlockCompact: { flexBasis: '100%' },
   title: { ...type.title, color: colors.text },
   status: { ...type.caption, color: colors.muted, fontVariant: ['tabular-nums'] },
   headerButton: {
@@ -502,9 +545,11 @@ const styles = StyleSheet.create({
   },
   headerPrimary: { backgroundColor: colors.volt, borderColor: colors.volt },
   headerDanger: { backgroundColor: colors.dangerDim, borderColor: colors.danger },
+  headerSelected: { borderColor: colors.volt },
   headerButtonText: { ...type.caption, color: colors.textDim, fontWeight: '800' },
   headerPrimaryText: { color: colors.onVolt },
   headerDangerText: { color: colors.danger },
+  headerSelectedText: { color: colors.volt },
   workspace: { flex: 1, flexDirection: 'row', gap: space.sm, padding: space.sm },
   workspaceCompact: { flexDirection: 'column' },
   previewPane: {

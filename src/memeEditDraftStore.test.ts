@@ -27,6 +27,7 @@ import {
   MemeEditSourceSessionController,
   flushAutosaveBeforeSourceRelease,
   requestSourceSessionClose,
+  shouldStartDefaultAfterDraftRestore,
   createExpoMemeEditDraftIo,
   draftStoragePaths,
   type MemeEditDraftIdentity,
@@ -233,6 +234,24 @@ describe('MemeEditDraftStore', () => {
     await expect(store.restore(identity)).resolves.toMatchObject({
       status: 'restored',
       project: { background: { color: 'older.mp4' } },
+    });
+  });
+
+  test('treats transient draft read errors as recoverable instead of defaulting blank', async () => {
+    const io = new MemoryDraftIo();
+    const store = new MemeEditDraftStore(io, { now: () => 20_000 });
+    await store.save(identity, project('valid-draft'));
+    const paths = draftStoragePaths(io.cacheDirectory, identity);
+    io.readFailurePaths.add(paths.draft);
+
+    const failed = await store.restore(identity);
+    expect(failed).toEqual({ status: 'rejected', reason: 'io-error' });
+    expect(shouldStartDefaultAfterDraftRestore(failed)).toBe(false);
+
+    io.readFailurePaths.clear();
+    await expect(store.restore(identity)).resolves.toMatchObject({
+      status: 'restored',
+      project: { background: { color: 'valid-draft' } },
     });
   });
 
@@ -1457,6 +1476,43 @@ describe('MemeEditSourcePreparationController', () => {
     await Promise.resolve();
     await Promise.resolve();
     expect(onError).not.toHaveBeenCalled();
+  });
+
+  test('old fire-and-forget session cancel cannot delete a newly prepared same-path source', async () => {
+    const events: string[] = [];
+    let generation = 0;
+    const io: MemeEditSourcePreparationIo = {
+      cacheDirectory: 'file:///cache/',
+      materialize: jest.fn(async (_source, destination) => {
+        generation += 1;
+        events.push(`materialize:${generation}:${destination}`);
+      }),
+      remove: jest.fn(async (destination) => {
+        events.push(`remove:${generation}:${destination}`);
+      }),
+      probe: jest.fn(async () => probeResult),
+    };
+    const seed = {
+      sessionId: 'meme-remix/race',
+      uri: 'content://provider/source.mp4',
+      name: 'source.mp4',
+      indexedKind: 'video' as const,
+      modifiedTimeMs: null,
+    };
+    const first = new MemeEditSourceSessionController(io, seed);
+    await first.prepare();
+    const cancelling = first.cancel();
+    const second = new MemeEditSourceSessionController(io, seed);
+    const prepared = await second.prepare();
+    await cancelling;
+
+    expect(prepared.materializedSourceUri).toContain('meme_work_');
+    expect(events).toEqual([
+      expect.stringMatching(/^remove:0:/),
+      expect.stringMatching(/^materialize:1:/),
+      expect.stringMatching(/^remove:1:/),
+      expect.stringMatching(/^materialize:2:/),
+    ]);
   });
 
   test('source session cancel retries owned deletion until cleanup succeeds', async () => {

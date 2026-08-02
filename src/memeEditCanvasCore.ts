@@ -63,6 +63,11 @@ export interface CanvasLayerDescriptor {
   label: string;
 }
 
+export interface StudioHeaderLayout {
+  mode: 'single-row' | 'compact-two-row';
+  showFullExportLabel: boolean;
+}
+
 const MIN_SCALE = 0.01;
 const MAX_SCALE = 16;
 const TRANSFORM_HANDLE_SIZE = 44;
@@ -77,6 +82,16 @@ const EPSILON = 1e-6;
 
 function finite(value: number): boolean {
   return Number.isFinite(value);
+}
+
+export function canDuplicateLayer(layerCount: number, maxLayers: number): boolean {
+  return finite(layerCount) && finite(maxLayers) && layerCount < maxLayers;
+}
+
+export function memeRemixHeaderLayout(width: number): StudioHeaderLayout {
+  return width <= 360
+    ? { mode: 'compact-two-row', showFullExportLabel: false }
+    : { mode: 'single-row', showFullExportLabel: true };
 }
 
 function finitePositive(value: number): boolean {

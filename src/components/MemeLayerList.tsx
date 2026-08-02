@@ -2,7 +2,7 @@ import React, { useCallback } from 'react';
 import { Alert, FlatList, StyleSheet, Text, View } from 'react-native';
 
 import { colors, radius, space, type } from '../theme';
-import type { MemeEditLayer, MemeEditProject } from '../memeEditProjectCore';
+import { PROJECT_LIMITS, type MemeEditLayer, type MemeEditProject } from '../memeEditProjectCore';
 import { PressableScale } from './ui';
 
 function layerTitle(layer: MemeEditLayer): string {
@@ -79,7 +79,7 @@ const LayerRow = React.memo(function LayerRow({
       <View style={styles.actions}>
         <MiniButton label="Up" onPress={() => onMoveUp(layer.id)} disabled={disabled || !canMoveUp} hint="Move this layer visually forward" />
         <MiniButton label="Down" onPress={() => onMoveDown(layer.id)} disabled={disabled || !canMoveDown} hint="Move this layer visually backward" />
-        <MiniButton label="Dup" onPress={() => onDuplicate(layer.id)} disabled={disabled} hint="Duplicate this layer" />
+        <MiniButton label="Dup" onPress={() => onDuplicate(layer.id)} disabled={disabled || total >= PROJECT_LIMITS.maxLayers} hint={total >= PROJECT_LIMITS.maxLayers ? `Project already has the ${PROJECT_LIMITS.maxLayers} layer maximum` : 'Duplicate this layer'} />
         <MiniButton label="Del" danger onPress={() => onDelete(layer.id)} disabled={disabled} hint="Delete this layer" />
       </View>
     </PressableScale>
