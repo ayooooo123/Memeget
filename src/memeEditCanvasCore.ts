@@ -79,6 +79,19 @@ export interface StudioHeaderLayout {
   rows: StudioHeaderRowLayout[];
 }
 
+export interface StudioExportControlInput {
+  ready: boolean;
+  exportBusy: boolean;
+  discarding: boolean;
+  hasExport: boolean;
+}
+
+export interface StudioExportControlState {
+  label: 'Export' | 'Out' | 'No export' | 'Export unavailable';
+  disabled: boolean;
+  accessibilityState: { disabled: boolean };
+}
+
 const MIN_SCALE = 0.01;
 const MAX_SCALE = 16;
 const TRANSFORM_HANDLE_SIZE = 44;
@@ -126,6 +139,23 @@ export function memeRemixHeaderLayout(width: number): StudioHeaderLayout {
     rows: [
       { key: 'single', controls: ['Cancel', 'TitleStatus', 'Before', 'Undo', 'Redo', 'Export'], maxWidth: width, minControlSize: 44 },
     ],
+  };
+}
+
+export function memeRemixExportControlState(
+  layout: StudioHeaderLayout,
+  input: StudioExportControlInput
+): StudioExportControlState {
+  const disabled = !input.ready || input.exportBusy || input.discarding || !input.hasExport;
+  const label = input.hasExport
+    ? layout.exportLabel
+    : layout.mode === 'compact-two-row'
+      ? 'No export'
+      : 'Export unavailable';
+  return {
+    label,
+    disabled,
+    accessibilityState: { disabled },
   };
 }
 
