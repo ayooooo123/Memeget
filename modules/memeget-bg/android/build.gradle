@@ -15,6 +15,9 @@ expoModule {
 // dependency. We only need to declare our namespace and any extra deps.
 android {
   namespace 'expo.modules.memegetbg'
+  defaultConfig {
+    testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
+  }
 }
 
 dependencies {
@@ -30,4 +33,7 @@ dependencies {
   implementation 'androidx.media3:media3-transformer:1.9.0'
   implementation 'androidx.media3:media3-effect:1.9.0'
   implementation 'androidx.media3:media3-inspector:1.9.0'
+
+  androidTestImplementation 'androidx.test:runner:1.6.2'
+  androidTestImplementation 'androidx.test.ext:junit:1.2.1'
 }
