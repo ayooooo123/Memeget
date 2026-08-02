@@ -109,6 +109,18 @@ internal data class BorderColorSample(val hex: String, val sampleCount: Int) {
   fun toMap(): Map<String, Any> = mapOf("hex" to hex, "sampleCount" to sampleCount)
 }
 
+internal data class ImagePixelGrid(
+  val rows: Int,
+  val columns: Int,
+  val colors: List<String>
+) {
+  fun toMap(): Map<String, Any> = mapOf(
+    "rows" to rows,
+    "columns" to columns,
+    "colors" to colors
+  )
+}
+
 internal object MemeTextDetector {
   const val MAX_BORDER_SAMPLES = 4096
   private const val MAX_OCR_DECODE_DIMENSION = 2048
@@ -191,6 +203,39 @@ internal object MemeTextDetector {
     }
   }
 
+  fun samplePixelGrid(
+    context: Context,
+    source: String,
+    rect: NormalizedImageRect,
+    pixelSize: Int
+  ): ImagePixelGrid {
+    decodeOrientedBitmap(context, source, MAX_SAMPLER_DECODE_DIMENSION).use { decoded ->
+      return sampleOrientedBitmapPixelGrid(decoded.bitmap, rect, pixelSize)
+    }
+  }
+
+  fun sampleOrientedBitmapPixelGrid(
+    bitmap: Bitmap,
+    rect: NormalizedImageRect,
+    pixelSize: Int
+  ): ImagePixelGrid {
+    val left = floor(rect.x.coerceIn(0.0, 1.0) * bitmap.width).toInt().coerceIn(0, bitmap.width - 1)
+    val top = floor(rect.y.coerceIn(0.0, 1.0) * bitmap.height).toInt().coerceIn(0, bitmap.height - 1)
+    val right = ceil((rect.x + rect.width).coerceIn(0.0, 1.0) * bitmap.width).toInt().coerceIn(left + 1, bitmap.width)
+    val bottom = ceil((rect.y + rect.height).coerceIn(0.0, 1.0) * bitmap.height).toInt().coerceIn(top + 1, bitmap.height)
+    val boundedPixelSize = pixelSize.coerceIn(1, 256)
+    val columns = ceil((right - left).toDouble() / boundedPixelSize).toInt().coerceIn(1, 16)
+    val rows = ceil((bottom - top).toDouble() / boundedPixelSize).toInt().coerceIn(1, 16)
+    val colors = ArrayList<String>(rows * columns)
+    for (row in 0 until rows) {
+      val y = (top + ((row + 0.5) * (bottom - top) / rows).toInt()).coerceIn(top, bottom - 1)
+      for (column in 0 until columns) {
+        val x = (left + ((column + 0.5) * (right - left) / columns).toInt()).coerceIn(left, right - 1)
+        colors.add(String.format(Locale.US, "#%08X", bitmap.getPixel(x, y)))
+      }
+    }
+    return ImagePixelGrid(rows, columns, colors)
+  }
   fun normalizePixelRect(
     left: Int,
     top: Int,

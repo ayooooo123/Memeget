@@ -2,9 +2,12 @@ import {
   MIN_NORMALIZED_CROP_AREA,
   MAX_TEXT_REGION_CANDIDATES,
   applyCropPreset,
+  BorderSampleRequestGate,
   createTextRegionLayers,
   contrastRatio,
+  canApplyTextRegionAction,
   flattenDetectedTextRegions,
+  defaultManualTextRegion,
   moveCropHandle,
   moveNormalizedRegion,
   nextQuarterRotation,
@@ -16,8 +19,10 @@ import {
   resizeNormalizedRegion,
   sourceFrameForVisibleCrop,
   visibleImageDimensions,
+  textRegionFingerprint,
   type DetectedTextResult,
 } from './memeImageEditCore';
+import { commitGestureTransaction } from './memeEditCanvasCore';
 import {
   PROJECT_LIMITS,
   applyProjectAction,
@@ -303,6 +308,94 @@ describe('persistent image geometry remapping', () => {
     expect(text.fontSize).toBeCloseTo(0.1 * 800 / 1200, 6);
     expect(text.keyframes[0].rotationDegrees).toBeCloseTo(90, 9);
   });
+  test.each([
+    ['horizontal', { flipX: true, flipY: false }],
+    ['vertical', { flipX: false, flipY: true }],
+  ] as const)('keeps transformable orientation readable through a %s base reflection', (_label, flips) => {
+    const project = createDefaultImageProject({ uri: 'file:///i.jpg', name: 'i.jpg', width: 100, height: 100 });
+    project.layers = [{
+      id: 'readable',
+      kind: 'text',
+      text: 'READ',
+      width: 0.4,
+      fontSize: 0.1,
+      style: textStyle,
+      active: null,
+      keyframes: [frame(0.4, 0.4, 37)],
+    }];
+
+    const remapped = remapImageProject(project, { ...project.base, ...flips });
+
+    expect((remapped.layers[0] as TextLayer).keyframes[0].rotationDegrees).toBe(37);
+  });
+
+  test('drops a transformable layer whose keyframes are fully outside the new crop', () => {
+    const project = createDefaultImageProject({ uri: 'file:///i.jpg', name: 'i.jpg', width: 100, height: 100 });
+    project.layers = [{
+      id: 'outside-text',
+      kind: 'text',
+      text: 'OUT',
+      width: 0.2,
+      fontSize: 0.08,
+      style: textStyle,
+      active: null,
+      keyframes: [frame(0.1, 0.5)],
+    }];
+
+    const remapped = remapImageProject(project, {
+      ...project.base,
+      crop: { x: 0.5, y: 0, width: 0.5, height: 1 },
+      outputAspect: 'free',
+    });
+
+    expect(remapped.layers).toEqual([]);
+  });
+
+  test('retains a cover when a correction survives even if its fallback rect is cropped out', () => {
+    const project = createDefaultImageProject({ uri: 'file:///i.jpg', name: 'i.jpg', width: 100, height: 100 });
+    project.layers = [{
+      id: 'corrected-cover',
+      kind: 'cover',
+      rect: { x: 0.05, y: 0.2, width: 0.1, height: 0.2 },
+      mode: 'solid',
+      color: '#000000',
+      pixelSize: 8,
+      active: null,
+      corrections: [{
+        timeUs: 0,
+        rect: { x: 0.6, y: 0.2, width: 0.2, height: 0.2 },
+        mode: 'solid',
+        easing: 'linear',
+      }],
+    }];
+
+    const remapped = remapImageProject(project, {
+      ...project.base,
+      crop: { x: 0.5, y: 0, width: 0.5, height: 1 },
+      outputAspect: 'free',
+    });
+
+    expect(remapped.layers).toHaveLength(1);
+    expect(remapped.layers[0]).toMatchObject({
+      id: 'corrected-cover',
+      rect: { x: 0.2, y: 0.2, width: 0.4, height: 0.2 },
+    });
+  });
+
+  test('net-zero image geometry commits add no history', () => {
+    const project = createDefaultImageProject({ uri: 'file:///i.jpg', name: 'i.jpg', width: 100, height: 100 });
+    const remapped = remapImageProject(project, project.base);
+    const history = commitGestureTransaction(createProjectHistory(project), [{
+      type: 'set-image-geometry',
+      base: remapped.base,
+      layers: remapped.layers,
+      maskTracks: remapped.maskTracks,
+    }]);
+
+    expect(history.past).toEqual([]);
+    expect(history.present).toBe(project);
+  });
+
 
   test('committing a crop gesture creates one history entry and undo restores the exact project', () => {
     const project = createDefaultImageProject({ uri: 'file:///i.jpg', name: 'i.jpg', width: 100, height: 80 });
@@ -398,6 +491,31 @@ describe('real OCR region normalization and replacement layers', () => {
       expect(textColors.outlineColor).not.toBe(textColors.color);
     }
   );
+
+
+  test('creates a centered bounded manual rectangle for accessibility activate', () => {
+    expect(defaultManualTextRegion()).toEqual({
+      id: 'manual-current',
+      text: '',
+      source: 'manual',
+      rect: { x: 0.25, y: 0.35, width: 0.5, height: 0.3 },
+    });
+  });
+  test('rejects stale A sampling after region B starts and gates fill actions by current region', () => {
+    const gate = new BorderSampleRequestGate();
+    const regionA = textRegionFingerprint({ id: 'A', text: 'A', source: 'manual', rect: { x: 0.1, y: 0.1, width: 0.2, height: 0.2 } });
+    const regionB = textRegionFingerprint({ id: 'B', text: 'B', source: 'manual', rect: { x: 0.4, y: 0.4, width: 0.2, height: 0.2 } });
+    const requestA = gate.begin(regionA);
+    const requestB = gate.begin(regionB);
+
+    expect(gate.accepts(requestA, regionA)).toBe(false);
+    expect(gate.accepts(requestB, regionB)).toBe(true);
+    expect(canApplyTextRegionAction('cover', regionB, null, null)).toBe(false);
+    expect(canApplyTextRegionAction('pixelate', regionB, null, null)).toBe(true);
+    expect(canApplyTextRegionAction('replace', regionB, regionB, null)).toBe(true);
+    expect(canApplyTextRegionAction('cover', regionB, null, regionA)).toBe(false);
+    expect(canApplyTextRegionAction('cover', regionB, null, regionB)).toBe(true);
+  });
 
   test.each(['cover', 'pixelate', 'replace'] as const)('creates bounded persistent %s layers', (action) => {
     const layers = createTextRegionLayers({

@@ -4,7 +4,7 @@ import { Image } from 'expo-image';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import { requireNativeViewManager } from 'expo-modules-core';
 
-import { measureMemeTextLayout } from '../../modules/memeget-bg';
+import { measureMemeTextLayout, sampleImagePixelGrid, type NativeImagePixelGrid } from '../../modules/memeget-bg';
 import {
   containedMediaRect,
   canvasLayerVisualDescriptor,
@@ -29,7 +29,9 @@ import {
 import {
   moveNormalizedRegion,
   resizeNormalizedRegion,
+  defaultManualTextRegion,
   sourceFrameForVisibleCrop,
+  remapNormalizedRect,
   visibleImageDimensions,
   type TextRegionCandidate,
 } from '../memeImageEditCore';
@@ -52,6 +54,16 @@ import { buildMemeTextLayoutSpec, compareNativeMemeTextLayoutResults, memeTextBa
 import { colors, radius, space, type } from '../theme';
 import { useConst } from '../reactUtils';
 
+
+const FULL_IMAGE_BASE = {
+  rotation: 0 as const,
+  flipX: false,
+  flipY: false,
+  crop: { x: 0, y: 0, width: 1, height: 1 },
+  outputAspect: 'source' as const,
+};
+const PIXEL_GRID_CACHE = new Map<string, NativeImagePixelGrid>();
+const MAX_PIXEL_GRID_CACHE_ENTRIES = 64;
 const PREVIEW_TIME_POLL_MS = 33;
 
 type CommitLayerKeyframes = (layerId: string, keyframes: TransformKeyframe[]) => void;
@@ -214,29 +226,66 @@ const OverlayVideo = React.memo(function OverlayVideo({ uri }: { uri: string }) 
 
 const PixelatePreview = React.memo(function PixelatePreview({
   layer,
-  rect,
-  mediaRect,
+  sourceUri,
+  sourceRect,
 }: {
   layer: CoverLayer;
-  rect: NormalizedRect;
-  mediaRect: ViewRect;
+  sourceUri: string;
+  sourceRect: NormalizedRect | null;
 }) {
-  const columns = Math.max(1, Math.min(8, Math.ceil(rect.width * mediaRect.width / layer.pixelSize)));
-  const rows = Math.max(1, Math.min(8, Math.ceil(rect.height * mediaRect.height / layer.pixelSize)));
-  const cells = useMemo(() => Array.from({ length: columns * rows }, (_, index) => index), [columns, rows]);
+  const [grid, setGrid] = React.useState<NativeImagePixelGrid | null>(null);
+  const [error, setError] = React.useState('');
+  const requestRef = useRef(0);
+  const key = sourceRect
+    ? `${sourceUri}:${sourceRect.x}:${sourceRect.y}:${sourceRect.width}:${sourceRect.height}:${layer.pixelSize}`
+    : '';
+  useEffect(() => {
+    const request = requestRef.current + 1;
+    requestRef.current = request;
+    setError('');
+    if (!sourceRect) {
+      setGrid(null);
+      setError('Pixel preview is outside the source image.');
+      return;
+    }
+    const cached = PIXEL_GRID_CACHE.get(key);
+    if (cached) {
+      setGrid(cached);
+      return;
+    }
+    setGrid(null);
+    sampleImagePixelGrid(sourceUri, sourceRect, layer.pixelSize)
+      .then((sample) => {
+        if (requestRef.current !== request) return;
+        if (!sample) {
+          setError('Actual pixel preview is unavailable in this build.');
+          return;
+        }
+        if (PIXEL_GRID_CACHE.size >= MAX_PIXEL_GRID_CACHE_ENTRIES) {
+          const oldest = PIXEL_GRID_CACHE.keys().next().value;
+          if (oldest !== undefined) PIXEL_GRID_CACHE.delete(oldest);
+        }
+        PIXEL_GRID_CACHE.set(key, sample);
+        setGrid(sample);
+      })
+      .catch((sampleError) => {
+        if (requestRef.current === request) {
+          setError(`Could not load actual pixel preview: ${String(sampleError)}`);
+        }
+      });
+  }, [key, layer.pixelSize, sourceRect, sourceUri]);
+  if (!grid) return error ? <Text style={styles.pixelError}>{error}</Text> : null;
   return (
     <View style={styles.pixelGrid} pointerEvents="none">
-      {cells.map((index) => (
+      {grid.colors.map((color, index) => (
         <View
           key={index}
           style={[
             styles.pixelCell,
             {
-              width: `${100 / columns}%`,
-              height: `${100 / rows}%`,
-              backgroundColor: (Math.floor(index / columns) + index % columns) % 2 === 0
-                ? 'rgba(255,255,255,0.24)'
-                : 'rgba(0,0,0,0.3)',
+              width: `${100 / grid.columns}%`,
+              height: `${100 / grid.rows}%`,
+              backgroundColor: color,
             },
           ]}
         />
@@ -246,9 +295,11 @@ const PixelatePreview = React.memo(function PixelatePreview({
 });
 
 
-const CoverLayerView = React.memo(function CoverLayerView({ layer, mediaRect, selected, hidden, activeTimeUs, disabled, onSelectLayer }: CanvasLayerProps & { layer: CoverLayer }) {
+const CoverLayerView = React.memo(function CoverLayerView({ project, layer, mediaRect, selected, hidden, activeTimeUs, disabled, onSelectLayer }: CanvasLayerProps & { layer: CoverLayer }) {
   const correction = evaluateMaskTrackRect({ id: layer.id, active: layer.active, corrections: layer.corrections }, activeTimeUs);
   const rect = correction ?? layer.rect;
+  const sourceRect = remapNormalizedRect(rect, project.base, FULL_IMAGE_BASE);
+  const sourceUri = project.transient.materializedSourceUri ?? project.source.uri;
   if (hidden) return null;
   return (
     <View
@@ -267,7 +318,7 @@ const CoverLayerView = React.memo(function CoverLayerView({ layer, mediaRect, se
       accessibilityHint="Select this correction layer"
       accessibilityState={{ selected, disabled: !!disabled }}
     >
-      {layer.mode === 'pixelate' && <PixelatePreview layer={layer} rect={rect} mediaRect={mediaRect} />}
+      {layer.mode === 'pixelate' && <PixelatePreview layer={layer} sourceUri={sourceUri} sourceRect={sourceRect} />}
       <Text style={styles.coverText}>{layer.mode === 'pixelate' ? 'Pixelate' : 'Cover'}</Text>
     </View>
   );
@@ -998,6 +1049,13 @@ export const MemeEditCanvas = React.memo(function MemeEditCanvas({
           accessibilityLabel="Manual text region drawing surface"
           accessibilityHint="Drag to draw a box over text that detection missed"
           accessibilityState={{ disabled: !!disabled }}
+          accessibilityActions={[{ name: 'activate', label: 'Create centered manual region' }]}
+          onAccessibilityAction={(event) => {
+            if (event.nativeEvent.actionName === 'activate' && onChangeSelectedTextRegion) {
+              onChangeSelectedTextRegion(defaultManualTextRegion());
+              onManualTextRegionComplete?.();
+            }
+          }}
         />
       )}
       <View style={styles.bounds} pointerEvents="none">
@@ -1031,6 +1089,7 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
   },
   pixelCell: { borderWidth: StyleSheet.hairlineWidth, borderColor: colors.border },
+  pixelError: { ...type.micro, color: colors.text, padding: space.xs, textAlign: 'center' },
   coverText: { ...type.micro, color: colors.textDim },
   transformLayer: {
     position: 'absolute',

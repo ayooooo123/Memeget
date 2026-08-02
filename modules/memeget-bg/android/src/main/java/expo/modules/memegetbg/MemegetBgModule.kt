@@ -223,6 +223,23 @@ class MemegetBgModule : Module() {
       ).toMap()
     }
 
+    AsyncFunction("sampleImagePixelGrid") {
+      source: String,
+      x: Double,
+      y: Double,
+      width: Double,
+      height: Double,
+      pixelSize: Int ->
+      val ctx = appContext.reactContext
+        ?: throw IllegalStateException("React context unavailable")
+      MemeTextDetector.samplePixelGrid(
+        ctx,
+        source,
+        NormalizedImageRect(x, y, width, height),
+        pixelSize
+      ).toMap()
+    }
+
     // Decode the first audio track of a video to mono 16 kHz float32 PCM,
     // written as a raw little-endian file in the cache dir (the JS side reads
     // it and hands the waveform to the on-device STT model). Async because a two-

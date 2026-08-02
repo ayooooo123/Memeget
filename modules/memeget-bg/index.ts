@@ -97,6 +97,12 @@ export interface NativeBorderColorSample {
   sampleCount: number;
 }
 
+export interface NativeImagePixelGrid {
+  rows: number;
+  columns: number;
+  colors: string[];
+}
+
 
 
 interface MemegetBgNative {
@@ -137,6 +143,14 @@ interface MemegetBgNative {
     width: number,
     height: number
   ): Promise<NativeBorderColorSample>;
+  sampleImagePixelGrid(
+    source: string,
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+    pixelSize: number
+  ): Promise<NativeImagePixelGrid>;
 }
 
 // Optional on purpose: in Expo Go, in the JS-only dev flow, or before a native
@@ -219,6 +233,22 @@ export async function sampleImageBorderColor(
     rect.y,
     rect.width,
     rect.height
+  );
+}
+
+export async function sampleImagePixelGrid(
+  source: string,
+  rect: NativeNormalizedRect,
+  pixelSize: number
+): Promise<NativeImagePixelGrid | null> {
+  if (!native || typeof native.sampleImagePixelGrid !== 'function') return null;
+  return native.sampleImagePixelGrid(
+    source,
+    rect.x,
+    rect.y,
+    rect.width,
+    rect.height,
+    pixelSize
   );
 }
 

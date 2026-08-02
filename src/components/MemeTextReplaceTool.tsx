@@ -16,11 +16,13 @@ import {
 } from '../../modules/memeget-bg';
 import {
   createTextRegionLayers,
+  canApplyTextRegionAction,
   flattenDetectedTextRegions,
   remapNormalizedRect,
   type DetectedTextResult,
   type TextRegionAction,
   type TextRegionCandidate,
+  textRegionFingerprint,
 } from '../memeImageEditCore';
 import { PROJECT_LIMITS, type BaseTransform, type MemeEditLayer, type MemeEditProject } from '../memeEditProjectCore';
 import { colors, radius, space, type } from '../theme';
@@ -86,9 +88,12 @@ export const MemeTextReplaceTool = React.memo(function MemeTextReplaceTool({
   const [replacementText, setReplacementText] = useState('');
   const [pixelSize, setPixelSize] = useState(12);
   const [applyError, setApplyError] = useState('');
+  const [sampledRegionKey, setSampledRegionKey] = useState<string | null>(null);
+  const [paletteRegionKey, setPaletteRegionKey] = useState<string | null>(null);
   const detectionRequest = useRef(0);
   const sampleRequest = useRef(0);
   const colorOverridden = useRef(false);
+  const currentRegionKey = selectedRegion ? textRegionFingerprint(selectedRegion) : null;
 
   useEffect(() => () => {
     detectionRequest.current += 1;
@@ -104,6 +109,8 @@ export const MemeTextReplaceTool = React.memo(function MemeTextReplaceTool({
   useEffect(() => {
     const request = sampleRequest.current + 1;
     sampleRequest.current = request;
+    setSampledRegionKey(null);
+    setPaletteRegionKey(null);
     if (!selectedRegion) {
       setSampleStatus('');
       return;
@@ -126,6 +133,7 @@ export const MemeTextReplaceTool = React.memo(function MemeTextReplaceTool({
           return;
         }
         if (!colorOverridden.current) setSelectedColor(sample.hex);
+        setSampledRegionKey(currentRegionKey);
         setSampleStatus(`Sampled fill ${sample.hex} from ${sample.sampleCount} nearby opaque pixels.`);
       })
       .catch((error) => {
@@ -141,6 +149,7 @@ export const MemeTextReplaceTool = React.memo(function MemeTextReplaceTool({
     selectedRegion?.rect.x,
     selectedRegion?.rect.y,
     sourceUri,
+    currentRegionKey,
   ]);
 
   const detect = useCallback(() => {
@@ -185,12 +194,22 @@ export const MemeTextReplaceTool = React.memo(function MemeTextReplaceTool({
 
   const chooseColor = useCallback((color: string) => {
     colorOverridden.current = true;
+    if (currentRegionKey) setPaletteRegionKey(currentRegionKey);
     setSelectedColor(color);
     setSampleStatus(`Palette fill ${color} selected.`);
-  }, []);
+  }, [currentRegionKey]);
 
   const apply = useCallback((action: TextRegionAction) => {
     if (!selectedRegion || disabled) return;
+    if (!currentRegionKey || !canApplyTextRegionAction(
+      action,
+      currentRegionKey,
+      sampledRegionKey,
+      paletteRegionKey
+    )) {
+      setApplyError('Wait for the current sampled fill, or choose a palette fill for this region.');
+      return;
+    }
     const requiredSlots = action === 'replace' ? 2 : 1;
     if (project.layers.length + requiredSlots > PROJECT_LIMITS.maxLayers) {
       setApplyError(
@@ -216,9 +235,11 @@ export const MemeTextReplaceTool = React.memo(function MemeTextReplaceTool({
     disabled,
     idPrefix,
     onAddLayers,
-    onSelectLayer,
+    currentRegionKey,
     pixelSize,
     project,
+    paletteRegionKey,
+    sampledRegionKey,
     replacementText,
     selectedColor,
     selectedRegion,
@@ -328,22 +349,30 @@ export const MemeTextReplaceTool = React.memo(function MemeTextReplaceTool({
           </View>
 
           <View style={styles.applyActions} accessibilityRole="toolbar" accessibilityLabel="Selected text region actions">
-            {(['cover', 'pixelate', 'replace'] as const).map((action) => (
-              <PressableScale
-                key={action}
-                onPress={() => apply(action)}
-                disabled={disabled}
-                style={action === 'replace' ? styles.primaryAction : styles.secondaryAction}
-                accessibilityRole="button"
-                accessibilityLabel={action === 'cover' ? 'Cover selected region' : action === 'pixelate' ? 'Pixelate selected region' : 'Replace selected text'}
-                accessibilityHint={action === 'replace' ? 'Add a solid cover and editable text in one undo step' : `${action === 'cover' ? 'Add a sampled solid fill' : 'Add bounded pixelation'} in one undo step`}
-                accessibilityState={{ disabled: !!disabled }}
-              >
-                <Text style={action === 'replace' ? styles.primaryActionText : styles.secondaryActionText}>
-                  {action === 'cover' ? 'Cover' : action === 'pixelate' ? 'Pixelate' : 'Replace'}
-                </Text>
-              </PressableScale>
-            ))}
+            {(['cover', 'pixelate', 'replace'] as const).map((action) => {
+              const actionDisabled = !!disabled || !currentRegionKey || !canApplyTextRegionAction(
+                action,
+                currentRegionKey,
+                sampledRegionKey,
+                paletteRegionKey
+              );
+              return (
+                <PressableScale
+                  key={action}
+                  onPress={() => apply(action)}
+                  disabled={actionDisabled}
+                  style={action === 'replace' ? styles.primaryAction : styles.secondaryAction}
+                  accessibilityRole="button"
+                  accessibilityLabel={action === 'cover' ? 'Cover selected region' : action === 'pixelate' ? 'Pixelate selected region' : 'Replace selected text'}
+                  accessibilityHint={action === 'replace' ? 'Add a solid cover and editable text in one undo step' : `${action === 'cover' ? 'Add a sampled solid fill' : 'Add bounded pixelation'} in one undo step`}
+                  accessibilityState={{ disabled: actionDisabled }}
+                >
+                  <Text style={action === 'replace' ? styles.primaryActionText : styles.secondaryActionText}>
+                    {action === 'cover' ? 'Cover' : action === 'pixelate' ? 'Pixelate' : 'Replace'}
+                  </Text>
+                </PressableScale>
+              );
+            })}
           </View>
           {!!applyError && <Text style={styles.error} accessibilityRole="alert">{applyError}</Text>}
         </View>

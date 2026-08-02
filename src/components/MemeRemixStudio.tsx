@@ -371,12 +371,12 @@ export function MemeRemixStudio({
   const commitImageBase = useCallback((base: BaseTransform) => {
     if (!project || project.source.kind !== 'image' || discarding) return;
     const remapped = remapImageProject(project, base);
-    setHistory((history) => applyProjectAction(history, {
+    setHistory((history) => commitGestureTransaction(history, [{
       type: 'set-image-geometry',
       base: remapped.base,
       layers: remapped.layers,
       maskTracks: remapped.maskTracks,
-    }));
+    }]));
     setTextRegions((current) => current.flatMap((region) => {
       const rect = remapNormalizedRect(region.rect, project.base, base);
       return rect ? [{ ...region, rect }] : [];

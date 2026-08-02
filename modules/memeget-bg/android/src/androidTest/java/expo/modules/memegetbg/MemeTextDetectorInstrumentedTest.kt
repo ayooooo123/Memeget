@@ -49,6 +49,25 @@ class MemeTextDetectorInstrumentedTest {
   }
 
   @Test
+  fun pixelGridSamplesActualBoundedSourceColors() {
+    val bitmap = Bitmap.createBitmap(4, 2, Bitmap.Config.ARGB_8888)
+    for (y in 0 until 2) {
+      for (x in 0 until 4) bitmap.setPixel(x, y, if (x < 2) Color.RED else Color.BLUE)
+    }
+
+    val grid = MemeTextDetector.sampleOrientedBitmapPixelGrid(
+      bitmap,
+      NormalizedImageRect(0.0, 0.0, 1.0, 1.0),
+      2
+    )
+
+    assertEquals(1, grid.rows)
+    assertEquals(2, grid.columns)
+    assertEquals(listOf("#FFFF0000", "#FF0000FF"), grid.colors)
+    bitmap.recycle()
+  }
+
+  @Test
   fun appliesEveryExifOrientationToBitmapPixels() {
     val source = Bitmap.createBitmap(3, 2, Bitmap.Config.ARGB_8888)
     source.setPixel(0, 0, Color.RED)
