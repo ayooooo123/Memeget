@@ -1,5 +1,6 @@
 import {
   MEME_TEXT_BOUNDS,
+  MEME_TEXT_MAX_LENGTH,
   defaultMemeTextFontSizeForPreset,
   normalizeMemeTextFontSize,
   normalizeMemeTextWrapWidth,
@@ -133,7 +134,7 @@ export interface MemeEditSource {
 }
 
 export interface MemeEditProject {
-  version: 1;
+  version: 2;
   source: MemeEditSource;
   base: BaseTransform;
   video: VideoEditSpec | null;
@@ -179,7 +180,6 @@ export const MAX_HISTORY_STATES = 30;
 
 const MAX_ID_LENGTH = 256;
 const MAX_NAME_LENGTH = 1_024;
-const MAX_TEXT_LENGTH = 20_000;
 const MAX_COLOR_LENGTH = 128;
 const MAX_TRANSFORM_SCALE = 16;
 const MIN_TRANSFORM_SCALE = 0.01;
@@ -612,7 +612,7 @@ function defaultBackground(): BackgroundSpec {
 
 export function createDefaultImageProject(source: ImageSourceMetadata): MemeEditProject {
   return {
-    version: 1,
+    version: 2,
     source: { ...source, kind: 'image', durationUs: null },
     base: defaultBaseTransform(),
     video: null,
@@ -625,7 +625,7 @@ export function createDefaultImageProject(source: ImageSourceMetadata): MemeEdit
 
 export function createDefaultVideoProject(source: VideoSourceMetadata): MemeEditProject {
   return {
-    version: 1,
+    version: 2,
     source: { ...source, kind: 'video' },
     base: defaultBaseTransform(),
     video: {
@@ -1236,7 +1236,7 @@ function validateLayer(
   }
   if (value.kind === 'text') {
     rejectUnknownFields(value, ['id', 'kind', 'text', 'width', 'fontSize', 'style', 'active', 'keyframes'], path, errors);
-    validateString(value.text, `${path}.text`, MAX_TEXT_LENGTH, errors, true);
+    validateString(value.text, `${path}.text`, MEME_TEXT_MAX_LENGTH, errors, true);
     const width = value.width;
     const validWidth = validateFiniteNumber(width, `${path}.width`, errors);
     if (validWidth && (width <= 0 || width > 1)) {
@@ -1644,19 +1644,28 @@ function projectWithLegacyTextFontSizeDefaults(input: Record<string, unknown>): 
   return changed ? { ...input, layers } : input;
 }
 
+export function migrateMemeEditProject(input: unknown): ProjectValidationResult {
+  if (!isRecord(input)) return validateMemeEditProject(input);
+  if (input.version === 2) return validateMemeEditProject(input);
+  if (input.version !== 1) return validateMemeEditProject(input);
+  const migrated = projectWithLegacyTextFontSizeDefaults({ ...input, version: 2 });
+  return validateMemeEditProject(migrated);
+}
+
+
 
 export function validateMemeEditProject(input: unknown): ProjectValidationResult {
   const errors: ProjectValidationError[] = [];
   if (!validateRecord(input, '', errors)) return { ok: false, errors };
-  const projectInput = projectWithLegacyTextFontSizeDefaults(input);
+  const projectInput = input;
   rejectUnknownFields(
     projectInput,
     ['version', 'source', 'base', 'video', 'layers', 'maskTracks', 'background', 'transient'],
     '',
     errors
   );
-  if (projectInput.version !== 1) {
-    addError(errors, 'version', 'unsupported_version', 'Only MemeEditProject version 1 is supported.');
+  if (projectInput.version !== 2) {
+    addError(errors, 'version', 'unsupported_version', 'Only MemeEditProject version 2 is supported; migrate version 1 projects before validation.');
   }
   validateSource(projectInput.source, errors);
   validateBase(projectInput.base, errors);
@@ -1821,7 +1830,7 @@ function assertBoundedString(
 function assertLayerStringsAreBounded(layer: MemeEditLayer): void {
   assertBoundedString(layer.id, MAX_ID_LENGTH, 'Layer ID');
   if (layer.kind === 'text') {
-    assertBoundedString(layer.text, MAX_TEXT_LENGTH, 'Layer text', true);
+    assertBoundedString(layer.text, MEME_TEXT_MAX_LENGTH, 'Layer text', true);
     assertBoundedString(layer.style.color, MAX_COLOR_LENGTH, 'Text color');
     assertBoundedString(layer.style.outlineColor, MAX_COLOR_LENGTH, 'Text outline color');
     if (layer.style.backgroundColor !== null) {

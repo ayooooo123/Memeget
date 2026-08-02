@@ -40,6 +40,23 @@ export interface MediaProbeResult {
   stableId: string;
   displayName: string | null;
 }
+export interface NativeMemeTextLayoutLine {
+  text: string;
+  start: number;
+  end: number;
+  widthPx: number;
+  topPx: number;
+  baselinePx: number;
+}
+
+export interface NativeMemeTextLayoutResult {
+  widthPx: number;
+  heightPx: number;
+  includeFontPadding: false;
+  tolerancePx: number;
+  lines: NativeMemeTextLayoutLine[];
+}
+
 
 
 interface MemegetBgNative {
@@ -62,6 +79,15 @@ interface MemegetBgNative {
   transcodeVideoToMp4(source: string): Promise<string>;
   copyFileToClipboard(uri: string, name: string, mimeType: string): Promise<void>;
   saveToDownloads(srcPath: string, name: string, mimeType: string): Promise<string>;
+  measureMemeTextLayout(
+    text: string,
+    fontFamily: string,
+    fontWeight: number,
+    fontSizePx: number,
+    letterSpacingEm: number,
+    widthPx: number,
+    align: string
+  ): Promise<NativeMemeTextLayoutResult>;
 }
 
 // Optional on purpose: in Expo Go, in the JS-only dev flow, or before a native
@@ -178,6 +204,27 @@ export const mediaEditorNativeAvailable =
   native != null &&
   typeof native.renderMemeVariation === 'function' &&
   typeof native.transcodeVideoToMp4 === 'function';
+
+export async function measureMemeTextLayout(input: {
+  text: string;
+  fontFamily: string;
+  fontWeight: number;
+  fontSizePx: number;
+  letterSpacingEm: number;
+  widthPx: number;
+  align: string;
+}): Promise<NativeMemeTextLayoutResult | null> {
+  if (!native || typeof native.measureMemeTextLayout !== 'function') return null;
+  return native.measureMemeTextLayout(
+    input.text,
+    input.fontFamily,
+    input.fontWeight,
+    input.fontSizePx,
+    input.letterSpacingEm,
+    input.widthPx,
+    input.align
+  );
+}
 
 export async function renderMemeVariation(
   source: string,

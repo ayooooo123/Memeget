@@ -3,10 +3,10 @@ import { Animated, PanResponder, StyleSheet, Text, View, type LayoutChangeEvent 
 import { Image } from 'expo-image';
 import { useVideoPlayer, VideoView } from 'expo-video';
 
+import { measureMemeTextLayout } from '../../modules/memeget-bg';
 import {
   containedMediaRect,
   dragKeyframeByViewDelta,
-  gesturePointInsideMedia,
   gestureMoveShouldClaim,
   layerBodyTouchInsideMedia,
   layerHandlePoints,
@@ -42,7 +42,7 @@ import { buildMemeTextLayoutSpec, memeTextBackingRadiusForPreview, type MemeText
 import { colors, radius, space, type } from '../theme';
 import { useConst } from '../reactUtils';
 
-const ACTIVE_TIME_US = 0;
+const PREVIEW_TIME_POLL_MS = 250;
 const DEFAULT_LAYER_ASPECT = 1;
 
 type CommitLayerKeyframes = (layerId: string, keyframes: TransformKeyframe[]) => void;
@@ -53,13 +53,14 @@ type CanvasLayerProps = {
   mediaRect: ViewRect;
   selected: boolean;
   hidden: boolean;
+  activeTimeUs: number;
   disabled?: boolean;
   onSelectLayer: (id: string | null) => void;
   onCommitLayerKeyframes: CommitLayerKeyframes;
 };
 
-function firstKeyframe(layer: KeyframedLayer): TransformKeyframe {
-  const interpolated = interpolateTransformKeyframes(layer.keyframes, ACTIVE_TIME_US);
+function firstKeyframe(layer: KeyframedLayer, timeUs: number): TransformKeyframe {
+  const interpolated = interpolateTransformKeyframes(layer.keyframes, timeUs);
   const fallback = layer.keyframes[0];
   if (!interpolated) return fallback;
   return { ...fallback, ...interpolated };
@@ -90,11 +91,17 @@ function keyframeLayerBox(keyframe: TransformKeyframe, layerWidth: number, media
   return { x: center.x - width / 2, y: center.y - height / 2, width, height };
 }
 
-const SourceVideo = React.memo(function SourceVideo({ uri, style }: { uri: string; style: AbsoluteRectStyle }) {
+const SourceVideo = React.memo(function SourceVideo({ uri, style, onTimeUs }: { uri: string; style: AbsoluteRectStyle; onTimeUs: (timeUs: number) => void }) {
   const player = useVideoPlayer(uri, (instance) => {
     instance.loop = true;
     instance.play();
   });
+  useEffect(() => {
+    const timer = setInterval(() => {
+      onTimeUs(Math.max(0, Math.round((player.currentTime ?? 0) * 1_000_000)));
+    }, PREVIEW_TIME_POLL_MS);
+    return () => clearInterval(timer);
+  }, [onTimeUs, player]);
   return <VideoView pointerEvents="none" style={[styles.sourceMedia, style]} player={player} contentFit="contain" nativeControls={false} />;
 });
 
@@ -107,8 +114,8 @@ const OverlayVideo = React.memo(function OverlayVideo({ uri }: { uri: string }) 
   return <VideoView pointerEvents="none" style={StyleSheet.absoluteFill} player={player} contentFit="contain" nativeControls={false} />;
 });
 
-const CoverLayerView = React.memo(function CoverLayerView({ layer, mediaRect, selected, hidden, disabled, onSelectLayer }: CanvasLayerProps & { layer: CoverLayer }) {
-  const correction = evaluateMaskTrackRect({ id: layer.id, active: layer.active, corrections: layer.corrections }, ACTIVE_TIME_US);
+const CoverLayerView = React.memo(function CoverLayerView({ layer, mediaRect, selected, hidden, activeTimeUs, disabled, onSelectLayer }: CanvasLayerProps & { layer: CoverLayer }) {
+  const correction = evaluateMaskTrackRect({ id: layer.id, active: layer.active, corrections: layer.corrections }, activeTimeUs);
   const rect = correction ?? layer.rect;
   if (hidden) return null;
   return (
@@ -134,6 +141,7 @@ const TransformableLayerView = React.memo(function TransformableLayerView({
   mediaRect,
   selected,
   hidden,
+  activeTimeUs,
   onSelectLayer,
   disabled,
   onCommitLayerKeyframes,
@@ -145,22 +153,13 @@ const TransformableLayerView = React.memo(function TransformableLayerView({
   const dragStartAccepted = useRef(false);
   const resizeStartAccepted = useRef(false);
   const rotateStartAccepted = useRef(false);
-  const keyframe = firstKeyframe(layer);
+  const keyframe = firstKeyframe(layer, activeTimeUs);
   const visualWidth = layer.kind === 'text' ? layer.width : 0.28;
   const box = keyframeLayerBox(keyframe, visualWidth, mediaRect);
   const handles = layerHandlePoints(keyframe, visualWidth, mediaRect);
   const textSpec = useMemo(() => layer.kind === 'text'
     ? buildMemeTextLayoutSpec(layer, keyframe, { canvasWidthPx: mediaRect.width, canvasHeightPx: mediaRect.height })
-    : null, [
-      keyframe.center.x,
-      keyframe.center.y,
-      keyframe.opacity,
-      keyframe.rotationDegrees,
-      keyframe.scale,
-      layer,
-      mediaRect.height,
-      mediaRect.width,
-    ]);
+    : null, [keyframe, layer, mediaRect.height, mediaRect.width]);
 
   useEffect(() => {
     translate.setValue({ x: 0, y: 0 });
@@ -193,8 +192,7 @@ const TransformableLayerView = React.memo(function TransformableLayerView({
       translate.setValue({ x: 0, y: 0 });
     },
     onPanResponderMove: (_event, gesture) => {
-      if (!dragStartAccepted.current) return;
-      translate.setValue({ x: gesture.dx, y: gesture.dy });
+      if (dragStartAccepted.current) translate.setValue({ x: gesture.dx, y: gesture.dy });
     },
     onPanResponderRelease: (_event, gesture) => {
       if (dragStartAccepted.current) {
@@ -307,11 +305,7 @@ const TransformableLayerView = React.memo(function TransformableLayerView({
       accessibilityRole="adjustable"
       accessibilityHint="Drag to move. Accessibility actions nudge the layer."
       accessibilityState={{ selected, disabled: !!disabled }}
-      accessibilityActions={[
-        { name: 'activate', label: 'Select layer' },
-        { name: 'increment', label: 'Nudge right' },
-        { name: 'decrement', label: 'Nudge left' },
-      ]}
+      accessibilityActions={[{ name: 'activate', label: 'Select layer' }, { name: 'increment', label: 'Nudge right' }, { name: 'decrement', label: 'Nudge left' }]}
       onAccessibilityAction={(event) => {
         if (disabled) return;
         const next = transformAccessibilityAction(event.nativeEvent.actionName as 'increment' | 'decrement' | 'longpress' | 'escape', keyframe, mediaRect);
@@ -353,6 +347,7 @@ const TransformableLayerView = React.memo(function TransformableLayerView({
 });
 
 const TextLayerContent = React.memo(function TextLayerContent({ spec }: { spec: MemeTextLayoutSpec }) {
+  const [diagnostic, setDiagnostic] = React.useState<string | null>(null);
   const boxStyle = useMemo(() => ({
     backgroundColor: spec.backing.color ?? 'transparent',
     borderRadius: memeTextBackingRadiusForPreview(spec),
@@ -365,19 +360,64 @@ const TextLayerContent = React.memo(function TextLayerContent({ spec }: { spec: 
     fontSize: spec.canvas.fontSizePx,
     lineHeight: spec.layout.lineHeightPx,
     fontWeight: spec.font.weight,
+    fontFamily: spec.font.family,
     letterSpacing: spec.font.letterSpacingEm * spec.canvas.fontSizePx,
     textAlign: spec.align,
     includeFontPadding: false,
-    textShadowColor: spec.outline.widthPx > 0 ? spec.outline.color : 'transparent',
-    textShadowOffset: { width: 0, height: 0 },
-    textShadowRadius: Math.max(0, spec.outline.widthPx),
   }), [spec]);
+  const outlineOffsets = useMemo(() => {
+    if (spec.outline.widthPx <= 0) return [];
+    const amount = Math.max(1, Math.min(12, spec.outline.widthPx));
+    return [
+      { left: -amount, top: 0 },
+      { left: amount, top: 0 },
+      { left: 0, top: -amount },
+      { left: 0, top: amount },
+      { left: -amount, top: -amount },
+      { left: amount, top: -amount },
+      { left: -amount, top: amount },
+      { left: amount, top: amount },
+    ];
+  }, [spec.outline.widthPx]);
+  const displayText = spec.layout.lines.map((line) => line.text).join('\n');
+
+  useEffect(() => {
+    let cancelled = false;
+    measureMemeTextLayout({
+      text: spec.displayText,
+      fontFamily: spec.font.family,
+      fontWeight: Number(spec.font.weight),
+      fontSizePx: spec.canvas.fontSizePx,
+      letterSpacingEm: spec.font.letterSpacingEm,
+      widthPx: spec.canvas.wrapWidthPx,
+      align: spec.align,
+    }).then((nativeLayout) => {
+      if (cancelled || !nativeLayout) return;
+      const lineCountMatches = nativeLayout.lines.length === spec.layout.lines.length;
+      const baselineDrift = Math.max(0, ...nativeLayout.lines.map((line, index) => Math.abs(line.baselinePx - (spec.layout.lines[index]?.baselinePx ?? line.baselinePx))));
+      setDiagnostic(lineCountMatches && baselineDrift <= spec.diagnostics.androidStaticLayoutTolerancePx
+        ? null
+        : `Text metrics drift: ${nativeLayout.lines.length}/${spec.layout.lines.length} lines, ${baselineDrift.toFixed(1)}px baseline`);
+    }).catch(() => {
+      if (!cancelled) setDiagnostic(null);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [spec]);
+
   return (
     <View style={styles.textFill} pointerEvents="none">
       <View style={[styles.textBacking, boxStyle]}>
-        <Text style={[styles.layerText, textStyle]}>{spec.layout.lines.map((line) => line.text).join('\n')}</Text>
+        {outlineOffsets.map((offset) => (
+          <Text key={`${offset.left}:${offset.top}`} style={[styles.layerText, textStyle, styles.outlineText, { color: spec.outline.color, left: offset.left, top: offset.top }]}>
+            {displayText}
+          </Text>
+        ))}
+        <Text style={[styles.layerText, textStyle]}>{displayText}</Text>
         {spec.backing.tail === 'bottom-left' && <View style={[styles.bubbleTail, { backgroundColor: spec.backing.color ?? colors.text }]} />}
       </View>
+      {!!diagnostic && <Text style={styles.textDiagnostic}>{diagnostic}</Text>}
     </View>
   );
 });
@@ -412,6 +452,7 @@ export const MemeEditCanvas = React.memo(function MemeEditCanvas({
   disabled?: boolean;
 }) {
   const [viewSize, setViewSize] = React.useState<ViewSize | null>(null);
+  const [activeTimeUs, setActiveTimeUs] = React.useState(0);
   const sourceUri = project.transient.materializedSourceUri ?? project.source.uri;
   const mediaRect = useMemo(
     () => viewSize ? containedMediaRect(viewSize, { width: project.source.width, height: project.source.height, rotation: project.base.rotation }) : null,
@@ -424,6 +465,14 @@ export const MemeEditCanvas = React.memo(function MemeEditCanvas({
       return { width: next.width, height: next.height };
     });
   }, []);
+  const onVideoTime = useCallback((timeUs: number) => {
+    const durationUs = project.source.durationUs;
+    setActiveTimeUs((current) => {
+      if (Math.abs(current - timeUs) < 16_667) return current;
+      if (durationUs === null || durationUs <= 0) return timeUs;
+      return Math.min(durationUs, timeUs);
+    });
+  }, [project.source.durationUs]);
   const selectPan = useMemo(() => PanResponder.create({
     onStartShouldSetPanResponder: (event) => {
       if (!mediaRect) return false;
@@ -437,7 +486,7 @@ export const MemeEditCanvas = React.memo(function MemeEditCanvas({
       <View style={styles.checker} pointerEvents="none" />
       {mediaRect ? (
         project.source.kind === 'video' ? (
-          <SourceVideo uri={sourceUri} style={viewRectToAbsoluteStyle(mediaRect)} />
+          <SourceVideo uri={sourceUri} style={viewRectToAbsoluteStyle(mediaRect)} onTimeUs={onVideoTime} />
         ) : (
           <Image source={{ uri: sourceUri }} style={[styles.sourceMedia, viewRectToAbsoluteStyle(mediaRect)]} contentFit="contain" cachePolicy="none" />
         )
@@ -445,11 +494,11 @@ export const MemeEditCanvas = React.memo(function MemeEditCanvas({
         <View style={styles.loadingBox}><Text style={styles.unavailableText}>Measuring canvas…</Text></View>
       )}
       {mediaRect && project.layers.map((layer) => {
-        const hidden = before || !isLayerActiveAt(layer, ACTIVE_TIME_US);
+        const hidden = before || !isLayerActiveAt(layer, activeTimeUs);
         if (layer.kind === 'cover') {
-          return <CoverLayerView key={layer.id} project={project} layer={layer} mediaRect={mediaRect} selected={selectedLayerId === layer.id} hidden={hidden} disabled={disabled} onSelectLayer={onSelectLayer} onCommitLayerKeyframes={onCommitLayerKeyframes} />;
+          return <CoverLayerView key={layer.id} project={project} layer={layer} mediaRect={mediaRect} selected={selectedLayerId === layer.id} hidden={hidden} activeTimeUs={activeTimeUs} disabled={disabled} onSelectLayer={onSelectLayer} onCommitLayerKeyframes={onCommitLayerKeyframes} />;
         }
-        return <TransformableLayerView key={layer.id} project={project} layer={layer} mediaRect={mediaRect} selected={selectedLayerId === layer.id} hidden={hidden} disabled={disabled} onSelectLayer={onSelectLayer} onCommitLayerKeyframes={onCommitLayerKeyframes} />;
+        return <TransformableLayerView key={layer.id} project={project} layer={layer} mediaRect={mediaRect} selected={selectedLayerId === layer.id} hidden={hidden} activeTimeUs={activeTimeUs} disabled={disabled} onSelectLayer={onSelectLayer} onCommitLayerKeyframes={onCommitLayerKeyframes} />;
       })}
       <View style={styles.bounds} pointerEvents="none">
         {mediaRect && <View style={[styles.mediaBounds, viewRectToAbsoluteStyle(mediaRect)]} />}
@@ -485,6 +534,7 @@ const styles = StyleSheet.create({
     borderColor: colors.volt,
     borderStyle: 'solid',
   },
+  textDiagnostic: { ...type.micro, color: colors.danger, marginTop: space.xs },
   textFill: { flex: 1, alignSelf: 'stretch', alignItems: 'center', justifyContent: 'center', padding: space.xs },
   textBacking: {
     maxWidth: '100%',
@@ -504,6 +554,10 @@ const styles = StyleSheet.create({
     color: colors.text,
     fontWeight: '900',
   },
+  outlineText: {
+    position: 'absolute',
+    width: '100%',
+  },
   subjectFill: {
     flex: 1,
     alignSelf: 'stretch',
@@ -519,14 +573,6 @@ const styles = StyleSheet.create({
     backgroundColor: colors.dangerDim,
   },
   unavailableText: { ...type.caption, color: colors.textDim, textAlign: 'center' },
-  rotateArm: {
-    position: 'absolute',
-    top: -28,
-    left: '50%',
-    width: 1,
-    height: 28,
-    backgroundColor: colors.volt,
-  },
   rotateHandle: {
     position: 'absolute',
     top: -44,

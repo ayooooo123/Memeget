@@ -5,6 +5,8 @@ export const MEME_TEXT_PRESET_IDS = ['impact', 'subtitle', 'label', 'news', 'bub
 export type MemeTextPresetId = typeof MEME_TEXT_PRESET_IDS[number];
 
 export const MEME_TEXT_LAYOUT_TOLERANCE_PX = 2;
+export const MEME_TEXT_MAX_LENGTH = 20_000;
+
 
 export const MEME_TEXT_BOUNDS = Object.freeze({
   minWrapWidth: 0.12,
@@ -44,9 +46,8 @@ export interface MemeTextPresetDefaults {
   font: MemeTextFontSpec;
   backing: MemeTextBackingDefaults;
 }
-
 export interface MemeTextFontSpec {
-  family: 'Impact' | 'System';
+  family: 'Anton' | 'NotoSans';
   weight: '400' | '700' | '900';
   lineHeightRatio: number;
   letterSpacingEm: number;
@@ -113,7 +114,7 @@ const PRESET_DEFAULTS: Record<MemeTextPresetId, MemeTextPresetDefaults> = {
       align: 'center',
       uppercase: true,
     },
-    font: { family: 'Impact', weight: '900', lineHeightRatio: 0.95, letterSpacingEm: 0.018, includeFontPadding: false },
+    font: { family: 'Anton', weight: '900', lineHeightRatio: 0.95, letterSpacingEm: 0.018, includeFontPadding: false },
     backing: { color: null, radiusScale: 0, paddingXScale: 0, paddingYScale: 0, tail: 'none' },
   },
   subtitle: {
@@ -130,7 +131,7 @@ const PRESET_DEFAULTS: Record<MemeTextPresetId, MemeTextPresetDefaults> = {
       align: 'center',
       uppercase: false,
     },
-    font: { family: 'System', weight: '700', lineHeightRatio: 1.18, letterSpacingEm: 0, includeFontPadding: false },
+    font: { family: 'NotoSans', weight: '700', lineHeightRatio: 1.18, letterSpacingEm: 0, includeFontPadding: false },
     backing: { color: colors.bg, radiusScale: 0.24, paddingXScale: 0.48, paddingYScale: 0.24, tail: 'none' },
   },
   label: {
@@ -147,7 +148,7 @@ const PRESET_DEFAULTS: Record<MemeTextPresetId, MemeTextPresetDefaults> = {
       align: 'center',
       uppercase: true,
     },
-    font: { family: 'System', weight: '900', lineHeightRatio: 1.05, letterSpacingEm: 0.035, includeFontPadding: false },
+    font: { family: 'NotoSans', weight: '900', lineHeightRatio: 1.05, letterSpacingEm: 0.035, includeFontPadding: false },
     backing: { color: colors.volt, radiusScale: 0.18, paddingXScale: 0.42, paddingYScale: 0.2, tail: 'none' },
   },
   news: {
@@ -164,7 +165,7 @@ const PRESET_DEFAULTS: Record<MemeTextPresetId, MemeTextPresetDefaults> = {
       align: 'left',
       uppercase: true,
     },
-    font: { family: 'System', weight: '900', lineHeightRatio: 1.02, letterSpacingEm: 0.02, includeFontPadding: false },
+    font: { family: 'NotoSans', weight: '900', lineHeightRatio: 1.02, letterSpacingEm: 0.02, includeFontPadding: false },
     backing: { color: colors.volt, radiusScale: 0, paddingXScale: 0.38, paddingYScale: 0.22, tail: 'none' },
   },
   bubble: {
@@ -181,7 +182,7 @@ const PRESET_DEFAULTS: Record<MemeTextPresetId, MemeTextPresetDefaults> = {
       align: 'left',
       uppercase: false,
     },
-    font: { family: 'System', weight: '700', lineHeightRatio: 1.12, letterSpacingEm: 0, includeFontPadding: false },
+    font: { family: 'NotoSans', weight: '700', lineHeightRatio: 1.12, letterSpacingEm: 0, includeFontPadding: false },
     backing: { color: colors.text, radiusScale: 0.55, paddingXScale: 0.5, paddingYScale: 0.34, tail: 'bottom-left' },
   },
   plain: {
@@ -198,7 +199,7 @@ const PRESET_DEFAULTS: Record<MemeTextPresetId, MemeTextPresetDefaults> = {
       align: 'center',
       uppercase: false,
     },
-    font: { family: 'System', weight: '400', lineHeightRatio: 1.16, letterSpacingEm: 0, includeFontPadding: false },
+    font: { family: 'NotoSans', weight: '400', lineHeightRatio: 1.16, letterSpacingEm: 0, includeFontPadding: false },
     backing: { color: null, radiusScale: 0, paddingXScale: 0, paddingYScale: 0, tail: 'none' },
   },
 };
@@ -275,6 +276,10 @@ export function applyMemeTextPreset(layer: TextLayer, preset: MemeTextPresetId):
     active: cloneActive(layer.active),
     keyframes: layer.keyframes.map((frame) => ({ ...frame, center: { ...frame.center } })),
   };
+}
+
+export function clampMemeTextContent(text: string): string {
+  return text.length > MEME_TEXT_MAX_LENGTH ? text.slice(0, MEME_TEXT_MAX_LENGTH) : text;
 }
 
 export function textDisplayText(layer: Pick<TextLayer, 'text' | 'style'>): string {

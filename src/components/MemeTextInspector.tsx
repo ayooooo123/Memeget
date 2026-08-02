@@ -6,8 +6,10 @@ import { nextDuplicateLayerId } from '../memeEditCanvasCore';
 import {
   MEME_TEXT_BOUNDS,
   MEME_TEXT_COLOR_SWATCHES,
+  MEME_TEXT_MAX_LENGTH,
   MEME_TEXT_PRESET_IDS,
   applyMemeTextPreset,
+  clampMemeTextContent,
   createMemeTextLayer,
   getMemeTextPresetDefaults,
   normalizeMemeTextFontSize,
@@ -202,8 +204,9 @@ export const MemeTextInspector = React.memo(function MemeTextInspector({
 
   const queueText = useCallback((text: string) => {
     if (!layer || disabled) return;
-    setDraftText(text);
-    pendingTextRef.current = { layerId: layer.id, text };
+    const boundedText = clampMemeTextContent(text);
+    setDraftText(boundedText);
+    pendingTextRef.current = { layerId: layer.id, text: boundedText };
     clearTimeout(textTimerRef.current ?? undefined);
     textTimerRef.current = setTimeout(flushText, TEXT_COMMIT_DELAY_MS) as unknown as number;
   }, [disabled, flushText, layer]);
@@ -268,6 +271,7 @@ export const MemeTextInspector = React.memo(function MemeTextInspector({
           textAlignVertical="top"
           onChangeText={queueText}
           onBlur={flushText}
+          maxLength={MEME_TEXT_MAX_LENGTH}
           placeholder="Type a caption"
           placeholderTextColor={colors.faint}
           style={[styles.input, !layer && styles.inputDisabled]}
