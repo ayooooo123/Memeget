@@ -4,9 +4,11 @@ import { join } from 'path';
 import {
   IMAGE_RENDER_PLAN_VERSION,
   MAX_IMAGE_RENDER_PIXELS,
+  MAX_MOSAIC_CELLS,
   MEME_MEDIA_LAYER_BASE_WIDTH,
   buildImageRenderPlan,
   imageRenderPlanUnavailableLayers,
+  mosaicCellFloorPx,
   type ImageRenderPlan,
   type ImageRenderTextLayerPlan,
 } from './memeImageRenderCore';
@@ -179,6 +181,45 @@ describe('buildImageRenderPlan layers', () => {
         pixelSizePx: 12,
       },
     ]);
+  });
+
+  test('clamps the mosaic cell so a full-canvas pixelate cover cannot ask for millions of cells', () => {
+    const square = createDefaultImageProject({
+      uri: 'file:///square.png',
+      name: 'square.png',
+      width: 4000,
+      height: 4000,
+    });
+    const fullCover: CoverLayer = {
+      ...coverLayer,
+      rect: { x: 0, y: 0, width: 1, height: 1 },
+      pixelSize: 1,
+    };
+    const plan = buildImageRenderPlan(
+      reduceMemeEditProject(square, { type: 'add-layers', layers: [fullCover] }),
+      { planId: 'plan-1' }
+    );
+
+    const cover = plan.layers[0];
+    if (cover.kind !== 'cover') throw new Error('expected cover layer');
+    // 16 MP of one-pixel cells is 16M averaged cells for a visually identical
+    // image; the plan has to state the coarser cell the renderer will use.
+    expect(cover.pixelSizePx).toBe(mosaicCellFloorPx(cover.rect));
+    expect(cover.pixelSizePx).toBe(16);
+    expect(
+      (cover.rect.width * cover.rect.height) / (cover.pixelSizePx * cover.pixelSizePx)
+    ).toBeLessThanOrEqual(MAX_MOSAIC_CELLS);
+  });
+
+  test('leaves a requested cell alone when the region is small enough to afford it', () => {
+    const plan = buildImageRenderPlan(projectWithLayers([{ ...coverLayer, pixelSize: 3 }]), {
+      planId: 'plan-1',
+    });
+
+    const cover = plan.layers[0];
+    if (cover.kind !== 'cover') throw new Error('expected cover layer');
+    expect(mosaicCellFloorPx(cover.rect)).toBe(2);
+    expect(cover.pixelSizePx).toBe(3);
   });
 
   test('resolves text layers through buildMemeTextLayoutSpec at output pixel size', () => {
