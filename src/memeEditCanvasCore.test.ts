@@ -1,6 +1,7 @@
 import {
   containedMediaRect,
   commitGestureTransaction,
+  canDuplicateLayer,
   describeCanvasLayers,
   dragKeyframeByViewDelta,
   gestureMoveShouldClaim,
@@ -9,6 +10,7 @@ import {
   layerBodyTouchInsideMedia,
   layerHandleTouchInsideMedia,
   nextDuplicateLayerId,
+  memeRemixHeaderLayout,
   normalizedPointToViewPoint,
   resizeKeyframeFromHandle,
   rotateKeyframeFromHandle,
@@ -222,6 +224,7 @@ describe('gesture transaction coalescing', () => {
     const layer = { id: 'caption', kind: 'text' as const, text: 'caption', width: 0.4, style: { preset: 'impact' as const, color: '#fff', outlineColor: '#000', outlineScale: 0.05, backgroundColor: null, opacity: 1, align: 'center' as const, uppercase: true }, active: null, keyframes: [kf()] };
     const seeded = applyProjectAction(createProjectHistory(project), { type: 'add-layer', layer });
 
+
     const next = commitGestureTransaction(seeded, [
       { type: 'set-layer-keyframes', id: 'caption', keyframes: [kf({ center: { x: 0.6, y: 0.5 } })] },
       { type: 'set-layer-keyframes', id: 'caption', keyframes: [kf({ center: { x: 0.7, y: 0.5 } })] },
@@ -236,6 +239,18 @@ describe('gesture transaction coalescing', () => {
   test('empty or no-op gesture transactions do not add undo history', () => {
     const history = createProjectHistory(createDefaultImageProject({ uri: 'file:///source.jpg', name: 'source.jpg', width: 100, height: 100 }));
     expect(commitGestureTransaction(history, [])).toBe(history);
+  });
+});
+
+describe('studio shell UI contracts', () => {
+  test('disables duplicate at the project layer limit', () => {
+    expect(canDuplicateLayer(63, 64)).toBe(true);
+    expect(canDuplicateLayer(64, 64)).toBe(false);
+  });
+
+  test('uses compact two-row header at narrow phone widths', () => {
+    expect(memeRemixHeaderLayout(360)).toEqual({ mode: 'compact-two-row', showFullExportLabel: false });
+    expect(memeRemixHeaderLayout(390)).toEqual({ mode: 'single-row', showFullExportLabel: true });
   });
 });
 

@@ -75,6 +75,15 @@ export type MemeEditDraftRestoreResult =
       reason: 'missing' | 'expired' | 'corrupt' | 'io-error' | 'source-mismatch';
     };
 
+export function shouldStartDefaultAfterDraftRestore(result: MemeEditDraftRestoreResult): boolean {
+  return result.status === 'rejected' && (
+    result.reason === 'missing' ||
+    result.reason === 'expired' ||
+    result.reason === 'corrupt' ||
+    result.reason === 'source-mismatch'
+  );
+}
+
 export interface MemeEditSourcePreparationIo {
   readonly cacheDirectory: string;
   materialize(source: string, destination: string): Promise<void>;
@@ -825,13 +834,15 @@ function projectFromPreparedProbe(uri: string, name: string, probe: MediaProbeRe
   return createDefaultImageProject({ uri, name, width, height });
 }
 
+const SESSION_SOURCE_OWNERS = new Map<string, symbol>();
+
 export class MemeEditSourceSessionController {
   private preparation: Promise<PreparedMemeEditSourceSession> | null = null;
   private destination: string | null = null;
   private owned = false;
   private closed = false;
   private released = false;
-
+  private readonly ownerToken = Symbol('meme-edit-source-session');
   constructor(
     private readonly io: MemeEditSourcePreparationIo,
     private readonly seed: MemeEditSourceSessionSeed
@@ -876,16 +887,23 @@ export class MemeEditSourceSessionController {
     this.destination = location.destination;
     this.owned = !location.isFile;
     if (!location.isFile) {
+      SESSION_SOURCE_OWNERS.set(location.destination, this.ownerToken);
       await this.io.remove(location.destination);
       await this.io.materialize(this.seed.uri, location.destination);
       if (this.closed) {
-        await this.io.remove(location.destination).catch(() => {});
+        if (SESSION_SOURCE_OWNERS.get(location.destination) === this.ownerToken) {
+          await this.io.remove(location.destination).catch(() => {});
+          SESSION_SOURCE_OWNERS.delete(location.destination);
+        }
         throw new Error('Source session preparation was cancelled.');
       }
     }
     const probe = await this.io.probe(location.destination);
     if (this.closed) {
-      if (!location.isFile) await this.io.remove(location.destination).catch(() => {});
+      if (!location.isFile && SESSION_SOURCE_OWNERS.get(location.destination) === this.ownerToken) {
+        await this.io.remove(location.destination).catch(() => {});
+        SESSION_SOURCE_OWNERS.delete(location.destination);
+      }
       throw new Error('Source session preparation was cancelled.');
     }
     if (probe === null) throw new Error('Media probe is unavailable for this source.');
@@ -920,7 +938,10 @@ export class MemeEditSourceSessionController {
     if (this.released) return;
     const prepared = this.preparation ? await this.preparation.catch(() => null) : null;
     const destination = this.destination ?? prepared?.materializedSourceUri ?? null;
-    if (this.owned && destination) await this.io.remove(destination);
+    if (this.owned && destination && SESSION_SOURCE_OWNERS.get(destination) === this.ownerToken) {
+      await this.io.remove(destination);
+      SESSION_SOURCE_OWNERS.delete(destination);
+    }
     this.released = true;
   }
 
