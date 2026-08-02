@@ -18,6 +18,14 @@ let mockNative: {
     width: number,
     height: number
   ): Promise<unknown>;
+  sampleImagePixelGrid?(
+    source: string,
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+    pixelSize: number
+  ): Promise<unknown>;
 } | null = null;
 
 jest.mock('expo-modules-core', () => ({
@@ -110,11 +118,14 @@ describe('image text detector and border sampler bridge', () => {
   });
 
   test('returns null only when the optional native methods are absent', async () => {
-    const { detectTextRegions, sampleImageBorderColor } = await import('./index');
+    const { detectTextRegions, sampleImageBorderColor, sampleImagePixelGrid } = await import('./index');
 
     await expect(detectTextRegions('file:///source.jpg')).resolves.toBeNull();
     await expect(
       sampleImageBorderColor('file:///source.jpg', { x: 0.1, y: 0.2, width: 0.3, height: 0.4 })
+    ).resolves.toBeNull();
+    await expect(
+      sampleImagePixelGrid('file:///source.jpg', { x: 0, y: 0, width: 1, height: 1 }, 8)
     ).resolves.toBeNull();
   });
 
@@ -129,8 +140,10 @@ describe('image text detector and border sampler bridge', () => {
     const sample = { hex: '#123456', sampleCount: 42 };
     const detector = jest.fn().mockResolvedValue(detection);
     const sampler = jest.fn().mockResolvedValueOnce(sample).mockRejectedValueOnce(new Error('decode failed'));
-    mockNative = { detectTextRegions: detector, sampleImageBorderColor: sampler };
-    const { detectTextRegions, sampleImageBorderColor } = await import('./index');
+    const pixelGrid = { rows: 1, columns: 2, colors: ['#FFFF0000', '#FF0000FF'] };
+    const gridSampler = jest.fn().mockResolvedValue(pixelGrid);
+    mockNative = { detectTextRegions: detector, sampleImageBorderColor: sampler, sampleImagePixelGrid: gridSampler };
+    const { detectTextRegions, sampleImageBorderColor, sampleImagePixelGrid } = await import('./index');
 
     await expect(detectTextRegions('content://image')).resolves.toEqual(detection);
     await expect(
@@ -139,7 +152,11 @@ describe('image text detector and border sampler bridge', () => {
     await expect(
       sampleImageBorderColor('content://broken', { x: 0, y: 0, width: 1, height: 1 })
     ).rejects.toThrow('decode failed');
+    await expect(
+      sampleImagePixelGrid('content://image', { x: 0.1, y: 0.2, width: 0.3, height: 0.4 }, 12)
+    ).resolves.toEqual(pixelGrid);
     expect(detector).toHaveBeenCalledWith('content://image');
     expect(sampler).toHaveBeenNthCalledWith(1, 'content://image', 0.1, 0.2, 0.3, 0.4);
+    expect(gridSampler).toHaveBeenCalledWith('content://image', 0.1, 0.2, 0.3, 0.4, 12);
   });
 });

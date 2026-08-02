@@ -398,8 +398,9 @@ function remapKeyframe(
   oldDisplay: ImageDimensions,
   newDisplay: ImageDimensions,
   remapScale: boolean
-): TransformKeyframe {
-  const center = remapPointRaw(keyframe.center, oldBase, newBase);
+): TransformKeyframe | null {
+  const center = remapNormalizedPoint(keyframe.center, oldBase, newBase);
+  if (!center) return null;
   const radians = keyframe.rotationDegrees * Math.PI / 180;
   const direction = remapVector({
     x: Math.cos(radians) / oldDisplay.width,
@@ -410,11 +411,12 @@ function remapKeyframe(
     y: direction.y * newDisplay.height,
   };
   const directionScale = Math.hypot(pixelDirection.x, pixelDirection.y);
+  const rotationDelta = ((newBase.rotation - oldBase.rotation + 540) % 360) - 180;
   return {
     ...keyframe,
-    center: { x: round(clamp(center.x, 0, 1)), y: round(clamp(center.y, 0, 1)) },
+    center,
     scale: round(keyframe.scale * (remapScale && Number.isFinite(directionScale) ? directionScale : 1)),
-    rotationDegrees: round(Math.atan2(pixelDirection.y, pixelDirection.x) * 180 / Math.PI),
+    rotationDegrees: round(keyframe.rotationDegrees + rotationDelta),
   };
 }
 
@@ -443,12 +445,11 @@ function remapCover(
   oldBase: BaseTransform,
   newBase: BaseTransform
 ): CoverLayer | null {
-  const rect = remapNormalizedRect(layer.rect, oldBase, newBase);
-  if (!rect) return null;
   const corrections = layer.corrections
     .map((correction) => remapCorrection(correction, oldBase, newBase))
     .filter((correction): correction is CoverCorrectionKeyframe => correction !== null);
-  return { ...layer, rect, corrections };
+  const rect = remapNormalizedRect(layer.rect, oldBase, newBase) ?? corrections[0]?.rect ?? null;
+  return rect ? { ...layer, rect, corrections } : null;
 }
 
 function remapTextLayer(
@@ -457,15 +458,17 @@ function remapTextLayer(
   newBase: BaseTransform,
   oldDisplay: ImageDimensions,
   newDisplay: ImageDimensions
-): TextLayer {
+): TextLayer | null {
+  const keyframes = layer.keyframes
+    .map((keyframe) => remapKeyframe(keyframe, oldBase, newBase, oldDisplay, newDisplay, false))
+    .filter((keyframe): keyframe is TransformKeyframe => keyframe !== null);
+  if (keyframes.length === 0) return null;
   return {
     ...layer,
     width: normalizeMemeTextWrapWidth(layer.width * oldDisplay.width / newDisplay.width),
     fontSize: normalizeMemeTextFontSize(layer.fontSize * oldDisplay.height / newDisplay.height),
     style: { ...layer.style },
-    keyframes: layer.keyframes.map((keyframe) =>
-      remapKeyframe(keyframe, oldBase, newBase, oldDisplay, newDisplay, false)
-    ),
+    keyframes,
   };
 }
 
@@ -475,13 +478,11 @@ function remapSubjectLayer(
   newBase: BaseTransform,
   oldDisplay: ImageDimensions,
   newDisplay: ImageDimensions
-): SubjectLayer {
-  return {
-    ...layer,
-    keyframes: layer.keyframes.map((keyframe) =>
-      remapKeyframe(keyframe, oldBase, newBase, oldDisplay, newDisplay, true)
-    ),
-  };
+): SubjectLayer | null {
+  const keyframes = layer.keyframes
+    .map((keyframe) => remapKeyframe(keyframe, oldBase, newBase, oldDisplay, newDisplay, true))
+    .filter((keyframe): keyframe is TransformKeyframe => keyframe !== null);
+  return keyframes.length > 0 ? { ...layer, keyframes } : null;
 }
 
 function remapMediaLayer(
@@ -491,15 +492,17 @@ function remapMediaLayer(
   oldDisplay: ImageDimensions,
   newDisplay: ImageDimensions,
   survivingMaskIds: ReadonlySet<string>
-): MediaOverlayLayer {
+): MediaOverlayLayer | null {
+  const keyframes = layer.keyframes
+    .map((keyframe) => remapKeyframe(keyframe, oldBase, newBase, oldDisplay, newDisplay, true))
+    .filter((keyframe): keyframe is TransformKeyframe => keyframe !== null);
+  if (keyframes.length === 0) return null;
   return {
     ...layer,
     targetMaskTrackId: layer.targetMaskTrackId && survivingMaskIds.has(layer.targetMaskTrackId)
       ? layer.targetMaskTrackId
       : null,
-    keyframes: layer.keyframes.map((keyframe) =>
-      remapKeyframe(keyframe, oldBase, newBase, oldDisplay, newDisplay, true)
-    ),
+    keyframes,
   };
 }
 
@@ -519,13 +522,16 @@ export function remapImageProject(project: MemeEditProject, requestedBase: BaseT
       const remapped = remapCover(layer, project.base, newBase);
       if (remapped) layers.push(remapped);
     } else if (layer.kind === 'text') {
-      layers.push(remapTextLayer(layer, project.base, newBase, oldDisplay, newDisplay));
+      const remapped = remapTextLayer(layer, project.base, newBase, oldDisplay, newDisplay);
+      if (remapped) layers.push(remapped);
     } else if (layer.kind === 'subject') {
       if (maskIds.has(layer.maskTrackId)) {
-        layers.push(remapSubjectLayer(layer, project.base, newBase, oldDisplay, newDisplay));
+        const remapped = remapSubjectLayer(layer, project.base, newBase, oldDisplay, newDisplay);
+        if (remapped) layers.push(remapped);
       }
     } else {
-      layers.push(remapMediaLayer(layer, project.base, newBase, oldDisplay, newDisplay, maskIds));
+      const remapped = remapMediaLayer(layer, project.base, newBase, oldDisplay, newDisplay, maskIds);
+      if (remapped) layers.push(remapped);
     }
   }
   const transientMaskTracks: Record<string, string> = {};
@@ -578,7 +584,48 @@ export function flattenDetectedTextRegions(result: DetectedTextResult): TextRegi
       });
     });
   });
+
   return output;
+}
+
+export function defaultManualTextRegion(): TextRegionCandidate {
+  return {
+    id: 'manual-current',
+    text: '',
+    source: 'manual',
+    rect: { x: 0.25, y: 0.35, width: 0.5, height: 0.3 },
+  };
+}
+
+export function textRegionFingerprint(region: TextRegionCandidate): string {
+  const { x, y, width, height } = region.rect;
+  return `${region.id}:${round(x)}:${round(y)}:${round(width)}:${round(height)}`;
+}
+
+export class BorderSampleRequestGate {
+  private sequence = 0;
+  private regionKey: string | null = null;
+
+  begin(regionKey: string): number {
+    this.sequence += 1;
+    this.regionKey = regionKey;
+    return this.sequence;
+  }
+
+  accepts(sequence: number, regionKey: string): boolean {
+    return sequence === this.sequence && regionKey === this.regionKey;
+  }
+}
+
+export function canApplyTextRegionAction(
+  action: TextRegionAction,
+  currentRegionKey: string,
+  sampledRegionKey: string | null,
+  paletteRegionKey: string | null
+): boolean {
+  return action === 'pixelate' ||
+    sampledRegionKey === currentRegionKey ||
+    paletteRegionKey === currentRegionKey;
 }
 
 function colorChannels(color: string): [number, number, number] {
