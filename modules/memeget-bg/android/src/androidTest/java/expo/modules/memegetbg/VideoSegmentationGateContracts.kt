@@ -1,8 +1,50 @@
 package expo.modules.memegetbg
 
+import java.util.zip.ZipEntry
+
 object VideoSegmentationGateContracts {
   const val REQUIRED_FIXTURE_COUNT = 3
   const val MAX_REALTIME_MULTIPLIER = 3L
+  const val FIXED_ZIP_ENTRY_TIME_MS = 315_532_800_000L
+
+  val EXPECTED_PROVENANCE_BOUNDARY_IDS = setOf(
+    "tasks.group",
+    "tasks.artifact",
+    "tasks.version",
+    "tasks.pomUrl",
+    "tasks.pomDigest",
+    "tasks.pomCoordinates",
+    "tasks.license",
+    "tasks.licenseUrl",
+    "tasks.licenseDigest",
+    "tasks.pomLicense",
+    "model.asset",
+    "model.version",
+    "model.downloadUrl",
+    "model.digest",
+    "model.license",
+    "model.licenseUrl",
+    "model.licenseDigest",
+    "model.output",
+    "model.modelCardUrl",
+    "model.modelCardDigest",
+    "fixtureSource.personalMedia",
+    "fixtureSource.downloadUrl",
+    "fixtureSource.digest",
+    "fixtureSource.license",
+    "fixtureSource.licenseUrl",
+    "fixtureSource.licenseDigest",
+    "generator.script",
+    "generator.scriptDigest",
+    "generator.ffmpegVersion",
+    "generator.downloadUrl",
+    "generator.archiveDigest",
+    "generator.binaryDigest",
+    "fixtures.exactSet",
+    "fixture.one_person",
+    "fixture.two_people_crossing_occluding",
+    "fixture.fast_motion"
+  )
 
   data class MatrixObservation(
     val workingSize: Int,
@@ -14,6 +56,9 @@ object VideoSegmentationGateContracts {
     val peakPssDeltaBytes: Long,
     val pssDeltaBudgetBytes: Long,
     val qualityPass: Boolean,
+    val complete: Boolean,
+    val completedFixtureCount: Int,
+    val playbackReviewPass: Boolean,
     val fixtureCount: Int
   )
 
@@ -62,28 +107,89 @@ object VideoSegmentationGateContracts {
 
   fun videoIsolationAccepted(
     observation: MatrixObservation,
-    cancellationCleanupPass: Boolean
+    cancellationCleanupPass: Boolean,
+    matrixComplete: Boolean
   ): Boolean =
-    observation.durationMs > 0L &&
+    matrixComplete &&
+      observation.complete &&
+      observation.durationMs > 0L &&
       observation.runtimeMs <= observation.durationMs * MAX_REALTIME_MULTIPLIER &&
       observation.peakPssDeltaBytes < observation.pssDeltaBudgetBytes &&
       observation.qualityPass &&
+      observation.playbackReviewPass &&
       observation.fixtureCount == REQUIRED_FIXTURE_COUNT &&
+      observation.completedFixtureCount == REQUIRED_FIXTURE_COUNT &&
       cancellationCleanupPass
 
   fun selectSmallestAccepted(
     observations: List<MatrixObservation>,
-    cancellationCleanupPass: Boolean
+    cancellationCleanupPass: Boolean,
+    matrixComplete: Boolean
   ): MatrixObservation? =
     observations
       .asSequence()
-      .filter { videoIsolationAccepted(it, cancellationCleanupPass) }
+      .filter { videoIsolationAccepted(it, cancellationCleanupPass, matrixComplete) }
       .sortedWith(compareBy<MatrixObservation> { it.workingSize }.thenBy { it.maskFps })
       .firstOrNull()
+
+  fun matrixComplete(observations: List<MatrixObservation>, evidenceCount: Int): Boolean {
+    val expectedSettings = setOf(
+      256 to 8,
+      256 to 12,
+      256 to 15,
+      384 to 8,
+      384 to 12,
+      384 to 15,
+      512 to 8,
+      512 to 12,
+      512 to 15
+    )
+    return observations.map { it.workingSize to it.maskFps }.toSet() == expectedSettings &&
+      observations.size == expectedSettings.size &&
+      observations.all {
+        it.complete &&
+          it.fixtureCount == REQUIRED_FIXTURE_COUNT &&
+          it.completedFixtureCount == REQUIRED_FIXTURE_COUNT
+      } &&
+      evidenceCount == expectedSettings.size * REQUIRED_FIXTURE_COUNT
+  }
+
+  fun playbackReviewPass(
+    evidenceSha256: String,
+    reviewedEvidenceSha256: String,
+    verdict: String
+  ): Boolean =
+    evidenceSha256.matches(Regex("^[0-9a-f]{64}$")) &&
+      evidenceSha256 == reviewedEvidenceSha256 &&
+      verdict == "PASS"
+
+  fun playbackReviewRecordComplete(verdict: String, defectsCount: Int): Boolean =
+    verdict == "PASS" || (verdict == "FAIL" && defectsCount > 0)
+
+  fun cleanupAll(primaryFailure: Throwable?, actions: List<() -> Unit>): Throwable? {
+    var failure = primaryFailure
+    for (action in actions) {
+      try {
+        action()
+      } catch (cleanupFailure: Throwable) {
+        if (failure == null) {
+          failure = cleanupFailure
+        } else {
+          failure.addSuppressed(cleanupFailure)
+        }
+      }
+    }
+    return failure
+  }
+
+  fun deterministicZipEntry(name: String): ZipEntry =
+    ZipEntry(name).apply { time = FIXED_ZIP_ENTRY_TIME_MS }
 
   fun cancellationCleanupPass(
     activeBeforeCancel: Boolean,
     cancelIssued: Boolean,
+    cancellationObserved: Boolean,
+    workerErrorAbsent: Boolean,
     workerStopped: Boolean,
     segmenterClosed: Boolean,
     decoderClosed: Boolean,
@@ -93,6 +199,8 @@ object VideoSegmentationGateContracts {
   ): Boolean =
     activeBeforeCancel &&
       cancelIssued &&
+      cancellationObserved &&
+      workerErrorAbsent &&
       workerStopped &&
       segmenterClosed &&
       decoderClosed &&
@@ -106,15 +214,23 @@ object VideoSegmentationGateContracts {
       zipDataOffsetBytes >= 0L &&
       zipDataOffsetBytes % 16_384L == 0L
 
-  fun provenanceBoundariesComplete(
-    boundaries: List<ProvenanceBoundary>,
-    requiredIds: Set<String>
-  ): Boolean {
-    if (boundaries.map { it.id }.toSet() != requiredIds || boundaries.size != requiredIds.size) return false
+  fun provenanceBoundariesComplete(boundaries: List<ProvenanceBoundary>): Boolean {
+    if (
+      boundaries.map { it.id }.toSet() != EXPECTED_PROVENANCE_BOUNDARY_IDS ||
+      boundaries.size != EXPECTED_PROVENANCE_BOUNDARY_IDS.size
+    ) {
+      return false
+    }
     return boundaries.all {
+      val pinnedUrl = !it.id.endsWith("Url") ||
+        (
+          it.observed.startsWith("https://") &&
+            !it.observed.contains("latest", ignoreCase = true)
+          )
       it.expected.isNotBlank() &&
         it.observed == it.expected &&
-        !it.observed.contains("latest", ignoreCase = true)
+        !it.observed.contains("latest", ignoreCase = true) &&
+        pinnedUrl
     }
   }
 

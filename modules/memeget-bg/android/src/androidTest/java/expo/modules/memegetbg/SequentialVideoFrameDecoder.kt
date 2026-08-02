@@ -81,15 +81,14 @@ internal class SequentialVideoFrameDecoder(
         MediaFormat.KEY_COLOR_FORMAT,
         MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible
       )
-      codec = MediaCodec.createDecoderByType(mime).also { decoder ->
-        decoderName = decoder.name
-        decoder.configure(format, null, null, 0)
-        decoder.start()
-        codecStarted = true
-      }
+      val createdCodec = MediaCodec.createDecoderByType(mime)
+      codec = createdCodec
+      decoderName = createdCodec.name
+      createdCodec.configure(format, null, null, 0)
+      createdCodec.start()
+      codecStarted = true
     } catch (error: Throwable) {
-      close()
-      throw error
+      throw checkNotNull(VideoSegmentationGateContracts.cleanupAll(error, listOf(::close)))
     }
   }
 
@@ -203,14 +202,18 @@ internal class SequentialVideoFrameDecoder(
     isClosed = true
     val activeCodec = codec
     codec = null
+    val cleanupActions = mutableListOf<() -> Unit>()
     if (activeCodec != null) {
       if (codecStarted) {
-        runCatching { activeCodec.stop() }
-        codecStarted = false
+        cleanupActions += {
+          activeCodec.stop()
+          codecStarted = false
+        }
       }
-      runCatching { activeCodec.release() }
+      cleanupActions += { activeCodec.release() }
     }
-    runCatching { extractor.release() }
+    cleanupActions += { extractor.release() }
+    VideoSegmentationGateContracts.cleanupAll(null, cleanupActions)?.let { throw it }
   }
 
   private fun imageToScaledBitmap(image: Image, targetWidth: Int, targetHeight: Int): Bitmap {
