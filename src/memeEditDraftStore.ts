@@ -355,6 +355,14 @@ function parseSerializedDraft(text: string): SerializedDraft | null {
   }
   const source = parseSourceIdentity(input.source);
   if (!source) return null;
+  const rawPayload = {
+    version: 1,
+    generation: input.generation,
+    savedAtMs: input.savedAtMs,
+    source,
+    project: input.project,
+  } as DraftPayload;
+  if (input.checksum !== identityToken(payloadText(rawPayload))) return null;
   const validation = migrateMemeEditProject(input.project);
   if (!validation.ok) return null;
   const payload: DraftPayload = {
@@ -364,7 +372,6 @@ function parseSerializedDraft(text: string): SerializedDraft | null {
     source,
     project: validation.value,
   };
-  if (input.checksum !== identityToken(payloadText(payload))) return null;
   return { ...payload, checksum: input.checksum };
 }
 
