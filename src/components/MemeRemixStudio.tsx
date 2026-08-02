@@ -341,9 +341,18 @@ export function MemeRemixStudio({
               await closeSessionAssets();
               onClose();
             } catch (error) {
+              if (closedRef.current) {
+                try {
+                  await closeSessionAssets();
+                } catch {
+                  // The studio is already closed; contain cleanup failures without
+                  // posting state updates into an unmounted tree.
+                }
+                return;
+              }
               setInlineError(`Could not discard draft: ${String(error)}`);
             } finally {
-              setDiscarding(false);
+              if (!closedRef.current) setDiscarding(false);
             }
           })();
         },
