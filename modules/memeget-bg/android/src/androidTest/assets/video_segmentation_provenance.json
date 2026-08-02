@@ -5,8 +5,12 @@
     "artifact": "tasks-vision",
     "version": "0.10.29",
     "pomUrl": "https://dl.google.com/dl/android/maven2/com/google/mediapipe/tasks-vision/0.10.29/tasks-vision-0.10.29.pom",
+    "pomAsset": "tasks-vision-0.10.29.pom",
+    "pomSha256": "718c0702d999da9581753b883e3ebdad993e1ba01bfd1e7715187f9050906428",
     "license": "Apache-2.0",
-    "licenseUrl": "https://github.com/google-ai-edge/mediapipe/blob/v0.10.29/LICENSE"
+    "licenseUrl": "https://www.apache.org/licenses/LICENSE-2.0.txt",
+    "licenseAsset": "Apache-2.0.txt",
+    "licenseAssetSha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
   },
   "model": {
     "asset": "selfie_segmenter_float16_v1.tflite",
@@ -17,11 +21,14 @@
     "bytes": 249537,
     "inputShape": "256x256x3",
     "quantization": "float16",
-    "output": "two-class confidence mask; background index 0, person index 1",
+    "output": "single person-confidence mask",
     "license": "Apache-2.0",
     "licenseAsset": "Apache-2.0.txt",
+    "licenseAssetSha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
     "licenseUrl": "https://www.apache.org/licenses/LICENSE-2.0.txt",
     "modelCardUrl": "https://storage.googleapis.com/mediapipe-assets/Model%20Card%20MediaPipe%20Selfie%20Segmentation.pdf",
+    "modelCardAsset": "selfie-segmentation-model-card.pdf",
+    "modelCardSha256": "ef2e8d350891ba71699ac1e079658e697fc8d48c0f9253922990e907ecdade60",
     "officialCatalogUrl": "https://developers.google.com/edge/mediapipe/solutions/vision/image_segmenter#models"
   },
   "fixtureSource": {
@@ -30,10 +37,14 @@
     "downloadUrl": "https://raw.githubusercontent.com/opencv/opencv/4.12.0/samples/data/vtest.avi",
     "sha256": "45cddc9490be69345cbdab64ca583be65987e864ca408038e648db99e10516cf",
     "license": "Apache-2.0",
-    "licenseUrl": "https://github.com/opencv/opencv/blob/4.12.0/LICENSE"
+    "licenseUrl": "https://raw.githubusercontent.com/opencv/opencv/4.12.0/LICENSE",
+    "licenseAsset": "opencv-4.12.0-LICENSE.txt",
+    "licenseAssetSha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
   },
   "generator": {
     "script": "fixtures/generate-video-segmentation-fixtures.sh",
+    "scriptAsset": "generate-video-segmentation-fixtures.sh",
+    "scriptSha256": "e2d1f046c00f4e7fd1bbaf6775ebd079266ba0e61f95c2ad5fdf8da8404f7a0b",
     "ffmpegVersion": "8.1.2-tessus",
     "downloadUrl": "https://evermeet.cx/ffmpeg/ffmpeg-8.1.2.zip",
     "archiveSha256": "e91df72a1ee7c26606f90dd2dd4dcccc6a75140ff9ea6fdd50faae828b82ba69",

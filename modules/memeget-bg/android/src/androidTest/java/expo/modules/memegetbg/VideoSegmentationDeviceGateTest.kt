@@ -2,6 +2,7 @@ package expo.modules.memegetbg
 
 import android.content.ContentValues
 import android.os.Environment
+import android.os.SystemClock
 import android.provider.MediaStore
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -21,6 +22,76 @@ class VideoSegmentationDeviceGateTest {
     assertTrue(validation.getBoolean("allDigestsMatch"))
     assertTrue(validation.getBoolean("modelProvenanceComplete"))
     assertEquals(3, validation.getJSONArray("fixtures").length())
+    assertTrue(validation.getBoolean("allProvenanceBoundariesMatch"))
+    assertEquals(0, validation.getJSONArray("failedBoundaries").length())
+    assertEquals("single person-confidence mask", validation.getJSONObject("model").getString("observedOutputSemantics"))
+  }
+
+  @Test
+  fun sequentialDecoderEmitsTargetsWithoutSeekingAndClosesOnFailure() {
+    val instrumentation = InstrumentationRegistry.getInstrumentation()
+    val source = instrumentation.targetContext.cacheDir.resolve("sequential-decoder-fixture.mp4")
+    instrumentation.context.assets.open("video_segmentation_one_person_10s_720p.mp4").use { input ->
+      source.outputStream().use { output -> input.copyTo(output) }
+    }
+    val decoder = SequentialVideoFrameDecoder(source)
+    val observedPresentationTimesUs = mutableListOf<Long>()
+    try {
+      decoder.decodeFrames(
+        targetTimestampsMs = VideoSegmentationGateContracts.evidenceSchedule(8, 1).map { it.timestampMs },
+        targetWidth = 256,
+        targetHeight = 144,
+        shouldCancel = { false }
+      ) { frame ->
+        observedPresentationTimesUs += frame.presentationTimeUs
+      }
+      assertEquals(8, observedPresentationTimesUs.size)
+      assertTrue(observedPresentationTimesUs.zipWithNext().all { (first, second) -> second > first })
+      assertEquals(0, decoder.extractorSeekCount)
+      assertTrue(decoder.inputSamplesAdvanced > 0)
+
+      var callbackFailureObserved = false
+      try {
+        SequentialVideoFrameDecoder(source).use { failing ->
+          failing.decodeFrames(listOf(0L), 256, 144, { false }) {
+            throw IllegalStateException("callback failure")
+          }
+        }
+      } catch (error: IllegalStateException) {
+        callbackFailureObserved = error.message == "callback failure"
+      }
+      assertTrue(callbackFailureObserved)
+    } finally {
+      decoder.close()
+      source.delete()
+    }
+    assertTrue(decoder.isClosed)
+  }
+
+  @Test
+  fun sequentialDecoderTimeoutTracksDecodeStallsNotCallbackWork() {
+    val instrumentation = InstrumentationRegistry.getInstrumentation()
+    val source = instrumentation.targetContext.cacheDir.resolve("sequential-decoder-slow-callback.mp4")
+    instrumentation.context.assets.open("video_segmentation_one_person_10s_720p.mp4").use { input ->
+      source.outputStream().use { output -> input.copyTo(output) }
+    }
+    try {
+      var frames = 0
+      SequentialVideoFrameDecoder(source, stallTimeoutMs = 100L).use { decoder ->
+        decoder.decodeFrames(
+          VideoSegmentationGateContracts.evidenceSchedule(8, 1).map { it.timestampMs },
+          256,
+          144,
+          { false }
+        ) {
+          SystemClock.sleep(50)
+          frames++
+        }
+      }
+      assertEquals(8, frames)
+    } finally {
+      source.delete()
+    }
   }
 
   @Test
@@ -39,6 +110,14 @@ class VideoSegmentationDeviceGateTest {
       publishDownload(file.name, file.readBytes(), "image/png")
     }
 
+    val playbackEvidence = result.getJSONArray("maskPlaybackEvidence")
+    for (index in 0 until playbackEvidence.length()) {
+      val item = playbackEvidence.getJSONObject(index)
+      val file = instrumentation.targetContext.filesDir.resolve(item.getString("fileName"))
+      assertTrue("Missing playback evidence ${file.name}", file.isFile)
+      publishDownload(file.name, file.readBytes(), "application/zip")
+    }
+
     println("VIDEO_SEGMENTATION_GATE_PACKAGE=${instrumentation.targetContext.packageName}")
     println("VIDEO_SEGMENTATION_GATE_PATH=${output.absolutePath}")
     println("VIDEO_SEGMENTATION_GATE_STATUS=${result.getString("gateStatus")}")
@@ -48,6 +127,7 @@ class VideoSegmentationDeviceGateTest {
     assertEquals("Pixel 9 Pro", result.getJSONObject("device").getString("model"))
     assertEquals(9, result.getJSONArray("matrix").length())
     assertEquals(3, result.getJSONObject("provenance").getJSONArray("fixtures").length())
+    assertEquals(6, result.getJSONArray("maskPlaybackEvidence").length())
     assertTrue(result.getString("gateStatus") in setOf("PASS", "FAIL"))
     assertTrue(result.getJSONObject("capabilities").has("videoIsolation"))
     assertTrue(result.getJSONObject("capabilities").has("autoTrack"))
