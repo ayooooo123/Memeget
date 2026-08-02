@@ -18,6 +18,8 @@ import {
   MemeEditAutosaveController,
   MemeEditDraftStore,
   MemeEditSourceSessionController,
+  flushAutosaveBeforeSourceRelease,
+  requestSourceSessionClose,
   createExpoMemeEditDraftIo,
   createExpoMemeEditSourcePreparationIo,
   type MemeEditDraftIdentity,
@@ -134,11 +136,21 @@ export function MemeRemixStudio({
   const project = ready?.history.present ?? null;
 
   const closeSessionAssets = useCallback(async () => {
-    autosaveRef.current?.cancel();
-    autosaveRef.current = null;
+    const autosave = autosaveRef.current;
     const controller = sourceControllerRef.current;
-    sourceControllerRef.current = null;
-    if (controller) await controller.cancel();
+    let cleanupError: unknown = null;
+    await flushAutosaveBeforeSourceRelease(
+      autosave,
+      async () => {
+        if (controller) await controller.cancel();
+      },
+      (error) => {
+        cleanupError = error;
+      }
+    );
+    if (cleanupError) throw cleanupError;
+    if (autosaveRef.current === autosave) autosaveRef.current = null;
+    if (sourceControllerRef.current === controller) sourceControllerRef.current = null;
   }, []);
 
   useEffect(() => {
@@ -225,10 +237,7 @@ export function MemeRemixStudio({
 
     return () => {
       cancelled = true;
-      autosaveRef.current?.cancel();
-      autosaveRef.current = null;
-      if (sourceControllerRef.current === sourceController) sourceControllerRef.current = null;
-      void sourceController.cancel().catch(() => {});
+      void closeSessionAssets().catch(() => {});
     };
   }, [closeSessionAssets, draftStore, item, retryNonce, sourceIo, visible]);
 
@@ -286,16 +295,31 @@ export function MemeRemixStudio({
   }, [applyAction]);
 
   const cancel = useCallback(() => {
+    if (state.kind !== 'ready') {
+      closedRef.current = true;
+      const controller = sourceControllerRef.current;
+      if (controller) {
+        requestSourceSessionClose(
+          controller,
+          onClose,
+          (error) => {
+            if (!closedRef.current) setInlineError(`Could not close edit session: ${String(error)}`);
+          }
+        );
+      } else {
+        onClose();
+      }
+      return;
+    }
     void (async () => {
       try {
-        await autosaveRef.current?.flush();
         await closeSessionAssets();
         onClose();
       } catch (error) {
         setInlineError(`Could not close edit session: ${String(error)}`);
       }
     })();
-  }, [closeSessionAssets, onClose]);
+  }, [closeSessionAssets, onClose, state.kind]);
 
   const discard = useCallback(() => {
     if (!ready) return;

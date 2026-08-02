@@ -1,7 +1,9 @@
 import {
   containedMediaRect,
   commitGestureTransaction,
+  describeCanvasLayers,
   dragKeyframeByViewDelta,
+  gestureMoveShouldClaim,
   gesturePointInsideMedia,
   layerHandlePoints,
   nextDuplicateLayerId,
@@ -100,6 +102,12 @@ describe('view and normalized coordinates', () => {
     expect(gesturePointInsideMedia({ x: 150, y: 39.5 }, media)).toBe(false);
   });
 
+  test('does not claim a move after the gesture started in letterbox', () => {
+    expect(gestureMoveShouldClaim(false, { dx: 80, dy: 0 })).toBe(false);
+    expect(gestureMoveShouldClaim(true, { dx: 1, dy: 1 })).toBe(false);
+    expect(gestureMoveShouldClaim(true, { dx: 3, dy: 0 })).toBe(true);
+  });
+
 describe('transform gesture math', () => {
   const rect = { x: 20, y: 10, width: 200, height: 100 };
 
@@ -142,6 +150,8 @@ describe('transform gesture math', () => {
       x: handles.resize.x - 10,
       y: handles.resize.y + 20,
     });
+    const flipped = layerHandlePoints(kf({ rotationDegrees: 180, scale: 1, center: { x: 0.01, y: 0.5 } }), 0.2, rect);
+    expect(gesturePointInsideMedia(flipped.resize, rect)).toBe(false);
     expect(resized.scale).toBeGreaterThan(1);
   });
 
@@ -179,6 +189,23 @@ describe('gesture transaction coalescing', () => {
   });
 });
 
+
+describe('canvas layer descriptors', () => {
+  test('keeps project layer order and marks missing subject masks unavailable', () => {
+    const project = createDefaultImageProject({ uri: 'file:///source.jpg', name: 'source.jpg', width: 100, height: 100 });
+    project.layers = [
+      { id: 'text', kind: 'text', text: 'hello', width: 0.4, style: { preset: 'impact', color: '#fff', outlineColor: '#000', outlineScale: 0.05, backgroundColor: null, opacity: 1, align: 'center', uppercase: false }, active: null, keyframes: [kf()] },
+      { id: 'subject', kind: 'subject', subjectIndex: null, maskTrackId: 'missing-mask', active: null, keyframes: [kf()], outlineColor: null, outlineScale: 0, shadowScale: 0 },
+      { id: 'media', kind: 'media', assetUri: 'file:///overlay.png', assetKind: 'image', fit: 'contain', targetMaskTrackId: null, active: null, keyframes: [kf()] },
+    ];
+
+    expect(describeCanvasLayers(project)).toEqual([
+      { id: 'text', kind: 'text', unavailable: false, label: 'Text layer' },
+      { id: 'subject', kind: 'subject', unavailable: true, label: 'Subject mask unavailable' },
+      { id: 'media', kind: 'media', unavailable: false, label: 'Image overlay' },
+    ]);
+  });
+});
 describe('deterministic layer IDs', () => {
   test('continues duplicate suffixes after restoring a draft with existing duplicates', () => {
     expect(nextDuplicateLayerId('studio-42', ['caption', 'studio-42-dup-1', 'studio-42-dup-3'])).toBe('studio-42-dup-4');
