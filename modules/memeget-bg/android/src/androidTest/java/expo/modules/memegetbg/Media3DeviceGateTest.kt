@@ -137,4 +137,31 @@ class Media3DeviceGateTest {
     assertEquals(4, result.getJSONArray("fixtures").length())
     assertTrue("Gate status was not finalized", result.getString("gateStatus") in setOf("PASS", "FAIL"))
   }
+
+  @Test
+  fun recordsAvDriftIsolationMatrix() {
+    val instrumentation = InstrumentationRegistry.getInstrumentation()
+    val result = Media3DeviceGateProbe.runDriftMatrix(instrumentation)
+    // Shared Downloads, not getExternalFilesDir: the instrumentation APK is uninstalled after the
+    // run, which takes its app-private external dir with it. Downloads de-duplicates a repeated
+    // DISPLAY_NAME into "name (1).json", so the caller must delete the old file before re-running.
+    val output = instrumentation.targetContext.filesDir.resolve("media3-av-drift-matrix.json")
+    output.writeText(result.toString(2))
+    val resolver = instrumentation.targetContext.contentResolver
+    val downloadUri = resolver.insert(
+      MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+      ContentValues().apply {
+        put(MediaStore.MediaColumns.DISPLAY_NAME, output.name)
+        put(MediaStore.MediaColumns.MIME_TYPE, "application/json")
+        put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+      }
+    ) ?: error("Could not create Downloads matrix output")
+    resolver.openOutputStream(downloadUri)?.use { stream ->
+      stream.write(output.readBytes())
+    } ?: error("Could not write Downloads matrix output")
+    println("MEDIA3_MATRIX_DOWNLOAD_URI=$downloadUri")
+
+    assertTrue("Matrix output was not written", output.isFile)
+    assertEquals(2, result.getJSONArray("fixtures").length())
+  }
 }

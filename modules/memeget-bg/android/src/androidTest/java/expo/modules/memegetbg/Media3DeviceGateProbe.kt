@@ -28,6 +28,7 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.effect.BitmapOverlay
 import androidx.media3.effect.CanvasOverlay
 import androidx.media3.effect.Crop
+import androidx.media3.effect.DebugTraceUtil
 import androidx.media3.effect.OverlayEffect
 import androidx.media3.transformer.Composition
 import androidx.media3.transformer.EditedMediaItem
@@ -65,6 +66,8 @@ object Media3DeviceGateProbe {
   private const val MAX_AV_DELTA_US = 50_000L
   private const val DURATION_TOLERANCE_US = 150_000L
   private const val CROP_SCALE = 0.8f
+  private const val WIRING_PER_ITEM = "perItemSetSpeed"
+  private const val WIRING_COMPOSITION = "compositionEffects"
 
   private data class RetainedRange(val startUs: Long, val endUs: Long)
 
@@ -234,6 +237,174 @@ object Media3DeviceGateProbe {
       .put("fixtures", fixtures)
   }
 
+  private data class MatrixFixture(
+    val id: String,
+    val sourceDurationUs: Long,
+    val single: List<RetainedRange>,
+    val pair: List<RetainedRange>
+  )
+
+  private data class MatrixCase(
+    val name: String,
+    val ranges: List<RetainedRange>,
+    val speed: Float,
+    val wiring: String
+  )
+
+  /**
+   * Isolation matrix for the audio/video end-time drift.
+   *
+   * Exports the same source four ways - trim only, trim plus speed, two retained ranges, two
+   * retained ranges plus speed - under both the legacy per-item [EditedMediaItem.Builder.setSpeed]
+   * wiring and the composition-level wiring in [RetainedRangeComposition], so the drift can be
+   * attributed to speed, to concatenation, or to their interaction.
+   *
+   * Deliberately runs without crop, overlay or gain effects: those are exercised by [run], and
+   * leaving them out keeps this matrix a single-variable comparison.
+   */
+  fun runDriftMatrix(instrumentation: Instrumentation): JSONObject {
+    // A muxer timeout says only "no output sample written"; the component trace says which stage
+    // stalled. Diagnostics only, and reset below: DebugTraceUtil.enableTracing is a process-wide
+    // static, and leaving it on would distort the peak-PSS numbers [run] records.
+    DebugTraceUtil.enableTracing = true
+    val context = instrumentation.targetContext
+    val workDir = File(context.cacheDir, "media3_drift_matrix").apply {
+      deleteRecursively()
+      check(mkdirs()) { "Could not create $absolutePath" }
+    }
+
+    val fixtures = listOf(
+      MatrixFixture(
+        id = "synthetic_5s_720p",
+        sourceDurationUs = 5_000_000L,
+        single = listOf(RetainedRange(500_000L, 3_500_000L)),
+        pair = listOf(RetainedRange(500_000L, 2_000_000L), RetainedRange(3_000_000L, 4_500_000L))
+      ),
+      MatrixFixture(
+        id = "synthetic_15s_720p",
+        sourceDurationUs = 15_000_000L,
+        single = listOf(RetainedRange(1_000_000L, 9_000_000L)),
+        pair = listOf(RetainedRange(1_000_000L, 5_000_000L), RetainedRange(10_000_000L, 14_000_000L))
+      )
+    )
+
+    val results = JSONArray()
+    try {
+      for (fixture in fixtures) {
+        val source = File(workDir, "${fixture.id}.mp4")
+        instrumentation.context.assets.open("${fixture.id}.mp4").use { input ->
+          source.outputStream().use { output -> input.copyTo(output) }
+        }
+        // The 5 s fixture carries the full four-shape matrix; the 15 s fixture only needs the
+        // failing shape, which shows the longer-offset drift signature and its fix.
+        val shapes = if (fixture.id == "synthetic_5s_720p") {
+          listOf(
+            Triple("trimOnly", fixture.single, 1f),
+            Triple("trimPlusSpeed", fixture.single, SPEED),
+            Triple("twoRanges", fixture.pair, 1f),
+            Triple("twoRangesPlusSpeed", fixture.pair, SPEED)
+          )
+        } else {
+          listOf(Triple("twoRangesPlusSpeed", fixture.pair, SPEED))
+        }
+        val caseResults = JSONArray()
+        for ((name, ranges, speed) in shapes) {
+          for (wiring in listOf(WIRING_PER_ITEM, WIRING_COMPOSITION)) {
+            caseResults.put(
+              runMatrixCase(context, fixture, source, MatrixCase(name, ranges, speed, wiring), workDir)
+            )
+          }
+        }
+        results.put(JSONObject().put("id", fixture.id).put("cases", caseResults))
+        source.delete()
+      }
+    } finally {
+      workDir.deleteRecursively()
+      DebugTraceUtil.enableTracing = false
+    }
+
+    return JSONObject()
+      .put("schemaVersion", 1)
+      .put("probe", "avDriftIsolationMatrix")
+      .put("observedAtUtc", utcNow())
+      .put("maxAvDeltaMs", MAX_AV_DELTA_US / 1_000.0)
+      .put("speedFactor", SPEED.toDouble())
+      .put(
+        "device",
+        JSONObject()
+          .put("model", Build.MODEL)
+          .put("apiLevel", Build.VERSION.SDK_INT)
+          .put("buildFingerprint", Build.FINGERPRINT)
+      )
+      .put("media3Version", MediaLibraryInfo.VERSION)
+      .put("fixtures", results)
+  }
+
+  private fun runMatrixCase(
+    context: Context,
+    fixture: MatrixFixture,
+    source: File,
+    case: MatrixCase,
+    workDir: File
+  ): JSONObject {
+    val ranges = case.ranges.map { RetainedRangeComposition.Range(it.startUs, it.endUs) }
+    val retainedUs = case.ranges.sumOf { it.endUs - it.startUs }
+    val expectedUs = RetainedRangeComposition.expectedOutputDurationUs(ranges, case.speed)
+    val result = JSONObject()
+      .put("case", case.name)
+      .put("wiring", case.wiring)
+      .put("rangeCount", case.ranges.size)
+      .put("speedFactor", case.speed.toDouble())
+      .put("retainedSourceDurationMs", microsToMillis(retainedUs))
+      .put("expectedOutputDurationMs", microsToMillis(expectedUs))
+    val output = File(workDir, "${fixture.id}_${case.name}_${case.wiring}.mp4").apply { delete() }
+    return try {
+      val composition = if (case.wiring == WIRING_PER_ITEM) {
+        legacyPerItemSpeedComposition(source, case)
+      } else {
+        RetainedRangeComposition.build(
+          uri = source.toURI().toString(),
+          sourceDurationUs = fixture.sourceDurationUs,
+          ranges = ranges,
+          speed = case.speed
+        )
+      }
+      val run = export(context, composition, output)
+      val probe = inspectMedia(output)
+      result
+        .put("status", "PASS")
+        .put("wallTimeMs", run.elapsedMs)
+        .put("durationMs", microsToMillis(probe.durationUs))
+        .put("videoEndTimeMs", probe.videoEndTimeUs?.let(::microsToMillisExact) ?: JSONObject.NULL)
+        .put("audioEndTimeMs", probe.audioEndTimeUs?.let(::microsToMillisExact) ?: JSONObject.NULL)
+        .put("avEndTimeDeltaMs", probe.avEndDeltaUs?.let(::microsToMillisExact) ?: JSONObject.NULL)
+        .put("avDeltaWithin50ms", avEndDeltaWithinLimit(probe.videoEndTimeUs, probe.audioEndTimeUs))
+        .put("videoMime", probe.videoMime ?: JSONObject.NULL)
+        .put("audioMime", probe.audioMime ?: JSONObject.NULL)
+        .put("width", probe.width ?: JSONObject.NULL)
+        .put("height", probe.height ?: JSONObject.NULL)
+    } catch (error: Throwable) {
+      result.put("status", "FAILED").put("error", errorJson(error))
+    } finally {
+      output.delete()
+    }
+  }
+
+  /** The wiring the gate used before the fix: speed attached to each [EditedMediaItem]. */
+  private fun legacyPerItemSpeedComposition(source: File, case: MatrixCase): Composition {
+    val speedProvider = object : SpeedProvider {
+      override fun getSpeed(timeUs: Long): Float = case.speed
+      override fun getNextSpeedChangeTimeUs(timeUs: Long): Long = C.TIME_UNSET
+    }
+    val items = case.ranges.map { range ->
+      EditedMediaItem.Builder(clippedMediaItem(source, range.startUs, range.endUs))
+        .setDurationUs(range.endUs - range.startUs)
+        .apply { if (case.speed != 1f) setSpeed(speedProvider) }
+        .build()
+    }
+    return Composition.Builder(EditedMediaItemSequence.Builder(items).build()).build()
+  }
+
   private fun runTrimProbe(context: Context, source: File, workDir: File): JSONObject {
     val output = File(workDir, "trim_probe.mp4").apply { delete() }
     val mediaItem = clippedMediaItem(source, 500_000L, 4_500_000L)
@@ -274,14 +445,17 @@ object Media3DeviceGateProbe {
     val input = inspectMedia(source)
     val inputRms = audioRms(context, source, 1.5)
     val retainedDurationUs = spec.ranges.sumOf { it.endUs - it.startUs }
-    val expectedOutputDurationUs = (retainedDurationUs / SPEED).toLong()
+    val expectedOutputDurationUs = RetainedRangeComposition.expectedOutputDurationUs(
+      spec.ranges.map { RetainedRangeComposition.Range(it.startUs, it.endUs) },
+      SPEED
+    )
     val runJson = JSONArray()
     val successfulRuns = mutableListOf<ExportRun>()
     var representative: File? = null
 
     repeat(EXPORT_RUNS) { index ->
       val output = File(workDir, "${spec.id}_run_${index + 1}.mp4").apply { delete() }
-      val holder = buildCombinedComposition(source, spec, expectedOutputDurationUs)
+      val holder = buildCombinedComposition(source, spec, input.durationUs, expectedOutputDurationUs)
       try {
         val run = export(context, holder.composition, output)
         successfulRuns += run
@@ -401,19 +575,9 @@ object Media3DeviceGateProbe {
   private fun buildCombinedComposition(
     source: File,
     spec: FixtureSpec,
+    sourceDurationUs: Long,
     expectedOutputDurationUs: Long
   ): CompositionHolder {
-    val speedProvider = object : SpeedProvider {
-      override fun getSpeed(timeUs: Long): Float = SPEED
-      override fun getNextSpeedChangeTimeUs(timeUs: Long): Long = C.TIME_UNSET
-    }
-    val items = spec.ranges.map { range ->
-      EditedMediaItem.Builder(clippedMediaItem(source, range.startUs, range.endUs))
-        .setSpeed(speedProvider)
-        .build()
-    }
-    val sequence = EditedMediaItemSequence.Builder(items).build()
-
     val expectedWidth = (spec.width * CROP_SCALE).roundToInt()
     val expectedHeight = (spec.height * CROP_SCALE).roundToInt()
     val staticBitmap = Bitmap.createBitmap(expectedWidth, expectedHeight, Bitmap.Config.ARGB_8888)
@@ -432,14 +596,20 @@ object Media3DeviceGateProbe {
         canvas.drawRect(canvas.width * 7f / 8f, 0f, canvas.width.toFloat(), canvas.height.toFloat(), dynamicPaint)
       }
     }
-    val effects = Effects(
-      listOf(GainProcessor(DefaultGainProvider.Builder(GAIN).build())),
-      listOf<Effect>(
+    // Speed lives on the Composition, not on the items: see RetainedRangeComposition for the
+    // media3 1.9.0 double-scaling of per-item video offsets that this avoids.
+    val composition = RetainedRangeComposition.build(
+      uri = source.toURI().toString(),
+      sourceDurationUs = sourceDurationUs,
+      ranges = spec.ranges.map { RetainedRangeComposition.Range(it.startUs, it.endUs) },
+      speed = SPEED,
+      audioProcessors = listOf(GainProcessor(DefaultGainProvider.Builder(GAIN).build())),
+      videoEffects = listOf(
         Crop(-CROP_SCALE, CROP_SCALE, -CROP_SCALE, CROP_SCALE),
         OverlayEffect(listOf(staticOverlay, dynamicOverlay))
       )
     )
-    return CompositionHolder(Composition.Builder(sequence).setEffects(effects).build(), staticBitmap)
+    return CompositionHolder(composition, staticBitmap)
   }
 
   private fun runCancellationProbe(
@@ -979,9 +1149,21 @@ object Media3DeviceGateProbe {
     JSONObject().put("status", "FAILED").put("error", errorJson(error))
   }
 
-  private fun errorJson(error: Throwable): JSONObject = JSONObject()
-    .put("type", error.javaClass.name)
-    .put("message", error.message ?: "")
+  private fun errorJson(error: Throwable, depth: Int = 0): JSONObject {
+    val json = JSONObject()
+      .put("type", error.javaClass.name)
+      .put("message", error.message ?: "")
+    if (error is ExportException) {
+      json.put("errorCode", error.errorCode).put("errorCodeName", error.errorCodeName)
+    }
+    // "Muxer error" on its own says nothing; the cause chain is where the diagnosis lives.
+    val cause = error.cause
+    if (cause != null && cause !== error && depth < 5) {
+      json.put("cause", errorJson(cause, depth + 1))
+    }
+    json.put("stack", error.stackTrace.take(6).joinToString(" | ") { it.toString() })
+    return json
+  }
 
   private fun mediaResourceManagerHasPid(instrumentation: Instrumentation, pid: Int): Boolean {
     val output = shell(instrumentation, "dumpsys media.resource_manager")
