@@ -1,0 +1,437 @@
+import React, { useCallback, useEffect, useMemo, useRef } from 'react';
+import { Animated, PanResponder, StyleSheet, Text, View, type LayoutChangeEvent } from 'react-native';
+import { Image } from 'expo-image';
+import { useVideoPlayer, VideoView } from 'expo-video';
+
+import {
+  containedMediaRect,
+  dragKeyframeByViewDelta,
+  normalizedPointToViewPoint,
+  resizeKeyframeFromHandle,
+  rotateKeyframeFromHandle,
+  viewPointToNormalizedPoint,
+  type ViewDelta,
+  type ViewPoint,
+  type ViewRect,
+  type ViewSize,
+} from '../memeEditCanvasCore';
+import {
+  evaluateMaskTrackRect,
+  interpolateTransformKeyframes,
+  type CoverLayer,
+  type KeyframedLayer,
+  type MediaOverlayLayer,
+  type MemeEditLayer,
+  type MemeEditProject,
+  type NormalizedRect,
+  type SubjectLayer,
+  type TextLayer,
+  type TransformKeyframe,
+} from '../memeEditProjectCore';
+import { colors, radius, space, type } from '../theme';
+import { useConst } from '../reactUtils';
+
+const ACTIVE_TIME_US = 0;
+const DEFAULT_LAYER_ASPECT = 1;
+
+type CommitLayerKeyframes = (layerId: string, keyframes: TransformKeyframe[]) => void;
+
+type CanvasLayerProps = {
+  project: MemeEditProject;
+  layer: MemeEditLayer;
+  mediaRect: ViewRect;
+  selected: boolean;
+  hidden: boolean;
+  onSelectLayer: (id: string | null) => void;
+  onCommitLayerKeyframes: CommitLayerKeyframes;
+};
+
+function firstKeyframe(layer: KeyframedLayer): TransformKeyframe {
+  const interpolated = interpolateTransformKeyframes(layer.keyframes, ACTIVE_TIME_US);
+  const fallback = layer.keyframes[0];
+  if (!interpolated) return fallback;
+  return { ...fallback, ...interpolated };
+}
+
+function writeFirstKeyframe(layer: KeyframedLayer, keyframe: TransformKeyframe): TransformKeyframe[] {
+  if (layer.keyframes.length === 0) return [keyframe];
+  return [{ ...keyframe, timeUs: layer.keyframes[0].timeUs }, ...layer.keyframes.slice(1)];
+}
+
+function rectStyle(rect: NormalizedRect, mediaRect: ViewRect) {
+  return {
+    left: mediaRect.x + rect.x * mediaRect.width,
+    top: mediaRect.y + rect.y * mediaRect.height,
+    width: rect.width * mediaRect.width,
+    height: rect.height * mediaRect.height,
+  };
+}
+
+function layerCenterPoint(keyframe: TransformKeyframe, mediaRect: ViewRect): ViewPoint {
+  return normalizedPointToViewPoint(keyframe.center, mediaRect);
+}
+
+function keyframeLayerBox(keyframe: TransformKeyframe, layerWidth: number, mediaRect: ViewRect): ViewRect {
+  const center = layerCenterPoint(keyframe, mediaRect);
+  const width = Math.max(44, mediaRect.width * Math.max(0.04, layerWidth) * keyframe.scale);
+  const height = Math.max(44, width * DEFAULT_LAYER_ASPECT);
+  return { x: center.x - width / 2, y: center.y - height / 2, width, height };
+}
+
+const SourceVideo = React.memo(function SourceVideo({ uri, style }: { uri: string; style: ViewRect }) {
+  const player = useVideoPlayer(uri, (instance) => {
+    instance.loop = true;
+    instance.play();
+  });
+  return <VideoView pointerEvents="none" style={[styles.sourceMedia, style]} player={player} contentFit="contain" nativeControls={false} />;
+});
+
+const OverlayVideo = React.memo(function OverlayVideo({ uri }: { uri: string }) {
+  const player = useVideoPlayer(uri, (instance) => {
+    instance.loop = true;
+    instance.muted = true;
+    instance.play();
+  });
+  return <VideoView pointerEvents="none" style={StyleSheet.absoluteFill} player={player} contentFit="contain" nativeControls={false} />;
+});
+
+const CoverLayerView = React.memo(function CoverLayerView({ layer, mediaRect, selected, hidden, onSelectLayer }: CanvasLayerProps & { layer: CoverLayer }) {
+  const correction = evaluateMaskTrackRect({ id: layer.id, active: layer.active, corrections: layer.corrections }, ACTIVE_TIME_US);
+  const rect = correction ?? layer.rect;
+  if (hidden) return null;
+  return (
+    <View
+      style={[styles.coverLayer, rectStyle(rect, mediaRect), selected && styles.selectedOutline]}
+      onStartShouldSetResponder={(event) => viewPointToNormalizedPoint({ x: event.nativeEvent.locationX + mediaRect.x, y: event.nativeEvent.locationY + mediaRect.y }, mediaRect) !== null}
+      onResponderRelease={() => onSelectLayer(layer.id)}
+      accessibilityRole="button"
+      accessibilityLabel="Cover correction layer"
+      accessibilityHint="Select this correction layer"
+      accessibilityState={{ selected }}
+    >
+      <Text style={styles.coverText}>{layer.mode === 'pixelate' ? 'Pixelate' : 'Cover'}</Text>
+    </View>
+  );
+});
+
+const TransformableLayerView = React.memo(function TransformableLayerView({
+  project,
+  layer,
+  mediaRect,
+  selected,
+  hidden,
+  onSelectLayer,
+  onCommitLayerKeyframes,
+}: CanvasLayerProps & { layer: TextLayer | SubjectLayer | MediaOverlayLayer }) {
+  const translate = useConst(() => new Animated.ValueXY({ x: 0, y: 0 }));
+  const scalePreview = useConst(() => new Animated.Value(1));
+  const rotatePreview = useConst(() => new Animated.Value(0));
+  const gestureStart = useRef<{ keyframe: TransformKeyframe; center: ViewPoint; handle: ViewPoint } | null>(null);
+  const keyframe = firstKeyframe(layer);
+  const visualWidth = layer.kind === 'text' ? layer.width : 0.28;
+  const box = keyframeLayerBox(keyframe, visualWidth, mediaRect);
+  const center = layerCenterPoint(keyframe, mediaRect);
+
+  useEffect(() => {
+    translate.setValue({ x: 0, y: 0 });
+    scalePreview.setValue(1);
+    rotatePreview.setValue(0);
+  }, [keyframe.center.x, keyframe.center.y, keyframe.scale, keyframe.rotationDegrees, scalePreview, translate, rotatePreview]);
+
+  const commit = useCallback((nextKeyframe: TransformKeyframe) => {
+    onCommitLayerKeyframes(layer.id, writeFirstKeyframe(layer, nextKeyframe));
+    translate.setValue({ x: 0, y: 0 });
+    scalePreview.setValue(1);
+    rotatePreview.setValue(0);
+  }, [layer, onCommitLayerKeyframes, rotatePreview, scalePreview, translate]);
+
+  const dragPan = useMemo(() => PanResponder.create({
+    onStartShouldSetPanResponder: () => true,
+    onMoveShouldSetPanResponder: (_event, gesture) => Math.abs(gesture.dx) + Math.abs(gesture.dy) > 2,
+    onPanResponderGrant: () => {
+      onSelectLayer(layer.id);
+      gestureStart.current = { keyframe, center, handle: { x: box.x + box.width, y: box.y + box.height } };
+      translate.setValue({ x: 0, y: 0 });
+    },
+    onPanResponderMove: (_event, gesture) => {
+      translate.setValue({ x: gesture.dx, y: gesture.dy });
+    },
+    onPanResponderRelease: (_event, gesture) => {
+      const start = gestureStart.current?.keyframe ?? keyframe;
+      commit(dragKeyframeByViewDelta(start, { dx: gesture.dx, dy: gesture.dy } satisfies ViewDelta, mediaRect));
+      gestureStart.current = null;
+    },
+    onPanResponderTerminate: () => {
+      translate.setValue({ x: 0, y: 0 });
+      gestureStart.current = null;
+    },
+  }), [box.height, box.width, box.x, box.y, center, commit, keyframe, layer.id, mediaRect, onSelectLayer, translate]);
+
+  const resizePan = useMemo(() => PanResponder.create({
+    onStartShouldSetPanResponder: () => selected,
+    onMoveShouldSetPanResponder: () => selected,
+    onPanResponderGrant: () => {
+      gestureStart.current = { keyframe, center, handle: { x: box.x + box.width, y: box.y + box.height } };
+      scalePreview.setValue(1);
+    },
+    onPanResponderMove: (_event, gesture) => {
+      const start = gestureStart.current;
+      if (!start) return;
+      const next = resizeKeyframeFromHandle(start.keyframe, start.center, start.handle, { x: start.handle.x + gesture.dx, y: start.handle.y + gesture.dy });
+      scalePreview.setValue(next.scale / Math.max(0.01, start.keyframe.scale));
+    },
+    onPanResponderRelease: (_event, gesture) => {
+      const start = gestureStart.current;
+      if (start) commit(resizeKeyframeFromHandle(start.keyframe, start.center, start.handle, { x: start.handle.x + gesture.dx, y: start.handle.y + gesture.dy }));
+      gestureStart.current = null;
+    },
+    onPanResponderTerminate: () => {
+      scalePreview.setValue(1);
+      gestureStart.current = null;
+    },
+  }), [box.height, box.width, box.x, box.y, center, commit, keyframe, scalePreview, selected]);
+
+  const rotatePan = useMemo(() => PanResponder.create({
+    onStartShouldSetPanResponder: () => selected,
+    onMoveShouldSetPanResponder: () => selected,
+    onPanResponderGrant: () => {
+      gestureStart.current = { keyframe, center, handle: { x: center.x, y: box.y - 28 } };
+      rotatePreview.setValue(0);
+    },
+    onPanResponderMove: (_event, gesture) => {
+      const start = gestureStart.current;
+      if (!start) return;
+      const next = rotateKeyframeFromHandle(start.keyframe, start.center, start.handle, { x: start.handle.x + gesture.dx, y: start.handle.y + gesture.dy });
+      rotatePreview.setValue(next.rotationDegrees - start.keyframe.rotationDegrees);
+    },
+    onPanResponderRelease: (_event, gesture) => {
+      const start = gestureStart.current;
+      if (start) commit(rotateKeyframeFromHandle(start.keyframe, start.center, start.handle, { x: start.handle.x + gesture.dx, y: start.handle.y + gesture.dy }));
+      gestureStart.current = null;
+    },
+    onPanResponderTerminate: () => {
+      rotatePreview.setValue(0);
+      gestureStart.current = null;
+    },
+  }), [box.y, center, commit, keyframe, rotatePreview, selected]);
+
+  if (hidden) return null;
+
+  const rotation = rotatePreview.interpolate({
+    inputRange: [-360, 360],
+    outputRange: [`${keyframe.rotationDegrees - 360}deg`, `${keyframe.rotationDegrees + 360}deg`],
+  });
+
+  return (
+    <Animated.View
+      style={[
+        styles.transformLayer,
+        { left: box.x, top: box.y, width: box.width, height: box.height, opacity: keyframe.opacity },
+        selected && styles.selectedOutline,
+        {
+          transform: [
+            { translateX: translate.x },
+            { translateY: translate.y },
+            { scale: scalePreview },
+            { rotate: rotation },
+          ],
+        },
+      ]}
+      {...dragPan.panHandlers}
+      accessibilityRole="adjustable"
+      accessibilityLabel={`${layer.kind} layer`}
+      accessibilityHint="Drag to move. Accessibility actions nudge the layer."
+      accessibilityState={{ selected }}
+      accessibilityActions={[
+        { name: 'activate', label: 'Select layer' },
+        { name: 'increment', label: 'Nudge right' },
+        { name: 'decrement', label: 'Nudge left' },
+      ]}
+      onAccessibilityAction={(event) => {
+        if (event.nativeEvent.actionName === 'increment') commit(dragKeyframeByViewDelta(keyframe, { dx: mediaRect.width * 0.01, dy: 0 }, mediaRect));
+        else if (event.nativeEvent.actionName === 'decrement') commit(dragKeyframeByViewDelta(keyframe, { dx: -mediaRect.width * 0.01, dy: 0 }, mediaRect));
+        else onSelectLayer(layer.id);
+      }}
+    >
+      {layer.kind === 'text' && <TextLayerContent layer={layer} />}
+      {layer.kind === 'subject' && <SubjectLayerContent project={project} layer={layer} />}
+      {layer.kind === 'media' && <MediaLayerContent layer={layer} />}
+      {selected && (
+        <>
+          <View style={styles.rotateArm} pointerEvents="none" />
+          <Animated.View style={styles.rotateHandle} {...rotatePan.panHandlers} accessibilityRole="adjustable" accessibilityLabel="Rotate selected layer" />
+          <Animated.View style={styles.resizeHandle} {...resizePan.panHandlers} accessibilityRole="adjustable" accessibilityLabel="Resize selected layer" />
+        </>
+      )}
+    </Animated.View>
+  );
+});
+
+const TextLayerContent = React.memo(function TextLayerContent({ layer }: { layer: TextLayer }) {
+  return (
+    <View style={styles.textFill} pointerEvents="none">
+      <Text style={[styles.layerText, { color: layer.style.color, opacity: layer.style.opacity, textAlign: layer.style.align }]} numberOfLines={3}>
+        {layer.style.uppercase ? layer.text.toUpperCase() : layer.text}
+      </Text>
+    </View>
+  );
+});
+
+const SubjectLayerContent = React.memo(function SubjectLayerContent({ project, layer }: { project: MemeEditProject; layer: SubjectLayer }) {
+  const hasMask = !!project.transient.maskTracks[layer.maskTrackId];
+  return (
+    <View style={[styles.subjectFill, !hasMask && styles.unavailableFill]} pointerEvents="none">
+      <Text style={styles.unavailableText}>{hasMask ? 'Subject mask' : 'Subject mask unavailable'}</Text>
+    </View>
+  );
+});
+
+const MediaLayerContent = React.memo(function MediaLayerContent({ layer }: { layer: MediaOverlayLayer }) {
+  if (layer.assetKind === 'video') return <OverlayVideo uri={layer.assetUri} />;
+  return <Image source={{ uri: layer.assetUri }} style={StyleSheet.absoluteFill} contentFit={layer.fit} cachePolicy="none" />;
+});
+
+export const MemeEditCanvas = React.memo(function MemeEditCanvas({
+  project,
+  selectedLayerId,
+  before,
+  onSelectLayer,
+  onCommitLayerKeyframes,
+}: {
+  project: MemeEditProject;
+  selectedLayerId: string | null;
+  before: boolean;
+  onSelectLayer: (id: string | null) => void;
+  onCommitLayerKeyframes: CommitLayerKeyframes;
+}) {
+  const [viewSize, setViewSize] = React.useState<ViewSize | null>(null);
+  const sourceUri = project.transient.materializedSourceUri ?? project.source.uri;
+  const mediaRect = useMemo(
+    () => viewSize ? containedMediaRect(viewSize, { width: project.source.width, height: project.source.height, rotation: project.base.rotation }) : null,
+    [project.base.rotation, project.source.height, project.source.width, viewSize]
+  );
+  const onLayout = useCallback((event: LayoutChangeEvent) => {
+    const next = event.nativeEvent.layout;
+    setViewSize((current) => {
+      if (current && Math.abs(current.width - next.width) < 0.5 && Math.abs(current.height - next.height) < 0.5) return current;
+      return { width: next.width, height: next.height };
+    });
+  }, []);
+  const selectPan = useMemo(() => PanResponder.create({
+    onStartShouldSetPanResponder: (event) => {
+      if (!mediaRect) return false;
+      return viewPointToNormalizedPoint({ x: event.nativeEvent.locationX, y: event.nativeEvent.locationY }, mediaRect) !== null;
+    },
+    onPanResponderRelease: () => onSelectLayer(null),
+  }), [mediaRect, onSelectLayer]);
+
+  return (
+    <View style={styles.root} onLayout={onLayout} {...selectPan.panHandlers} accessibilityLabel="Meme editing canvas">
+      <View style={styles.checker} pointerEvents="none" />
+      {mediaRect ? (
+        project.source.kind === 'video' ? (
+          <SourceVideo uri={sourceUri} style={mediaRect} />
+        ) : (
+          <Image source={{ uri: sourceUri }} style={[styles.sourceMedia, mediaRect]} contentFit="contain" cachePolicy="none" />
+        )
+      ) : (
+        <View style={styles.loadingBox}><Text style={styles.unavailableText}>Measuring canvas…</Text></View>
+      )}
+      {mediaRect && project.layers.map((layer) => {
+        if (layer.kind === 'cover') {
+          return <CoverLayerView key={layer.id} project={project} layer={layer} mediaRect={mediaRect} selected={selectedLayerId === layer.id} hidden={before} onSelectLayer={onSelectLayer} onCommitLayerKeyframes={onCommitLayerKeyframes} />;
+        }
+        return <TransformableLayerView key={layer.id} project={project} layer={layer} mediaRect={mediaRect} selected={selectedLayerId === layer.id} hidden={before} onSelectLayer={onSelectLayer} onCommitLayerKeyframes={onCommitLayerKeyframes} />;
+      })}
+      <View style={styles.bounds} pointerEvents="none">
+        {mediaRect && <View style={[styles.mediaBounds, mediaRect]} />}
+      </View>
+    </View>
+  );
+});
+
+const styles = StyleSheet.create({
+  root: { flex: 1, minHeight: 260, backgroundColor: colors.bg, overflow: 'hidden' },
+  checker: { ...StyleSheet.absoluteFill, backgroundColor: colors.bg },
+  sourceMedia: { position: 'absolute', backgroundColor: colors.surface },
+  bounds: { ...StyleSheet.absoluteFill },
+  mediaBounds: { position: 'absolute', borderWidth: StyleSheet.hairlineWidth, borderColor: colors.borderLight },
+  loadingBox: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+  coverLayer: {
+    position: 'absolute',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.overlay,
+    borderWidth: 1,
+    borderColor: colors.borderLight,
+  },
+  coverText: { ...type.micro, color: colors.textDim },
+  transformLayer: {
+    position: 'absolute',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: radius.sm,
+  },
+  selectedOutline: {
+    borderWidth: 2,
+    borderColor: colors.volt,
+    borderStyle: 'solid',
+  },
+  textFill: { flex: 1, alignSelf: 'stretch', alignItems: 'center', justifyContent: 'center', padding: space.xs },
+  layerText: {
+    width: '100%',
+    color: colors.text,
+    fontSize: 20,
+    lineHeight: 23,
+    fontWeight: '900',
+    textShadowColor: colors.bg,
+    textShadowOffset: { width: 1, height: 1 },
+    textShadowRadius: 1,
+  },
+  subjectFill: {
+    flex: 1,
+    alignSelf: 'stretch',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: colors.good,
+    backgroundColor: colors.goodDim,
+  },
+  unavailableFill: {
+    borderColor: colors.danger,
+    borderStyle: 'dashed',
+    backgroundColor: colors.dangerDim,
+  },
+  unavailableText: { ...type.caption, color: colors.textDim, textAlign: 'center' },
+  rotateArm: {
+    position: 'absolute',
+    top: -28,
+    left: '50%',
+    width: 1,
+    height: 28,
+    backgroundColor: colors.volt,
+  },
+  rotateHandle: {
+    position: 'absolute',
+    top: -44,
+    left: '50%',
+    marginLeft: -22,
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    borderWidth: 2,
+    borderColor: colors.volt,
+    backgroundColor: colors.voltDim,
+  },
+  resizeHandle: {
+    position: 'absolute',
+    right: -22,
+    bottom: -22,
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    borderWidth: 2,
+    borderColor: colors.volt,
+    backgroundColor: colors.surface2,
+  },
+});

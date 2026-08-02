@@ -42,17 +42,15 @@ import { termsWithLabel, upsertDurableTag } from '../tagMerge';
 import { emitLibraryChanged } from '../events';
 import { guessFacet } from '../facetCoverage';
 import { scoreExemplar } from '../learnCore';
-import { buildExemplarHeads, noteInteractive, saveSharedFiles, type ExemplarModel } from '../indexer';
+import { buildExemplarHeads, noteInteractive, type ExemplarModel } from '../indexer';
 import { noteCodecInteractive } from '../interactive';
 import { success, tap, thud, warn } from '../haptics';
 import {
   copyFileToClipboard,
-  mediaEditorNativeAvailable,
-  renderMemeVariation,
   saveToDownloads,
   transcodeVideoToMp4,
 } from '../../modules/memeget-bg';
-import { compatibleCopyTarget, makeVariationName } from '../memeActionsCore';
+import { compatibleCopyTarget } from '../memeActionsCore';
 import { mimeForName } from '../mediaFormats';
 import {
   deleteCache,
@@ -69,7 +67,7 @@ import type { MemeRecord, SearchHit, Tag } from '../types';
 
 import { useAudio } from '../audio';
 import { showToast } from './Toast';
-import { MemeVariationEditor, type VariationDraft } from './MemeVariationEditor';
+import { MemeRemixStudio } from './MemeRemixStudio';
 import { Chip, PressableScale } from './ui';
 
 const GAP = 3;
@@ -276,8 +274,8 @@ export const MemeGrid = React.memo(function MemeGrid({
   onScrollActiveChange?: (active: boolean) => void;
 }) {
   const [selected, setSelected] = useState<Item | null>(null);
-  const [variationOpen, setVariationOpen] = useState(false);
-  const [variationError, setVariationError] = useState('');
+  const [studioOpen, setStudioOpen] = useState(false);
+  const [studioExportError, setStudioExportError] = useState('');
   // Multi-select: long-press a cell to enter selection mode, tap to toggle, then
   // apply a bulk action (tag / delete) to the whole set. Kept in the grid (not
   // lifted to the screen) so the bar and cell overlays live next to the list.
@@ -680,60 +678,16 @@ export const MemeGrid = React.memo(function MemeGrid({
 
   const openVariation = () => {
     if (!selected || busy) return;
-    if (!mediaEditorNativeAvailable) {
-      showToast('Meme editing needs the installed native build', 'error');
-      return;
-    }
     noteInteractive();
     if (selected.kind === 'video') noteCodecInteractive();
-    setVariationError('');
-    setVariationOpen(true);
+    setStudioExportError('');
+    setStudioOpen(true);
   };
 
-  const saveVariation = async (draft: VariationDraft) => {
-    const item = selected;
-    if (!item || busy) return;
-    setBusy(true);
-    setVariationError('');
-    let rendered: string | null = null;
-    let materialized: string | null = null;
-    try {
-      materialized = await materialize(item.uri, item.name);
-      rendered = await renderMemeVariation(
-        materialized,
-        item.kind,
-        draft.topText,
-        draft.bottomText,
-        item.kind === 'image' && draft.coverTop,
-        item.kind === 'image' && draft.coverBottom
-      );
-      if (!rendered) throw new Error('Meme editor is unavailable in this build');
-      const extension = item.kind === 'video' ? 'mp4' : 'png';
-      const mimeType = item.kind === 'video' ? 'video/mp4' : 'image/png';
-      const result = await saveSharedFiles([
-        {
-          path: rendered,
-          fileName: makeVariationName(item.name, extension),
-          mimeType,
-        },
-      ]);
-      if (result.saved.length === 0) {
-        throw new Error(result.duplicates ? 'That variation already exists' : 'Could not write to the linked folder');
-      }
-      setVariationOpen(false);
-      emitLibraryChanged();
-      onCreated?.(result.saved);
-      success();
-      showToast('New variation saved — indexing in background', 'success');
-    } catch (e) {
-      const message = `Could not create variation: ${String(e)}`;
-      setVariationError(message);
-      showToast(message, 'error');
-    } finally {
-      if (materialized) await deleteCache(materialized).catch(() => {});
-      if (rendered) await deleteCache(rendered).catch(() => {});
-      setBusy(false);
-    }
+  const exportStudioProject = async () => {
+    const message = 'Structured project export is not implemented in this branch yet. No file was rendered.';
+    setStudioExportError(message);
+    throw new Error(message);
   };
 
   const onCopy = async () => {
@@ -1249,13 +1203,13 @@ export const MemeGrid = React.memo(function MemeGrid({
         }}
       />
 
-      <MemeVariationEditor
+      <MemeRemixStudio
         item={selected}
-        visible={variationOpen}
-        saving={busy}
-        error={variationError}
-        onClose={() => setVariationOpen(false)}
-        onSave={saveVariation}
+        visible={studioOpen && !!selected}
+        exportBusy={busy}
+        exportError={studioExportError}
+        onClose={() => setStudioOpen(false)}
+        onExport={exportStudioProject}
       />
 
       <Modal
