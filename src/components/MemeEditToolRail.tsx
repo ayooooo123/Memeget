@@ -1,10 +1,13 @@
 import React from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 
+import { memeEditToolsForSource, type MemeEditToolId } from '../memeEditCanvasCore';
+import type { MediaEditKind } from '../memeEditProjectCore';
+
 import { colors, radius, space, type } from '../theme';
 import { PressableScale } from './ui';
 
-export type MemeEditTool = 'layers' | 'text' | 'transform';
+export type MemeEditTool = MemeEditToolId;
 
 interface ToolSpec {
   id: MemeEditTool;
@@ -16,21 +19,25 @@ interface ToolSpec {
 const TOOLS: readonly ToolSpec[] = [
   { id: 'layers', label: 'Layers', hint: 'Show layer order and layer actions', mark: 'L' },
   { id: 'text', label: 'Text', hint: 'Add and style meme text layers', mark: 'A' },
-  { id: 'transform', label: 'Transform', hint: 'Move, resize, and rotate the selected layer', mark: 'T' },
+  { id: 'transform', label: 'Transform', hint: 'Crop, rotate, or flip this image', mark: 'T' },
+  { id: 'replace-text', label: 'Replace text', hint: 'Detect text or draw a box, then Cover, Pixelate, or Replace', mark: 'R' },
 ];
 
 export const MemeEditToolRail = React.memo(function MemeEditToolRail({
   activeTool,
   onSelectTool,
   disabled,
+  sourceKind,
 }: {
   activeTool: MemeEditTool;
   onSelectTool: (tool: MemeEditTool) => void;
   disabled?: boolean;
+  sourceKind: MediaEditKind;
 }) {
+  const availableTools = memeEditToolsForSource(sourceKind);
   return (
     <View style={styles.rail} accessibilityRole="toolbar" accessibilityLabel="Editing tools">
-      {TOOLS.map((tool) => {
+      {TOOLS.filter((tool) => availableTools.includes(tool.id)).map((tool) => {
         const selected = activeTool === tool.id;
         return (
           <PressableScale

@@ -1298,3 +1298,85 @@ describe('bounded project history', () => {
     expect(undoProjectHistory(history)).toBe(history);
   });
 });
+
+describe('atomic image geometry and multi-layer actions', () => {
+  test('accepts free crop geometry and replaces image geometry in one immutable action', () => {
+    const project = createDefaultImageProject(imageSource);
+    const text = textLayer('mapped');
+    const next = reduceMemeEditProject(project, {
+      type: 'set-image-geometry',
+      base: {
+        rotation: 90,
+        flipX: true,
+        flipY: false,
+        crop: { x: 0.1, y: 0.2, width: 0.7, height: 0.6 },
+        outputAspect: 'free',
+      },
+      layers: [text],
+      maskTracks: [],
+    });
+
+    expect(next).not.toBe(project);
+    expect(next.base.outputAspect).toBe('free');
+    expect(next.layers).toEqual([text]);
+    expect(project.layers).toEqual([]);
+    expect(validateMemeEditProject(next)).toEqual({ ok: true, value: next });
+  });
+
+  test('enforces a finite minimum crop area at the reducer boundary', () => {
+    const project = createDefaultImageProject(imageSource);
+    const next = reduceMemeEditProject(project, {
+      type: 'set-image-geometry',
+      base: {
+        ...project.base,
+        crop: { x: Number.NaN, y: 0.99, width: 0.0001, height: 0.0001 },
+        outputAspect: 'free',
+      },
+      layers: [],
+      maskTracks: [],
+    });
+
+    expect(Object.values(next.base.crop).every(Number.isFinite)).toBe(true);
+    expect(next.base.crop.width * next.base.crop.height).toBeGreaterThanOrEqual(0.0025);
+    expect(next.base.crop.x + next.base.crop.width).toBeLessThanOrEqual(1);
+    expect(next.base.crop.y + next.base.crop.height).toBeLessThanOrEqual(1);
+  });
+
+  test('ignores image geometry actions for video projects', () => {
+    const project = createDefaultVideoProject(videoSource);
+
+    expect(reduceMemeEditProject(project, {
+      type: 'set-image-geometry',
+      base: { ...project.base, rotation: 90 },
+      layers: [],
+      maskTracks: [],
+    })).toBe(project);
+  });
+
+  test('adds caller-ID layers atomically and enforces the project layer limit before mutation', () => {
+    const project = createDefaultImageProject(imageSource);
+    const first = textLayer('first');
+    const second = textLayer('second');
+    const added = reduceMemeEditProject(project, { type: 'add-layers', layers: [first, second] });
+
+    expect(added.layers.map((layer) => layer.id)).toEqual(['first', 'second']);
+    expect(project.layers).toEqual([]);
+
+    const full = { ...project, layers: Array.from({ length: PROJECT_LIMITS.maxLayers - 1 }, (_, index) => textLayer(`existing-${index}`)) };
+    expect(() => reduceMemeEditProject(full, {
+      type: 'add-layers',
+      layers: [textLayer('overflow-a'), textLayer('overflow-b')],
+    })).toThrow(/64 layer/);
+    expect(full.layers).toHaveLength(PROJECT_LIMITS.maxLayers - 1);
+  });
+
+  test('rejects duplicate IDs inside a multi-layer action without partial insertion', () => {
+    const project = createDefaultImageProject(imageSource);
+
+    expect(() => reduceMemeEditProject(project, {
+      type: 'add-layers',
+      layers: [textLayer('duplicate'), textLayer('duplicate')],
+    })).toThrow(/duplicate/i);
+    expect(project.layers).toEqual([]);
+  });
+});

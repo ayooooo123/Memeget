@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef } from 'react';
-import { Animated, PanResponder, Platform, StyleSheet, Text, View, type LayoutChangeEvent } from 'react-native';
+import { Animated, PanResponder, Platform, StyleSheet, Text, View, type ImageStyle, type LayoutChangeEvent, type ViewStyle } from 'react-native';
 import { Image } from 'expo-image';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import { requireNativeViewManager } from 'expo-modules-core';
@@ -21,12 +21,18 @@ import {
   upsertLayerKeyframeAtCapturedTime,
   viewPointToNormalizedPoint,
   viewRectToAbsoluteStyle,
-  type AbsoluteRectStyle,
   type ViewDelta,
   type ViewPoint,
   type ViewRect,
   type ViewSize,
 } from '../memeEditCanvasCore';
+import {
+  moveNormalizedRegion,
+  resizeNormalizedRegion,
+  sourceFrameForVisibleCrop,
+  visibleImageDimensions,
+  type TextRegionCandidate,
+} from '../memeImageEditCore';
 import {
   evaluateMaskTrackRect,
   interpolateTransformKeyframes,
@@ -37,6 +43,7 @@ import {
   type MemeEditLayer,
   type MemeEditProject,
   type NormalizedRect,
+  type NormalizedPoint,
   type SubjectLayer,
   type TextLayer,
   type TransformKeyframe,
@@ -113,7 +120,15 @@ function rectStyle(rect: NormalizedRect, mediaRect: ViewRect) {
 }
 
 
-const SourceVideo = React.memo(function SourceVideo({ uri, style, onTimeUs }: { uri: string; style: AbsoluteRectStyle; onTimeUs: (timeUs: number) => void }) {
+const SourceVideo = React.memo(function SourceVideo({
+  uri,
+  style,
+  onTimeUs,
+}: {
+  uri: string;
+  style: ViewStyle;
+  onTimeUs: (timeUs: number) => void;
+}) {
   const player = useVideoPlayer(uri, (instance) => {
     instance.loop = true;
     instance.play();
@@ -124,7 +139,68 @@ const SourceVideo = React.memo(function SourceVideo({ uri, style, onTimeUs }: { 
     }, PREVIEW_TIME_POLL_MS);
     return () => clearInterval(timer);
   }, [onTimeUs, player]);
-  return <VideoView pointerEvents="none" style={[styles.sourceMedia, style]} player={player} contentFit="contain" nativeControls={false} />;
+  return <VideoView pointerEvents="none" style={[styles.sourceMedia, style]} player={player} contentFit="fill" nativeControls={false} />;
+});
+
+const SourceMedia = React.memo(function SourceMedia({
+  project,
+  uri,
+  mediaRect,
+  onTimeUs,
+}: {
+  project: MemeEditProject;
+  uri: string;
+  mediaRect: ViewRect;
+  onTimeUs: (timeUs: number) => void;
+}) {
+  const frame = sourceFrameForVisibleCrop(
+    { x: 0, y: 0, width: mediaRect.width, height: mediaRect.height },
+    project.base
+  );
+  const swapsAxes = project.base.rotation === 90 || project.base.rotation === 270;
+  const contentWidth = swapsAxes ? frame.height : frame.width;
+  const contentHeight = swapsAxes ? frame.width : frame.height;
+  const contentFrame = {
+    left: (frame.width - contentWidth) / 2,
+    top: (frame.height - contentHeight) / 2,
+    width: contentWidth,
+    height: contentHeight,
+  };
+  const videoStyle: ViewStyle = {
+    ...contentFrame,
+    transform: [{ rotate: `${project.base.rotation}deg` }],
+  };
+  const imageStyle: ImageStyle = {
+    ...contentFrame,
+    transform: [{ rotate: `${project.base.rotation}deg` }],
+  };
+  return (
+    <View style={[styles.sourceClip, viewRectToAbsoluteStyle(mediaRect)]} pointerEvents="none">
+      <View
+        style={[
+          styles.orientedSource,
+          frame,
+          {
+            transform: [
+              { scaleX: project.base.flipX ? -1 : 1 },
+              { scaleY: project.base.flipY ? -1 : 1 },
+            ],
+          },
+        ]}
+      >
+        {project.source.kind === 'video' ? (
+          <SourceVideo uri={uri} style={videoStyle} onTimeUs={onTimeUs} />
+        ) : (
+          <Image
+            source={{ uri }}
+            style={[styles.sourceMedia, imageStyle]}
+            contentFit="fill"
+            cachePolicy="none"
+          />
+        )}
+      </View>
+    </View>
+  );
 });
 
 const OverlayVideo = React.memo(function OverlayVideo({ uri }: { uri: string }) {
@@ -136,22 +212,62 @@ const OverlayVideo = React.memo(function OverlayVideo({ uri }: { uri: string }) 
   return <VideoView pointerEvents="none" style={StyleSheet.absoluteFill} player={player} contentFit="contain" nativeControls={false} />;
 });
 
+const PixelatePreview = React.memo(function PixelatePreview({
+  layer,
+  rect,
+  mediaRect,
+}: {
+  layer: CoverLayer;
+  rect: NormalizedRect;
+  mediaRect: ViewRect;
+}) {
+  const columns = Math.max(1, Math.min(8, Math.ceil(rect.width * mediaRect.width / layer.pixelSize)));
+  const rows = Math.max(1, Math.min(8, Math.ceil(rect.height * mediaRect.height / layer.pixelSize)));
+  const cells = useMemo(() => Array.from({ length: columns * rows }, (_, index) => index), [columns, rows]);
+  return (
+    <View style={styles.pixelGrid} pointerEvents="none">
+      {cells.map((index) => (
+        <View
+          key={index}
+          style={[
+            styles.pixelCell,
+            {
+              width: `${100 / columns}%`,
+              height: `${100 / rows}%`,
+              backgroundColor: (Math.floor(index / columns) + index % columns) % 2 === 0
+                ? 'rgba(255,255,255,0.24)'
+                : 'rgba(0,0,0,0.3)',
+            },
+          ]}
+        />
+      ))}
+    </View>
+  );
+});
+
+
 const CoverLayerView = React.memo(function CoverLayerView({ layer, mediaRect, selected, hidden, activeTimeUs, disabled, onSelectLayer }: CanvasLayerProps & { layer: CoverLayer }) {
   const correction = evaluateMaskTrackRect({ id: layer.id, active: layer.active, corrections: layer.corrections }, activeTimeUs);
   const rect = correction ?? layer.rect;
   if (hidden) return null;
   return (
     <View
-      style={[styles.coverLayer, rectStyle(rect, mediaRect), selected && styles.selectedOutline]}
+      style={[
+        styles.coverLayer,
+        rectStyle(rect, mediaRect),
+        layer.mode === 'solid' && { backgroundColor: layer.color },
+        selected && styles.selectedOutline,
+      ]}
       onStartShouldSetResponder={(event) => !disabled && viewPointToNormalizedPoint({ x: event.nativeEvent.locationX + mediaRect.x, y: event.nativeEvent.locationY + mediaRect.y }, mediaRect) !== null}
       onResponderRelease={() => {
         if (!disabled) onSelectLayer(layer.id);
       }}
       accessibilityRole="button"
-      accessibilityLabel="Cover correction layer"
+      accessibilityLabel={layer.mode === 'pixelate' ? 'Pixelate correction layer' : 'Solid cover correction layer'}
       accessibilityHint="Select this correction layer"
       accessibilityState={{ selected, disabled: !!disabled }}
     >
+      {layer.mode === 'pixelate' && <PixelatePreview layer={layer} rect={rect} mediaRect={mediaRect} />}
       <Text style={styles.coverText}>{layer.mode === 'pixelate' ? 'Pixelate' : 'Cover'}</Text>
     </View>
   );
@@ -543,6 +659,182 @@ const MediaLayerContent = React.memo(function MediaLayerContent({ layer }: { lay
   return <Image source={{ uri: layer.assetUri }} style={StyleSheet.absoluteFill} contentFit={layer.fit} cachePolicy="none" />;
 });
 
+const TextRegionOverlay = React.memo(function TextRegionOverlay({
+  region,
+  mediaRect,
+  selected,
+  disabled,
+  onSelect,
+}: {
+  region: TextRegionCandidate;
+  mediaRect: ViewRect;
+  selected: boolean;
+  disabled: boolean;
+  onSelect: (region: TextRegionCandidate) => void;
+}) {
+  const visual = rectStyle(region.rect, mediaRect);
+  const targetWidth = Math.max(44, visual.width);
+  const targetHeight = Math.max(44, visual.height);
+  const targetLeft = Math.max(mediaRect.x, Math.min(
+    visual.left - (targetWidth - visual.width) / 2,
+    mediaRect.x + mediaRect.width - targetWidth
+  ));
+  const targetTop = Math.max(mediaRect.y, Math.min(
+    visual.top - (targetHeight - visual.height) / 2,
+    mediaRect.y + mediaRect.height - targetHeight
+  ));
+  return (
+    <View
+      style={[
+        styles.textRegionTarget,
+        { left: targetLeft, top: targetTop, width: targetWidth, height: targetHeight },
+      ]}
+      onStartShouldSetResponder={() => !disabled}
+      onResponderRelease={() => {
+        if (!disabled) onSelect(region);
+      }}
+      accessibilityRole="button"
+      accessibilityLabel={`${region.source} text box: ${region.text || 'blank manual region'}`}
+      accessibilityHint="Select this region for Cover, Pixelate, or Replace"
+      accessibilityState={{ selected, disabled }}
+    >
+      <View
+        pointerEvents="none"
+        style={[
+          styles.textRegionBox,
+          {
+            left: visual.left - targetLeft,
+            top: visual.top - targetTop,
+            width: visual.width,
+            height: visual.height,
+          },
+          selected && styles.textRegionSelected,
+        ]}
+      />
+    </View>
+  );
+});
+
+const SelectedTextRegionOverlay = React.memo(function SelectedTextRegionOverlay({
+  region,
+  mediaRect,
+  disabled,
+  onChange,
+}: {
+  region: TextRegionCandidate;
+  mediaRect: ViewRect;
+  disabled: boolean;
+  onChange: (region: TextRegionCandidate) => void;
+}) {
+  const drag = useConst(() => new Animated.ValueXY({ x: 0, y: 0 }));
+  const resize = useConst(() => new Animated.ValueXY({ x: 0, y: 0 }));
+  const dragAccepted = useRef(false);
+  const resizeAccepted = useRef(false);
+  const dragPan = useMemo(() => PanResponder.create({
+    onStartShouldSetPanResponder: () => {
+      dragAccepted.current = !disabled;
+      return dragAccepted.current;
+    },
+    onMoveShouldSetPanResponder: (_event, gesture) =>
+      dragAccepted.current && Math.abs(gesture.dx) + Math.abs(gesture.dy) > 2,
+    onPanResponderMove: (_event, gesture) => {
+      if (dragAccepted.current) drag.setValue({ x: gesture.dx, y: gesture.dy });
+    },
+    onPanResponderRelease: (_event, gesture) => {
+      if (dragAccepted.current) {
+        onChange({
+          ...region,
+          rect: moveNormalizedRegion(region.rect, {
+            x: gesture.dx / mediaRect.width,
+            y: gesture.dy / mediaRect.height,
+          }),
+        });
+      }
+      dragAccepted.current = false;
+      drag.setValue({ x: 0, y: 0 });
+    },
+    onPanResponderTerminate: () => {
+      dragAccepted.current = false;
+      drag.setValue({ x: 0, y: 0 });
+    },
+  }), [disabled, drag, mediaRect.height, mediaRect.width, onChange, region]);
+  const resizePan = useMemo(() => PanResponder.create({
+    onStartShouldSetPanResponder: () => {
+      resizeAccepted.current = !disabled;
+      return resizeAccepted.current;
+    },
+    onMoveShouldSetPanResponder: (_event, gesture) =>
+      resizeAccepted.current && Math.abs(gesture.dx) + Math.abs(gesture.dy) > 2,
+    onPanResponderMove: (_event, gesture) => {
+      if (resizeAccepted.current) resize.setValue({ x: gesture.dx, y: gesture.dy });
+    },
+    onPanResponderRelease: (_event, gesture) => {
+      if (resizeAccepted.current) {
+        onChange({
+          ...region,
+          rect: resizeNormalizedRegion(region.rect, {
+            x: gesture.dx / mediaRect.width,
+            y: gesture.dy / mediaRect.height,
+          }),
+        });
+      }
+      resizeAccepted.current = false;
+      resize.setValue({ x: 0, y: 0 });
+    },
+    onPanResponderTerminate: () => {
+      resizeAccepted.current = false;
+      resize.setValue({ x: 0, y: 0 });
+    },
+  }), [disabled, mediaRect.height, mediaRect.width, onChange, region, resize]);
+  const visual = rectStyle(region.rect, mediaRect);
+  const nudge = useCallback((direction: number) => {
+    if (!disabled) onChange({
+      ...region,
+      rect: moveNormalizedRegion(region.rect, { x: direction * 0.02, y: direction * 0.02 }),
+    });
+  }, [disabled, onChange, region]);
+  const resizeBy = useCallback((direction: number) => {
+    if (!disabled) onChange({
+      ...region,
+      rect: resizeNormalizedRegion(region.rect, { x: direction * 0.02, y: direction * 0.02 }),
+    });
+  }, [disabled, onChange, region]);
+  return (
+    <Animated.View
+      {...dragPan.panHandlers}
+      style={[
+        styles.selectedTextRegion,
+        visual,
+        {
+          width: Animated.add(visual.width, resize.x),
+          height: Animated.add(visual.height, resize.y),
+          transform: drag.getTranslateTransform(),
+        },
+      ]}
+      accessible
+      accessibilityRole="adjustable"
+      accessibilityLabel={`Selected text region: ${region.text || 'manual box'}`}
+      accessibilityHint="Drag to move. Increment and decrement nudge the region."
+      accessibilityState={{ disabled }}
+      accessibilityActions={[{ name: 'increment' }, { name: 'decrement' }]}
+      onAccessibilityAction={(event) => nudge(event.nativeEvent.actionName === 'increment' ? 1 : -1)}
+    >
+      <Text style={styles.textRegionLabel} numberOfLines={1}>{region.source === 'manual' ? 'Manual region' : region.text}</Text>
+      <View
+        {...resizePan.panHandlers}
+        style={styles.textRegionResizeHandle}
+        accessible
+        accessibilityRole="adjustable"
+        accessibilityLabel="Resize selected text region"
+        accessibilityHint="Drag the corner. Increment expands and decrement contracts."
+        accessibilityState={{ disabled }}
+        accessibilityActions={[{ name: 'increment' }, { name: 'decrement' }]}
+        onAccessibilityAction={(event) => resizeBy(event.nativeEvent.actionName === 'increment' ? 1 : -1)}
+      />
+    </Animated.View>
+  );
+});
+
 export const MemeEditCanvas = React.memo(function MemeEditCanvas({
   project,
   selectedLayerId,
@@ -550,6 +842,12 @@ export const MemeEditCanvas = React.memo(function MemeEditCanvas({
   onSelectLayer,
   onCommitLayerKeyframes,
   disabled,
+  textRegions = [],
+  selectedTextRegion = null,
+  manualTextRegionMode = false,
+  onSelectTextRegion,
+  onChangeSelectedTextRegion,
+  onManualTextRegionComplete,
 }: {
   project: MemeEditProject;
   selectedLayerId: string | null;
@@ -557,13 +855,32 @@ export const MemeEditCanvas = React.memo(function MemeEditCanvas({
   onSelectLayer: (id: string | null) => void;
   onCommitLayerKeyframes: CommitLayerKeyframes;
   disabled?: boolean;
+  textRegions?: readonly TextRegionCandidate[];
+  selectedTextRegion?: TextRegionCandidate | null;
+  manualTextRegionMode?: boolean;
+  onSelectTextRegion?: (region: TextRegionCandidate | null) => void;
+  onChangeSelectedTextRegion?: (region: TextRegionCandidate) => void;
+  onManualTextRegionComplete?: () => void;
 }) {
   const [viewSize, setViewSize] = React.useState<ViewSize | null>(null);
   const [activeTimeUs, setActiveTimeUs] = React.useState(0);
   const sourceUri = project.transient.materializedSourceUri ?? project.source.uri;
+  const visibleDimensions = useMemo(
+    () => visibleImageDimensions(
+      { width: project.source.width, height: project.source.height },
+      project.base
+    ),
+    [
+      project.base.crop.height,
+      project.base.crop.width,
+      project.base.rotation,
+      project.source.height,
+      project.source.width,
+    ]
+  );
   const mediaRect = useMemo(
-    () => viewSize ? containedMediaRect(viewSize, { width: project.source.width, height: project.source.height, rotation: project.base.rotation }) : null,
-    [project.base.rotation, project.source.height, project.source.width, viewSize]
+    () => viewSize ? containedMediaRect(viewSize, { ...visibleDimensions, rotation: 0 }) : null,
+    [viewSize, visibleDimensions]
   );
   const onLayout = useCallback((event: LayoutChangeEvent) => {
     const next = event.nativeEvent.layout;
@@ -580,23 +897,70 @@ export const MemeEditCanvas = React.memo(function MemeEditCanvas({
       return Math.min(durationUs, timeUs);
     });
   }, [project.source.durationUs]);
+  const manualStart = useRef<NormalizedPoint | null>(null);
+  const manualPan = useMemo(() => PanResponder.create({
+    onStartShouldSetPanResponder: () =>
+      manualTextRegionMode && !disabled && !!mediaRect && !!onChangeSelectedTextRegion,
+    onMoveShouldSetPanResponder: (_event, gesture) =>
+      manualTextRegionMode && Math.abs(gesture.dx) + Math.abs(gesture.dy) > 2,
+    onPanResponderGrant: (event) => {
+      if (!mediaRect) return;
+      manualStart.current = {
+        x: Math.max(0, Math.min(1, event.nativeEvent.locationX / mediaRect.width)),
+        y: Math.max(0, Math.min(1, event.nativeEvent.locationY / mediaRect.height)),
+      };
+    },
+    onPanResponderMove: (event) => {
+      const start = manualStart.current;
+      if (!start || !mediaRect || !onChangeSelectedTextRegion) return;
+      const current = {
+        x: Math.max(0, Math.min(1, event.nativeEvent.locationX / mediaRect.width)),
+        y: Math.max(0, Math.min(1, event.nativeEvent.locationY / mediaRect.height)),
+      };
+      const x = Math.min(start.x, current.x);
+      const y = Math.min(start.y, current.y);
+      onChangeSelectedTextRegion({
+        id: 'manual-current',
+        text: '',
+        source: 'manual',
+        rect: {
+          x,
+          y,
+          width: Math.min(1 - x, Math.max(0.05, Math.abs(current.x - start.x))),
+          height: Math.min(1 - y, Math.max(0.05, Math.abs(current.y - start.y))),
+        },
+      });
+    },
+    onPanResponderRelease: () => {
+      manualStart.current = null;
+      onManualTextRegionComplete?.();
+    },
+    onPanResponderTerminate: () => {
+      manualStart.current = null;
+    },
+  }), [
+    disabled,
+    manualTextRegionMode,
+    mediaRect,
+    onChangeSelectedTextRegion,
+    onManualTextRegionComplete,
+  ]);
   const selectPan = useMemo(() => PanResponder.create({
     onStartShouldSetPanResponder: (event) => {
-      if (!mediaRect) return false;
+      if (!mediaRect || manualTextRegionMode) return false;
       return viewPointToNormalizedPoint({ x: event.nativeEvent.locationX, y: event.nativeEvent.locationY }, mediaRect) !== null;
     },
-    onPanResponderRelease: () => onSelectLayer(null),
-  }), [mediaRect, onSelectLayer]);
+    onPanResponderRelease: () => {
+      onSelectLayer(null);
+      onSelectTextRegion?.(null);
+    },
+  }), [manualTextRegionMode, mediaRect, onSelectLayer, onSelectTextRegion]);
 
   return (
     <View style={styles.root} onLayout={onLayout} {...selectPan.panHandlers} accessibilityLabel="Meme editing canvas">
       <View style={styles.checker} pointerEvents="none" />
       {mediaRect ? (
-        project.source.kind === 'video' ? (
-          <SourceVideo uri={sourceUri} style={viewRectToAbsoluteStyle(mediaRect)} onTimeUs={onVideoTime} />
-        ) : (
-          <Image source={{ uri: sourceUri }} style={[styles.sourceMedia, viewRectToAbsoluteStyle(mediaRect)]} contentFit="contain" cachePolicy="none" />
-        )
+        <SourceMedia project={project} uri={sourceUri} mediaRect={mediaRect} onTimeUs={onVideoTime} />
       ) : (
         <View style={styles.loadingBox}><Text style={styles.unavailableText}>Measuring canvas…</Text></View>
       )}
@@ -607,6 +971,35 @@ export const MemeEditCanvas = React.memo(function MemeEditCanvas({
         }
         return <TransformableLayerView key={layer.id} project={project} layer={layer} mediaRect={mediaRect} selected={selectedLayerId === layer.id} hidden={hidden} activeTimeUs={activeTimeUs} disabled={disabled} onSelectLayer={onSelectLayer} onCommitLayerKeyframes={onCommitLayerKeyframes} />;
       })}
+      {mediaRect && textRegions.map((region) => (
+        <TextRegionOverlay
+          key={region.id}
+          region={region}
+          mediaRect={mediaRect}
+          selected={selectedTextRegion?.id === region.id}
+          disabled={!!disabled}
+          onSelect={(next) => onSelectTextRegion?.(next)}
+        />
+      ))}
+      {mediaRect && selectedTextRegion && onChangeSelectedTextRegion && (
+        <SelectedTextRegionOverlay
+          region={selectedTextRegion}
+          mediaRect={mediaRect}
+          disabled={!!disabled}
+          onChange={onChangeSelectedTextRegion}
+        />
+      )}
+      {mediaRect && manualTextRegionMode && (
+        <View
+          {...manualPan.panHandlers}
+          style={[styles.manualRegionSurface, viewRectToAbsoluteStyle(mediaRect)]}
+          accessible
+          accessibilityRole="button"
+          accessibilityLabel="Manual text region drawing surface"
+          accessibilityHint="Drag to draw a box over text that detection missed"
+          accessibilityState={{ disabled: !!disabled }}
+        />
+      )}
       <View style={styles.bounds} pointerEvents="none">
         {mediaRect && <View style={[styles.mediaBounds, viewRectToAbsoluteStyle(mediaRect)]} />}
       </View>
@@ -618,6 +1011,8 @@ const styles = StyleSheet.create({
   root: { flex: 1, minHeight: 260, backgroundColor: colors.bg, overflow: 'hidden' },
   checker: { ...StyleSheet.absoluteFill, backgroundColor: colors.bg },
   sourceMedia: { position: 'absolute', backgroundColor: colors.surface },
+  sourceClip: { position: 'absolute', overflow: 'hidden', backgroundColor: colors.surface },
+  orientedSource: { position: 'absolute' },
   bounds: { ...StyleSheet.absoluteFill },
   mediaBounds: { position: 'absolute', borderWidth: StyleSheet.hairlineWidth, borderColor: colors.borderLight },
   loadingBox: { flex: 1, alignItems: 'center', justifyContent: 'center' },
@@ -629,6 +1024,13 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.borderLight,
   },
+  pixelGrid: {
+    ...StyleSheet.absoluteFill,
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    overflow: 'hidden',
+  },
+  pixelCell: { borderWidth: StyleSheet.hairlineWidth, borderColor: colors.border },
   coverText: { ...type.micro, color: colors.textDim },
   transformLayer: {
     position: 'absolute',
@@ -644,6 +1046,52 @@ const styles = StyleSheet.create({
     borderWidth: 2,
     borderColor: colors.volt,
     borderStyle: 'solid',
+  },
+  textRegionTarget: { position: 'absolute', zIndex: 20 },
+  textRegionBox: {
+    position: 'absolute',
+    borderWidth: 2,
+    borderColor: colors.accent,
+    borderStyle: 'dashed',
+    backgroundColor: 'rgba(255,255,255,0.08)',
+  },
+  textRegionSelected: { borderColor: colors.volt, borderStyle: 'solid' },
+  selectedTextRegion: {
+    position: 'absolute',
+    zIndex: 21,
+    minWidth: 44,
+    minHeight: 44,
+    borderWidth: 2,
+    borderColor: colors.volt,
+    backgroundColor: colors.voltDim,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  textRegionLabel: {
+    ...type.micro,
+    color: colors.text,
+    backgroundColor: colors.surface,
+    paddingHorizontal: space.xs,
+    maxWidth: '100%',
+  },
+  textRegionResizeHandle: {
+    position: 'absolute',
+    right: -22,
+    bottom: -22,
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    borderWidth: 2,
+    borderColor: colors.volt,
+    backgroundColor: colors.surface,
+  },
+  manualRegionSurface: {
+    position: 'absolute',
+    zIndex: 22,
+    borderWidth: 2,
+    borderColor: colors.accent,
+    borderStyle: 'dashed',
+    backgroundColor: 'rgba(255,255,255,0.03)',
   },
   textDiagnostic: { ...type.micro, color: colors.danger, marginTop: space.xs },
   textFill: { flex: 1, alignSelf: 'stretch', alignItems: 'center', justifyContent: 'center', padding: space.xs },

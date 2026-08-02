@@ -17,7 +17,7 @@ export interface BaseTransform {
   flipX: boolean;
   flipY: boolean;
   crop: NormalizedRect;
-  outputAspect: 'source' | '1:1' | '4:5' | '9:16' | '16:9';
+  outputAspect: 'source' | 'free' | '1:1' | '4:5' | '9:16' | '16:9';
 }
 
 export interface TextStyle {
@@ -185,6 +185,7 @@ const MAX_TRANSFORM_SCALE = 16;
 const MIN_TRANSFORM_SCALE = 0.01;
 const MAX_ROTATION_DEGREES = 36_000;
 const MAX_PIXEL_SIZE = 256;
+const MIN_BASE_CROP_EDGE = 0.05;
 const MAX_MEDIA_DURATION_US = 24 * 60 * 60 * 1_000_000;
 const OUTPUT_ASPECTS: Record<BaseTransform['outputAspect'], true> = {
   source: true,
@@ -192,6 +193,7 @@ const OUTPUT_ASPECTS: Record<BaseTransform['outputAspect'], true> = {
   '4:5': true,
   '9:16': true,
   '16:9': true,
+  free: true,
 };
 const TEXT_PRESETS: Record<TextStyle['preset'], true> = {
   impact: true,
@@ -1725,6 +1727,18 @@ function normalizeCrop(crop: NormalizedRect, fallback: NormalizedRect): Normaliz
   return normalized;
 }
 
+function normalizeBaseCrop(crop: NormalizedRect, fallback: NormalizedRect): NormalizedRect {
+  const normalized = normalizeCrop(crop, fallback);
+  const width = Math.max(MIN_BASE_CROP_EDGE, normalized.width);
+  const height = Math.max(MIN_BASE_CROP_EDGE, normalized.height);
+  return {
+    x: roundGeometry(Math.min(normalized.x, 1 - width)),
+    y: roundGeometry(Math.min(normalized.y, 1 - height)),
+    width: roundGeometry(width),
+    height: roundGeometry(height),
+  };
+}
+
 function normalizeBase(base: BaseTransform, fallback: BaseTransform): BaseTransform {
   const rotation = base.rotation === 90 || base.rotation === 180 || base.rotation === 270 ? base.rotation : 0;
   const outputAspect = Object.prototype.hasOwnProperty.call(OUTPUT_ASPECTS, base.outputAspect)
@@ -1734,7 +1748,7 @@ function normalizeBase(base: BaseTransform, fallback: BaseTransform): BaseTransf
     rotation,
     flipX: Boolean(base.flipX),
     flipY: Boolean(base.flipY),
-    crop: normalizeCrop(base.crop, fallback.crop),
+    crop: normalizeBaseCrop(base.crop, fallback.crop),
     outputAspect,
   };
 }
@@ -2048,10 +2062,17 @@ function enforceProjectBounds(project: MemeEditProject): MemeEditProject {
 
 export type MemeEditProjectAction =
   | { type: 'set-base-transform'; base: BaseTransform }
+  | {
+      type: 'set-image-geometry';
+      base: BaseTransform;
+      layers: MemeEditLayer[];
+      maskTracks: MaskTrackSpec[];
+    }
   | { type: 'set-video-retained-ranges'; retainedRanges: TimeRangeUs[] }
   | { type: 'set-video-speed'; speed: number }
   | { type: 'set-video-audio'; audio: VideoEditSpec['audio'] }
   | { type: 'add-layer'; layer: MemeEditLayer; index?: number }
+  | { type: 'add-layers'; layers: MemeEditLayer[]; index?: number }
   | { type: 'update-layer'; layer: MemeEditLayer }
   | { type: 'remove-layer'; id: string }
   | { type: 'move-layer'; id: string; toIndex: number }
@@ -2074,6 +2095,48 @@ export function reduceMemeEditProject(
   switch (action.type) {
     case 'set-base-transform':
       return { ...project, base: normalizeBase(action.base, project.base) };
+    case 'set-image-geometry': {
+      if (project.source.kind !== 'image') return project;
+      if (action.layers.length > PROJECT_LIMITS.maxLayers) {
+        throw new RangeError(
+          `Project cannot contain more than ${PROJECT_LIMITS.maxLayers} layers.`
+        );
+      }
+      if (action.maskTracks.length > PROJECT_LIMITS.maxMaskTracks) {
+        throw new RangeError(
+          `Project cannot contain more than ${PROJECT_LIMITS.maxMaskTracks} mask tracks.`
+        );
+      }
+      const trackIds = new Set<string>();
+      for (const track of action.maskTracks) {
+        if (trackIds.has(track.id)) {
+          throw new Error(`Mask track ID "${track.id}" is duplicated.`);
+        }
+        trackIds.add(track.id);
+      }
+      const base = normalizeBase(action.base, project.base);
+      let candidate: MemeEditProject = { ...project, base, maskTracks: [], layers: [] };
+      const maskTracks = action.maskTracks.map((track) => normalizeMaskTrack(track, candidate));
+      candidate = { ...candidate, maskTracks };
+      const layerIds = new Set<string>();
+      const layers = action.layers.map((layer) => {
+        if (layerIds.has(layer.id)) {
+          throw new Error(`Layer ID "${layer.id}" is duplicated.`);
+        }
+        layerIds.add(layer.id);
+        return normalizeLayer(layer, candidate);
+      });
+      const transientMaskTracks: Record<string, string> = {};
+      for (const track of maskTracks) {
+        const uri = project.transient.maskTracks[track.id];
+        if (uri !== undefined) transientMaskTracks[track.id] = uri;
+      }
+      return enforceProjectBounds({
+        ...candidate,
+        layers,
+        transient: { ...project.transient, maskTracks: transientMaskTracks },
+      });
+    }
     case 'set-video-retained-ranges': {
       if (project.video === null || project.source.durationUs === null) return project;
       const retainedRanges = normalizeRetainedRanges(
@@ -2115,6 +2178,27 @@ export function reduceMemeEditProject(
       const index = Math.max(0, Math.min(action.index ?? project.layers.length, project.layers.length));
       const layers = project.layers.slice();
       layers.splice(index, 0, normalizeLayer(action.layer, project));
+      return enforceProjectBounds({ ...project, layers });
+    }
+    case 'add-layers': {
+      if (action.layers.length === 0) return project;
+      if (action.index !== undefined && !Number.isSafeInteger(action.index)) return project;
+      if (project.layers.length + action.layers.length > PROJECT_LIMITS.maxLayers) {
+        throw new RangeError(
+          `Project cannot contain more than ${PROJECT_LIMITS.maxLayers} layers.`
+        );
+      }
+      const ids = new Set(project.layers.map((layer) => layer.id));
+      for (const layer of action.layers) {
+        if (ids.has(layer.id)) {
+          throw new Error(`Layer ID "${layer.id}" is duplicated.`);
+        }
+        ids.add(layer.id);
+      }
+      const index = Math.max(0, Math.min(action.index ?? project.layers.length, project.layers.length));
+      const additions = action.layers.map((layer) => normalizeLayer(layer, project));
+      const layers = project.layers.slice();
+      layers.splice(index, 0, ...additions);
       return enforceProjectBounds({ ...project, layers });
     }
     case 'update-layer': {

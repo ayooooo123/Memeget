@@ -10,6 +10,14 @@ let mockNative: {
     widthDip: number,
     align: string
   ): Promise<unknown>;
+  detectTextRegions?(source: string): Promise<unknown>;
+  sampleImageBorderColor?(
+    source: string,
+    x: number,
+    y: number,
+    width: number,
+    height: number
+  ): Promise<unknown>;
 } | null = null;
 
 jest.mock('expo-modules-core', () => ({
@@ -92,5 +100,46 @@ describe('meme text layout DIP bridge', () => {
       align: 'center',
     })).resolves.toEqual(metrics);
     expect(nativeMeasure).toHaveBeenCalledWith('ÁG py', 'Anton', 900, 48, 45.6, 0.018, 320, 'center');
+  });
+});
+
+describe('image text detector and border sampler bridge', () => {
+  beforeEach(() => {
+    jest.resetModules();
+    mockNative = null;
+  });
+
+  test('returns null only when the optional native methods are absent', async () => {
+    const { detectTextRegions, sampleImageBorderColor } = await import('./index');
+
+    await expect(detectTextRegions('file:///source.jpg')).resolves.toBeNull();
+    await expect(
+      sampleImageBorderColor('file:///source.jpg', { x: 0.1, y: 0.2, width: 0.3, height: 0.4 })
+    ).resolves.toBeNull();
+  });
+
+  test('passes normalized inputs through and propagates real native failures', async () => {
+    const detection = {
+      sourceWidth: 120,
+      sourceHeight: 80,
+      rotation: 90,
+      languages: ['en'],
+      blocks: [],
+    };
+    const sample = { hex: '#123456', sampleCount: 42 };
+    const detector = jest.fn().mockResolvedValue(detection);
+    const sampler = jest.fn().mockResolvedValueOnce(sample).mockRejectedValueOnce(new Error('decode failed'));
+    mockNative = { detectTextRegions: detector, sampleImageBorderColor: sampler };
+    const { detectTextRegions, sampleImageBorderColor } = await import('./index');
+
+    await expect(detectTextRegions('content://image')).resolves.toEqual(detection);
+    await expect(
+      sampleImageBorderColor('content://image', { x: 0.1, y: 0.2, width: 0.3, height: 0.4 })
+    ).resolves.toEqual(sample);
+    await expect(
+      sampleImageBorderColor('content://broken', { x: 0, y: 0, width: 1, height: 1 })
+    ).rejects.toThrow('decode failed');
+    expect(detector).toHaveBeenCalledWith('content://image');
+    expect(sampler).toHaveBeenNthCalledWith(1, 'content://image', 0.1, 0.2, 0.3, 0.4);
   });
 });

@@ -197,6 +197,32 @@ class MemegetBgModule : Module() {
       MemeMediaProbe.probe(ctx, source).toMap()
     }
 
+    // Detect real local-image text using the same pinned ML Kit stack as
+    // expo-text-extractor. The detector honors EXIF before recognition and
+    // returns normalized block/line/element geometry.
+    AsyncFunction("detectTextRegions") { source: String ->
+      val ctx = appContext.reactContext
+        ?: throw IllegalStateException("React context unavailable")
+      MemeTextDetector.detect(ctx, source).toMap()
+    }
+
+    // Sample a bounded ring outside a normalized region on a downsampled,
+    // EXIF-oriented bitmap. Real decode/sample errors reject.
+    AsyncFunction("sampleImageBorderColor") {
+      source: String,
+      x: Double,
+      y: Double,
+      width: Double,
+      height: Double ->
+      val ctx = appContext.reactContext
+        ?: throw IllegalStateException("React context unavailable")
+      MemeTextDetector.sampleBorderColor(
+        ctx,
+        source,
+        NormalizedImageRect(x, y, width, height)
+      ).toMap()
+    }
+
     // Decode the first audio track of a video to mono 16 kHz float32 PCM,
     // written as a raw little-endian file in the cache dir (the JS side reads
     // it and hands the waveform to the on-device STT model). Async because a two-

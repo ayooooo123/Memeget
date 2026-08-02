@@ -30,6 +30,10 @@ dependencies {
   // Read a linked SAF document's lastModified() for the library's recency sort.
   implementation 'androidx.documentfile:documentfile:1.0.1'
 
+  // Match expo-text-extractor's resolved on-device OCR stack exactly. This
+  // module needs a direct compile dependency to expose real OCR geometry.
+  implementation 'com.google.android.gms:play-services-mlkit-text-recognition:19.0.1'
+
   // ExoPlayer frame extraction for the last-resort poster path
   // (VideoPlayerFrameExtractor). Pinned to the SAME media3 version expo-video
   // bundles (see its android/build.gradle: androidxMedia3Version) so the app

@@ -14,6 +14,7 @@ import {
   layerBodyTouchInsideMedia,
   layerHandleTouchInsideMedia,
   memeRemixExportControlState,
+  memeEditToolsForSource,
   projectHistoryCommandAvailability,
   runProjectHistoryCommand,
   nextDuplicateLayerId,
@@ -80,6 +81,13 @@ describe('containedMediaRect', () => {
   test('returns null for non-finite or empty input', () => {
     expect(containedMediaRect({ width: Infinity, height: 300 }, { width: 100, height: 100, rotation: 0 })).toBeNull();
     expect(containedMediaRect({ width: 300, height: 0 }, { width: 100, height: 100, rotation: 0 })).toBeNull();
+  });
+});
+
+describe('source-specific editor tools', () => {
+  test('exposes image transform and text replacement only for image projects', () => {
+    expect(memeEditToolsForSource('image')).toEqual(['layers', 'text', 'transform', 'replace-text']);
+    expect(memeEditToolsForSource('video')).toEqual(['layers', 'text']);
   });
 });
 

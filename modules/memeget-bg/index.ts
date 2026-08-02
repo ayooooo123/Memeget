@@ -57,6 +57,46 @@ export interface NativeMemeTextLayoutResult {
   lines: NativeMemeTextLayoutLine[];
 }
 
+export interface NativeNormalizedPoint {
+  x: number;
+  y: number;
+}
+
+export interface NativeNormalizedRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface NativeDetectedTextElement {
+  text: string;
+  box: NativeNormalizedRect | null;
+  cornerPoints: NativeNormalizedPoint[];
+  languages: string[];
+}
+
+export interface NativeDetectedTextLine extends NativeDetectedTextElement {
+  elements: NativeDetectedTextElement[];
+}
+
+export interface NativeDetectedTextBlock extends NativeDetectedTextElement {
+  lines: NativeDetectedTextLine[];
+}
+
+export interface NativeDetectedTextResult {
+  sourceWidth: number;
+  sourceHeight: number;
+  rotation: 0 | 90 | 180 | 270;
+  languages: string[];
+  blocks: NativeDetectedTextBlock[];
+}
+
+export interface NativeBorderColorSample {
+  hex: string;
+  sampleCount: number;
+}
+
 
 
 interface MemegetBgNative {
@@ -89,6 +129,14 @@ interface MemegetBgNative {
     widthDip: number,
     align: string
   ): Promise<NativeMemeTextLayoutResult>;
+  detectTextRegions(source: string): Promise<NativeDetectedTextResult>;
+  sampleImageBorderColor(
+    source: string,
+    x: number,
+    y: number,
+    width: number,
+    height: number
+  ): Promise<NativeBorderColorSample>;
 }
 
 // Optional on purpose: in Expo Go, in the JS-only dev flow, or before a native
@@ -148,6 +196,30 @@ export function getFileModifiedTime(uri: string): number | null {
 export async function probeMedia(source: string): Promise<MediaProbeResult | null> {
   if (!native) return null;
   return native.probeMedia(source);
+}
+
+export const textDetectionNativeAvailable =
+  native != null && typeof native.detectTextRegions === 'function';
+export const borderColorSamplerNativeAvailable =
+  native != null && typeof native.sampleImageBorderColor === 'function';
+
+export async function detectTextRegions(source: string): Promise<NativeDetectedTextResult | null> {
+  if (!native || typeof native.detectTextRegions !== 'function') return null;
+  return native.detectTextRegions(source);
+}
+
+export async function sampleImageBorderColor(
+  source: string,
+  rect: NativeNormalizedRect
+): Promise<NativeBorderColorSample | null> {
+  if (!native || typeof native.sampleImageBorderColor !== 'function') return null;
+  return native.sampleImageBorderColor(
+    source,
+    rect.x,
+    rect.y,
+    rect.width,
+    rect.height
+  );
 }
 
 // True once the native audio decoder is built into the app — the audio
