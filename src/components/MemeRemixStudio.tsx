@@ -28,11 +28,18 @@ import {
   type MemeEditDraftIdentity,
 } from '../memeEditDraftStore';
 import {
+  remapImageProject,
+  remapNormalizedRect,
+  type TextRegionCandidate,
+} from '../memeImageEditCore';
+import {
   applyProjectAction,
   beginProjectTransaction,
   commitProjectTransaction,
   PROJECT_LIMITS,
   createProjectHistory,
+  type BaseTransform,
+  type MemeEditLayer,
   type MemeEditProject,
   type MemeEditProjectAction,
   type ProjectHistory,
@@ -47,6 +54,8 @@ import { MemeEditCanvas } from './MemeEditCanvas';
 import { MemeEditToolRail, type MemeEditTool } from './MemeEditToolRail';
 import { MemeLayerList } from './MemeLayerList';
 import { MemeTextInspector } from './MemeTextInspector';
+import { MemeTextReplaceTool } from './MemeTextReplaceTool';
+import { MemeTransformInspector } from './MemeTransformInspector';
 
 type StudioItem = Pick<MemeRecord, 'id' | 'kind' | 'name' | 'uri' | 'modifiedAt'>;
 
@@ -160,6 +169,10 @@ export function MemeRemixStudio({
   const [inlineError, setInlineError] = useState('');
   const [externalTextRevision, setExternalTextRevision] = useState(0);
   const [discarding, setDiscarding] = useState(false);
+  const [previewBase, setPreviewBase] = useState<BaseTransform | null>(null);
+  const [textRegions, setTextRegions] = useState<TextRegionCandidate[]>([]);
+  const [selectedTextRegion, setSelectedTextRegion] = useState<TextRegionCandidate | null>(null);
+  const [manualTextRegionMode, setManualTextRegionMode] = useState(false);
   const autosaveRef = useRef<MemeEditAutosaveController | null>(null);
   const sourceControllerRef = useRef<MemeEditSourceSessionController | null>(null);
   const closedRef = useRef(true);
@@ -220,6 +233,11 @@ export function MemeRemixStudio({
       setInlineError('');
       setDiscarding(false);
       setSelectedLayerId(null);
+      setPreviewBase(null);
+      setTextRegions([]);
+      setSelectedTextRegion(null);
+      setManualTextRegionMode(false);
+      setActiveTool('layers');
       setState({ kind: 'closed' });
       void (async () => {
         try {
@@ -235,6 +253,11 @@ export function MemeRemixStudio({
     closedRef.current = false;
     let cancelled = false;
     setState({ kind: 'loading', message: 'Preparing source…' });
+    setPreviewBase(null);
+    setTextRegions([]);
+    setSelectedTextRegion(null);
+    setManualTextRegionMode(false);
+    setActiveTool('layers');
     setInlineError('');
 
     const safeSetState = (next: LoadState) => {
@@ -342,22 +365,58 @@ export function MemeRemixStudio({
     if (!discarding) setHistory((history) => commitGestureTransaction(history, [{ type: 'set-layer-keyframes', id: layerId, keyframes }]));
   }, [discarding, setHistory]);
 
+  const previewImageBase = useCallback((base: BaseTransform) => {
+    if (project?.source.kind === 'image' && !discarding) setPreviewBase(base);
+  }, [discarding, project?.source.kind]);
+  const commitImageBase = useCallback((base: BaseTransform) => {
+    if (!project || project.source.kind !== 'image' || discarding) return;
+    const remapped = remapImageProject(project, base);
+    setHistory((history) => applyProjectAction(history, {
+      type: 'set-image-geometry',
+      base: remapped.base,
+      layers: remapped.layers,
+      maskTracks: remapped.maskTracks,
+    }));
+    setTextRegions((current) => current.flatMap((region) => {
+      const rect = remapNormalizedRect(region.rect, project.base, base);
+      return rect ? [{ ...region, rect }] : [];
+    }));
+    setSelectedTextRegion((current) => {
+      if (!current) return null;
+      const rect = remapNormalizedRect(current.rect, project.base, base);
+      return rect ? { ...current, rect } : null;
+    });
+    setPreviewBase(null);
+  }, [discarding, project, setHistory]);
+  const addRegionLayers = useCallback((layers: MemeEditLayer[]) => {
+    if (discarding || layers.length === 0) return;
+    setHistory((history) => commitGestureTransaction(history, [{ type: 'add-layers', layers }]));
+  }, [discarding, setHistory]);
+
   const beginTextTransaction = useCallback(() => {
     if (!discarding) setHistory(beginProjectTransaction);
   }, [discarding, setHistory]);
   const commitTextTransaction = useCallback(() => {
     if (!discarding) setHistory(commitProjectTransaction);
   }, [discarding, setHistory]);
+  const clearTransientImageTools = useCallback(() => {
+    setPreviewBase(null);
+    setTextRegions([]);
+    setSelectedTextRegion(null);
+    setManualTextRegionMode(false);
+  }, []);
   const undo = useCallback(() => {
     if (discarding) return;
     tap();
     runProjectHistoryCommand('undo', flushPendingTextForHistory, setHistory, announceExternalTextRevision);
-  }, [announceExternalTextRevision, discarding, flushPendingTextForHistory, setHistory]);
+    clearTransientImageTools();
+  }, [announceExternalTextRevision, clearTransientImageTools, discarding, flushPendingTextForHistory, setHistory]);
   const redo = useCallback(() => {
     if (discarding) return;
     tap();
     runProjectHistoryCommand('redo', flushPendingTextForHistory, setHistory, announceExternalTextRevision);
-  }, [announceExternalTextRevision, discarding, flushPendingTextForHistory, setHistory]);
+    clearTransientImageTools();
+  }, [announceExternalTextRevision, clearTransientImageTools, discarding, flushPendingTextForHistory, setHistory]);
   const moveLayer = useCallback((id: string, toIndex: number) => applyAction({ type: 'move-layer', id, toIndex }), [applyAction]);
   const duplicateLayer = useCallback((id: string) => {
     if (!project) return;
@@ -501,6 +560,12 @@ export function MemeRemixStudio({
     }
   }, []);
   const exportControl = memeRemixExportControlState(headerLayout, { ready: !!ready, exportBusy: !!exportBusy, discarding, hasExport: !!onExport });
+  const canvasProject = useMemo(
+    () => project && previewBase && project.source.kind === 'image'
+      ? remapImageProject(project, previewBase)
+      : project,
+    [previewBase, project]
+  );
 
   return (
     <Modal visible={visible} animationType="slide" statusBarTranslucent onRequestClose={cancel}>
@@ -541,12 +606,18 @@ export function MemeRemixStudio({
           <View style={[styles.workspace, compact && styles.workspaceCompact]}>
             <View style={styles.previewPane}>
               <MemeEditCanvas
-                project={project}
+                project={canvasProject ?? project}
                 selectedLayerId={selectedLayerId}
                 before={before}
                 onSelectLayer={setSelectedLayerId}
                 onCommitLayerKeyframes={commitLayerKeyframes}
                 disabled={disabled}
+                textRegions={activeTool === 'replace-text' ? textRegions : []}
+                selectedTextRegion={activeTool === 'replace-text' ? selectedTextRegion : null}
+                manualTextRegionMode={activeTool === 'replace-text' && manualTextRegionMode}
+                onSelectTextRegion={setSelectedTextRegion}
+                onChangeSelectedTextRegion={setSelectedTextRegion}
+                onManualTextRegionComplete={() => setManualTextRegionMode(false)}
               />
               <View style={styles.readout} pointerEvents="none">
                 <Text style={styles.readoutText}>{selectedLayerSummary(project, selectedLayerId)}</Text>
@@ -554,7 +625,7 @@ export function MemeRemixStudio({
             </View>
             <View style={[styles.sidePane, compact && styles.sidePaneCompact]}>
               <View style={styles.sideHead}>
-                <Text style={styles.sideTitle}>{activeTool === 'layers' ? 'Layer tray' : activeTool === 'text' ? 'Text' : 'Transform'}</Text>
+                <Text style={styles.sideTitle}>{activeTool === 'layers' ? 'Layer tray' : activeTool === 'text' ? 'Text' : activeTool === 'transform' ? 'Image transform' : 'Replace text'}</Text>
                 <Text style={styles.sideMeta}>{project.layers.length} layer{project.layers.length === 1 ? '' : 's'}</Text>
               </View>
               {activeTool === 'layers' ? (
@@ -584,13 +655,35 @@ export function MemeRemixStudio({
                   onBeginTextTransaction={beginTextTransaction}
                   onCommitTextTransaction={commitTextTransaction}
                 />
-              ) : (
-                <ScrollView contentContainerStyle={styles.transformPanel}>
-                  <Text style={styles.transformTitle}>Direct transform</Text>
-                  <Text style={styles.transformCopy}>Drag the selected layer on the media. Use the round handle to rotate and the corner handle to resize. Letterbox space is inert.</Text>
-                  <Text style={styles.transformMetric}>{selectedLayerSummary(project, selectedLayerId)}</Text>
+              ) : activeTool === 'transform' ? (
+                <View style={styles.transformPanel}>
+                  <MemeTransformInspector
+                    project={project}
+                    base={previewBase ?? project.base}
+                    disabled={disabled}
+                    onPreviewBase={previewImageBase}
+                    onCommitBase={commitImageBase}
+                  />
                   <HeaderButton label={discarding ? 'Discarding…' : 'Discard draft'} hint="Delete this source's saved edit draft" onPress={discard} disabled={discarding} danger />
-                </ScrollView>
+                </View>
+              ) : (
+                <MemeTextReplaceTool
+                  project={project}
+                  sourceUri={project.transient.materializedSourceUri ?? project.source.uri}
+                  idPrefix={`studio-${item?.id ?? 'session'}-replace`}
+                  regions={textRegions}
+                  selectedRegion={selectedTextRegion}
+                  manualMode={manualTextRegionMode}
+                  disabled={disabled}
+                  onRegionsChange={setTextRegions}
+                  onSelectedRegionChange={setSelectedTextRegion}
+                  onManualModeChange={(enabled) => {
+                    setManualTextRegionMode(enabled);
+                    if (enabled) setSelectedTextRegion(null);
+                  }}
+                  onAddLayers={addRegionLayers}
+                  onSelectLayer={setSelectedLayerId}
+                />
               )}
             </View>
           </View>
@@ -612,7 +705,7 @@ export function MemeRemixStudio({
           </View>
         )}
 
-        <MemeEditToolRail activeTool={activeTool} onSelectTool={setActiveTool} disabled={state.kind !== 'ready' || discarding} />
+        <MemeEditToolRail activeTool={activeTool} onSelectTool={setActiveTool} sourceKind={project?.source.kind ?? 'image'} disabled={state.kind !== 'ready' || discarding} />
         <View style={{ height: Math.max(insets.bottom, space.sm) + (Platform.OS === 'android' ? keyboardHeight : 0) }} />
       </KeyboardAvoidingView>
     </Modal>

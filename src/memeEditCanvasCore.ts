@@ -81,6 +81,14 @@ export interface CapturedTransformGesture {
 
 export type ProjectHistoryCommand = 'undo' | 'redo';
 
+export type MemeEditToolId = 'layers' | 'text' | 'transform' | 'replace-text';
+
+export function memeEditToolsForSource(kind: MemeEditProject['source']['kind']): MemeEditToolId[] {
+  return kind === 'image'
+    ? ['layers', 'text', 'transform', 'replace-text']
+    : ['layers', 'text'];
+}
+
 export interface ProjectHistoryCommandAvailability {
   canUndo: boolean;
   canRedo: boolean;
