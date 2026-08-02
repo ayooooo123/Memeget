@@ -581,6 +581,49 @@ export function flattenDetectedTextRegions(result: DetectedTextResult): TextRegi
   return output;
 }
 
+function colorChannels(color: string): [number, number, number] {
+  const value = color.trim();
+  const short = /^#([0-9a-f]{3})$/i.exec(value)?.[1];
+  const full = /^#([0-9a-f]{6})(?:[0-9a-f]{2})?$/i.exec(value)?.[1];
+  const hex = full ?? (short ? short.split('').map((part) => `${part}${part}`).join('') : null);
+  if (!hex) return [0, 0, 0];
+  return [
+    Number.parseInt(hex.slice(0, 2), 16),
+    Number.parseInt(hex.slice(2, 4), 16),
+    Number.parseInt(hex.slice(4, 6), 16),
+  ];
+}
+
+export function relativeLuminance(color: string): number {
+  const channels = colorChannels(color).map((channel) => {
+    const normalized = channel / 255;
+    return normalized <= 0.04045
+      ? normalized / 12.92
+      : ((normalized + 0.055) / 1.055) ** 2.4;
+  });
+  return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2];
+}
+
+export function contrastRatio(first: string, second: string): number {
+  const firstLuminance = relativeLuminance(first);
+  const secondLuminance = relativeLuminance(second);
+  const lighter = Math.max(firstLuminance, secondLuminance);
+  const darker = Math.min(firstLuminance, secondLuminance);
+  return (lighter + 0.05) / (darker + 0.05);
+}
+
+export function replacementTextColorsForCover(
+  coverColor: string
+): Pick<TextLayer['style'], 'color' | 'outlineColor' | 'outlineScale'> {
+  const dark = '#000000';
+  const light = '#FFFFFF';
+  const darkContrast = contrastRatio(dark, coverColor);
+  const lightContrast = contrastRatio(light, coverColor);
+  return darkContrast >= lightContrast
+    ? { color: dark, outlineColor: light, outlineScale: 0.04 }
+    : { color: light, outlineColor: dark, outlineScale: 0.04 };
+}
+
 export function createTextRegionLayers(input: TextRegionLayerInput): MemeEditLayer[] {
   const rect = clippedUnitRect(input.rect);
   if (!rect) throw new RangeError('Text region must overlap the visible image.');
@@ -601,6 +644,7 @@ export function createTextRegionLayers(input: TextRegionLayerInput): MemeEditLay
     text: input.text,
     width: clamp(rect.width, MEME_TEXT_BOUNDS.minWrapWidth, MEME_TEXT_BOUNDS.maxWrapWidth),
     fontSize: clamp(rect.height * 0.72, MEME_TEXT_BOUNDS.minFontSize, MEME_TEXT_BOUNDS.maxFontSize),
+    style: replacementTextColorsForCover(input.color),
     active: null,
     keyframes: [{
       timeUs: 0,

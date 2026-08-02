@@ -3,6 +3,7 @@ import {
   MAX_TEXT_REGION_CANDIDATES,
   applyCropPreset,
   createTextRegionLayers,
+  contrastRatio,
   flattenDetectedTextRegions,
   moveCropHandle,
   moveNormalizedRegion,
@@ -11,6 +12,7 @@ import {
   remapImageProject,
   remapNormalizedPoint,
   remapNormalizedRect,
+  replacementTextColorsForCover,
   resizeNormalizedRegion,
   sourceFrameForVisibleCrop,
   visibleImageDimensions,
@@ -387,6 +389,16 @@ describe('real OCR region normalization and replacement layers', () => {
     });
   });
 
+  test.each(['#FFFFFF', '#101820', '#FF4E42', '#B8FF2C'])(
+    'chooses readable replacement text against %s',
+    (coverColor) => {
+      const textColors = replacementTextColorsForCover(coverColor);
+
+      expect(contrastRatio(textColors.color, coverColor)).toBeGreaterThanOrEqual(4.5);
+      expect(textColors.outlineColor).not.toBe(textColors.color);
+    }
+  );
+
   test.each(['cover', 'pixelate', 'replace'] as const)('creates bounded persistent %s layers', (action) => {
     const layers = createTextRegionLayers({
       action,
@@ -411,6 +423,9 @@ describe('real OCR region normalization and replacement layers', () => {
       expect(layers).toHaveLength(2);
       expect(layers[1]).toMatchObject({ id: 'caller-text', kind: 'text', text: 'HELLO', active: null });
       expect((layers[1] as TextLayer).keyframes[0].center).toEqual({ x: 0.3, y: 0.35 });
+      expect((layers[1] as TextLayer).style).toMatchObject(
+        replacementTextColorsForCover('#345678')
+      );
     } else {
       expect(layers).toHaveLength(1);
     }
