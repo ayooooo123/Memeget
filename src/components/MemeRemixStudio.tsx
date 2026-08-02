@@ -140,7 +140,7 @@ export function MemeRemixStudio({
     const autosave = autosaveRef.current;
     const controller = sourceControllerRef.current;
     let cleanupError: unknown = null;
-    await flushAutosaveBeforeSourceRelease(
+    const outcome = await flushAutosaveBeforeSourceRelease(
       autosave,
       async () => {
         if (controller) await controller.cancel();
@@ -150,8 +150,8 @@ export function MemeRemixStudio({
       }
     );
     if (cleanupError) throw cleanupError;
-    if (autosaveRef.current === autosave) autosaveRef.current = null;
-    if (sourceControllerRef.current === controller) sourceControllerRef.current = null;
+    if (outcome === 'released' && autosaveRef.current === autosave) autosaveRef.current = null;
+    if (outcome === 'released' && sourceControllerRef.current === controller) sourceControllerRef.current = null;
   }, []);
 
   useEffect(() => {

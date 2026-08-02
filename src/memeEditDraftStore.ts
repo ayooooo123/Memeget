@@ -660,25 +660,29 @@ export function requestSourceSessionClose(
   });
 }
 
+
+export type SourceReleaseOutcome = 'released' | 'blocked';
 export async function flushAutosaveBeforeSourceRelease(
   autosave: MemeEditAutosaveController | null,
   release: () => Promise<void>,
   onError: (error: unknown) => void = () => {}
-): Promise<void> {
+): Promise<SourceReleaseOutcome> {
   if (autosave) {
-    if (autosave.isDiscarding()) return;
+    if (autosave.isDiscarding()) return 'blocked';
     try {
       await autosave.flush();
     } catch (error) {
       onError(error);
-      return;
+      return 'blocked';
     }
   }
   try {
     await release();
   } catch (error) {
     onError(error);
+    return 'blocked';
   }
+  return 'released';
 }
 
 interface SharedPreparationEntry {
