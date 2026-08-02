@@ -768,6 +768,76 @@ describe('MemeEditSourcePreparationController', () => {
     expect(io.remove).toHaveBeenCalledWith(destination);
   });
 
+  test('shares preparation across controllers and deletes only after the final staggered release', async () => {
+    let releaseCopy!: () => void;
+    const copyGate = new Promise<void>((resolve) => {
+      releaseCopy = resolve;
+    });
+    const io: MemeEditSourcePreparationIo = {
+      cacheDirectory: 'file:///cache/',
+      materialize: jest.fn(async () => copyGate),
+      remove: jest.fn(async () => {}),
+      probe: jest.fn(async () => probeResult),
+    };
+    const firstController = new MemeEditSourcePreparationController(io, identity);
+    const secondController = new MemeEditSourcePreparationController(io, identity);
+
+    const first = firstController.prepare(project('first-controller'));
+    const firstAgain = firstController.prepare(project('first-controller-again'));
+    const second = secondController.prepare(project('second-controller'));
+    await Promise.resolve();
+    expect(io.materialize).toHaveBeenCalledTimes(1);
+    expect(io.remove).toHaveBeenCalledTimes(1);
+
+    releaseCopy();
+    const [firstPrepared, firstAgainPrepared, secondPrepared] = await Promise.all([
+      first,
+      firstAgain,
+      second,
+    ]);
+    expect(firstPrepared.materializedSourceUri).toBe(secondPrepared.materializedSourceUri);
+    expect(firstAgainPrepared.materializedSourceUri).toBe(secondPrepared.materializedSourceUri);
+    expect(io.probe).toHaveBeenCalledTimes(1);
+
+    await firstController.discard();
+    expect(io.remove).toHaveBeenCalledTimes(1);
+    await expect(secondController.prepare(project('still-live'))).resolves.toMatchObject({
+      materializedSourceUri: secondPrepared.materializedSourceUri,
+    });
+
+    await secondController.discard();
+    expect(io.remove).toHaveBeenCalledTimes(2);
+    expect(io.remove).toHaveBeenLastCalledWith(secondPrepared.materializedSourceUri);
+  });
+
+  test('removes a failed shared preparation so another controller can retry', async () => {
+    const retryIdentity: MemeEditDraftIdentity = {
+      ...identity,
+      sessionId: 'editor/session:retry',
+    };
+    const failingIo: MemeEditSourcePreparationIo = {
+      cacheDirectory: 'file:///cache/',
+      materialize: jest.fn(async () => {
+        throw new Error('copy failed');
+      }),
+      remove: jest.fn(async () => {}),
+      probe: jest.fn(async () => probeResult),
+    };
+    const firstController = new MemeEditSourcePreparationController(failingIo, retryIdentity);
+    await expect(firstController.prepare(project())).rejects.toThrow('copy failed');
+
+    const workingIo: MemeEditSourcePreparationIo = {
+      cacheDirectory: 'file:///cache/',
+      materialize: jest.fn(async () => {}),
+      remove: jest.fn(async () => {}),
+      probe: jest.fn(async () => probeResult),
+    };
+    const retryController = new MemeEditSourcePreparationController(workingIo, retryIdentity);
+    await expect(retryController.prepare(project())).resolves.toMatchObject({ owned: true });
+    expect(workingIo.materialize).toHaveBeenCalledTimes(1);
+    await retryController.discard();
+  });
+
   test('removes a stale owned destination before the first materialization copy', async () => {
     const paths = draftStoragePaths('file:///cache/', identity);
     const destination =
@@ -797,6 +867,7 @@ describe('MemeEditSourcePreparationController', () => {
       `remove:${destination}`,
       `materialize:${destination}`,
     ]);
+    await controller.discard();
   });
 
   test.each([
