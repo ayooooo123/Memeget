@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "task": "0.1",
-  "observedAtUtc": "2026-08-02T01:15:22.711Z",
+  "observedAtUtc": "2026-08-02T01:34:56.670Z",
   "gateStatus": "FAIL",
   "device": {
     "manufacturer": "Google",
@@ -70,17 +70,17 @@
       "observedOutputDurationMs": 4001,
       "audioMime": "audio\/mp4a-latm",
       "videoMime": "video\/avc",
-      "avEndTimeDeltaMs": 1,
+      "avEndTimeDeltaMs": 1.334,
       "outputBytes": 2388263,
-      "wallTimeMs": 3222,
-      "peakPssBytes": 239738880,
+      "wallTimeMs": 3074,
+      "peakPssBytes": 238918656,
       "durationWithin150ms": true,
       "aacPreserved": true,
       "avDeltaWithin50ms": true
     },
     "twoRetainedRanges": {
-      "status": "PASS",
-      "evidence": "two clipped EditedMediaItems concatenated for every fixture"
+      "status": "FAILED",
+      "evidence": "two clipped EditedMediaItems concatenated and every present track end is within 150 ms of expected for every fixture"
     },
     "h264Output": {
       "status": "PASS",
@@ -95,8 +95,8 @@
       "evidence": "decoded output\/input PCM RMS ratio is between 0.40 and 0.60 for requested gain 0.50"
     },
     "speed": {
-      "status": "PASS",
-      "evidence": "measured output duration matches retained duration divided by 1.25 within 150 ms"
+      "status": "FAILED",
+      "evidence": "every present track end matches retained duration divided by 1.25 within 150 ms"
     },
     "staticOverlay": {
       "status": "PASS",
@@ -113,7 +113,7 @@
     "cancellation": {
       "status": "PASS",
       "cancelRequestedBeforeCompletion": true,
-      "cancelLatencyMs": 66,
+      "cancelLatencyMs": 55,
       "partialOutputExistedBeforeExplicitCleanup": true,
       "partialOutputDeleteSucceeded": true,
       "partialOutputExistsAfterCleanup": false,
@@ -138,10 +138,10 @@
       "criterion": "Every output A\/V end-time delta must be <= 50 ms",
       "status": "FAIL",
       "observed": [
-        281,
-        670,
-        281,
-        670
+        281.333,
+        670.666,
+        281.333,
+        670.666
       ]
     },
     "cancellationCleanup": {
@@ -150,7 +150,7 @@
       "observed": {
         "status": "PASS",
         "cancelRequestedBeforeCompletion": true,
-        "cancelLatencyMs": 66,
+        "cancelLatencyMs": 55,
         "partialOutputExistedBeforeExplicitCleanup": true,
         "partialOutputDeleteSucceeded": true,
         "partialOutputExistsAfterCleanup": false,
@@ -167,7 +167,7 @@
     },
     "requiredOperations": {
       "criterion": "Every required operation must have passing device evidence",
-      "status": "PASS",
+      "status": "FAIL",
       "observed": "trim,twoRetainedRanges,h264Output,aacPreservation,volume,speed,staticOverlay,timestampAwareOverlay,crop,cancellation"
     },
     "fixtureMatrix": {
@@ -186,7 +186,7 @@
         "durationMs": 5013,
         "videoEndTimeMs": 4999,
         "audioEndTimeMs": 5013,
-        "avEndTimeDeltaMs": 13,
+        "avEndTimeDeltaMs": 13.334,
         "videoFormatDurationMs": 5000,
         "audioFormatDurationMs": 5000,
         "bytes": 1689669,
@@ -220,7 +220,7 @@
         "durationMs": 2441,
         "videoEndTimeMs": 2160,
         "audioEndTimeMs": 2441,
-        "avEndTimeDeltaMs": 281,
+        "avEndTimeDeltaMs": 281.333,
         "videoFormatDurationMs": 2160,
         "audioFormatDurationMs": 2441,
         "bytes": 1225890,
@@ -231,8 +231,8 @@
         "height": 576,
         "audioRms": 0.030536128103421854,
         "observedVolumeRmsRatio": 0.48948582103285526,
-        "medianExportRateXRealtime": 0.5270580742659758,
-        "peakPssBytes": 242601984
+        "medianExportRateXRealtime": 0.5816852513700262,
+        "peakPssBytes": 250387456
       },
       "overlayEvidence": {
         "earlyFrame": {
@@ -272,29 +272,29 @@
         {
           "run": 1,
           "status": "PASS",
-          "wallTimeMs": 4632,
-          "peakPssBytes": 214214656
+          "wallTimeMs": 4272,
+          "peakPssBytes": 221492224
         },
         {
           "run": 2,
           "status": "PASS",
-          "wallTimeMs": 4667,
-          "peakPssBytes": 242601984
+          "wallTimeMs": 4197,
+          "peakPssBytes": 250387456
         },
         {
           "run": 3,
           "status": "PASS",
-          "wallTimeMs": 4598,
-          "peakPssBytes": 216079360
+          "wallTimeMs": 4090,
+          "peakPssBytes": 219121664
         }
       ],
       "checks": {
-        "twoRetainedRanges": true,
+        "twoRetainedRanges": false,
         "h264Output": true,
         "aacPreserved": true,
         "avDeltaWithin50ms": false,
         "volumeApplied": true,
-        "speedApplied": true,
+        "speedApplied": false,
         "staticOverlayObserved": true,
         "timestampOverlayObserved": true,
         "cropObserved": true
@@ -309,7 +309,7 @@
         "durationMs": 15018,
         "videoEndTimeMs": 14999,
         "audioEndTimeMs": 15018,
-        "avEndTimeDeltaMs": 18,
+        "avEndTimeDeltaMs": 18.667,
         "videoFormatDurationMs": 15000,
         "audioFormatDurationMs": 15000,
         "bytes": 4978324,
@@ -343,10 +343,10 @@
         "durationMs": 6431,
         "videoEndTimeMs": 5760,
         "audioEndTimeMs": 6430,
-        "avEndTimeDeltaMs": 670,
+        "avEndTimeDeltaMs": 670.666,
         "videoFormatDurationMs": 5760,
         "audioFormatDurationMs": 6430,
-        "bytes": 2392257,
+        "bytes": 2399309,
         "hasAudio": true,
         "videoMime": "video\/avc",
         "audioMime": "audio\/mp4a-latm",
@@ -354,8 +354,8 @@
         "height": 576,
         "audioRms": 0.03082118079759395,
         "observedVolumeRmsRatio": 0.49405513812413443,
-        "medianExportRateXRealtime": 0.5865560014593214,
-        "peakPssBytes": 284668928
+        "medianExportRateXRealtime": 0.6116606429522541,
+        "peakPssBytes": 288746496
       },
       "overlayEvidence": {
         "earlyFrame": {
@@ -395,29 +395,29 @@
         {
           "run": 1,
           "status": "PASS",
-          "wallTimeMs": 11023,
-          "peakPssBytes": 275865600
+          "wallTimeMs": 10514,
+          "peakPssBytes": 264331264
         },
         {
           "run": 2,
           "status": "PASS",
-          "wallTimeMs": 10315,
-          "peakPssBytes": 258153472
+          "wallTimeMs": 10246,
+          "peakPssBytes": 288746496
         },
         {
           "run": 3,
           "status": "PASS",
-          "wallTimeMs": 10964,
-          "peakPssBytes": 284668928
+          "wallTimeMs": 12110,
+          "peakPssBytes": 258589696
         }
       ],
       "checks": {
-        "twoRetainedRanges": true,
+        "twoRetainedRanges": false,
         "h264Output": true,
         "aacPreserved": true,
         "avDeltaWithin50ms": false,
         "volumeApplied": true,
-        "speedApplied": true,
+        "speedApplied": false,
         "staticOverlayObserved": true,
         "timestampOverlayObserved": true,
         "cropObserved": true
@@ -432,7 +432,7 @@
         "durationMs": 5013,
         "videoEndTimeMs": 4999,
         "audioEndTimeMs": 5013,
-        "avEndTimeDeltaMs": 13,
+        "avEndTimeDeltaMs": 13.334,
         "videoFormatDurationMs": 5000,
         "audioFormatDurationMs": 5000,
         "bytes": 1682007,
@@ -466,10 +466,10 @@
         "durationMs": 2441,
         "videoEndTimeMs": 2160,
         "audioEndTimeMs": 2441,
-        "avEndTimeDeltaMs": 281,
+        "avEndTimeDeltaMs": 281.333,
         "videoFormatDurationMs": 2160,
         "audioFormatDurationMs": 2441,
-        "bytes": 1953887,
+        "bytes": 2206304,
         "hasAudio": true,
         "videoMime": "video\/avc",
         "audioMime": "audio\/mp4a-latm",
@@ -477,8 +477,8 @@
         "height": 864,
         "audioRms": 0.030536128103421854,
         "observedVolumeRmsRatio": 0.48948582103285526,
-        "medianExportRateXRealtime": 0.509460141903172,
-        "peakPssBytes": 340483072
+        "medianExportRateXRealtime": 0.5390446014572754,
+        "peakPssBytes": 334955520
       },
       "overlayEvidence": {
         "earlyFrame": {
@@ -518,29 +518,29 @@
         {
           "run": 1,
           "status": "PASS",
-          "wallTimeMs": 4718,
-          "peakPssBytes": 340483072
+          "wallTimeMs": 5001,
+          "peakPssBytes": 330870784
         },
         {
           "run": 2,
           "status": "PASS",
-          "wallTimeMs": 5786,
-          "peakPssBytes": 281377792
+          "wallTimeMs": 4529,
+          "peakPssBytes": 295252992
         },
         {
           "run": 3,
           "status": "PASS",
-          "wallTimeMs": 4792,
-          "peakPssBytes": 323529728
+          "wallTimeMs": 4399,
+          "peakPssBytes": 334955520
         }
       ],
       "checks": {
-        "twoRetainedRanges": true,
+        "twoRetainedRanges": false,
         "h264Output": true,
         "aacPreserved": true,
         "avDeltaWithin50ms": false,
         "volumeApplied": true,
-        "speedApplied": true,
+        "speedApplied": false,
         "staticOverlayObserved": true,
         "timestampOverlayObserved": true,
         "cropObserved": true
@@ -555,7 +555,7 @@
         "durationMs": 15018,
         "videoEndTimeMs": 14999,
         "audioEndTimeMs": 15018,
-        "avEndTimeDeltaMs": 18,
+        "avEndTimeDeltaMs": 18.667,
         "videoFormatDurationMs": 15000,
         "audioFormatDurationMs": 15000,
         "bytes": 4963543,
@@ -589,10 +589,10 @@
         "durationMs": 6431,
         "videoEndTimeMs": 5760,
         "audioEndTimeMs": 6430,
-        "avEndTimeDeltaMs": 670,
+        "avEndTimeDeltaMs": 670.666,
         "videoFormatDurationMs": 5760,
         "audioFormatDurationMs": 6430,
-        "bytes": 4740140,
+        "bytes": 4754939,
         "hasAudio": true,
         "videoMime": "video\/avc",
         "audioMime": "audio\/mp4a-latm",
@@ -600,8 +600,8 @@
         "height": 864,
         "audioRms": 0.03082118079759395,
         "observedVolumeRmsRatio": 0.49405513812413443,
-        "medianExportRateXRealtime": 0.5775482712168837,
-        "peakPssBytes": 372177920
+        "medianExportRateXRealtime": 0.5025789309159112,
+        "peakPssBytes": 349893632
       },
       "overlayEvidence": {
         "earlyFrame": {
@@ -641,29 +641,29 @@
         {
           "run": 1,
           "status": "PASS",
-          "wallTimeMs": 12771,
-          "peakPssBytes": 351757312
+          "wallTimeMs": 11426,
+          "peakPssBytes": 340642816
         },
         {
           "run": 2,
           "status": "PASS",
-          "wallTimeMs": 11135,
-          "peakPssBytes": 372177920
+          "wallTimeMs": 13240,
+          "peakPssBytes": 349893632
         },
         {
           "run": 3,
           "status": "PASS",
-          "wallTimeMs": 10660,
-          "peakPssBytes": 331102208
+          "wallTimeMs": 12796,
+          "peakPssBytes": 333849600
         }
       ],
       "checks": {
-        "twoRetainedRanges": true,
+        "twoRetainedRanges": false,
         "h264Output": true,
         "aacPreserved": true,
         "avDeltaWithin50ms": false,
         "volumeApplied": true,
-        "speedApplied": true,
+        "speedApplied": false,
         "staticOverlayObserved": true,
         "timestampOverlayObserved": true,
         "cropObserved": true

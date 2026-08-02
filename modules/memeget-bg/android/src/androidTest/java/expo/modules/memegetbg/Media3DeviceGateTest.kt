@@ -7,12 +7,50 @@ import android.provider.MediaStore
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class Media3DeviceGateTest {
+  @Test
+  fun endpointToleranceChecksEveryPresentTrack() {
+    assertFalse(
+      Media3DeviceGateProbe.trackEndpointsWithinTolerance(
+        expectedEndUs = 2_400_000L,
+        videoPresent = true,
+        videoEndUs = 2_160_000L,
+        audioPresent = true,
+        audioEndUs = 2_441_000L
+      )
+    )
+    assertTrue(
+      Media3DeviceGateProbe.trackEndpointsWithinTolerance(
+        expectedEndUs = 2_400_000L,
+        videoPresent = true,
+        videoEndUs = 2_310_000L,
+        audioPresent = true,
+        audioEndUs = 2_441_000L
+      )
+    )
+    assertFalse(
+      Media3DeviceGateProbe.trackEndpointsWithinTolerance(
+        expectedEndUs = 2_400_000L,
+        videoPresent = true,
+        videoEndUs = null,
+        audioPresent = true,
+        audioEndUs = 2_400_000L
+      )
+    )
+  }
+
+  @Test
+  fun avDriftComparisonUsesRawMicroseconds() {
+    assertTrue(Media3DeviceGateProbe.avEndDeltaWithinLimit(0L, 50_000L))
+    assertFalse(Media3DeviceGateProbe.avEndDeltaWithinLimit(0L, 50_001L))
+  }
+
   @Test
   fun recordsPinnedMedia3ContractsOnPhysicalDevice() {
     val instrumentation = InstrumentationRegistry.getInstrumentation()
