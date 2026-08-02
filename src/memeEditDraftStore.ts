@@ -70,7 +70,7 @@ export type MemeEditDraftRestoreResult =
   | { status: 'restored'; project: MemeEditProject; savedAtMs: number }
   | {
       status: 'rejected';
-      reason: 'missing' | 'expired' | 'corrupt' | 'source-mismatch';
+      reason: 'missing' | 'expired' | 'corrupt' | 'io-error' | 'source-mismatch';
     };
 
 export interface MemeEditSourcePreparationIo {
@@ -115,6 +115,28 @@ const SYSTEM_TIMERS: MemeEditTimers = {
   setTimeout: (callback, delayMs) => globalThis.setTimeout(callback, delayMs),
   clearTimeout: (handle) => globalThis.clearTimeout(handle as number),
 };
+
+// Stores/controllers can be created independently for the same editing
+// session. Keep every journal mutation on one recovered per-path tail so direct
+// saves remain monotonic and discard cannot interleave. Settled tails remove
+// themselves, bounding this map to active journal keys.
+const JOURNAL_MUTATION_TAILS = new Map<string, Promise<void>>();
+
+function serializeJournalMutation<T>(key: string, mutation: () => Promise<T>): Promise<T> {
+  const previous = JOURNAL_MUTATION_TAILS.get(key) ?? Promise.resolve();
+  const operation = previous.then(mutation);
+  const recoveredTail = operation.then(
+    () => undefined,
+    () => undefined
+  );
+  JOURNAL_MUTATION_TAILS.set(key, recoveredTail);
+  void recoveredTail.then(() => {
+    if (JOURNAL_MUTATION_TAILS.get(key) === recoveredTail) {
+      JOURNAL_MUTATION_TAILS.delete(key);
+    }
+  });
+  return operation;
+}
 
 function isBoundedString(value: unknown, maximumLength = MAX_SOURCE_STRING_LENGTH): value is string {
   return typeof value === 'string' && value.length > 0 && value.length <= maximumLength;
@@ -349,7 +371,15 @@ export class MemeEditDraftStore {
     }
   }
 
-  async save(identity: MemeEditDraftIdentity, project: MemeEditProject): Promise<void> {
+  save(identity: MemeEditDraftIdentity, project: MemeEditProject): Promise<void> {
+    const key = draftStoragePaths(this.io.cacheDirectory, identity).slotA;
+    return serializeJournalMutation(key, () => this.saveUnlocked(identity, project));
+  }
+
+  private async saveUnlocked(
+    identity: MemeEditDraftIdentity,
+    project: MemeEditProject
+  ): Promise<void> {
     assertIdentity(identity);
     const validation = validateMemeEditProject(project);
     if (!validation.ok) throw new Error(invalidProjectMessage(validation.errors));
@@ -401,6 +431,7 @@ export class MemeEditDraftStore {
     const paths = draftStoragePaths(this.io.cacheDirectory, identity);
     const candidatePaths = [paths.slotA, paths.slotB, paths.temporaryA, paths.temporaryB];
     let foundBytes = false;
+    let readError = false;
     const candidates: SerializedDraft[] = [];
     for (const path of candidatePaths) {
       try {
@@ -410,8 +441,11 @@ export class MemeEditDraftStore {
         const parsed = parseSerializedDraft(text);
         if (parsed) candidates.push(parsed);
       } catch {
-        foundBytes = true;
+        readError = true;
       }
+    }
+    if (readError) {
+      return { status: 'rejected', reason: 'io-error' };
     }
     if (candidates.length === 0) {
       return { status: 'rejected', reason: foundBytes ? 'corrupt' : 'missing' };
@@ -432,7 +466,12 @@ export class MemeEditDraftStore {
     return { status: 'restored', project: draft.project, savedAtMs: draft.savedAtMs };
   }
 
-  async discard(identity: MemeEditDraftIdentity): Promise<void> {
+  discard(identity: MemeEditDraftIdentity): Promise<void> {
+    const key = draftStoragePaths(this.io.cacheDirectory, identity).slotA;
+    return serializeJournalMutation(key, () => this.discardUnlocked(identity));
+  }
+
+  private async discardUnlocked(identity: MemeEditDraftIdentity): Promise<void> {
     const paths = draftStoragePaths(this.io.cacheDirectory, identity);
     let firstError: unknown = null;
     let entries: string[] = [];
@@ -487,7 +526,14 @@ export class MemeEditAutosaveController {
     if (this.timerHandle !== null) this.timers.clearTimeout(this.timerHandle);
     this.timerHandle = this.timers.setTimeout(() => {
       this.timerHandle = null;
-      void this.flush().catch(this.onError);
+      void this.flush().catch((error) => {
+        try {
+          this.onError(error);
+        } catch {
+          // Error reporting is best-effort and must never create a second
+          // unhandled rejection after the save failure is already contained.
+        }
+      });
     }, DRAFT_AUTOSAVE_DELAY_MS);
   }
 
@@ -554,6 +600,7 @@ export class MemeEditSourcePreparationController {
         return { uri: source.uri, probe: await this.io.probe(source.uri), owned: false };
       }
       try {
+        await this.io.remove(destination);
         await this.io.materialize(source.uri, destination);
         const probe = await this.io.probe(destination);
         return { uri: destination, probe, owned: true };
