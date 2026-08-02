@@ -7,6 +7,8 @@ import {
   MEME_TEXT_MAX_LENGTH,
   clampMemeTextContent,
   createMemeTextLayer,
+  nativeMemeTextLayoutInputFromSpec,
+  compareNativeMemeTextLayoutToSpec,
   getMemeTextPresetDefaults,
   textDisplayText,
 } from './memeTextLayoutCore';
@@ -189,5 +191,47 @@ describe('serializable meme text layout contract', () => {
       ['bubble', false, 2],
       ['plain', false, 2],
     ]);
+  });
+
+  test('native parity diagnostics consume serialized spec placement instead of a tolerance constant only', () => {
+    const spec = buildMemeTextLayoutSpec(
+      createMemeTextLayer('fixture-impact', 'impact', { text: 'native outline words' }),
+      kf({ scale: 1.4, rotationDegrees: 3 }),
+      { canvasWidthPx: 720, canvasHeightPx: 1_280 }
+    );
+
+    expect(nativeMemeTextLayoutInputFromSpec(spec)).toEqual({
+      text: spec.displayText,
+      fontFamily: spec.font.family,
+      fontWeight: Number(spec.font.weight),
+      fontSizePx: spec.canvas.fontSizePx,
+      letterSpacingEm: spec.font.letterSpacingEm,
+      widthPx: spec.canvas.wrapWidthPx,
+      align: spec.align,
+    });
+
+    const exactNative = {
+      widthPx: spec.canvas.wrapWidthPx,
+      heightPx: spec.layout.heightPx,
+      includeFontPadding: false,
+      tolerancePx: MEME_TEXT_LAYOUT_TOLERANCE_PX,
+      lines: spec.layout.lines.map((line) => ({ ...line })),
+    };
+    expect(compareNativeMemeTextLayoutToSpec(spec, exactNative)).toEqual({
+      ok: true,
+      lineCountDrift: 0,
+      maxWidthDriftPx: 0,
+      maxTopDriftPx: 0,
+      maxBaselineDriftPx: 0,
+    });
+
+    const driftedNative = {
+      ...exactNative,
+      lines: exactNative.lines.map((line, index) => index === 0 ? { ...line, baselinePx: line.baselinePx + 3 } : line),
+    };
+    expect(compareNativeMemeTextLayoutToSpec(spec, driftedNative)).toMatchObject({
+      ok: false,
+      maxBaselineDriftPx: 3,
+    });
   });
 });

@@ -99,6 +99,33 @@ export interface MemeTextLayoutSpec {
   };
 }
 
+export interface NativeMemeTextLayoutInput {
+  text: string;
+  fontFamily: MemeTextFontSpec['family'];
+  fontWeight: number;
+  fontSizePx: number;
+  letterSpacingEm: number;
+  widthPx: number;
+  align: TextStyle['align'];
+}
+
+export interface NativeMemeTextLayoutResult {
+  widthPx: number;
+  heightPx: number;
+  includeFontPadding: boolean;
+  tolerancePx: number;
+  lines: Array<{ text: string; widthPx: number; topPx: number; baselinePx: number }>;
+}
+
+export interface NativeMemeTextLayoutComparison {
+  ok: boolean;
+  lineCountDrift: number;
+  maxWidthDriftPx: number;
+  maxTopDriftPx: number;
+  maxBaselineDriftPx: number;
+}
+
+
 const PRESET_DEFAULTS: Record<MemeTextPresetId, MemeTextPresetDefaults> = {
   impact: {
     preset: 'impact',
@@ -321,26 +348,34 @@ function charWidthEm(char: string, font: MemeTextFontSpec): number {
   return 0.6;
 }
 
-function measureTextPx(text: string, fontSizePx: number, font: MemeTextFontSpec): number {
-  let widthEm = 0;
-  for (let index = 0; index < text.length; index += 1) {
-    widthEm += charWidthEm(text[index], font) + font.letterSpacingEm;
-  }
-  if (text.length > 0) widthEm -= font.letterSpacingEm;
+function charWidthPx(char: string, fontSizePx: number, font: MemeTextFontSpec): number {
   const weightFactor = font.weight === '900' ? 1.04 : font.weight === '700' ? 1 : 0.96;
-  return Math.round(widthEm * fontSizePx * weightFactor);
+  return (charWidthEm(char, font) + font.letterSpacingEm) * fontSizePx * weightFactor;
+}
+
+function measureTextPx(text: string, fontSizePx: number, font: MemeTextFontSpec): number {
+  if (text.length === 0) return 0;
+  let widthPx = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    widthPx += charWidthPx(text[index], fontSizePx, font);
+  }
+  widthPx -= font.letterSpacingEm * fontSizePx * (font.weight === '900' ? 1.04 : font.weight === '700' ? 1 : 0.96);
+  return Math.round(widthPx);
 }
 
 function splitLongToken(token: string, maxWidthPx: number, fontSizePx: number, font: MemeTextFontSpec): string[] {
   const parts: string[] = [];
   let current = '';
+  let currentWidthPx = 0;
   for (const char of token) {
-    const next = current + char;
-    if (current && measureTextPx(next, fontSizePx, font) > maxWidthPx) {
+    const nextWidthPx = currentWidthPx + charWidthPx(char, fontSizePx, font);
+    if (current && Math.round(nextWidthPx) > maxWidthPx) {
       parts.push(current);
       current = char;
+      currentWidthPx = charWidthPx(char, fontSizePx, font);
     } else {
-      current = next;
+      current += char;
+      currentWidthPx = nextWidthPx;
     }
   }
   if (current) parts.push(current);
@@ -450,6 +485,54 @@ export function buildMemeTextLayoutSpec(
     diagnostics: {
       androidStaticLayoutTolerancePx: MEME_TEXT_LAYOUT_TOLERANCE_PX,
     },
+  };
+}
+
+export function nativeMemeTextLayoutInputFromSpec(spec: MemeTextLayoutSpec): NativeMemeTextLayoutInput {
+  return {
+    text: spec.displayText,
+    fontFamily: spec.font.family,
+    fontWeight: Number(spec.font.weight),
+    fontSizePx: spec.canvas.fontSizePx,
+    letterSpacingEm: spec.font.letterSpacingEm,
+    widthPx: spec.canvas.wrapWidthPx,
+    align: spec.align,
+  };
+}
+
+export function compareNativeMemeTextLayoutToSpec(
+  spec: MemeTextLayoutSpec,
+  native: NativeMemeTextLayoutResult
+): NativeMemeTextLayoutComparison {
+  const limit = spec.diagnostics.androidStaticLayoutTolerancePx;
+  const count = Math.max(spec.layout.lines.length, native.lines.length);
+  let maxWidthDriftPx = 0;
+  let maxTopDriftPx = 0;
+  let maxBaselineDriftPx = 0;
+  for (let index = 0; index < count; index += 1) {
+    const expected = spec.layout.lines[index];
+    const actual = native.lines[index];
+    if (!expected || !actual) {
+      maxWidthDriftPx = Number.POSITIVE_INFINITY;
+      maxTopDriftPx = Number.POSITIVE_INFINITY;
+      maxBaselineDriftPx = Number.POSITIVE_INFINITY;
+      break;
+    }
+    maxWidthDriftPx = Math.max(maxWidthDriftPx, Math.abs(actual.widthPx - expected.widthPx));
+    maxTopDriftPx = Math.max(maxTopDriftPx, Math.abs(actual.topPx - expected.topPx));
+    maxBaselineDriftPx = Math.max(maxBaselineDriftPx, Math.abs(actual.baselinePx - expected.baselinePx));
+  }
+  const lineCountDrift = native.lines.length - spec.layout.lines.length;
+  return {
+    ok: native.includeFontPadding === false &&
+      Math.abs(lineCountDrift) === 0 &&
+      maxWidthDriftPx <= limit &&
+      maxTopDriftPx <= limit &&
+      maxBaselineDriftPx <= limit,
+    lineCountDrift,
+    maxWidthDriftPx,
+    maxTopDriftPx,
+    maxBaselineDriftPx,
   };
 }
 

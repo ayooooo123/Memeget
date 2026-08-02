@@ -23,7 +23,7 @@ const TEXT_COMMIT_DELAY_MS = 250;
 
 type InspectorAction = Extract<
   MemeEditProjectAction,
-  { type: 'add-layer' | 'update-layer' | 'duplicate-layer' | 'remove-layer' | 'move-layer' }
+  { type: 'add-layer' | 'update-layer' | 'duplicate-layer' | 'remove-layer' | 'move-layer' | 'set-layer-active-range' }
 >;
 
 interface MemeTextInspectorProps {
@@ -112,13 +112,16 @@ function LabeledSlider({
   disabled?: boolean;
   onChange: (value: number) => void;
 }) {
+  const [draftValue, setDraftValue] = useState(value);
+  useEffect(() => setDraftValue(value), [value]);
+  const boundedValue = Math.max(0, Math.min(1, draftValue));
   return (
     <View style={[styles.sliderRow, disabled && styles.disabledBlock]} accessibilityLabel={`${label}, ${valueLabel}`} accessibilityState={{ disabled: !!disabled }}>
       <View style={styles.sliderLabels}>
         <Text style={styles.sliderLabel}>{label}</Text>
         <Text style={styles.sliderValue}>{valueLabel}</Text>
       </View>
-      <Slider value={value} onChange={disabled ? () => {} : onChange} />
+      <Slider value={boundedValue} onChange={disabled ? () => {} : setDraftValue} onComplete={disabled ? undefined : onChange} />
     </View>
   );
 }
@@ -178,6 +181,11 @@ export const MemeTextInspector = React.memo(function MemeTextInspector({
   const layer = selectedTextLayer(project, selectedLayerId);
   const canAdd = project.layers.length < PROJECT_LIMITS.maxLayers && !disabled;
   const selectedIndex = layer ? project.layers.findIndex((candidate) => candidate.id === layer.id) : -1;
+  const durationUs = project.source.kind === 'video' ? project.source.durationUs ?? 0 : 0;
+  const activeStartUs = layer?.active?.startUs ?? 0;
+  const activeEndUs = layer?.active?.endUs ?? durationUs;
+  const activeStartValue = durationUs > 0 ? activeStartUs / durationUs : 0;
+  const activeEndValue = durationUs > 0 ? activeEndUs / durationUs : 1;
 
   projectRef.current = project;
   selectedLayerRef.current = layer;
@@ -192,6 +200,15 @@ export const MemeTextInspector = React.memo(function MemeTextInspector({
     if (!current || current.text === pending.text) return;
     onApplyAction({ type: 'update-layer', layer: { ...current, text: pending.text } });
   }, [onApplyAction]);
+
+  const layerWithPendingText = useCallback((current: TextLayer): TextLayer => {
+    const pending = pendingTextRef.current;
+    if (!pending || pending.layerId !== current.id) return current;
+    pendingTextRef.current = null;
+    clearTimeout(textTimerRef.current ?? undefined);
+    textTimerRef.current = null;
+    return current.text === pending.text ? current : { ...current, text: pending.text };
+  }, []);
 
   useEffect(() => {
     flushText();
@@ -212,11 +229,10 @@ export const MemeTextInspector = React.memo(function MemeTextInspector({
   }, [disabled, flushText, layer]);
 
   const updateLayer = useCallback((updater: (current: TextLayer) => TextLayer) => {
-    flushText();
     const current = selectedLayerRef.current;
     if (!current || disabled) return;
-    onApplyAction({ type: 'update-layer', layer: updater(current) });
-  }, [disabled, flushText, onApplyAction]);
+    onApplyAction({ type: 'update-layer', layer: updater(layerWithPendingText(current)) });
+  }, [disabled, layerWithPendingText, onApplyAction]);
 
   const addText = useCallback((preset: MemeTextPresetId = 'impact') => {
     if (!canAdd) return;
@@ -261,10 +277,9 @@ export const MemeTextInspector = React.memo(function MemeTextInspector({
           ))}
         </View>
       </Section>
-
       <Section title="Content">
         <TextInput
-          key={layer?.id ?? 'empty-text'}
+          key={`${layer?.id ?? 'empty-text'}:${layer?.text ?? ''}`}
           defaultValue={layer?.text ?? ''}
           editable={!!layer && !disabled}
           multiline
@@ -310,6 +325,35 @@ export const MemeTextInspector = React.memo(function MemeTextInspector({
         </View>
       </Section>
 
+
+      {durationUs > 0 && (
+        <Section title="Video range">
+          <LabeledSlider
+            label="Start"
+            valueLabel={`${(activeStartUs / 1_000_000).toFixed(1)}s`}
+            disabled={!layer || disabled}
+            value={activeStartValue}
+            onChange={(value) => {
+              if (!layer) return;
+              flushText();
+              const startUs = Math.min(Math.round(value * durationUs), Math.max(0, activeEndUs - 1));
+              onApplyAction({ type: 'set-layer-active-range', id: layer.id, active: { startUs, endUs: activeEndUs } });
+            }}
+          />
+          <LabeledSlider
+            label="End"
+            valueLabel={`${(activeEndUs / 1_000_000).toFixed(1)}s`}
+            disabled={!layer || disabled}
+            value={activeEndValue}
+            onChange={(value) => {
+              if (!layer) return;
+              flushText();
+              const endUs = Math.max(Math.round(value * durationUs), activeStartUs + 1);
+              onApplyAction({ type: 'set-layer-active-range', id: layer.id, active: { startUs: activeStartUs, endUs } });
+            }}
+          />
+        </Section>
+      )}
       <Section title="Color and backing">
         <ColorSwatches
           label="Fill"
@@ -363,13 +407,12 @@ export const MemeTextInspector = React.memo(function MemeTextInspector({
           onChange={(opacity) => updateLayer((current) => ({ ...current, style: { ...current.style, opacity } }))}
         />
       </Section>
-
       <Section title="Layer actions">
         <View style={styles.buttonWrap}>
-          <ControlButton label="Move up" hint="Move text layer visually forward" disabled={!layer || disabled || selectedIndex >= project.layers.length - 1} onPress={() => layer && onMoveLayer(layer.id, selectedIndex + 1)} />
-          <ControlButton label="Move down" hint="Move text layer visually backward" disabled={!layer || disabled || selectedIndex <= 0} onPress={() => layer && onMoveLayer(layer.id, selectedIndex - 1)} />
-          <ControlButton label="Duplicate" hint="Duplicate text layer with a new deterministic ID" disabled={!layer || disabled || project.layers.length >= PROJECT_LIMITS.maxLayers} onPress={() => layer && onDuplicateLayer(layer.id)} />
-          <ControlButton label="Delete" hint="Delete selected text layer" danger disabled={!layer || disabled} onPress={() => layer && onDeleteLayer(layer.id)} />
+          <ControlButton label="Move up" hint="Move text layer visually forward" disabled={!layer || disabled || selectedIndex >= project.layers.length - 1} onPress={() => { flushText(); if (layer) onMoveLayer(layer.id, selectedIndex + 1); }} />
+          <ControlButton label="Move down" hint="Move text layer visually backward" disabled={!layer || disabled || selectedIndex <= 0} onPress={() => { flushText(); if (layer) onMoveLayer(layer.id, selectedIndex - 1); }} />
+          <ControlButton label="Duplicate" hint="Duplicate text layer with a new deterministic ID" disabled={!layer || disabled || project.layers.length >= PROJECT_LIMITS.maxLayers} onPress={() => { flushText(); if (layer) onDuplicateLayer(layer.id); }} />
+          <ControlButton label="Delete" hint="Delete selected text layer" danger disabled={!layer || disabled} onPress={() => { flushText(); if (layer) onDeleteLayer(layer.id); }} />
         </View>
       </Section>
     </ScrollView>
