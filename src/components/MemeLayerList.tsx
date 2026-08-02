@@ -24,6 +24,7 @@ const LayerRow = React.memo(function LayerRow({
   index,
   total,
   selected,
+  disabled,
   onSelect,
   onMoveUp,
   onMoveDown,
@@ -34,6 +35,7 @@ const LayerRow = React.memo(function LayerRow({
   index: number;
   total: number;
   selected: boolean;
+  disabled: boolean;
   onSelect: (id: string) => void;
   onMoveUp: (id: string) => void;
   onMoveDown: (id: string) => void;
@@ -45,18 +47,21 @@ const LayerRow = React.memo(function LayerRow({
   return (
     <PressableScale
       scaleTo={0.98}
-      onPress={() => onSelect(layer.id)}
+      onPress={() => {
+        if (!disabled) onSelect(layer.id);
+      }}
       style={[styles.row, selected && styles.rowSelected]}
       accessibilityRole="button"
       accessibilityLabel={`${layerTitle(layer)}, layer ${index + 1} of ${total}`}
       accessibilityHint="Select this layer for direct manipulation"
-      accessibilityState={{ selected }}
+      accessibilityState={{ selected, disabled }}
       accessibilityActions={[
         { name: 'activate', label: 'Select layer' },
         ...(canMoveUp ? [{ name: 'increment', label: 'Move layer up' }] : []),
         ...(canMoveDown ? [{ name: 'decrement', label: 'Move layer down' }] : []),
       ]}
       onAccessibilityAction={(event) => {
+        if (disabled) return;
         if (event.nativeEvent.actionName === 'increment') onMoveUp(layer.id);
         else if (event.nativeEvent.actionName === 'decrement') onMoveDown(layer.id);
         else onSelect(layer.id);
@@ -72,10 +77,10 @@ const LayerRow = React.memo(function LayerRow({
         </View>
       </View>
       <View style={styles.actions}>
-        <MiniButton label="Up" onPress={() => onMoveUp(layer.id)} disabled={!canMoveUp} hint="Move this layer visually forward" />
-        <MiniButton label="Down" onPress={() => onMoveDown(layer.id)} disabled={!canMoveDown} hint="Move this layer visually backward" />
-        <MiniButton label="Dup" onPress={() => onDuplicate(layer.id)} hint="Duplicate this layer" />
-        <MiniButton label="Del" danger onPress={() => onDelete(layer.id)} hint="Delete this layer" />
+        <MiniButton label="Up" onPress={() => onMoveUp(layer.id)} disabled={disabled || !canMoveUp} hint="Move this layer visually forward" />
+        <MiniButton label="Down" onPress={() => onMoveDown(layer.id)} disabled={disabled || !canMoveDown} hint="Move this layer visually backward" />
+        <MiniButton label="Dup" onPress={() => onDuplicate(layer.id)} disabled={disabled} hint="Duplicate this layer" />
+        <MiniButton label="Del" danger onPress={() => onDelete(layer.id)} disabled={disabled} hint="Delete this layer" />
       </View>
     </PressableScale>
   );
@@ -117,6 +122,7 @@ export const MemeLayerList = React.memo(function MemeLayerList({
   onMoveLayer,
   onDuplicateLayer,
   onDeleteLayer,
+  disabled = false,
 }: {
   project: MemeEditProject;
   selectedLayerId: string | null;
@@ -124,18 +130,22 @@ export const MemeLayerList = React.memo(function MemeLayerList({
   onMoveLayer: (id: string, toIndex: number) => void;
   onDuplicateLayer: (id: string) => void;
   onDeleteLayer: (id: string) => void;
+  disabled?: boolean;
 }) {
   const ordered = project.layers.slice().reverse();
   const total = project.layers.length;
   const moveUp = useCallback((id: string) => {
+    if (disabled) return;
     const index = project.layers.findIndex((layer) => layer.id === id);
     if (index >= 0) onMoveLayer(id, Math.min(project.layers.length - 1, index + 1));
   }, [project.layers, onMoveLayer]);
   const moveDown = useCallback((id: string) => {
+    if (disabled) return;
     const index = project.layers.findIndex((layer) => layer.id === id);
     if (index >= 0) onMoveLayer(id, Math.max(0, index - 1));
   }, [project.layers, onMoveLayer]);
   const deleteLayer = useCallback((id: string) => {
+    if (disabled) return;
     const layer = project.layers.find((candidate) => candidate.id === id);
     Alert.alert('Delete layer?', layer ? layerTitle(layer) : 'This cannot be undone.', [
       { text: 'Cancel', style: 'cancel' },
@@ -148,13 +158,14 @@ export const MemeLayerList = React.memo(function MemeLayerList({
       index={total - index - 1}
       total={total}
       selected={item.id === selectedLayerId}
+      disabled={disabled}
       onSelect={onSelectLayer}
       onMoveUp={moveUp}
       onMoveDown={moveDown}
       onDuplicate={onDuplicateLayer}
       onDelete={deleteLayer}
     />
-  ), [deleteLayer, moveDown, moveUp, onDuplicateLayer, onSelectLayer, selectedLayerId, total]);
+  ), [deleteLayer, disabled, moveDown, moveUp, onDuplicateLayer, onSelectLayer, selectedLayerId, total]);
 
   if (project.layers.length === 0) {
     return (

@@ -558,11 +558,14 @@ export class MemeEditAutosaveController {
       this.timers.clearTimeout(this.timerHandle);
       this.timerHandle = null;
     }
+    const capturedGeneration = this.pendingGeneration;
     const project = this.pendingProject;
     if (project === null) return this.activeOperation ?? this.queueTail;
     this.pendingProject = null;
     const operation = this.queueTail.then(() => this.store.save(this.identity, project)).catch((error) => {
-      if (this.pendingProject === null) this.pendingProject = project;
+      if (this.pendingProject === null && this.pendingGeneration === capturedGeneration) {
+        this.pendingProject = project;
+      }
       throw error;
     });
     this.activeOperation = operation;
@@ -597,10 +600,12 @@ export class MemeEditAutosaveController {
     try {
       await this.queueTail;
       await this.store.discard(this.identity);
-      if (this.pendingGeneration === capturedGeneration) {
-        this.pendingProject = null;
-        this.discarded = true;
+      if (this.timerHandle !== null) {
+        this.timers.clearTimeout(this.timerHandle);
+        this.timerHandle = null;
       }
+      this.pendingProject = null;
+      this.discarded = true;
     } catch (error) {
       if (this.pendingGeneration === capturedGeneration) {
         this.pendingProject = pendingProject;

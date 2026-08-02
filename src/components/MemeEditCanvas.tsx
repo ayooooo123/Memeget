@@ -51,6 +51,7 @@ type CanvasLayerProps = {
   mediaRect: ViewRect;
   selected: boolean;
   hidden: boolean;
+  disabled?: boolean;
   onSelectLayer: (id: string | null) => void;
   onCommitLayerKeyframes: CommitLayerKeyframes;
 };
@@ -104,19 +105,21 @@ const OverlayVideo = React.memo(function OverlayVideo({ uri }: { uri: string }) 
   return <VideoView pointerEvents="none" style={StyleSheet.absoluteFill} player={player} contentFit="contain" nativeControls={false} />;
 });
 
-const CoverLayerView = React.memo(function CoverLayerView({ layer, mediaRect, selected, hidden, onSelectLayer }: CanvasLayerProps & { layer: CoverLayer }) {
+const CoverLayerView = React.memo(function CoverLayerView({ layer, mediaRect, selected, hidden, disabled, onSelectLayer }: CanvasLayerProps & { layer: CoverLayer }) {
   const correction = evaluateMaskTrackRect({ id: layer.id, active: layer.active, corrections: layer.corrections }, ACTIVE_TIME_US);
   const rect = correction ?? layer.rect;
   if (hidden) return null;
   return (
     <View
       style={[styles.coverLayer, rectStyle(rect, mediaRect), selected && styles.selectedOutline]}
-      onStartShouldSetResponder={(event) => viewPointToNormalizedPoint({ x: event.nativeEvent.locationX + mediaRect.x, y: event.nativeEvent.locationY + mediaRect.y }, mediaRect) !== null}
-      onResponderRelease={() => onSelectLayer(layer.id)}
+      onStartShouldSetResponder={(event) => !disabled && viewPointToNormalizedPoint({ x: event.nativeEvent.locationX + mediaRect.x, y: event.nativeEvent.locationY + mediaRect.y }, mediaRect) !== null}
+      onResponderRelease={() => {
+        if (!disabled) onSelectLayer(layer.id);
+      }}
       accessibilityRole="button"
       accessibilityLabel="Cover correction layer"
       accessibilityHint="Select this correction layer"
-      accessibilityState={{ selected }}
+      accessibilityState={{ selected, disabled: !!disabled }}
     >
       <Text style={styles.coverText}>{layer.mode === 'pixelate' ? 'Pixelate' : 'Cover'}</Text>
     </View>
@@ -130,6 +133,7 @@ const TransformableLayerView = React.memo(function TransformableLayerView({
   selected,
   hidden,
   onSelectLayer,
+  disabled,
   onCommitLayerKeyframes,
 }: CanvasLayerProps & { layer: TextLayer | SubjectLayer | MediaOverlayLayer }) {
   const translate = useConst(() => new Animated.ValueXY({ x: 0, y: 0 }));
@@ -159,6 +163,7 @@ const TransformableLayerView = React.memo(function TransformableLayerView({
 
   const dragPan = useMemo(() => PanResponder.create({
     onStartShouldSetPanResponder: (event) => {
+      if (disabled) return false;
       const accepted = layerBodyTouchInsideMedia(keyframe, visualWidth, mediaRect, {
         x: event.nativeEvent.locationX,
         y: event.nativeEvent.locationY,
@@ -190,10 +195,11 @@ const TransformableLayerView = React.memo(function TransformableLayerView({
       dragStartAccepted.current = false;
       gestureStart.current = null;
     },
-  }), [commit, handles.center, handles.resize, keyframe, layer.id, mediaRect, onSelectLayer, translate, visualWidth]);
+  }), [commit, disabled, handles.center, handles.resize, keyframe, layer.id, mediaRect, onSelectLayer, translate, visualWidth]);
 
   const resizePan = useMemo(() => PanResponder.create({
     onStartShouldSetPanResponder: (event) => {
+      if (disabled) return false;
       const accepted = selected && layerHandleTouchInsideMedia(keyframe, visualWidth, mediaRect, 'resize', {
         x: event.nativeEvent.locationX,
         y: event.nativeEvent.locationY,
@@ -224,10 +230,11 @@ const TransformableLayerView = React.memo(function TransformableLayerView({
       resizeStartAccepted.current = false;
       gestureStart.current = null;
     },
-  }), [commit, handles.center, handles.resize, keyframe, mediaRect, scalePreview, selected, visualWidth]);
+  }), [commit, disabled, handles.center, handles.resize, keyframe, mediaRect, scalePreview, selected, visualWidth]);
 
   const rotatePan = useMemo(() => PanResponder.create({
     onStartShouldSetPanResponder: (event) => {
+      if (disabled) return false;
       const accepted = selected && layerHandleTouchInsideMedia(keyframe, visualWidth, mediaRect, 'rotate', {
         x: event.nativeEvent.locationX,
         y: event.nativeEvent.locationY,
@@ -258,7 +265,7 @@ const TransformableLayerView = React.memo(function TransformableLayerView({
       rotateStartAccepted.current = false;
       gestureStart.current = null;
     },
-  }), [commit, handles.center, handles.rotate, keyframe, mediaRect, rotatePreview, selected, visualWidth]);
+  }), [commit, disabled, handles.center, handles.rotate, keyframe, mediaRect, rotatePreview, selected, visualWidth]);
 
   if (hidden) return null;
 
@@ -284,15 +291,15 @@ const TransformableLayerView = React.memo(function TransformableLayerView({
       ]}
       {...dragPan.panHandlers}
       accessibilityRole="adjustable"
-      accessibilityLabel={`${layer.kind} layer`}
       accessibilityHint="Drag to move. Accessibility actions nudge the layer."
-      accessibilityState={{ selected }}
+      accessibilityState={{ selected, disabled: !!disabled }}
       accessibilityActions={[
         { name: 'activate', label: 'Select layer' },
         { name: 'increment', label: 'Nudge right' },
         { name: 'decrement', label: 'Nudge left' },
       ]}
       onAccessibilityAction={(event) => {
+        if (disabled) return;
         const next = transformAccessibilityAction(event.nativeEvent.actionName as 'increment' | 'decrement' | 'longpress' | 'escape', keyframe, mediaRect);
         if (next !== keyframe) commit(next);
         else onSelectLayer(layer.id);
@@ -308,16 +315,22 @@ const TransformableLayerView = React.memo(function TransformableLayerView({
             {...rotatePan.panHandlers}
             accessibilityRole="adjustable"
             accessibilityLabel="Rotate selected layer"
+            accessibilityState={{ disabled: !!disabled }}
             accessibilityActions={[{ name: 'increment', label: 'Rotate clockwise' }, { name: 'decrement', label: 'Rotate counter-clockwise' }]}
-            onAccessibilityAction={(event) => commit(transformHandleAccessibilityAction('rotate', event.nativeEvent.actionName as 'increment' | 'decrement', keyframe, mediaRect))}
+            onAccessibilityAction={(event) => {
+              if (!disabled) commit(transformHandleAccessibilityAction('rotate', event.nativeEvent.actionName as 'increment' | 'decrement', keyframe, mediaRect));
+            }}
           />
           <Animated.View
             style={styles.resizeHandle}
             {...resizePan.panHandlers}
             accessibilityRole="adjustable"
             accessibilityLabel="Resize selected layer"
+            accessibilityState={{ disabled: !!disabled }}
             accessibilityActions={[{ name: 'increment', label: 'Make larger' }, { name: 'decrement', label: 'Make smaller' }]}
-            onAccessibilityAction={(event) => commit(transformHandleAccessibilityAction('resize', event.nativeEvent.actionName as 'increment' | 'decrement', keyframe, mediaRect))}
+            onAccessibilityAction={(event) => {
+              if (!disabled) commit(transformHandleAccessibilityAction('resize', event.nativeEvent.actionName as 'increment' | 'decrement', keyframe, mediaRect));
+            }}
           />
         </>
       )}
@@ -355,12 +368,14 @@ export const MemeEditCanvas = React.memo(function MemeEditCanvas({
   before,
   onSelectLayer,
   onCommitLayerKeyframes,
+  disabled,
 }: {
   project: MemeEditProject;
   selectedLayerId: string | null;
   before: boolean;
   onSelectLayer: (id: string | null) => void;
   onCommitLayerKeyframes: CommitLayerKeyframes;
+  disabled?: boolean;
 }) {
   const [viewSize, setViewSize] = React.useState<ViewSize | null>(null);
   const sourceUri = project.transient.materializedSourceUri ?? project.source.uri;
@@ -397,9 +412,9 @@ export const MemeEditCanvas = React.memo(function MemeEditCanvas({
       )}
       {mediaRect && project.layers.map((layer) => {
         if (layer.kind === 'cover') {
-          return <CoverLayerView key={layer.id} project={project} layer={layer} mediaRect={mediaRect} selected={selectedLayerId === layer.id} hidden={before} onSelectLayer={onSelectLayer} onCommitLayerKeyframes={onCommitLayerKeyframes} />;
+          return <CoverLayerView key={layer.id} project={project} layer={layer} mediaRect={mediaRect} selected={selectedLayerId === layer.id} hidden={before} disabled={disabled} onSelectLayer={onSelectLayer} onCommitLayerKeyframes={onCommitLayerKeyframes} />;
         }
-        return <TransformableLayerView key={layer.id} project={project} layer={layer} mediaRect={mediaRect} selected={selectedLayerId === layer.id} hidden={before} onSelectLayer={onSelectLayer} onCommitLayerKeyframes={onCommitLayerKeyframes} />;
+        return <TransformableLayerView key={layer.id} project={project} layer={layer} mediaRect={mediaRect} selected={selectedLayerId === layer.id} hidden={before} disabled={disabled} onSelectLayer={onSelectLayer} onCommitLayerKeyframes={onCommitLayerKeyframes} />;
       })}
       <View style={styles.bounds} pointerEvents="none">
         {mediaRect && <View style={[styles.mediaBounds, viewRectToAbsoluteStyle(mediaRect)]} />}
