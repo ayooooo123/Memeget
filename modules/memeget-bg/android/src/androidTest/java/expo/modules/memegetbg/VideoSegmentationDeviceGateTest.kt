@@ -181,6 +181,27 @@ class VideoSegmentationDeviceGateTest {
     ) ?: error("Could not create Downloads/$name")
     resolver.openOutputStream(uri)?.use { it.write(bytes) }
       ?: error("Could not write Downloads/$name")
+
+    // The delete above only matches rows this install still owns. Gradle uninstalls and
+    // reinstalls the instrumentation APK on every connected run, which drops that owner
+    // attribution, so an artifact left by an earlier run survives the delete and MediaStore
+    // silently de-duplicates this insert into "name (1).ext". A host-side pull of the exact
+    // name then returns the PREVIOUS run's bytes, which would be committed as if it were
+    // evidence from this run. Fail loudly rather than publish silently stale evidence.
+    val publishedName = resolver.query(
+      uri,
+      arrayOf(MediaStore.MediaColumns.DISPLAY_NAME),
+      null,
+      null,
+      null
+    )?.use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else null }
+    assertEquals(
+      "MediaStore de-duplicated Downloads/$name, so a stale artifact from an earlier " +
+        "install is still on the device and this run's bytes were written elsewhere. " +
+        "Clear it first: adb shell rm -f \"/sdcard/Download/video-segmentation-*\"",
+      name,
+      publishedName
+    )
     println("VIDEO_SEGMENTATION_GATE_DOWNLOAD_URI=$uri")
   }
 }
