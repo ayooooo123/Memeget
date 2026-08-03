@@ -1,0 +1,11 @@
+<?xml version='1.0' encoding='UTF-8' ?>
+<testsuite name="expo.modules.memegetbg.MemeTextPreviewViewConstructorTest" tests="3" failures="0" errors="0" skipped="0" time="2.184" timestamp="2026-08-03T19:32:08" hostname="localhost">
+  <properties>
+    <property name="device" value="Pixel 9 Pro - 17" />
+    <property name="flavor" value="" />
+    <property name="project" value=":memeget-bg" />
+  </properties>
+  <testcase name="theResolvedConstructorProducesAUsableView" classname="expo.modules.memegetbg.MemeTextPreviewViewConstructorTest" time="0.015" />
+  <testcase name="exposesAConstructorExpoCanResolve" classname="expo.modules.memegetbg.MemeTextPreviewViewConstructorTest" time="0.002" />
+  <testcase name="stillSupportsTheExplicitDensityConstructorOtherTestsUse" classname="expo.modules.memegetbg.MemeTextPreviewViewConstructorTest" time="0.003" />
+</testsuite>
