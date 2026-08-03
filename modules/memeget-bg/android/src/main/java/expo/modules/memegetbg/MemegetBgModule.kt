@@ -18,6 +18,7 @@ import androidx.documentfile.provider.DocumentFile
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.Promise
 import expo.modules.kotlin.modules.ModuleDefinition
+import org.json.JSONArray
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
@@ -25,6 +26,23 @@ import java.io.IOException
 class MemegetBgModule : Module() {
   override fun definition() = ModuleDefinition {
     Name("MemegetBg")
+
+    View(MemeTextPreviewView::class) {
+      Events("onMetrics")
+      Prop("text") { view: MemeTextPreviewView, value: String -> view.setText(value) }
+      Prop("fontFamily") { view: MemeTextPreviewView, value: String -> view.setFontFamily(value) }
+      Prop("fontWeight") { view: MemeTextPreviewView, value: Int -> view.setFontWeight(value) }
+      Prop("fontSizeDip") { view: MemeTextPreviewView, value: Double -> view.setFontSizeDip(value.toFloat()) }
+      Prop("lineHeightDip") { view: MemeTextPreviewView, value: Double -> view.setLineHeightDip(value.toFloat()) }
+      Prop("letterSpacingEm") { view: MemeTextPreviewView, value: Double -> view.setLetterSpacingEm(value.toFloat()) }
+      Prop("widthDip") { view: MemeTextPreviewView, value: Double -> view.setWidthDip(value.toFloat()) }
+      Prop("align") { view: MemeTextPreviewView, value: String -> view.setAlign(value) }
+      Prop("fillColor") { view: MemeTextPreviewView, value: String -> view.setFillColor(value) }
+      Prop("strokeColor") { view: MemeTextPreviewView, value: String -> view.setStrokeColor(value) }
+      Prop("strokeWidthDip") { view: MemeTextPreviewView, value: Double -> view.setStrokeWidthDip(value.toFloat()) }
+      Prop("opacity") { view: MemeTextPreviewView, value: Double -> view.setOpacity(value.toFloat()) }
+      OnViewDidUpdateProps { view: MemeTextPreviewView -> view.commitPendingProps() }
+    }
 
     // Put an actual file — in practice a video, which expo-clipboard can't
     // handle — on the system clipboard as a content:// uri. The file is staged
@@ -90,6 +108,35 @@ class MemegetBgModule : Module() {
           promise.reject("E_IMAGE_EXPORT", error.message, error)
         }
       }
+    }
+
+    // Render a full-resolution still from a structured edit project. The plan
+    // JSON is produced by src/memeImageRenderCore.ts, which resolves every
+    // layer into output pixels first — this call only decodes, draws and
+    // encodes. AsyncFunction keeps the decode/encode off the JS thread; real
+    // failures reject so the studio can show why the export did not happen.
+    AsyncFunction("renderImageProject") { planJson: String ->
+      val ctx = appContext.reactContext
+        ?: throw IllegalStateException("React context unavailable")
+      MemeImageRenderer.render(ctx, planJson)
+    }
+
+    // Screen the assets a video composition plan (src/memeVideoCompositionCore.ts) wants to pull
+    // in — title cards today, replacement clips and music beds as they land. Returns one entry per
+    // asset the composition cannot honour, each with a sentence the studio can show. An empty list
+    // means every asset checked out. Async because it opens and header-decodes real files.
+    AsyncFunction("inspectCompositionAssets") { requirementsJson: String ->
+      val ctx = appContext.reactContext
+        ?: throw IllegalStateException("React context unavailable")
+      RetainedRangeComposition
+        .inspectAssets(ctx, compositionAssetRequirements(requirementsJson))
+        .map { rejection ->
+          mapOf(
+            "uri" to rejection.uri,
+            "role" to rejection.role.name,
+            "reason" to rejection.reason
+          )
+        }
     }
 
     // WebM is playable in Memeget but not accepted by several mobile paste
@@ -171,6 +218,58 @@ class MemegetBgModule : Module() {
       }
     }
 
+    // Inspect local file:// or content:// media without materializing or
+    // uploading it. AsyncFunction runs off the JS thread and propagates real
+    // probe failures as rejected promises.
+    AsyncFunction("probeMedia") { source: String ->
+      val ctx = appContext.reactContext
+        ?: throw IllegalStateException("React context unavailable")
+      MemeMediaProbe.probe(ctx, source).toMap()
+    }
+
+    // Detect real local-image text using the same pinned ML Kit stack as
+    // expo-text-extractor. The detector honors EXIF before recognition and
+    // returns normalized block/line/element geometry.
+    AsyncFunction("detectTextRegions") { source: String ->
+      val ctx = appContext.reactContext
+        ?: throw IllegalStateException("React context unavailable")
+      MemeTextDetector.detect(ctx, source).toMap()
+    }
+
+    // Sample a bounded ring outside a normalized region on a downsampled,
+    // EXIF-oriented bitmap. Real decode/sample errors reject.
+    AsyncFunction("sampleImageBorderColor") {
+      source: String,
+      x: Double,
+      y: Double,
+      width: Double,
+      height: Double ->
+      val ctx = appContext.reactContext
+        ?: throw IllegalStateException("React context unavailable")
+      MemeTextDetector.sampleBorderColor(
+        ctx,
+        source,
+        NormalizedImageRect(x, y, width, height)
+      ).toMap()
+    }
+
+    AsyncFunction("sampleImagePixelGrid") {
+      source: String,
+      x: Double,
+      y: Double,
+      width: Double,
+      height: Double,
+      pixelSize: Int ->
+      val ctx = appContext.reactContext
+        ?: throw IllegalStateException("React context unavailable")
+      MemeTextDetector.samplePixelGrid(
+        ctx,
+        source,
+        NormalizedImageRect(x, y, width, height),
+        pixelSize
+      ).toMap()
+    }
+
     // Decode the first audio track of a video to mono 16 kHz float32 PCM,
     // written as a raw little-endian file in the cache dir (the JS side reads
     // it and hands the waveform to the on-device STT model). Async because a two-
@@ -201,6 +300,32 @@ class MemegetBgModule : Module() {
       val ctx = appContext.reactContext
         ?: throw IllegalStateException("React context unavailable")
       VideoPlayerFrameExtractor.extract(ctx, source, seconds)
+    }
+
+    AsyncFunction("measureMemeTextLayout") {
+      text: String,
+      fontFamily: String,
+      fontWeight: Int,
+      fontSizeDip: Double,
+      lineHeightDip: Double,
+      letterSpacingEm: Double,
+      widthDip: Double,
+      align: String ->
+      val ctx = appContext.reactContext
+        ?: throw IllegalStateException("React context unavailable")
+      val density = MemeTextDensity(ctx.resources.displayMetrics.density)
+      MemeTextLayout.measure(
+        context = ctx,
+        text = text,
+        fontFamily = fontFamily,
+        fontWeight = fontWeight,
+        fontSizeDip = fontSizeDip.toFloat(),
+        lineHeightDip = lineHeightDip.toFloat(),
+        letterSpacingEm = letterSpacingEm.toFloat(),
+        widthDip = widthDip.toFloat(),
+        align = align,
+        density = density
+      ).toDip(density).toMap()
     }
 
     // Battery + thermal snapshot the JS loop polls to decide whether to keep
@@ -253,6 +378,27 @@ class MemegetBgModule : Module() {
     Function("stopForeground") {
       val ctx = appContext.reactContext ?: return@Function null
       ctx.stopService(Intent(ctx, KeepAliveService::class.java))
+    }
+  }
+
+  // The JS side owns the plan shape, so the bridge only marshals: `[{uri, role, mimeType?}]`.
+  // Bounded by the composition's own item ceiling — a caller that hands over an unbounded list is
+  // asking this to header-decode an unbounded number of files on a background thread.
+  private fun compositionAssetRequirements(
+    requirementsJson: String
+  ): List<RetainedRangeComposition.AssetRequirement> {
+    val entries = JSONArray(requirementsJson)
+    require(entries.length() <= RetainedRangeComposition.MAX_SEGMENTS) {
+      "At most ${RetainedRangeComposition.MAX_SEGMENTS} assets can be inspected at once, " +
+        "got ${entries.length()}"
+    }
+    return (0 until entries.length()).map { index ->
+      val entry = entries.getJSONObject(index)
+      RetainedRangeComposition.AssetRequirement(
+        uri = entry.getString("uri"),
+        role = RetainedRangeComposition.AssetRole.valueOf(entry.getString("role")),
+        declaredMimeType = entry.optString("mimeType").ifBlank { null }
+      )
     }
   }
 }

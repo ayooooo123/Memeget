@@ -1,0 +1,165 @@
+{
+  "schemaVersion": 1,
+  "task": "4.3",
+  "observedAtUtc": "2026-08-03T00:37:41.000Z",
+  "device": {
+    "manufacturer": "Google",
+    "model": "sdk_gphone64_arm64",
+    "device": "emu64a",
+    "androidRelease": "16",
+    "apiLevel": 36,
+    "buildFingerprint": "google/sdk_gphone64_arm64/emu64a:16/BE4B.251210.005/14574095:user/release-keys"
+  },
+  "media3Version": "1.9.0",
+  "physicalConfirmationOwed": "Emulator only. The physical Pixel was offline for this lane, so nothing here is physical evidence. Two numbers specifically still need a real device: the media3 gate's 50000us audio/video end-time criterion (emulator-5554's AAC encoder pads past it, so this test asserts the 150000us duration tolerance instead), and the export wall times.",
+  "method": {
+    "subject": "expo.modules.memegetbg.RetainedRangeComposition.buildTimeline",
+    "test": "modules/memeget-bg/android/src/androidTest/java/expo/modules/memegetbg/RetainedRangeCompositionInstrumentedTest.kt",
+    "exporter": "androidx.media3.transformer.Transformer, H.264 video + AAC audio requested",
+    "durationMeasurement": "last MediaExtractor sample timestamp plus the median inter-sample interval, per track",
+    "expectedDuration": "RetainedRangeComposition.expectedOutputDurationUs = SpeedProviderUtil.getDurationAfterSpeedProviderApplied(sum of segment timeline durations)",
+    "durationToleranceUs": 150000,
+    "assertedCodecs": {
+      "video": "video/avc",
+      "audio": "audio/mp4a-latm"
+    },
+    "fixtureGenerator": "modules/memeget-bg/android/src/androidTest/fixtures/generate-composition-fixtures.sh"
+  },
+  "compositions": [
+    {
+      "case": "rotatedSourceAcrossSeams",
+      "fixture": "composition_rotated_3s_240p.mp4",
+      "segments": "range [100000,900000), card 400000us, range [1200000,2000000), range [2400000,2900000)",
+      "speed": 1.0,
+      "cards": 1,
+      "outputSizePinned": "240x320",
+      "outputFile": "rotated_seams.mp4",
+      "exportWallTimeMs": 1694,
+      "outputBytes": 447836,
+      "expectedOutputDurationUs": 2500000,
+      "videoEndTimeUs": 2399999,
+      "videoDeltaUs": -100001,
+      "audioEndTimeUs": 2547999,
+      "audioDeltaUs": 47999,
+      "displayWidthPx": 240,
+      "displayHeightPx": 320,
+      "containerRotationDegrees": 90,
+      "continuity": {
+        "videoFrames": 69,
+        "medianSampleIntervalUs": 33333,
+        "largestSampleIntervalUs": 133334,
+        "largestIntervalFromUs": 666666,
+        "largestIntervalToUs": 800000,
+        "framesAllowedHeldAtASeam": 3
+      }
+    },
+    {
+      "case": "threeRangesAtSpeed",
+      "fixture": "composition_landscape_3s_240p.mp4",
+      "segments": "ranges [200000,900000) [1200000,1800000) [2100000,2900000)",
+      "speed": 1.25,
+      "cards": 0,
+      "outputSizePinned": null,
+      "outputFile": "gapless_speed_125.mp4",
+      "exportWallTimeMs": 2827,
+      "outputBytes": 502690,
+      "expectedOutputDurationUs": 1680000,
+      "videoEndTimeUs": 1600000,
+      "videoDeltaUs": -80000,
+      "audioEndTimeUs": 1715999,
+      "audioDeltaUs": 35999,
+      "displayWidthPx": 320,
+      "displayHeightPx": 240,
+      "containerRotationDegrees": 0,
+      "continuity": {
+        "videoFrames": 60,
+        "medianSampleIntervalUs": 26667,
+        "largestSampleIntervalUs": 26667,
+        "largestIntervalFromUs": 26666,
+        "largestIntervalToUs": 53333,
+        "framesAllowedHeldAtASeam": 1
+      }
+    },
+    {
+      "case": "threeRangesAtUnitSpeed",
+      "fixture": "composition_landscape_3s_240p.mp4",
+      "segments": "ranges [200000,900000) [1200000,1800000) [2100000,2900000)",
+      "speed": 1.0,
+      "cards": 0,
+      "outputSizePinned": null,
+      "outputFile": "gapless_speed_1.mp4",
+      "exportWallTimeMs": 1433,
+      "outputBytes": 509680,
+      "expectedOutputDurationUs": 2100000,
+      "videoEndTimeUs": 1999999,
+      "videoDeltaUs": -100001,
+      "audioEndTimeUs": 2142666,
+      "audioDeltaUs": 42666,
+      "displayWidthPx": 320,
+      "displayHeightPx": 240,
+      "containerRotationDegrees": 0,
+      "continuity": {
+        "videoFrames": 60,
+        "medianSampleIntervalUs": 33333,
+        "largestSampleIntervalUs": 33334,
+        "largestIntervalFromUs": 66666,
+        "largestIntervalToUs": 100000,
+        "framesAllowedHeldAtASeam": 1
+      }
+    },
+    {
+      "case": "titleCardsAroundRanges",
+      "fixture": "composition_landscape_3s_240p.mp4",
+      "segments": "card 1000000us, range [300000,1300000), card 600000us, range [2000000,2800000)",
+      "speed": 1.0,
+      "cards": 2,
+      "outputSizePinned": "320x240",
+      "outputFile": "title_cards.mp4",
+      "exportWallTimeMs": 1531,
+      "outputBytes": 556225,
+      "expectedOutputDurationUs": 3400000,
+      "videoEndTimeUs": 3399999,
+      "videoDeltaUs": -1,
+      "audioEndTimeUs": 3423492,
+      "audioDeltaUs": 23492,
+      "displayWidthPx": 320,
+      "displayHeightPx": 240,
+      "containerRotationDegrees": 0,
+      "continuity": {
+        "videoFrames": 102,
+        "medianSampleIntervalUs": 33333,
+        "largestSampleIntervalUs": 33334,
+        "largestIntervalFromUs": 66666,
+        "largestIntervalToUs": 100000,
+        "framesAllowedHeldAtASeam": 1
+      }
+    }
+  ],
+  "assetRejections": [
+    {
+      "role": "TITLE_CARD",
+      "reason": "video/avc is not a still image media3 can decode. Re-encode the card as PNG, JPEG, WebP, BMP or HEIF."
+    },
+    {
+      "role": "TITLE_CARD",
+      "reason": "The bytes could not be decoded as a still image."
+    },
+    {
+      "role": "TITLE_CARD",
+      "reason": "The bytes could not be decoded as a still image."
+    },
+    {
+      "role": "TITLE_CARD",
+      "reason": "The asset could not be opened: /data/user/0/expo.modules.memegetbg.test/cache/retained_range_composition/card_missing.png: open failed: ENOENT (No such file or directory)"
+    },
+    {
+      "role": "REPLACEMENT_AUDIO",
+      "reason": "The asset has no audio track, so using it here would silently drop the audio."
+    }
+  ],
+  "controlExperiment": {
+    "question": "Is the shared Presentation that pins every item to the source frame load-bearing?",
+    "method": "Removed the single line that appends the Presentation to each item's effect list, then re-ran insertsTitleCardsWithoutResizingOrReorderingTheComposition alone.",
+    "result": "FAILED: the leading 720x480 title card dictated the encoder size for the whole export - 'the leading card must not resize the composition expected:<320> but was:<720>'. Restored, and the suite is green again."
+  }
+}

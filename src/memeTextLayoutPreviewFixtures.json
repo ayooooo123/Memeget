@@ -1,0 +1,8 @@
+[
+  {"preset":"impact","scale":1,"input":{"text":"IMPACT LAYOUT FIXTURE WORDS","fontFamily":"Anton","fontWeight":900,"fontSizeDip":151,"lineHeightDip":143.5,"letterSpacingEm":0.018,"widthDip":634,"align":"center"}},
+  {"preset":"subtitle","scale":1.25,"input":{"text":"subtitle layout fixture words","fontFamily":"NotoSans","fontWeight":700,"fontSizeDip":64,"lineHeightDip":75.5,"letterSpacingEm":0,"widthDip":562,"align":"center"}},
+  {"preset":"label","scale":1,"input":{"text":"LABEL LAYOUT FIXTURE WORDS","fontFamily":"NotoSans","fontWeight":900,"fontSizeDip":82,"lineHeightDip":86.1,"letterSpacingEm":0.035,"widthDip":302,"align":"center"}},
+  {"preset":"news","scale":1.5,"input":{"text":"NEWS LAYOUT FIXTURE WORDS","fontFamily":"NotoSans","fontWeight":900,"fontSizeDip":74,"lineHeightDip":75.5,"letterSpacingEm":0.02,"widthDip":720,"align":"left"}},
+  {"preset":"bubble","scale":1,"input":{"text":"bubble layout fixture words","fontFamily":"NotoSans","fontWeight":700,"fontSizeDip":82,"lineHeightDip":91.8,"letterSpacingEm":0,"widthDip":446,"align":"left"}},
+  {"preset":"plain","scale":1,"input":{"text":"plain layout\n\nfixture words","fontFamily":"NotoSans","fontWeight":400,"fontSizeDip":77,"lineHeightDip":89.3,"letterSpacingEm":0,"widthDip":418,"align":"center"}}
+]

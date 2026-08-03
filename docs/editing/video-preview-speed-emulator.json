@@ -1,0 +1,132 @@
+{
+  "schemaVersion": 1,
+  "task": "4.2",
+  "observedAtUtc": "2026-08-03T00:03:06.497Z",
+  "device": {
+    "manufacturer": "Google",
+    "model": "sdk_gphone64_arm64",
+    "device": "emu64a",
+    "androidRelease": "16",
+    "apiLevel": 36,
+    "buildFingerprint": "google\/sdk_gphone64_arm64\/emu64a:16\/BE4B.251210.005\/14574095:user\/release-keys"
+  },
+  "media3Version": "1.9.0",
+  "method": {
+    "subject": "androidx.media3.exoplayer.ExoPlayer, the player expo-video wraps",
+    "speedApi": "ExoPlayer.playbackParameters = PlaybackParameters(speed, 1f)",
+    "volumeApi": "ExoPlayer.volume",
+    "asset": "synthetic_15s_720p.mp4",
+    "warmupMs": 700,
+    "windowMs": 4000,
+    "sampleIntervalMs": 50,
+    "rateTolerance": 0.02,
+    "videoSurface": "ImageReader PRIVATE sink, frames drained"
+  },
+  "speeds": [
+    {
+      "requestedSpeed": 0.5,
+      "appliedPlaybackParametersSpeed": 0.5,
+      "observedRate": 0.5001,
+      "relativeError": 2.0E-4,
+      "positionAdvanceMs": 2004,
+      "wallClockMs": 4007,
+      "rebufferCount": 0,
+      "droppedFrames": 0,
+      "previewClean": true,
+      "error": null
+    },
+    {
+      "requestedSpeed": 0.75,
+      "appliedPlaybackParametersSpeed": 0.75,
+      "observedRate": 0.756,
+      "relativeError": 0.0081,
+      "positionAdvanceMs": 3031,
+      "wallClockMs": 4009,
+      "rebufferCount": 0,
+      "droppedFrames": 0,
+      "previewClean": true,
+      "error": null
+    },
+    {
+      "requestedSpeed": 1,
+      "appliedPlaybackParametersSpeed": 1,
+      "observedRate": 1,
+      "relativeError": 0,
+      "positionAdvanceMs": 4056,
+      "wallClockMs": 4056,
+      "rebufferCount": 0,
+      "droppedFrames": 0,
+      "previewClean": true,
+      "error": null
+    },
+    {
+      "requestedSpeed": 1.25,
+      "appliedPlaybackParametersSpeed": 1.25,
+      "observedRate": 1.2481,
+      "relativeError": -0.0015,
+      "positionAdvanceMs": 5025,
+      "wallClockMs": 4026,
+      "rebufferCount": 0,
+      "droppedFrames": 0,
+      "previewClean": true,
+      "error": null
+    },
+    {
+      "requestedSpeed": 1.5,
+      "appliedPlaybackParametersSpeed": 1.5,
+      "observedRate": 1.5012,
+      "relativeError": 8.0E-4,
+      "positionAdvanceMs": 6026,
+      "wallClockMs": 4014,
+      "rebufferCount": 0,
+      "droppedFrames": 0,
+      "previewClean": true,
+      "error": null
+    },
+    {
+      "requestedSpeed": 2,
+      "appliedPlaybackParametersSpeed": 2,
+      "observedRate": 1.9968,
+      "relativeError": -0.0016,
+      "positionAdvanceMs": 8045,
+      "wallClockMs": 4029,
+      "rebufferCount": 0,
+      "droppedFrames": 0,
+      "previewClean": true,
+      "error": null
+    }
+  ],
+  "volume": [
+    {
+      "requested": 0,
+      "appliedByPlayer": 0,
+      "honored": true
+    },
+    {
+      "requested": 0.5,
+      "appliedByPlayer": 0.5,
+      "honored": true
+    },
+    {
+      "requested": 1,
+      "appliedByPlayer": 1,
+      "honored": true
+    },
+    {
+      "requested": 1.5,
+      "appliedByPlayer": 1,
+      "honored": false
+    },
+    {
+      "requested": 2,
+      "appliedByPlayer": 1,
+      "honored": false
+    },
+    {
+      "requested": 0,
+      "appliedByPlayer": 0,
+      "honored": true,
+      "note": "mute path: expo-video writes 0f and restores userVolume on unmute"
+    }
+  ]
+}

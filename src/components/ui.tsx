@@ -16,6 +16,7 @@ import {
 
 import { colors, radius, type } from '../theme';
 import { useConst } from '../reactUtils';
+import { initialSliderGestureState, reduceSliderGesture, type SliderGestureEvent } from '../sliderCore';
 
 const AnimatedPressable = Animated.createAnimatedComponent(Pressable);
 
@@ -157,31 +158,56 @@ export function ProgressBar({ value, tint = colors.volt }: { value: number; tint
 export function Slider({
   value,
   onChange,
+  onComplete,
+  accessibilityLabel,
+  accessibilityDisabled,
   tint = colors.volt,
 }: {
   value: number;
-  onChange: (v: number) => void;
+  onChange: (value: number) => void;
+  onComplete?: (value: number) => void;
+  accessibilityLabel?: string;
+  accessibilityDisabled?: boolean;
   tint?: string;
 }) {
   const widthRef = useRef(0);
   const onChangeRef = useRef(onChange);
+  const onCompleteRef = useRef(onComplete);
+  const gestureRef = useRef(initialSliderGestureState(value));
   onChangeRef.current = onChange;
-
-  const setFromX = (x: number) => {
-    const w = widthRef.current;
-    if (!w) return;
-    onChangeRef.current(Math.max(0, Math.min(1, x / w)));
+  onCompleteRef.current = onComplete;
+  if (!gestureRef.current.active) gestureRef.current = initialSliderGestureState(value);
+  const valueFromX = (x: number): number | null => {
+    const width = widthRef.current;
+    if (width <= 0) return null;
+    return Math.max(0, Math.min(1, x / width));
+  };
+  const transition = (event: SliderGestureEvent) => {
+    const next = reduceSliderGesture(gestureRef.current, event);
+    gestureRef.current = next.state;
+    if (next.displayValue !== null) onChangeRef.current(next.displayValue);
+    if (next.completeValue !== null) onCompleteRef.current?.(next.completeValue);
   };
 
-  // Lazy: PanResponder.create() runs once instead of on every render. The
-  // gesture reads the latest onChange via onChangeRef, so a stable responder is
-  // correct.
+  // Lazy: PanResponder.create() runs once instead of on every render. Mutable
+  // refs keep the responder current without creating a new gesture owner.
   const pan = useConst(() =>
     PanResponder.create({
       onStartShouldSetPanResponder: () => true,
       onMoveShouldSetPanResponder: () => true,
-      onPanResponderGrant: (e) => setFromX(e.nativeEvent.locationX),
-      onPanResponderMove: (e) => setFromX(e.nativeEvent.locationX),
+      onPanResponderGrant: (event) => {
+        const next = valueFromX(event.nativeEvent.locationX);
+        if (next !== null) transition({ type: 'grant', value: next });
+      },
+      onPanResponderMove: (event) => {
+        const next = valueFromX(event.nativeEvent.locationX);
+        if (next !== null) transition({ type: 'move', value: next });
+      },
+      onPanResponderRelease: (event) => {
+        const next = valueFromX(event.nativeEvent.locationX);
+        if (next !== null) transition({ type: 'release', value: next });
+      },
+      onPanResponderTerminate: () => transition({ type: 'terminate' }),
     })
   );
 
@@ -193,6 +219,17 @@ export function Slider({
         widthRef.current = e.nativeEvent.layout.width;
       }}
       {...pan.panHandlers}
+      accessibilityLabel={accessibilityLabel}
+      accessibilityState={{ disabled: !!accessibilityDisabled }}
+      accessibilityRole="adjustable"
+      accessibilityValue={{ min: 0, max: 100, now: Math.round(Math.max(0, Math.min(1, value)) * 100) }}
+      accessibilityActions={[{ name: 'increment', label: 'Increase' }, { name: 'decrement', label: 'Decrease' }]}
+      onAccessibilityAction={(event) => {
+        const delta = event.nativeEvent.actionName === 'decrement' ? -0.05 : 0.05;
+        const next = Math.max(0, Math.min(1, value + delta));
+        onChangeRef.current(next);
+        onCompleteRef.current?.(next);
+      }}
     >
       <View style={styles.sliderTrack}>
         <View style={[styles.sliderFill, { width: pct, backgroundColor: tint }]} />
@@ -252,7 +289,7 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
   },
   fill: { height: '100%', borderRadius: 2 },
-  sliderHit: { height: 28, justifyContent: 'center' },
+  sliderHit: { minHeight: 44, justifyContent: 'center' },
   sliderTrack: {
     height: 6,
     borderRadius: 3,

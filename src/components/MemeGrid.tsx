@@ -47,12 +47,14 @@ import { noteCodecInteractive } from '../interactive';
 import { success, tap, thud, warn } from '../haptics';
 import {
   copyFileToClipboard,
-  mediaEditorNativeAvailable,
-  renderMemeVariation,
+  imageRendererNativeAvailable,
+  renderImageProject,
   saveToDownloads,
   transcodeVideoToMp4,
 } from '../../modules/memeget-bg';
-import { compatibleCopyTarget, makeVariationName } from '../memeActionsCore';
+import type { MemeEditProject } from '../memeEditProjectCore';
+import { buildImageRenderPlan, imageRenderPlanUnavailableLayers } from '../memeImageRenderCore';
+import { compatibleCopyTarget } from '../memeActionsCore';
 import { mimeForName } from '../mediaFormats';
 import {
   deleteCache,
@@ -69,7 +71,7 @@ import type { MemeRecord, SearchHit, Tag } from '../types';
 
 import { useAudio } from '../audio';
 import { showToast } from './Toast';
-import { MemeVariationEditor, type VariationDraft } from './MemeVariationEditor';
+import { MemeRemixStudio } from './MemeRemixStudio';
 import { Chip, PressableScale } from './ui';
 
 const GAP = 3;
@@ -276,8 +278,7 @@ export const MemeGrid = React.memo(function MemeGrid({
   onScrollActiveChange?: (active: boolean) => void;
 }) {
   const [selected, setSelected] = useState<Item | null>(null);
-  const [variationOpen, setVariationOpen] = useState(false);
-  const [variationError, setVariationError] = useState('');
+  const [studioOpen, setStudioOpen] = useState(false);
   // Multi-select: long-press a cell to enter selection mode, tap to toggle, then
   // apply a bulk action (tag / delete) to the whole set. Kept in the grid (not
   // lifted to the screen) so the bar and cell overlays live next to the list.
@@ -680,61 +681,52 @@ export const MemeGrid = React.memo(function MemeGrid({
 
   const openVariation = () => {
     if (!selected || busy) return;
-    if (!mediaEditorNativeAvailable) {
-      showToast('Meme editing needs the installed native build', 'error');
-      return;
-    }
     noteInteractive();
     if (selected.kind === 'video') noteCodecInteractive();
-    setVariationError('');
-    setVariationOpen(true);
+    setStudioOpen(true);
   };
 
-  const saveVariation = async (draft: VariationDraft) => {
+  // Render the studio's structured project into a real full-resolution PNG and
+  // hand it to the same collection path a shared meme takes: saveSharedFiles
+  // writes it into the linked folder and inserts the pending row, onCreated
+  // indexes it. The original file is never touched — the remix lands as its
+  // own single library item.
+  const onStudioExport = useCallback(async (project: MemeEditProject) => {
     const item = selected;
     if (!item || busy) return;
+    noteInteractive();
     setBusy(true);
-    setVariationError('');
     let rendered: string | null = null;
-    let materialized: string | null = null;
     try {
-      materialized = await materialize(item.uri, item.name);
-      rendered = await renderMemeVariation(
-        materialized,
-        item.kind,
-        draft.topText,
-        draft.bottomText,
-        item.kind === 'image' && draft.coverTop,
-        item.kind === 'image' && draft.coverBottom
-      );
-      if (!rendered) throw new Error('Meme editor is unavailable in this build');
-      const extension = item.kind === 'video' ? 'mp4' : 'png';
-      const mimeType = item.kind === 'video' ? 'video/mp4' : 'image/png';
-      const result = await saveSharedFiles([
-        {
-          path: rendered,
-          fileName: makeVariationName(item.name, extension),
-          mimeType,
-        },
+      const plan = buildImageRenderPlan(project, { planId: `meme-remix-${item.id}` });
+      const skipped = imageRenderPlanUnavailableLayers(plan);
+      rendered = await renderImageProject(JSON.stringify(plan));
+      if (!rendered) throw new Error('Image export needs a native build');
+      const stem = item.name.replace(/\.[^./]+$/, '') || 'meme';
+      const saved = await saveSharedFiles([
+        { path: rendered, fileName: `${stem}-remix.png`, mimeType: 'image/png' },
       ]);
-      if (result.saved.length === 0) {
-        throw new Error(result.duplicates ? 'That variation already exists' : 'Could not write to the linked folder');
+      if (saved.saved.length === 0) {
+        if (saved.duplicates > 0) {
+          showToast('That exact remix is already in your library', 'info');
+          return;
+        }
+        throw new Error(`Could not save the rendered meme into ${saved.folderName}`);
       }
-      setVariationOpen(false);
-      emitLibraryChanged();
-      onCreated?.(result.saved);
+      onCreated?.(saved.saved);
       success();
-      showToast('New variation saved — indexing in background', 'success');
-    } catch (e) {
-      const message = `Could not create variation: ${String(e)}`;
-      setVariationError(message);
-      showToast(message, 'error');
+      showToast(
+        skipped.length > 0
+          ? `Saved to ${saved.folderName} — ${skipped.length} layer${skipped.length === 1 ? '' : 's'} could not be rendered`
+          : `Saved to ${saved.folderName}`,
+        skipped.length > 0 ? 'info' : 'success'
+      );
+      setStudioOpen(false);
     } finally {
-      if (materialized) await deleteCache(materialized).catch(() => {});
       if (rendered) await deleteCache(rendered).catch(() => {});
       setBusy(false);
     }
-  };
+  }, [busy, onCreated, selected]);
 
   const onCopy = async () => {
     if (!selected || busy) return;
@@ -1249,13 +1241,12 @@ export const MemeGrid = React.memo(function MemeGrid({
         }}
       />
 
-      <MemeVariationEditor
+      <MemeRemixStudio
         item={selected}
-        visible={variationOpen}
-        saving={busy}
-        error={variationError}
-        onClose={() => setVariationOpen(false)}
-        onSave={saveVariation}
+        visible={studioOpen && !!selected}
+        exportBusy={busy}
+        onClose={() => setStudioOpen(false)}
+        onExport={selected?.kind === 'image' && imageRendererNativeAvailable ? onStudioExport : undefined}
       />
 
       <Modal

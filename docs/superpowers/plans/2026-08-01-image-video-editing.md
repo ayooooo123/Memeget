@@ -67,13 +67,16 @@ The first tap defaults to the most likely useful action:
 4. Speed presets from 0.5× to 2× with audio pitch handled by Media3; no silent speed drift.
 5. Multiple timed text/label layers with start/end handles.
 6. Keyframes for position, scale, rotation, opacity, and background color; linear and hold interpolation.
-7. “Pin to subject” motion mode: manual start/end keyframes always available; automatic tracking is gated by an on-device probe and falls back honestly to manual keyframes.
-8. Video person/foreground isolation with a temporally smoothed mask track.
-9. Transparent-look composites over solid color, blurred source, replacement image, or replacement video. MP4 itself remains opaque; alpha is composited before export.
-10. Timeline split points and removal of unwanted middle ranges, implemented as a Media3 composition of retained segments.
-11. Static image/title-card insertion with a bounded duration.
-12. Export progress, estimated stage, cancellation, process-safe cleanup, and codec fallback reporting.
-13. H.264/AAC MP4 output. Silent GIF export is a separate encoder gate and must never masquerade as delivered until real GIF bytes pass device tests.
+7. A virtualized, zoomable frame strip that can reach every source frame without decoding or retaining the whole video in memory.
+8. Exact-frame edits represented as sparse keyframes, held ranges, or bounded mask corrections rather than an unbounded bitmap project per frame.
+9. Replacement image/video layers that can cover an existing overlay or follow a selected object through manually corrected keyframes.
+10. “Pin to subject” motion mode: manual start/end keyframes always available; automatic tracking is gated by an on-device probe and falls back honestly to manual keyframes.
+11. Video person/foreground isolation with a temporally smoothed mask track.
+12. Transparent-look composites over solid color, blurred source, replacement image, or replacement video. MP4 itself remains opaque; alpha is composited before export.
+13. Timeline split points and removal of unwanted middle ranges, implemented as a Media3 composition of retained segments.
+14. Static image/title-card insertion with a bounded duration.
+15. Export progress, estimated stage, cancellation, process-safe cleanup, and codec fallback reporting.
+16. H.264/AAC MP4 output. Silent GIF export is a separate encoder gate and must never masquerade as delivered until real GIF bytes pass device tests.
 
 ### Smart remix moments
 
@@ -83,6 +86,7 @@ The milestone should create at least these “how did it do that on my phone?”
 - Tap a person → remove the background → add a colored outline → place them over another image.
 - Trim a video, mute it, and add a timed caption in under ten seconds.
 - Pin a label to a moving person with two keyframes; auto-track if the runtime gate passes.
+- Scrub to any frame, select an existing picture/object, cover or mask it, and replace it with a new image that follows manually corrected motion keyframes.
 - Isolate a person throughout a short reaction clip and place them over a blurred original background.
 - Turn a WebM into an edited, paste-compatible MP4 without exposing codec details.
 
@@ -166,6 +170,17 @@ export interface SubjectLayer {
   shadowScale: number;
 }
 
+export interface MediaOverlayLayer {
+  id: string;
+  kind: 'media';
+  assetUri: string;
+  assetKind: 'image' | 'video';
+  fit: 'contain' | 'cover';
+  targetMaskTrackId: string | null;
+  active: TimeRangeUs | null;
+  keyframes: TransformKeyframe[];
+}
+
 export interface BackgroundSpec {
   mode: 'source' | 'solid' | 'blurred-source' | 'image' | 'video';
   color: string;
@@ -185,7 +200,7 @@ export interface MemeEditProject {
   source: { uri: string; name: string; kind: MediaEditKind; width: number; height: number; durationUs: number | null };
   base: BaseTransform;
   video: VideoEditSpec | null;
-  layers: Array<TextLayer | CoverLayer | SubjectLayer>;
+  layers: Array<TextLayer | CoverLayer | SubjectLayer | MediaOverlayLayer>;
   background: BackgroundSpec;
   transient: { maskTracks: Record<string, string>; materializedSourceUri: string | null };
 }
@@ -216,6 +231,7 @@ export interface MemeEditProject {
 - `src/components/MemeEditCanvas.tsx` — contained-media coordinate mapping and direct manipulation.
 - `src/components/MemeEditToolRail.tsx` — mode-specific tool navigation.
 - `src/components/MemeTimeline.tsx` — thumbnails, playhead, trim/split ranges, timed layer bars.
+- `src/components/MemeFrameStrip.tsx` — virtualized zoomable source-frame navigation with bounded thumbnail decode/cache.
 - `src/components/MemeLayerList.tsx` — selection, visibility, order, duplicate/delete.
 - `src/components/MemeTextInspector.tsx` — text presets and style controls.
 - `src/components/MemeTransformInspector.tsx` — crop/rotate/flip/aspect controls.
@@ -223,6 +239,7 @@ export interface MemeEditProject {
 - `src/components/MemeSubjectTool.tsx` — still/video mask state and background controls.
 - `src/components/MemeVideoAudioTool.tsx` — mute/volume controls.
 - `src/components/MemeVideoMotionTool.tsx` — timed layers and keyframes.
+- `src/components/MemeObjectReplaceTool.tsx` — frame selection, cover/mask choice, replacement asset, and sparse correction keyframes.
 - `src/components/MemeExportSheet.tsx` — Save/Copy/Downloads, progress, cancel, codec report.
 
 ### New Android files
@@ -348,6 +365,8 @@ export interface MemeEditProject {
 ### Task 4.1: Timeline and playback synchronization
 
 - [ ] Add thumbnail extraction/cache at bounded intervals, playhead, current/duration labels, trim handles, split points, retained-range bars, and layer bars.
+- [ ] Add a virtualized zoomable frame strip: coarse thumbnails while zoomed out, exact on-demand frame thumbnails while zoomed in, and bounded cache eviction.
+- [ ] Selecting a frame seeks to that exact source timestamp; frame edits create sparse keyframes/held ranges and never persist every decoded frame.
 - [ ] Scrubbing seeks Expo Video; throttle seeks so a drag cannot flood ExoPlayer.
 - [ ] Map source↔output times through removed ranges and speed in pure tested helpers.
 - [ ] Selecting a layer seeks to its start if the playhead is outside its active range.
@@ -374,18 +393,19 @@ export interface MemeEditProject {
 
 ### Task 5.1: Timed text layers and keyframes
 
-- [ ] Give every video text/subject layer start/end handles.
+- [ ] Give every video text/subject/media-replacement layer start/end handles.
 - [ ] Add keyframes for center, scale, rotation, opacity, with linear/hold interpolation.
 - [ ] Native `MemeDynamicOverlay` evaluates the same pure interpolation contract at each presentation timestamp.
 - [ ] Add `Set keyframe here`, next/previous keyframe, delete keyframe, and copy-forward controls.
 - [ ] Press-and-hold Before/After hides overlays without resetting playback.
 
-### Task 5.2: Pin labels to motion
+### Task 5.2: Pin labels and replacement layers to motion
 
 - [ ] Manual mode: user sets at least two keyframes; interpolation visibly follows motion.
 - [ ] Auto mode appears only if Task 0.2 tracking gate passed. User selects a subject at the playhead; native prepass emits normalized track keyframes with confidence.
 - [ ] Low-confidence spans are visible and editable; never jump to a different subject silently.
 - [ ] Cuts terminate tracks. User explicitly restarts tracking after a cut.
+- [ ] A replacement layer can cover an original overlay region or use a selected mask track; manual keyframes and per-frame corrections remain available when automatic tracking is gated off.
 
 ---
 
@@ -406,6 +426,14 @@ export interface MemeEditProject {
 - [ ] Add outline/shadow around the foreground with bounded kernel sizes.
 - [ ] Keep original audio and duration unchanged unless user edits them.
 - [ ] Compare preview and export at start/middle/end plus fast-motion boundaries.
+
+### Task 6.3: Select and replace video objects
+
+- [ ] At any playhead frame, let the user tap or box-select an object/overlay region and choose `Cover`, `Pixelate`, or `Replace with image/video`.
+- [ ] `Replace` creates an explicit cover/mask plus a media overlay layer; never claim generative erase or inpainting.
+- [ ] Store manual frame corrections as bounded sparse mask deltas/keyframes with visible interpolation, not a full editable bitmap for every frame.
+- [ ] When the tracking gate passes, seed the replacement track automatically; low-confidence spans and cuts still require visible user correction.
+- [ ] Preview and export replacement geometry/masks at selected frames plus the boundaries between corrections.
 
 ---
 
@@ -498,13 +526,14 @@ Capture screenshots/video for the six smart remix flows. Verify touch targets, k
 | Audio | Export result invariants | Spoken A/V sync and volume/mute |
 | Motion | Keyframe interpolation tests | Manual/auto subject following |
 | Video isolation | Mask-track format/invalidation tests | Flicker, occlusion, memory, speed |
+| Frame/object replacement | Sparse keyframe, mask-delta, and cache-bound tests | Reach any frame; replace overlay/object; inspect correction boundaries |
 | Export/cancel | State-machine tests | Cancel each stage; no leaked file/codec |
 | Collection | Persistence orchestration tests | Count +1, searchable, original unchanged |
 | Build | Typecheck/Jest/Kotlin/release | Upgrade install over existing data |
 
 ## Success criteria
 
-- Replacing existing image text, isolating a subject, trimming/muting a video, and adding timed text are each reachable in a few obvious taps.
+- Replacing existing image text, reaching and editing any video frame, replacing a selected video overlay/object, isolating a subject, trimming/muting a video, and adding timed text are each reachable in a few obvious taps.
 - Image preview and output agree within two preview pixels after scaling.
 - Video overlay timing agrees within one rendered frame at the output frame rate.
 - Original audio is preserved and A/V end-time delta stays below 50 ms unless mute is explicit.

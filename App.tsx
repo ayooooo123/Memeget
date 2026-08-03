@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
+import { useFonts } from 'expo-font';
 import { StatusBar } from 'expo-status-bar';
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Animated, AppState, Pressable, StyleSheet, Text, View } from 'react-native';
@@ -77,6 +78,10 @@ function Shell() {
   const [tab, setTab] = useState<TabKey>('library');
   const [tagSearchRequest, setTagSearchRequest] = useState<TagSearchRequest | null>(null);
   const [dbReady, setDbReady] = useState(false);
+  const [fontsReady] = useFonts({
+    Anton: require('./assets/fonts/Anton-Regular.ttf'),
+    NotoSans: require('./assets/fonts/NotoSans.ttf'),
+  });
 
   useEffect(() => {
     initDb()
@@ -113,7 +118,7 @@ function Shell() {
 
   return (
     <SafeAreaView style={styles.root} edges={['top', 'left', 'right']}>
-      {!dbReady ? (
+      {!dbReady || !fontsReady ? (
         <Boot />
       ) : (
         // Both screens stay mounted so the Library keeps its scroll position,

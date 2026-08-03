@@ -1,0 +1,20 @@
+{
+  "fonts": [
+    {
+      "family": "Anton",
+      "file": "Anton-Regular.ttf",
+      "source": "https://github.com/google/fonts/raw/main/ofl/anton/Anton-Regular.ttf",
+      "license": "SIL Open Font License 1.1",
+      "licenseFile": "Anton-OFL.txt",
+      "usage": "Impact-compatible meme headline fallback"
+    },
+    {
+      "family": "NotoSans",
+      "file": "NotoSans.ttf",
+      "source": "https://raw.githubusercontent.com/google/fonts/main/ofl/notosans/NotoSans%5Bwdth%2Cwght%5D.ttf",
+      "license": "SIL Open Font License 1.1",
+      "licenseFile": "NotoSans-OFL.txt",
+      "usage": "Sans text fallback for subtitle, label, news, bubble, and plain presets"
+    }
+  ]
+}
