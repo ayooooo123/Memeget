@@ -39,6 +39,7 @@
       ],
       ["expo-video", { "supportsPictureInPicture": true }],
       "./plugins/withFixedDebugKeystore",
+      "./plugins/withSeparateDebugApp",
       "expo-task-manager",
       "expo-background-task",
       [
