@@ -82,12 +82,20 @@ export interface CapturedTransformGesture {
 
 export type ProjectHistoryCommand = 'undo' | 'redo';
 
-export type MemeEditToolId = 'layers' | 'text' | 'transform' | 'replace-text' | 'timeline' | 'motion' | 'audio';
+export type MemeEditToolId =
+  | 'layers'
+  | 'text'
+  | 'transform'
+  | 'replace-text'
+  | 'timeline'
+  | 'frames'
+  | 'motion'
+  | 'audio';
 
 export function memeEditToolsForSource(kind: MemeEditProject['source']['kind']): MemeEditToolId[] {
   return kind === 'image'
     ? ['layers', 'text', 'transform', 'replace-text']
-    : ['layers', 'text', 'timeline', 'motion', 'audio'];
+    : ['layers', 'text', 'timeline', 'frames', 'motion', 'audio'];
 }
 
 // One 60fps frame. Below this a report is decoder jitter rather than a new

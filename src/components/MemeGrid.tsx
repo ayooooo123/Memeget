@@ -60,12 +60,12 @@ import { compatibleCopyTarget } from '../memeActionsCore';
 import {
   type ExportDestination,
   type MemeExportResult,
+  abandonedPaths,
   exportDestinations,
   exportOutputSpec,
   exportSummary,
   initialExportState,
-  memeExportReducer,
-  reusableResult,
+  runExport,
   skippedLayerWarning,
 } from '../memeExportCore';
 import { mimeForName } from '../mediaFormats';
@@ -708,25 +708,29 @@ export const MemeGrid = React.memo(function MemeGrid({
   // earlier version of their meme.
   const exportStateRef = useRef(initialExportState());
 
+  // Deliver a finished render. The cached file is NOT swept here: every
+  // destination has already copied the bytes somewhere durable, and keeping the
+  // render is what makes a second destination instant. Closing the studio
+  // reclaims it.
   const deliverExport = useCallback(
-    async (item: MemeRecord, destination: ExportDestination, result: MemeExportResult) => {
+    async (item: MemeRecord, destination: ExportDestination, result: MemeExportResult): Promise<void> => {
       if (destination === 'downloads') {
         const dest = await saveToDownloads(result.path, result.name, result.mimeType);
         if (!dest) throw new Error('This build cannot write to Downloads');
         success();
         showToast(exportSummary(result, 'downloads', dest), result.warnings.length ? 'info' : 'success');
-        return true;
+        return;
       }
       if (destination === 'clipboard') {
+        // The native side copies the bytes into cacheDir/clipboard and shares
+        // THAT through FileProvider, so the clipboard never references our
+        // render — verified in MemegetBgModule.kt, and the plain copy path
+        // already depends on it.
         const copied = await copyFileToClipboard(result.path, result.name, result.mimeType).catch(() => false);
         if (!copied) throw new Error('This build cannot copy files');
         success();
         showToast(exportSummary(result, 'clipboard', ''), result.warnings.length ? 'info' : 'success');
-        // Safe to sweep the source: the native side copies the bytes into
-        // cacheDir/clipboard and shares THAT via FileProvider, so the clipboard
-        // does not reference our render. The plain copy path already relies on
-        // this — it deletes its transcoded file immediately after copying.
-        return true;
+        return;
       }
       const saved = await saveSharedFiles([
         { path: result.path, fileName: result.name, mimeType: result.mimeType },
@@ -734,7 +738,7 @@ export const MemeGrid = React.memo(function MemeGrid({
       if (saved.saved.length === 0) {
         if (saved.duplicates > 0) {
           showToast('That exact remix is already in your library', 'info');
-          return true;
+          return;
         }
         throw new Error(`Could not save the rendered meme into ${saved.folderName}`);
       }
@@ -742,7 +746,6 @@ export const MemeGrid = React.memo(function MemeGrid({
       success();
       showToast(exportSummary(result, 'library', saved.folderName), result.warnings.length ? 'info' : 'success');
       setStudioOpen(false);
-      return true;
     },
     [onCreated]
   );
@@ -751,45 +754,23 @@ export const MemeGrid = React.memo(function MemeGrid({
     async (project: MemeEditProject, item: MemeRecord, destination: ExportDestination) => {
       const plan = buildImageRenderPlan(project, { planId: `meme-remix-${item.id}` });
       const planJson = JSON.stringify(plan);
-      const dispatch = (event: Parameters<typeof memeExportReducer>[1]) => {
-        exportStateRef.current = memeExportReducer(exportStateRef.current, event);
-      };
-
-      let result = reusableResult(exportStateRef.current, planJson);
-      let rendered: string | null = null;
-      if (!result) {
-        dispatch({ type: 'start', destination, revision: planJson });
-        const phase = exportStateRef.current.phase;
-        const runId = phase.kind === 'running' ? phase.runId : -1;
-        try {
-          rendered = await renderImageProject(planJson);
-          if (!rendered) throw new Error('Image export needs a native build');
-          result = {
-            path: rendered,
+      // The plan's own serialization is the cache key: identical plan, identical
+      // pixels, so reuse is provably safe and any edit invalidates it.
+      exportStateRef.current = await runExport(
+        exportStateRef.current,
+        { destination, revision: planJson },
+        {
+          render: () => renderImageProject(planJson),
+          describe: (path) => ({
+            path,
             name: exportOutputSpec(item.name, 'image').name,
             mimeType: 'image/png',
             warnings: skippedLayerWarning(imageRenderPlanUnavailableLayers(plan).length),
-          };
-          dispatch({ type: 'succeeded', runId, result });
-        } catch (error) {
-          dispatch({ type: 'failed', runId, message: String(error) });
-          throw error;
+          }),
+          deliver: (result) => deliverExport(item, destination, result),
+          sweep: (path) => deleteCache(path).catch(() => {}),
         }
-      }
-
-      await deliverExport(item, destination, result);
-      // The render is deliberately KEPT after delivery. Every destination has
-      // copied the bytes somewhere durable, so the cached file is no longer
-      // load-bearing — but holding it is what makes a second destination
-      // instant instead of a second full-resolution encode, which is the whole
-      // point of the picker. It is bounded at one file: starting a render for a
-      // changed project orphans the previous one, and closing the studio sweeps
-      // whatever is left.
-      const orphans = exportStateRef.current.orphans;
-      if (orphans.length > 0) {
-        dispatch({ type: 'orphansDrained' });
-        await Promise.all(orphans.map((path) => deleteCache(path).catch(() => {})));
-      }
+      );
     },
     [deliverExport]
   );
@@ -802,11 +783,7 @@ export const MemeGrid = React.memo(function MemeGrid({
   // shows up on the paths nobody tested.
   useEffect(() => {
     if (studioOpen) return;
-    const state = exportStateRef.current;
-    const pending = [
-      ...state.orphans,
-      ...(state.phase.kind === 'ready' ? [state.phase.result.path] : []),
-    ];
+    const pending = abandonedPaths(exportStateRef.current);
     if (pending.length === 0) return;
     exportStateRef.current = initialExportState();
     for (const path of pending) void deleteCache(path).catch(() => {});

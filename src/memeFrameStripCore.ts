@@ -147,18 +147,26 @@ export function frameStripTicks(
  * Timestamps in `ticks` that are not cached yet, capped at `limit`. Cached
  * misses (a timestamp that decoded to null) are NOT retried — an undecodable
  * frame must not be re-attempted on every scroll.
+ *
+ * `inFlight` holds `TimelineThumbnailCache.keyFor` keys for decodes that have
+ * started but not yet written a result. Without it a re-pump that lands inside
+ * that window requests the same frame again, and on a real device a duplicate
+ * decode costs a whole extra cell's worth of time.
  */
 export function pendingFrameRequests(
   ticks: readonly FrameTick[],
   cache: TimelineThumbnailCache,
   sourceUri: string,
-  limit: number
+  limit: number,
+  inFlight?: ReadonlySet<string>
 ): number[] {
   const max = Math.max(0, Math.floor(finiteOr(limit, 0)));
   const out: number[] = [];
   for (const tick of ticks) {
     if (out.length >= max) break;
-    if (!cache.has(sourceUri, tick.timeUs)) out.push(tick.timeUs);
+    if (cache.has(sourceUri, tick.timeUs)) continue;
+    if (inFlight?.has(TimelineThumbnailCache.keyFor(sourceUri, tick.timeUs))) continue;
+    out.push(tick.timeUs);
   }
   return out;
 }
@@ -242,4 +250,181 @@ export function frameWindowTicks(
     ticks.push({ timeUs: index * interval, xPx: index * cell, exact: true });
   }
   return ticks;
+}
+
+
+// ---- cell derivation --------------------------------------------------------
+
+/**
+ * How many source frames one strip cell spans. 1 means the strip really is
+ * frame-exact; anything larger is a coarse sample and the UI must say so
+ * instead of implying every frame is reachable at this zoom.
+ */
+export function frameStripStride(
+  scale: TimelineScale,
+  frameIntervalUs: number,
+  tileWidthPx = FRAME_CELL_WIDTH_PX
+): number {
+  const frame = Math.max(1, Math.round(finiteOr(frameIntervalUs, 1)));
+  return Math.round(frameStripIntervalUs(scale, frameIntervalUs, tileWidthPx) / frame);
+}
+
+/**
+ * Pixel span of one strip interval — the width a cell needs so the strip reads
+ * as a continuous filmstrip rather than a dotted line. The ladder already
+ * guarantees an interval at least `tileWidthPx` wide, so this only ever widens
+ * a cell beyond the minimum.
+ */
+export function frameStripTickWidthPx(scale: TimelineScale, intervalUs: number): number {
+  const durationUs = Math.max(0, finiteOr(scale.durationUs, 0));
+  const contentWidthPx = timelineContentWidthPx(scale);
+  if (durationUs <= 0 || contentWidthPx <= 0) return 1;
+  return Math.max(1, (contentWidthPx * Math.max(1, finiteOr(intervalUs, 1))) / durationUs);
+}
+
+/**
+ * What a cell can honestly show.
+ *   ready        — decoded, has a poster
+ *   pending      — not decoded yet; the pump will get to it
+ *   undecodable  — decode was attempted and failed; it will NOT be retried
+ * The third state exists because a permanently blank cell that looks identical
+ * to a pending one is a lie about work still being in flight.
+ */
+export type FrameCellState = 'ready' | 'pending' | 'undecodable';
+
+export interface FrameCell {
+  /** Source frame ordinal. Meaningful in both layouts, unlike a cell position. */
+  index: number;
+  /** Exact source timestamp this cell decodes and seeks to. */
+  timeUs: number;
+  xPx: number;
+  widthPx: number;
+  uri: string | null;
+  state: FrameCellState;
+  current: boolean;
+}
+
+export interface FrameCellOptions {
+  cache: TimelineThumbnailCache;
+  sourceUri: string;
+  /** Source frame interval, used for the frame ordinal. */
+  frameIntervalUs: number;
+  /** Time one cell covers. Equal to `frameIntervalUs` in frame mode. */
+  cellSpanUs: number;
+  cellWidthPx: number;
+  /** Playhead in source time; the cell containing it is marked current. */
+  currentTimeUs: number;
+  /** When given, the trailing cell is clipped so it cannot overhang the track. */
+  contentWidthPx?: number;
+}
+
+/**
+ * Everything a cell needs to render, derived in one pass. Reading the cache
+ * here also promotes the visible window in the LRU, so the frames on screen are
+ * the last ones evicted.
+ */
+export function frameStripCells(
+  ticks: readonly FrameTick[],
+  options: FrameCellOptions
+): FrameCell[] {
+  const frame = Math.max(1, Math.round(finiteOr(options.frameIntervalUs, 1)));
+  const span = Math.max(1, Math.round(finiteOr(options.cellSpanUs, frame)));
+  const width = Math.max(1, finiteOr(options.cellWidthPx, 1));
+  const contentWidthPx = Math.max(0, finiteOr(options.contentWidthPx ?? 0, 0));
+  // Compare against the cell the playhead SNAPS to rather than testing a range:
+  // every tick is a multiple of the span in both layouts, so this marks exactly
+  // one cell and never two or none.
+  const currentCellUs = frameIndexAt(options.currentTimeUs, span) * span;
+  return ticks.map((tick) => {
+    const cached = options.cache.get(options.sourceUri, tick.timeUs);
+    return {
+      index: Math.round(tick.timeUs / frame),
+      timeUs: tick.timeUs,
+      xPx: tick.xPx,
+      widthPx: contentWidthPx > 0 ? Math.max(0, Math.min(width, contentWidthPx - tick.xPx)) : width,
+      uri: cached ?? null,
+      state: cached === undefined ? 'pending' : cached === null ? 'undecodable' : 'ready',
+      current: tick.timeUs === currentCellUs,
+    };
+  });
+}
+
+// ---- readout and stepping ---------------------------------------------------
+
+/**
+ * Millisecond-precise clock. The timeline's centisecond readout collapses
+ * adjacent frames of a high-rate clip onto the same string, which is useless
+ * precisely where frame accuracy is the point.
+ */
+export function formatFrameTimeUs(timeUs: number): string {
+  const safeUs = Number.isFinite(timeUs) ? Math.max(0, timeUs) : 0;
+  const totalMs = Math.floor(safeUs / 1_000);
+  const minutes = Math.floor(totalMs / 60_000);
+  const withinMinute = totalMs % 60_000;
+  const seconds = `${Math.floor(withinMinute / 1_000)}`.padStart(2, '0');
+  const millis = `${withinMinute % 1_000}`.padStart(3, '0');
+  return `${minutes}:${seconds}.${millis}`;
+}
+
+export interface FrameStripReadout {
+  /** Ordinal of the frame under the playhead, clamped to one the strip renders. */
+  index: number;
+  totalFrames: number;
+  /** Exact source timestamp of that frame — what a seek or an edit stores. */
+  exactUs: number;
+  timeLabel: string;
+  durationLabel: string;
+}
+
+/**
+ * `snapToFrameUs` caps at `floor(duration / interval) * interval`, which is one
+ * frame PAST the last cell `frameWindowAt` will lay out. Naming that frame in
+ * the readout would point at a cell the user can never scroll to, so the
+ * ordinal is clamped to the strip's own last frame instead.
+ */
+export function frameStripReadout(
+  timeUs: number,
+  frameIntervalUs: number,
+  durationUs: number
+): FrameStripReadout {
+  const interval = Math.max(1, Math.round(finiteOr(frameIntervalUs, 1)));
+  const totalFrames = totalFrameCount(durationUs, interval);
+  const index = totalFrames === 0 ? 0 : Math.min(frameIndexAt(timeUs, interval), totalFrames - 1);
+  const exactUs = totalFrames === 0 ? 0 : index * interval;
+  return {
+    index,
+    totalFrames,
+    exactUs,
+    timeLabel: formatFrameTimeUs(exactUs),
+    durationLabel: formatFrameTimeUs(Math.max(0, finiteOr(durationUs, 0))),
+  };
+}
+
+/** Move `deltaFrames` frames from wherever the playhead is, staying on the strip. */
+export function stepFrameUs(
+  timeUs: number,
+  frameIntervalUs: number,
+  durationUs: number,
+  deltaFrames: number
+): number {
+  const interval = Math.max(1, Math.round(finiteOr(frameIntervalUs, 1)));
+  const totalFrames = totalFrameCount(durationUs, interval);
+  if (totalFrames === 0) return 0;
+  const index = frameIndexAt(timeUs, interval) + Math.trunc(finiteOr(deltaFrames, 0));
+  return Math.min(Math.max(0, index), totalFrames - 1) * interval;
+}
+
+/**
+ * Scroll offset that centres a content position, clamped to the scrollable
+ * range. Both layouts use it: frame mode passes a cell centre, time mode passes
+ * the playhead's pixel position.
+ */
+export function centerScrollXPx(
+  contentXPx: number,
+  viewportWidthPx: number,
+  contentWidthPx: number
+): number {
+  const viewport = Math.max(0, finiteOr(viewportWidthPx, 0));
+  const maxScrollPx = Math.max(0, Math.max(0, finiteOr(contentWidthPx, 0)) - viewport);
+  return Math.min(Math.max(0, finiteOr(contentXPx, 0) - viewport / 2), maxScrollPx);
 }

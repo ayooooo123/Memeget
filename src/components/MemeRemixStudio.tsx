@@ -62,6 +62,7 @@ import type { MemeRecord } from '../types';
 import { PressableScale } from './ui';
 import { MemeEditCanvas, type VideoSeekRequest } from './MemeEditCanvas';
 import { MemeEditToolRail, type MemeEditTool } from './MemeEditToolRail';
+import { MemeFrameStrip } from './MemeFrameStrip';
 import { MemeLayerList } from './MemeLayerList';
 import { MemeTextInspector } from './MemeTextInspector';
 import { MemeTextReplaceTool } from './MemeTextReplaceTool';
@@ -192,6 +193,9 @@ export function MemeRemixStudio({
   const [playbackUs, setPlaybackUs] = useState(0);
   const [scrubUs, setScrubUs] = useState<number | null>(null);
   const [seekRequest, setSeekRequest] = useState<VideoSeekRequest | null>(null);
+  // Container frame rate from the media probe. Only the frame strip needs it,
+  // and only to size its cells; null makes it assume 30fps.
+  const [sourceFrameRate, setSourceFrameRate] = useState<number | null>(null);
   const autosaveRef = useRef<MemeEditAutosaveController | null>(null);
   const sourceControllerRef = useRef<MemeEditSourceSessionController | null>(null);
   const closedRef = useRef(true);
@@ -265,6 +269,7 @@ export function MemeRemixStudio({
       setPlaybackUs(0);
       setScrubUs(null);
       setSeekRequest(null);
+      setSourceFrameRate(null);
       seekThrottleRef.current = createSeekThrottle();
       setState({ kind: 'closed' });
       void (async () => {
@@ -289,6 +294,7 @@ export function MemeRemixStudio({
     setPlaybackUs(0);
     setScrubUs(null);
     setSeekRequest(null);
+    setSourceFrameRate(null);
     seekThrottleRef.current = createSeekThrottle();
     setInlineError('');
 
@@ -346,6 +352,7 @@ export function MemeRemixStudio({
     sourceControllerRef.current = sourceController;
     sourceController.prepare()
       .then(async (prepared) => {
+        if (!cancelled && !closedRef.current) setSourceFrameRate(prepared.probe?.frameRate ?? null);
         const restored = await draftStore.restore(prepared.identity);
         if (cancelled || closedRef.current) return;
         if (restored.status === 'restored') {
@@ -711,6 +718,10 @@ export function MemeRemixStudio({
                 onManualTextRegionComplete={() => setManualTextRegionMode(false)}
                 previewAudio={previewAudio}
                 seekRequest={seekRequest}
+                // Deliberately NOT the frames tool: the preview loops at 30fps and a
+                // frame decode costs ~1-3s, so feeding it live playback time makes the
+                // strip chase a playhead it can never catch. It parks on the frame you
+                // chose instead.
                 onPlaybackTimeUs={activeTool === 'timeline' || activeTool === 'motion' ? setPlaybackUs : undefined}
               />
               <View style={styles.readout} pointerEvents="none">
@@ -719,7 +730,7 @@ export function MemeRemixStudio({
             </View>
             <View style={[styles.sidePane, compact && styles.sidePaneCompact]}>
               <View style={styles.sideHead}>
-                <Text style={styles.sideTitle}>{activeTool === 'layers' ? 'Layer tray' : activeTool === 'text' ? 'Text' : activeTool === 'transform' ? 'Image transform' : activeTool === 'timeline' ? 'Timeline' : activeTool === 'motion' ? 'Motion' : activeTool === 'audio' ? 'Audio & speed' : 'Replace text'}</Text>
+                <Text style={styles.sideTitle}>{activeTool === 'layers' ? 'Layer tray' : activeTool === 'text' ? 'Text' : activeTool === 'transform' ? 'Image transform' : activeTool === 'timeline' ? 'Timeline' : activeTool === 'frames' ? 'Frames' : activeTool === 'motion' ? 'Motion' : activeTool === 'audio' ? 'Audio & speed' : 'Replace text'}</Text>
                 <Text style={styles.sideMeta}>{project.layers.length} layer{project.layers.length === 1 ? '' : 's'}</Text>
               </View>
               {activeTool === 'layers' ? (
@@ -770,6 +781,14 @@ export function MemeRemixStudio({
                   onScrubEnd={endScrub}
                   onCommitRetainedRanges={commitRetainedRanges}
                   onSelectLayer={selectLayer}
+                />
+              ) : activeTool === 'frames' ? (
+                <MemeFrameStrip
+                  project={project}
+                  frameRate={sourceFrameRate}
+                  playheadUs={playheadUs}
+                  disabled={disabled}
+                  onSeekToFrame={parkPlayheadAt}
                 />
               ) : activeTool === 'motion' ? (
                 <MemeVideoMotionTool

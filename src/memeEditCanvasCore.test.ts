@@ -94,6 +94,11 @@ describe('source-specific editor tools', () => {
     expect(memeEditToolsForSource('video')).not.toContain('transform');
     expect(memeEditToolsForSource('video')).not.toContain('replace-text');
   });
+
+  test('offers frame stepping only where there are frames to step', () => {
+    expect(memeEditToolsForSource('video')).toContain('frames');
+    expect(memeEditToolsForSource('image')).not.toContain('frames');
+  });
 });
 
 describe('view and normalized coordinates', () => {

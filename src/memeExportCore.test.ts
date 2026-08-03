@@ -1,7 +1,11 @@
 import {
   EXPORT_STAGES,
+  type ExportRunEffects,
   type ExportState,
   type MemeExportResult,
+  abandonedPaths,
+  drainOrphans,
+  runExport,
   destinationLabel,
   exportDestinations,
   exportOutputSpec,
@@ -323,5 +327,130 @@ describe('what the user is told', () => {
   it('does not claim a clipboard copy was "saved" somewhere', () => {
     // A toast saying "Saved to the clipboard" sends people looking in Downloads.
     expect(exportSummary(result(), 'clipboard', 'Memes')).toBe('Copied — paste it anywhere');
+  });
+});
+
+describe('running a whole export', () => {
+  /** Records what actually touched the disk. */
+  function harness(overrides: Partial<ExportRunEffects> = {}) {
+    const swept: string[] = [];
+    let renders = 0;
+    const effects: ExportRunEffects = {
+      render: async () => {
+        renders += 1;
+        return `/cache/render-${renders}.png`;
+      },
+      describe: (path: string): MemeExportResult => ({ path, name: 'out.png', mimeType: 'image/png', warnings: [] }),
+      deliver: async () => {},
+      sweep: async (path: string) => {
+        swept.push(path);
+      },
+      ...overrides,
+    };
+    return { effects, swept, renderCount: () => renders };
+  }
+
+  it('renders once and delivers it', async () => {
+    const delivered: string[] = [];
+    const h = harness({
+      deliver: async (r) => {
+        delivered.push(r.path);
+      },
+    });
+    const state = await runExport(initialExportState(), { destination: 'library', revision: 'plan-a' }, h.effects);
+    expect(h.renderCount()).toBe(1);
+    expect(delivered).toEqual(['/cache/render-1.png']);
+    expect(state.phase.kind).toBe('ready');
+    expect(h.swept).toEqual([]);
+  });
+
+  it('does not render again for a second destination, but still delivers it', async () => {
+    // The entire justification for the picker: choosing Copy after Save is
+    // instant, not a second full-resolution encode. Asserting only the render
+    // count is not enough — a cache path that skips the DELIVERY too would
+    // satisfy that and silently do nothing on the second tap.
+    const delivered: string[] = [];
+    const h = harness({
+      deliver: async (r) => {
+        delivered.push(r.path);
+      },
+    });
+    let state = await runExport(initialExportState(), { destination: 'library', revision: 'plan-a' }, h.effects);
+    state = await runExport(state, { destination: 'downloads', revision: 'plan-a' }, h.effects);
+    expect(h.renderCount()).toBe(1);
+    expect(delivered).toEqual(['/cache/render-1.png', '/cache/render-1.png']);
+    expect(state.phase.kind).toBe('ready');
+  });
+
+  it('renders again, and sweeps the old file, once the project changes', async () => {
+    const h = harness();
+    let state = await runExport(initialExportState(), { destination: 'library', revision: 'plan-a' }, h.effects);
+    state = await runExport(state, { destination: 'library', revision: 'plan-b' }, h.effects);
+    expect(h.renderCount()).toBe(2);
+    // One file at a time is the bound; the stale render must not survive.
+    expect(h.swept).toEqual(['/cache/render-1.png']);
+  });
+
+  it('reports a render failure rather than swallowing it', async () => {
+    const h = harness({
+      render: async () => {
+        throw new Error('no encoder');
+      },
+    });
+    await expect(
+      runExport(initialExportState(), { destination: 'library', revision: 'plan-a' }, h.effects)
+    ).rejects.toThrow('no encoder');
+  });
+
+  it('treats an unavailable renderer as a failure, not a silent no-op', async () => {
+    const h = harness({ render: async () => null });
+    await expect(
+      runExport(initialExportState(), { destination: 'library', revision: 'plan-a' }, h.effects)
+    ).rejects.toThrow(/cannot render/);
+  });
+
+  it('keeps the render when delivery fails, so retry does not re-encode', async () => {
+    const h = harness({
+      deliver: async () => {
+        throw new Error('Downloads is full');
+      },
+    });
+    await expect(
+      runExport(initialExportState(), { destination: 'downloads', revision: 'plan-a' }, h.effects)
+    ).rejects.toThrow('Downloads is full');
+    expect(h.swept).toEqual([]);
+  });
+
+  it('sweeps a result that finished after the user cancelled', async () => {
+    // The race that would otherwise create a meme the user explicitly cancelled.
+    const h = harness();
+    let state = memeExportReducer(initialExportState(), {
+      type: 'start',
+      destination: 'library',
+      revision: 'plan-a',
+    });
+    const runId = state.phase.kind === 'running' ? state.phase.runId : -1;
+    state = memeExportReducer(state, { type: 'cancel' });
+    state = memeExportReducer(state, { type: 'succeeded', runId, result: result('/cache/raced.png') });
+    expect(state.phase.kind).toBe('cancelled');
+    const drained = await drainOrphans(state, h.effects.sweep);
+    expect(h.swept).toEqual(['/cache/raced.png']);
+    expect(drained.orphans).toEqual([]);
+  });
+
+  it('drains each orphan exactly once even when drained again', async () => {
+    const h = harness();
+    let state = await runExport(initialExportState(), { destination: 'library', revision: 'plan-a' }, h.effects);
+    state = await runExport(state, { destination: 'library', revision: 'plan-b' }, h.effects);
+    await drainOrphans(state, h.effects.sweep);
+    expect(h.swept).toEqual(['/cache/render-1.png']);
+  });
+
+  it('names everything still on disk when the editor closes', async () => {
+    const h = harness();
+    const state = await runExport(initialExportState(), { destination: 'library', revision: 'plan-a' }, h.effects);
+    // The kept render is deliberate, so closing must be what reclaims it.
+    expect(abandonedPaths(state)).toEqual(['/cache/render-1.png']);
+    expect(abandonedPaths(initialExportState())).toEqual([]);
   });
 });
