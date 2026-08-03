@@ -22,6 +22,7 @@ const TOOLS: readonly ToolSpec[] = [
   { id: 'transform', label: 'Transform', hint: 'Crop, rotate, or flip this image', mark: 'T' },
   { id: 'replace-text', label: 'Replace text', hint: 'Detect text or draw a box, then Cover, Pixelate, or Replace', mark: 'R' },
   { id: 'timeline', label: 'Timeline', hint: 'Scrub, trim, split, and see when each layer is on screen', mark: 'C' },
+  { id: 'motion', label: 'Motion', hint: 'Set when a layer is on screen and keyframe how it moves', mark: 'K' },
   { id: 'audio', label: 'Audio', hint: 'Mute, set the volume, and choose the playback speed', mark: 'V' },
 ];
 

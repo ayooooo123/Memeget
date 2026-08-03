@@ -6,6 +6,7 @@ import { requireNativeViewManager } from 'expo-modules-core';
 
 import { measureMemeTextLayout, sampleImagePixelGrid, type NativeImagePixelGrid } from '../../modules/memeget-bg';
 import {
+  canvasLayerHidden,
   containedMediaRect,
   canvasLayerVisualDescriptor,
   captureTransformGesture,
@@ -13,6 +14,7 @@ import {
   gestureMoveShouldClaim,
   layerBodyTouchInsideMedia,
   layerHandlePoints,
+  nextCanvasPlayheadUs,
   layerHandleTouchInsideMedia,
   resizeKeyframeFromHandle,
   rotateKeyframeFromHandle,
@@ -38,7 +40,6 @@ import {
 import {
   evaluateMaskTrackRect,
   interpolateTransformKeyframes,
-  isLayerActiveAt,
   type CoverLayer,
   type KeyframedLayer,
   type MediaOverlayLayer,
@@ -997,11 +998,15 @@ export const MemeEditCanvas = React.memo(function MemeEditCanvas({
       return { width: next.width, height: next.height };
     });
   }, []);
+  // One settled playhead for both the overlays and whatever the studio is
+  // showing, so a timeline readout can never disagree with what is drawn.
+  const playheadRef = useRef(0);
   const onVideoTime = useCallback((timeUs: number) => {
-    const durationUs = project.source.durationUs;
-    const boundedUs = durationUs === null || durationUs <= 0 ? timeUs : Math.min(durationUs, timeUs);
-    onPlaybackTimeUs?.(boundedUs);
-    setActiveTimeUs((current) => (Math.abs(current - boundedUs) < 16_667 ? current : boundedUs));
+    const next = nextCanvasPlayheadUs(playheadRef.current, timeUs, project.source.durationUs);
+    if (next === playheadRef.current) return;
+    playheadRef.current = next;
+    onPlaybackTimeUs?.(next);
+    setActiveTimeUs(next);
   }, [onPlaybackTimeUs, project.source.durationUs]);
   const manualStart = useRef<NormalizedPoint | null>(null);
   const manualPan = useMemo(() => PanResponder.create({
@@ -1071,7 +1076,7 @@ export const MemeEditCanvas = React.memo(function MemeEditCanvas({
         <View style={styles.loadingBox}><Text style={styles.unavailableText}>Measuring canvas…</Text></View>
       )}
       {mediaRect && project.layers.map((layer) => {
-        const hidden = before || !isLayerActiveAt(layer, activeTimeUs);
+        const hidden = canvasLayerHidden(layer, activeTimeUs, before);
         if (layer.kind === 'cover') {
           return <CoverLayerView key={layer.id} project={project} layer={layer} mediaRect={mediaRect} selected={selectedLayerId === layer.id} hidden={hidden} activeTimeUs={activeTimeUs} disabled={disabled} onSelectLayer={onSelectLayer} onCommitLayerKeyframes={onCommitLayerKeyframes} />;
         }

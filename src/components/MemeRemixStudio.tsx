@@ -68,6 +68,7 @@ import { MemeTextReplaceTool } from './MemeTextReplaceTool';
 import { MemeTimeline } from './MemeTimeline';
 import { MemeTransformInspector } from './MemeTransformInspector';
 import { MemeVideoAudioTool } from './MemeVideoAudioTool';
+import { MemeVideoMotionTool } from './MemeVideoMotionTool';
 
 type StudioItem = Pick<MemeRecord, 'id' | 'kind' | 'name' | 'uri' | 'modifiedAt'>;
 
@@ -395,10 +396,24 @@ export function MemeRemixStudio({
   const commitLayerKeyframes = useCallback((layerId: string, keyframes: TransformKeyframe[]) => {
     if (!discarding) setHistory((history) => commitGestureTransaction(history, [{ type: 'set-layer-keyframes', id: layerId, keyframes }]));
   }, [discarding, setHistory]);
+  // One motion command — a handle drag, a keyframe, an easing switch — is one
+  // history entry. A refused command arrives as an empty list and commits
+  // nothing, so a rejected press leaves no undo step behind.
+  const commitMotionActions = useCallback((actions: MemeEditProjectAction[]) => {
+    if (!discarding) setHistory((history) => commitGestureTransaction(history, actions));
+  }, [discarding, setHistory]);
   const requestSeek = useCallback((timeUs: number) => {
     seekNonceRef.current += 1;
     setSeekRequest({ timeUs, nonce: seekNonceRef.current });
   }, []);
+  // Parks the preview on a frame: the playhead, the decoder, and the scrub
+  // throttle all land on the same instant.
+  const parkPlayheadAt = useCallback((timeUs: number) => {
+    setScrubUs(null);
+    setPlaybackUs(timeUs);
+    seekThrottleRef.current = createSeekThrottle();
+    requestSeek(timeUs);
+  }, [requestSeek]);
   // Called at full gesture rate by the timeline. The throttle decides how much
   // of that the decoder actually sees.
   const scrubPlayhead = useCallback((sourceTimeUs: number) => {
@@ -421,11 +436,8 @@ export function MemeRemixStudio({
     if (!project || project.source.kind !== 'video' || id === null) return;
     const target = seekTargetForLayerSelection(project.layers.find((layer) => layer.id === id) ?? null, playheadUs);
     if (target === null) return;
-    setScrubUs(null);
-    setPlaybackUs(target);
-    seekThrottleRef.current = createSeekThrottle();
-    requestSeek(target);
-  }, [playheadUs, project, requestSeek]);
+    parkPlayheadAt(target);
+  }, [parkPlayheadAt, playheadUs, project]);
   // One trim gesture, one undo entry: the retained-range change and every layer
   // it invalidates go into a single transaction.
   const commitRetainedRanges = useCallback((retainedRanges: TimeRangeUs[]) => {
@@ -699,7 +711,7 @@ export function MemeRemixStudio({
                 onManualTextRegionComplete={() => setManualTextRegionMode(false)}
                 previewAudio={previewAudio}
                 seekRequest={seekRequest}
-                onPlaybackTimeUs={activeTool === 'timeline' ? setPlaybackUs : undefined}
+                onPlaybackTimeUs={activeTool === 'timeline' || activeTool === 'motion' ? setPlaybackUs : undefined}
               />
               <View style={styles.readout} pointerEvents="none">
                 <Text style={styles.readoutText}>{selectedLayerSummary(project, selectedLayerId)}</Text>
@@ -707,7 +719,7 @@ export function MemeRemixStudio({
             </View>
             <View style={[styles.sidePane, compact && styles.sidePaneCompact]}>
               <View style={styles.sideHead}>
-                <Text style={styles.sideTitle}>{activeTool === 'layers' ? 'Layer tray' : activeTool === 'text' ? 'Text' : activeTool === 'transform' ? 'Image transform' : activeTool === 'timeline' ? 'Timeline' : activeTool === 'audio' ? 'Audio & speed' : 'Replace text'}</Text>
+                <Text style={styles.sideTitle}>{activeTool === 'layers' ? 'Layer tray' : activeTool === 'text' ? 'Text' : activeTool === 'transform' ? 'Image transform' : activeTool === 'timeline' ? 'Timeline' : activeTool === 'motion' ? 'Motion' : activeTool === 'audio' ? 'Audio & speed' : 'Replace text'}</Text>
                 <Text style={styles.sideMeta}>{project.layers.length} layer{project.layers.length === 1 ? '' : 's'}</Text>
               </View>
               {activeTool === 'layers' ? (
@@ -757,6 +769,16 @@ export function MemeRemixStudio({
                   onScrubPlayhead={scrubPlayhead}
                   onScrubEnd={endScrub}
                   onCommitRetainedRanges={commitRetainedRanges}
+                  onSelectLayer={selectLayer}
+                />
+              ) : activeTool === 'motion' ? (
+                <MemeVideoMotionTool
+                  project={project}
+                  selectedLayerId={selectedLayerId}
+                  playheadUs={playheadUs}
+                  disabled={disabled}
+                  onCommitActions={commitMotionActions}
+                  onSeek={parkPlayheadAt}
                   onSelectLayer={selectLayer}
                 />
               ) : activeTool === 'audio' ? (

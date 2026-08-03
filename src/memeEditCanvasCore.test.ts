@@ -2,6 +2,8 @@ import {
   containedMediaRect,
   commitGestureTransaction,
   canDuplicateLayer,
+  canvasLayerHidden,
+  nextCanvasPlayheadUs,
   beforeAfterAccessibilityNextState,
   beforeAfterPointerNextState,
   describeCanvasLayers,
@@ -35,6 +37,7 @@ import {
   commitProjectTransaction,
   createDefaultImageProject,
   createProjectHistory,
+  type MemeEditLayer,
   type TransformKeyframe,
 } from './memeEditProjectCore';
 
@@ -374,6 +377,46 @@ describe('studio shell UI contracts', () => {
     expect(beforeAfterPointerNextState(false, 'press-out')).toBe(false);
     expect(beforeAfterAccessibilityNextState(false, 'activate')).toBe(true);
     expect(beforeAfterAccessibilityNextState(true, 'activate')).toBe(false);
+  });
+
+  test('holding Before hides every overlay without moving the preview playhead', () => {
+    const timed: MemeEditLayer = {
+      id: 'caption',
+      kind: 'text',
+      text: 'hello',
+      width: 0.4,
+      fontSize: 0.1,
+      style: { preset: 'impact', color: '#fff', outlineColor: '#000', outlineScale: 0.05, backgroundColor: null, opacity: 1, align: 'center', uppercase: false },
+      active: { startUs: 1_000_000, endUs: 2_000_000 },
+      keyframes: [kf()],
+    };
+
+    const playheadUs = nextCanvasPlayheadUs(0, 1_500_000, 5_000_000);
+    expect(playheadUs).toBe(1_500_000);
+    expect(canvasLayerHidden(timed, playheadUs, false)).toBe(false);
+    expect(canvasLayerHidden(timed, playheadUs, true)).toBe(true);
+    // The hold is not a player event, so nothing advances the playhead while it
+    // is held — and releasing it shows the same layers at the same frame.
+    expect(nextCanvasPlayheadUs(playheadUs, playheadUs, 5_000_000)).toBe(playheadUs);
+    expect(canvasLayerHidden(timed, playheadUs, false)).toBe(false);
+    // A layer the playhead is past stays hidden either way; Before is not what
+    // decides that.
+    expect(canvasLayerHidden(timed, 3_000_000, false)).toBe(true);
+    expect(canvasLayerHidden({ ...timed, active: null }, 3_000_000, false)).toBe(false);
+  });
+
+  test('the playhead only moves on a real player report, bounded by the source duration', () => {
+    expect(nextCanvasPlayheadUs(0, 9_000_000, 5_000_000)).toBe(5_000_000);
+    expect(nextCanvasPlayheadUs(0, 9_000_000, null)).toBe(9_000_000);
+    // A dead band the width of one 60fps frame keeps a paused player from
+    // re-rendering every overlay on decoder jitter.
+    expect(nextCanvasPlayheadUs(1_000_000, 1_010_000, 5_000_000)).toBe(1_000_000);
+    expect(nextCanvasPlayheadUs(1_000_000, 1_020_000, 5_000_000)).toBe(1_020_000);
+  });
+
+  test('the motion tool is offered for video only', () => {
+    expect(memeEditToolsForSource('video')).toContain('motion');
+    expect(memeEditToolsForSource('image')).not.toContain('motion');
   });
 });
 
