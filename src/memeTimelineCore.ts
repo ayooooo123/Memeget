@@ -145,6 +145,12 @@ export function timelineThumbnailTicks(
   if (durationUs <= 0) return [{ timeUs: 0, xPx: 0, widthPx: tileWidthPx }];
 
   const intervalUs = timelineThumbnailIntervalUs(scale, tileWidthPx, maxTiles);
+  const contentWidthPx = timelineContentWidthPx(scale);
+  // A tile spans its whole interval rather than a fixed tile width, so the strip
+  // reads as a continuous filmstrip instead of a dotted line. The interval is
+  // chosen to be at least `tileWidthPx` wide, so this only ever widens a tile,
+  // and the component renders `cover` — the extra width crops, never stretches.
+  const spanPx = (contentWidthPx * intervalUs) / durationUs;
   const windowWidthPx = finiteOr(options.windowWidthPx ?? 0, 0);
   const windowed = windowWidthPx > 0;
   const overscanPx = Math.max(0, finiteOr(options.overscanPx ?? 0, 0));
@@ -154,8 +160,10 @@ export function timelineThumbnailTicks(
   const ticks: TimelineTick[] = [];
   for (let timeUs = 0; timeUs < durationUs && ticks.length < maxTiles; timeUs += intervalUs) {
     const xPx = timeUsToPixels(timeUs, scale);
-    if (windowed && (xPx + tileWidthPx < leftPx || xPx > rightPx)) continue;
-    ticks.push({ timeUs, xPx, widthPx: tileWidthPx });
+    // The final tile is clipped to the content edge so it cannot overhang.
+    const widthPx = Math.max(1, Math.min(spanPx, contentWidthPx - xPx));
+    if (windowed && (xPx + widthPx < leftPx || xPx > rightPx)) continue;
+    ticks.push({ timeUs, xPx, widthPx });
   }
   return ticks;
 }

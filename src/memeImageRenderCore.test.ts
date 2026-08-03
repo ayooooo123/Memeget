@@ -2,9 +2,16 @@ import { readFileSync } from 'fs';
 import { join } from 'path';
 
 import {
+  CUTOUT_PARITY_FIXTURE_VERSION,
+  CUTOUT_PARITY_TOLERANCE_PX,
   IMAGE_RENDER_PLAN_VERSION,
+  buildCutoutParityFixtures,
   MAX_IMAGE_RENDER_PIXELS,
   MAX_MOSAIC_CELLS,
+  CUTOUT_OUTLINE_MAX_FRACTION,
+  CUTOUT_SHADOW_BLUR_MAX_FRACTION,
+  CUTOUT_SHADOW_COLOR,
+  CUTOUT_SHADOW_OFFSET_MAX_FRACTION,
   MEME_MEDIA_LAYER_BASE_WIDTH,
   buildImageRenderPlan,
   imageRenderPlanUnavailableLayers,
@@ -274,16 +281,134 @@ describe('buildImageRenderPlan layers', () => {
     expect(imageRenderPlanUnavailableLayers(missing)).toEqual(missing.layers);
   });
 
-  test('keeps a subject layer unavailable even once its mask track has a uri', () => {
+  test('composites a subject layer once its mask track has a materialized cutout', () => {
     const withUri = reduceMemeEditProject(projectWithLayers([subjectLayer]), {
       type: 'set-mask-track-uri',
       trackId: 'mask-1',
       uri: 'file:///cache/mask-1.png',
     });
+    const plan = buildImageRenderPlan(withUri, { planId: 'plan-1' });
 
-    expect(buildImageRenderPlan(withUri, { planId: 'plan-1' }).layers).toEqual([
-      { kind: 'unavailable', id: 'subject-1', layerKind: 'subject', reason: 'subject-compositing-unsupported' },
+    // Track rect 0.4x0.4 of a 1200x800 canvas, centred by the keyframe at 0.5.
+    expect(plan.layers).toEqual([
+      {
+        kind: 'subject',
+        id: 'subject-1',
+        cutoutUri: 'file:///cache/mask-1.png',
+        rect: { x: 360, y: 240, width: 480, height: 320 },
+        rotationDegrees: 0,
+        opacity: 1,
+        outlineColor: null,
+        outlinePx: 0,
+        shadowColor: CUTOUT_SHADOW_COLOR,
+        shadowBlurPx: 0,
+        shadowOffsetPx: 0,
+      },
     ]);
+    // A composited cutout is not a gap, so it must not reach the export warnings.
+    expect(imageRenderPlanUnavailableLayers(plan)).toEqual([]);
+  });
+
+  test('moves, scales and rotates a cutout with its keyframe', () => {
+    const moved: SubjectLayer = {
+      ...subjectLayer,
+      keyframes: [frame({ center: { x: 0.25, y: 0.6 }, scale: 0.5, rotationDegrees: 12, opacity: 0.75 })],
+    };
+    const withUri = reduceMemeEditProject(projectWithLayers([moved]), {
+      type: 'set-mask-track-uri',
+      trackId: 'mask-1',
+      uri: 'file:///cache/mask-1.png',
+    });
+    const [layer] = buildImageRenderPlan(withUri, { planId: 'plan-1' }).layers;
+    if (layer.kind !== 'subject') throw new Error('expected a subject plan');
+
+    expect(layer.rect).toEqual({ x: 300 - 120, y: 480 - 80, width: 240, height: 160 });
+    expect(layer.rotationDegrees).toBe(12);
+    expect(layer.opacity).toBe(0.75);
+  });
+
+  test('resolves sticker sizes from the shared fractions against the cutout, not the canvas', () => {
+    const sticker: SubjectLayer = {
+      ...subjectLayer,
+      outlineColor: '#B8FF2C',
+      outlineScale: 0.5,
+      shadowScale: 0.25,
+    };
+    const withUri = reduceMemeEditProject(projectWithLayers([sticker]), {
+      type: 'set-mask-track-uri',
+      trackId: 'mask-1',
+      uri: 'file:///cache/mask-1.png',
+    });
+    const [layer] = buildImageRenderPlan(withUri, { planId: 'plan-1' }).layers;
+    if (layer.kind !== 'subject') throw new Error('expected a subject plan');
+
+    // Short edge of the drawn cutout is 320 px (0.4 * 800).
+    expect(layer.outlinePx).toBeCloseTo(0.5 * CUTOUT_OUTLINE_MAX_FRACTION * 320, 6);
+    expect(layer.shadowBlurPx).toBeCloseTo(0.25 * CUTOUT_SHADOW_BLUR_MAX_FRACTION * 320, 6);
+    expect(layer.shadowOffsetPx).toBeCloseTo(0.25 * CUTOUT_SHADOW_OFFSET_MAX_FRACTION * 320, 6);
+    expect(layer.outlineColor).toBe('#B8FF2C');
+  });
+
+  test('drops the outline when the layer has no outline colour', () => {
+    const noColour: SubjectLayer = { ...subjectLayer, outlineColor: null, outlineScale: 1 };
+    const withUri = reduceMemeEditProject(projectWithLayers([noColour]), {
+      type: 'set-mask-track-uri',
+      trackId: 'mask-1',
+      uri: 'file:///cache/mask-1.png',
+    });
+    const [layer] = buildImageRenderPlan(withUri, { planId: 'plan-1' }).layers;
+    if (layer.kind !== 'subject') throw new Error('expected a subject plan');
+    expect(layer.outlinePx).toBe(0);
+  });
+
+  test('places a cutout identically at preview scale and at full resolution', () => {
+    const sticker: SubjectLayer = {
+      ...subjectLayer,
+      outlineColor: '#FFFFFF',
+      outlineScale: 0.4,
+      shadowScale: 0.6,
+      keyframes: [frame({ center: { x: 0.3, y: 0.7 }, scale: 1.5 })],
+    };
+    const project = reduceMemeEditProject(projectWithLayers([sticker]), {
+      type: 'set-mask-track-uri',
+      trackId: 'mask-1',
+      uri: 'file:///cache/mask-1.png',
+    });
+    const full = buildImageRenderPlan(project, { planId: 'full' });
+    // A quarter of the pixels on each axis: the preview surface, in effect.
+    const preview = buildImageRenderPlan(project, {
+      planId: 'preview',
+      maxOutputPixels: Math.floor((1200 * 800) / 16),
+    });
+    const [fullLayer] = full.layers;
+    const [previewLayer] = preview.layers;
+    if (fullLayer.kind !== 'subject' || previewLayer.kind !== 'subject') {
+      throw new Error('expected subject plans');
+    }
+    expect(preview.output.widthPx).toBeLessThan(full.output.widthPx);
+
+    // Everything that positions or sizes the sticker has to be the same
+    // FRACTION of the canvas at both scales — this is the bug where a mask
+    // composites in the preview and lands somewhere else in the export.
+    const asFractions = (
+      layer: typeof fullLayer,
+      output: ImageRenderPlan['output']
+    ): number[] => [
+      layer.rect.x / output.widthPx,
+      layer.rect.y / output.heightPx,
+      layer.rect.width / output.widthPx,
+      layer.rect.height / output.heightPx,
+      layer.outlinePx / output.heightPx,
+      layer.shadowBlurPx / output.heightPx,
+      layer.shadowOffsetPx / output.heightPx,
+    ];
+    const fullFractions = asFractions(fullLayer, full.output);
+    const previewFractions = asFractions(previewLayer, preview.output);
+    fullFractions.forEach((value, index) => {
+      expect(previewFractions[index]).toBeCloseTo(value, 4);
+    });
+    expect(fullLayer.rotationDegrees).toBe(previewLayer.rotationDegrees);
+    expect(fullLayer.opacity).toBe(previewLayer.opacity);
   });
 
   test('marks a video overlay unavailable rather than sampling an arbitrary frame', () => {
@@ -370,6 +495,99 @@ describe('buildImageRenderPlan memory guard', () => {
 
     expect(plan.output.widthPx).toBeGreaterThanOrEqual(1);
     expect(plan.output.heightPx).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe('native cutout parity fixtures', () => {
+  const fixtures = buildCutoutParityFixtures();
+
+  test('the committed fixture JSON is exactly what TypeScript produces, on both sides of the bridge', () => {
+    const shared = JSON.parse(
+      readFileSync(join(__dirname, 'memeCutoutParityFixtures.json'), 'utf8')
+    );
+    const asset = JSON.parse(
+      readFileSync(
+        join(
+          __dirname,
+          '..',
+          'modules',
+          'memeget-bg',
+          'android',
+          'src',
+          'main',
+          'assets',
+          'cutout_parity_fixtures.json'
+        ),
+        'utf8'
+      )
+    );
+
+    expect(shared).toEqual(fixtures);
+    expect(asset).toEqual(fixtures);
+  });
+
+  test('every placement is the same fraction of its canvas, whatever the canvas is', () => {
+    expect(fixtures.version).toBe(CUTOUT_PARITY_FIXTURE_VERSION);
+    expect(fixtures.tolerancePx).toBe(CUTOUT_PARITY_TOLERANCE_PX);
+    expect(fixtures.canvases.length).toBeGreaterThanOrEqual(2);
+    expect(fixtures.cases.length).toBeGreaterThanOrEqual(5);
+
+    for (const parityCase of fixtures.cases) {
+      expect(parityCase.placements).toHaveLength(fixtures.canvases.length);
+      for (const placement of parityCase.placements) {
+        const canvas = fixtures.canvases[placement.canvas];
+        expect(placement.rect.x / canvas.widthPx).toBeCloseTo(parityCase.normalizedRect.x, 6);
+        expect(placement.rect.y / canvas.heightPx).toBeCloseTo(parityCase.normalizedRect.y, 6);
+        expect(placement.rect.width / canvas.widthPx).toBeCloseTo(parityCase.normalizedRect.width, 6);
+        expect(placement.rect.height / canvas.heightPx).toBeCloseTo(
+          parityCase.normalizedRect.height,
+          6
+        );
+        expect(placement.rotationDegrees).toBe(parityCase.rotationDegrees);
+        expect(placement.opacity).toBe(parityCase.opacity);
+      }
+    }
+  });
+
+  test('effect sizes scale with the canvas rather than staying put', () => {
+    const sticker = fixtures.cases.find((entry) => entry.id === 'outline-and-shadow');
+    if (!sticker) throw new Error('expected the outline-and-shadow case');
+    const [big, small] = sticker.placements;
+    const ratio = fixtures.canvases[0].heightPx / fixtures.canvases[1].heightPx;
+
+    expect(big.outlinePx).toBeGreaterThan(0);
+    expect(big.shadowBlurPx).toBeGreaterThan(0);
+    expect(big.shadowOffsetPx).toBeGreaterThan(0);
+    // A fixed pixel outline is the bug: at a sixteenth of the pixels it would
+    // swallow the sticker in the preview, or vanish in the export.
+    expect(big.outlinePx / small.outlinePx).toBeCloseTo(ratio, 6);
+    expect(big.shadowBlurPx / small.shadowBlurPx).toBeCloseTo(ratio, 6);
+    expect(big.shadowOffsetPx / small.shadowOffsetPx).toBeCloseTo(ratio, 6);
+  });
+
+  test('the cases the device compares against pixels really are comparable', () => {
+    const verifiable = fixtures.cases.filter((entry) => entry.pixelVerifiable);
+    expect(verifiable.length).toBeGreaterThanOrEqual(3);
+
+    for (const parityCase of verifiable) {
+      // Rotation or an effect would spill the drawn pixels past the rect, and
+      // the device measures the opaque bounding box against exactly that rect.
+      expect(parityCase.rotationDegrees).toBe(0);
+      expect(parityCase.outlineScale).toBe(0);
+      expect(parityCase.shadowScale).toBe(0);
+      for (const placement of parityCase.placements) {
+        const canvas = fixtures.canvases[placement.canvas];
+        expect(placement.rect.x).toBeGreaterThanOrEqual(0);
+        expect(placement.rect.y).toBeGreaterThanOrEqual(0);
+        expect(placement.rect.x + placement.rect.width).toBeLessThanOrEqual(canvas.widthPx);
+        expect(placement.rect.y + placement.rect.height).toBeLessThanOrEqual(canvas.heightPx);
+      }
+      // Both canvases share an aspect ratio, so one generated cutout fits both.
+      const aspects = parityCase.placements.map(
+        (placement) => placement.rect.width / placement.rect.height
+      );
+      for (const aspect of aspects) expect(aspect).toBeCloseTo(aspects[0], 6);
+    }
   });
 });
 

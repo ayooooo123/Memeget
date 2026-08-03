@@ -385,6 +385,57 @@ describe('applying a cutout to a project', () => {
     );
   });
 
+  it('remaps the cutout into the cropped frame the user is looking at', () => {
+    // Native segmented the WHOLE source; this project shows its right half. A
+    // cutout at source x 0.1..0.8 has to land at 0..0.6 of the visible frame,
+    // not stay where the full-frame coordinates put it.
+    const base = imageProject();
+    const cropped: MemeEditProject = {
+      ...base,
+      base: { ...base.base, crop: { x: 0.5, y: 0, width: 0.5, height: 1 } },
+    };
+    const outcome = apply({ project: cropped });
+    if (!outcome.ok) throw new Error(`refused: ${outcome.reason}`);
+    const rect = outcome.application.maskTracks[0].corrections[0].rect;
+    expect(rect.x).toBe(0);
+    expect(rect.width).toBeCloseTo(0.6, 6);
+    expect(outcome.application.layers[0].keyframes[0].center.x).toBeCloseTo(0.3, 6);
+    // The un-remapped source rect would have been x 0.1 — pin that it moved.
+    expect(rect).not.toEqual(result().combined.bounds);
+  });
+
+  it('remaps through a quarter rotation as well as a crop', () => {
+    const base = imageProject();
+    const rotated: MemeEditProject = { ...base, base: { ...base.base, rotation: 90 } };
+    const outcome = apply({ project: rotated });
+    if (!outcome.ok) throw new Error(`refused: ${outcome.reason}`);
+    const rect = outcome.application.maskTracks[0].corrections[0].rect;
+    // Rotating the frame swaps the axes: the source's 0.7-wide box is now tall.
+    expect(rect.height).toBeCloseTo(0.7, 6);
+    expect(rect.width).toBeCloseTo(0.8, 6);
+  });
+
+  it('refuses a subject the crop has cut away instead of hiding a dead layer', () => {
+    const base = imageProject();
+    const cropped: MemeEditProject = {
+      ...base,
+      base: { ...base.base, crop: { x: 0.9, y: 0.9, width: 0.1, height: 0.1 } },
+    };
+    const outcome = apply({
+      project: cropped,
+      result: result({
+        combined: nativeCutout({
+          id: 'req-1-combined',
+          subjectIndex: null,
+          bounds: { x: 0, y: 0, width: 0.2, height: 0.2 },
+        }),
+      }),
+    });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.reason).toBe('outside-crop');
+  });
+
   it('points the mask track at the materialized cutout file', () => {
     const outcome = apply();
     if (!outcome.ok) throw new Error('refused');

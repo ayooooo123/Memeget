@@ -25,6 +25,7 @@ import {
   type NormalizedRect,
   type SubjectLayer,
 } from './memeEditProjectCore';
+import { SOURCE_FRAME_BASE, remapNormalizedRect } from './memeImageEditCore';
 import type { NativeSubjectCutout, NativeSubjectCutoutResult } from '../modules/memeget-bg';
 
 /**
@@ -458,7 +459,8 @@ export type CutoutRefusalReason =
   | 'cutout-layer-limit'
   | 'mask-track-limit'
   | 'memory-ceiling'
-  | 'background-asset-missing';
+  | 'background-asset-missing'
+  | 'outside-crop';
 
 export interface CutoutApplication {
   /** Draw order: index 0 is drawn first (furthest back). */
@@ -600,13 +602,26 @@ export function buildCutoutApplication(
     };
   }
 
+  // Native segments the whole EXIF-oriented source; the project's layers and
+  // mask tracks live in the cropped, rotated frame the user is looking at. Skip
+  // this and a cutout taken after a crop lands in the wrong place — and a
+  // subject cropped out of frame silently becomes a layer nobody can see.
+  const bounds = remapNormalizedRect(ref.bounds, SOURCE_FRAME_BASE, input.project.base);
+  if (!bounds) {
+    return {
+      ok: false,
+      reason: 'outside-crop',
+      message: 'That subject is outside the current crop. Widen the crop, or pick another subject.',
+    };
+  }
+
   const takenTrackIds = new Set(input.project.maskTracks.map((track) => track.id));
   const maskTrackId = uniqueId(`${input.idPrefix}-mask`, takenTrackIds);
   const takenLayerIds = new Set(input.project.layers.map((layer) => layer.id));
   // A cutout starts where it was found: its bounds' centre, scale 1.
   const center: NormalizedPoint = clampNormalizedPoint({
-    x: ref.bounds.x + ref.bounds.width / 2,
-    y: ref.bounds.y + ref.bounds.height / 2,
+    x: bounds.x + bounds.width / 2,
+    y: bounds.y + bounds.height / 2,
   });
   const layers: SubjectLayer[] = [];
 
@@ -642,7 +657,7 @@ export function buildCutoutApplication(
         {
           id: maskTrackId,
           active: null,
-          corrections: [{ timeUs: 0, rect: ref.bounds, easing: 'hold' }],
+          corrections: [{ timeUs: 0, rect: bounds, easing: 'hold' }],
         },
       ],
       // Both layers share one mask track, so the duplicate costs no extra

@@ -26,6 +26,25 @@ export const MIN_NORMALIZED_CROP_AREA = 0.0025;
 export const MIN_NORMALIZED_CROP_EDGE = 0.05;
 export const MAX_TEXT_REPLACE_PIXEL_SIZE = 256;
 
+/**
+ * The base transform of the untouched source frame: no rotation, no flip, full
+ * crop.
+ *
+ * Native code always works on the EXIF-oriented, UNCROPPED image — OCR boxes,
+ * border samples and subject cutouts all come back in that frame — while project
+ * layers and mask tracks live in the cropped, rotated frame the user is looking
+ * at. Every conversion between the two goes through `remapNormalizedRect` with
+ * this as the other end, so it is stated once here instead of being re-declared
+ * by each caller.
+ */
+export const SOURCE_FRAME_BASE: BaseTransform = Object.freeze({
+  rotation: 0,
+  flipX: false,
+  flipY: false,
+  crop: Object.freeze({ x: 0, y: 0, width: 1, height: 1 }),
+  outputAspect: 'source',
+}) as BaseTransform;
+
 export type ImageCropPreset = BaseTransform['outputAspect'];
 export type TextRegionAction = 'cover' | 'pixelate' | 'replace';
 

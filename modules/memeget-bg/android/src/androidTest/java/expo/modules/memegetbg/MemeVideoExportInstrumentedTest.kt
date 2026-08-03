@@ -9,6 +9,8 @@ import android.util.Log
 import androidx.annotation.OptIn
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.transformer.ExportResult
+import androidx.media3.transformer.TransformationRequest
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import java.io.File
@@ -50,10 +52,10 @@ class MemeVideoExportInstrumentedTest {
     const val LONG_HEIGHT = 1080
 
     // 3 s of 240p with an AAC track: the completion assertions, cheap enough to run twice.
-    const val SHORT_ASSET = "composition_landscape_3s_240p.mp4"
-    const val SHORT_DURATION_US = 3_000_000L
-    const val SHORT_WIDTH = 320
-    const val SHORT_HEIGHT = 240
+    const val SHORT_ASSET = ExportTestSupport.SHORT_ASSET
+    const val SHORT_DURATION_US = ExportTestSupport.SHORT_DURATION_US
+    const val SHORT_WIDTH = ExportTestSupport.SHORT_WIDTH
+    const val SHORT_HEIGHT = ExportTestSupport.SHORT_HEIGHT
 
     const val SETTLE_TIMEOUT_SECONDS = 180L
     const val PROGRESS_TIMEOUT_MS = 30_000L
@@ -118,8 +120,11 @@ class MemeVideoExportInstrumentedTest {
     // The keep-alive lease is back, so the foreground notification is down.
     assertEquals(0, KeepAliveLease.holderCount())
 
-    // Polling stopped: a poll callback that outlives the run keeps calling getProgress on a
-    // released transformer and drives a progress bar for an export that is over.
+    // Polling stopped. The count, not the absence of further events: a leaked loop polls a
+    // cancelled transformer, which answers PROGRESS_STATE_NOT_STARTED and so reports nothing at
+    // all while still waking the main looper five times a second forever. A mutation that
+    // deleted the stopPolling() call went unnoticed until this assertion existed.
+    assertEquals(0, MemeVideoExporter.activePollCount())
     val afterSettle = run.progressCount()
     SystemClock.sleep(1_000L)
     assertEquals(afterSettle, run.progressCount())
@@ -209,6 +214,8 @@ class MemeVideoExportInstrumentedTest {
     )
     // Nothing was bent, so nothing is claimed: a warning here would be a lie about a clean export.
     assertEquals(emptyList<String>(), outcome.warnings)
+    // Success is a terminal path like any other: it releases the poll and the lease.
+    assertEquals(0, MemeVideoExporter.activePollCount())
     assertEquals(0, KeepAliveLease.holderCount())
   }
 
@@ -227,6 +234,50 @@ class MemeVideoExportInstrumentedTest {
     assertFalse(error is MemeVideoExporter.CancelledException)
     assertEquals(emptyList<String>(), exportedFileNames())
     assertEquals(0, KeepAliveLease.holderCount())
+  }
+
+  @Test
+  fun whateverMedia3ChangedIsSaidInWordsTheUserCanRead() {
+    // The device will not reliably refuse H.264, so the reporting itself is asserted directly:
+    // an unsurfaced fallback is a file that silently differs from what the studio promised.
+    val requested = TransformationRequest.Builder()
+      .setVideoMimeType(MimeTypes.VIDEO_H264)
+      .setAudioMimeType(MimeTypes.AUDIO_AAC)
+      .build()
+    val fallback = TransformationRequest.Builder()
+      .setVideoMimeType(MimeTypes.VIDEO_H265)
+      .setAudioMimeType(MimeTypes.AUDIO_AMR_NB)
+      .build()
+    val notes = MemeVideoExporter.fallbackWarnings(requested, fallback)
+    assertEquals(2, notes.size)
+    assertTrue(notes[0], notes[0].contains("H.264") && notes[0].contains("H.265"))
+    assertTrue(notes[1], notes[1].contains("AAC") && notes[1].contains("AMR"))
+    assertEquals(emptyList<String>(), MemeVideoExporter.fallbackWarnings(requested, requested))
+
+    val plan = VideoExportPlan.parse(
+      planJson(copyAsset(SHORT_ASSET), SHORT_DURATION_US, SHORT_WIDTH, SHORT_HEIGHT)
+    )
+    val downscaled = ExportResult.Builder()
+      .setVideoMimeType(MimeTypes.VIDEO_H264)
+      .setAudioMimeType(MimeTypes.AUDIO_AAC)
+      .setWidth(256)
+      .setHeight(192)
+      .setAverageVideoBitrate(2_400_000)
+      .build()
+    val resized = MemeVideoExporter.resultWarnings(plan, downscaled)
+    assertEquals(1, resized.size)
+    assertTrue(
+      resized[0],
+      resized[0].contains("256x192") && resized[0].contains("320x240") && resized[0].contains("Mb/s")
+    )
+
+    val asAsked = ExportResult.Builder()
+      .setVideoMimeType(MimeTypes.VIDEO_H264)
+      .setAudioMimeType(MimeTypes.AUDIO_AAC)
+      .setWidth(SHORT_WIDTH)
+      .setHeight(SHORT_HEIGHT)
+      .build()
+    assertEquals(emptyList<String>(), MemeVideoExporter.resultWarnings(plan, asAsked))
   }
 
   // ------------------------------------------------------------------ helpers
@@ -288,55 +339,8 @@ class MemeVideoExportInstrumentedTest {
     return handle
   }
 
-  /** The subset of `memeVideoCompositionCore.ts`'s plan the exporter reads. */
-  private fun planJson(
-    source: File,
-    durationUs: Long,
-    width: Int,
-    height: Int,
-    speed: Double = 1.0
-  ): String {
-    val segment = JSONObject()
-      .put("kind", "source")
-      .put("index", 0)
-      .put("sourceStartUs", 0L)
-      .put("sourceEndUs", durationUs)
-      .put("timelineDurationUs", durationUs)
-      .put("outputStartUs", 0L)
-      .put("outputEndUs", durationUs)
-    return JSONObject()
-      .put("version", VideoExportPlan.SUPPORTED_VERSION)
-      .put("id", "instrumented")
-      .put(
-        "source",
-        JSONObject()
-          .put("uri", Uri.fromFile(source).toString())
-          .put("widthPx", width)
-          .put("heightPx", height)
-          .put("durationUs", durationUs)
-          .put("rotation", 0)
-          .put("flipX", false)
-          .put("flipY", false)
-          .put(
-            "crop",
-            JSONObject().put("x", 0).put("y", 0).put("width", 1).put("height", 1)
-          )
-      )
-      .put(
-        "output",
-        JSONObject()
-          .put("widthPx", width)
-          .put("heightPx", height)
-          .put("speed", speed)
-          .put("durationUs", (durationUs / speed).toLong())
-          .put("retainedDurationUs", durationUs)
-          .put("cardDurationUs", 0L)
-      )
-      .put("audio", JSONObject().put("muted", false).put("volume", 1.0))
-      .put("segments", JSONArray().put(segment))
-      .put("rejections", JSONArray())
-      .toString()
-  }
+  private fun planJson(source: File, durationUs: Long, width: Int, height: Int): String =
+    ExportTestSupport.planJson(source, durationUs, width, height)
 
   private fun exportedFileNames(): List<String> =
     MemeVideoExporter.exportCacheDir(context).listFiles()?.map { it.name }?.sorted() ?: emptyList()
@@ -378,12 +382,5 @@ class MemeVideoExportInstrumentedTest {
     }
   }
 
-  private fun copyAsset(name: String): File {
-    val target = File(workDir, name)
-    if (target.isFile && target.length() > 0L) return target
-    InstrumentationRegistry.getInstrumentation().context.assets.open(name).use { input ->
-      target.outputStream().use { output -> input.copyTo(output) }
-    }
-    return target
-  }
+  private fun copyAsset(name: String): File = ExportTestSupport.copyAsset(workDir, name)
 }

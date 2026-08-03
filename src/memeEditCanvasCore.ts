@@ -380,13 +380,27 @@ export function rotateKeyframeFromHandle(
   return { ...start, rotationDegrees: roundCanvas(start.rotationDegrees + normalizeAngleDelta(currentAngle - startAngle)) };
 }
 
+/**
+ * Where and how big a layer is on the preview canvas.
+ *
+ * `explicitBase` exists for subject cutouts: a text or media layer gets the
+ * square base box the editor gives every overlay, but a cutout's natural size is
+ * the region segmentation found it in — so the caller resolves that through
+ * `resolveCutoutPlacement` (the same function the exporter uses) and hands the
+ * result in, rather than this file growing a second copy of the sticker geometry.
+ * The scale and rotation still ride on the transform, so a cutout is dragged and
+ * resized exactly like any other layer.
+ */
 export function canvasLayerVisualDescriptor(
   keyframe: TransformKeyframe,
   layerWidth: number,
-  mediaRect: ViewRect
+  mediaRect: ViewRect,
+  explicitBase?: { width: number; height: number }
 ): CanvasLayerVisualDescriptor {
   const center = normalizedPointToViewPoint(keyframe.center, mediaRect);
-  const base = layerBaseSize(layerWidth, mediaRect);
+  const base = explicitBase && explicitBase.width > 0 && explicitBase.height > 0
+    ? explicitBase
+    : layerBaseSize(layerWidth, mediaRect);
   const scale = clampScale(keyframe.scale);
   return {
     center,

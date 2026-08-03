@@ -51,7 +51,11 @@ import {
   type TextLayer,
   type TransformKeyframe,
 } from '../memeEditProjectCore';
-import { MEME_MEDIA_LAYER_BASE_WIDTH } from '../memeImageRenderCore';
+import {
+  IMAGE_RENDER_TIME_US,
+  MEME_MEDIA_LAYER_BASE_WIDTH,
+  resolveCutoutPlacement,
+} from '../memeImageRenderCore';
 import { videoAudioPreview } from '../memeVideoAudioCore';
 import { buildMemeTextLayoutSpec, compareNativeMemeTextLayoutResults, memeTextBackingRadiusForPreview, memeTextMeasureKey, nativeMemeTextLayoutInputFromSpec, type MemeTextLayoutSpec, type NativeMemeTextLayoutResult } from '../memeTextLayoutCore';
 import { colors, radius, space, type } from '../theme';
@@ -401,9 +405,33 @@ const TransformableLayerView = React.memo(function TransformableLayerView({
   const evaluatedKeyframe = firstKeyframe(layer, activeTimeUs);
   const keyframe = gestureStart.current?.keyframe ?? evaluatedKeyframe;
   const visualWidth = layer.kind === 'text' ? layer.width : MEME_MEDIA_LAYER_BASE_WIDTH;
+  // A cutout's natural size is the region segmentation found it in, resolved
+  // through the exporter's own function against the PREVIEW canvas. The scale is
+  // deliberately left at 1: the transform below applies it, and it also scales
+  // the stamped effects — which is exactly how the exporter resolves them, off
+  // the SCALED short edge.
+  const cutoutPlacement = useMemo(() => {
+    if (layer.kind !== 'subject') return null;
+    const track = project.maskTracks.find((candidate) => candidate.id === layer.maskTrackId);
+    const trackRect = track ? evaluateMaskTrackRect(track, IMAGE_RENDER_TIME_US) : null;
+    if (!trackRect || mediaRect.width <= 0 || mediaRect.height <= 0) return null;
+    return resolveCutoutPlacement(
+      layer,
+      { ...keyframe, scale: 1 },
+      trackRect,
+      { widthPx: mediaRect.width, heightPx: mediaRect.height }
+    );
+  }, [keyframe, layer, mediaRect.height, mediaRect.width, project.maskTracks]);
+  const cutoutBase = cutoutPlacement
+    ? { width: cutoutPlacement.rect.width, height: cutoutPlacement.rect.height }
+    : undefined;
+  const cutoutEffects = {
+    outlinePx: cutoutPlacement?.outlinePx ?? 0,
+    shadowOffsetPx: cutoutPlacement?.shadowOffsetPx ?? 0,
+  };
   const visualDescriptor = useMemo(
-    () => canvasLayerVisualDescriptor(keyframe, visualWidth, mediaRect),
-    [keyframe.center.x, keyframe.center.y, keyframe.rotationDegrees, keyframe.scale, mediaRect, visualWidth]
+    () => canvasLayerVisualDescriptor(keyframe, visualWidth, mediaRect, cutoutBase),
+    [cutoutBase, keyframe.center.x, keyframe.center.y, keyframe.rotationDegrees, keyframe.scale, mediaRect, visualWidth]
   );
   const box = useMemo(() => ({
     x: visualDescriptor.center.x - visualDescriptor.content.baseWidthDip / 2,
@@ -590,7 +618,14 @@ const TransformableLayerView = React.memo(function TransformableLayerView({
       >
         {layer.kind === 'media' && <MediaLayerContent layer={layer} />}
         {layer.kind === 'text' && textSpec && <TextLayerContent spec={textSpec} />}
-        {layer.kind === 'subject' && <SubjectLayerContent project={project} layer={layer} />}
+        {layer.kind === 'subject' && (
+          <SubjectLayerContent
+            project={project}
+            layer={layer}
+            outlinePx={cutoutEffects.outlinePx}
+            shadowOffsetPx={cutoutEffects.shadowOffsetPx}
+          />
+        )}
       </Animated.View>
       {selected && controlFrame && (
         <Animated.View
@@ -747,11 +782,70 @@ const TextLayerContent = React.memo(function TextLayerContent({ spec }: { spec: 
   );
 });
 
-const SubjectLayerContent = React.memo(function SubjectLayerContent({ project, layer }: { project: MemeEditProject; layer: SubjectLayer }) {
-  const hasMask = !!project.transient.maskTracks[layer.maskTrackId];
+/**
+ * The cutout itself, in the preview.
+ *
+ * The PNG the segmenter wrote is what gets drawn — the same file the exporter
+ * composites — so position, size and the alpha edge are the real thing rather
+ * than a placeholder box. The sticker effects are stamped copies here (expo-image
+ * tints them) which matches the export's geometry and colour; the export blurs
+ * its shadow and the preview cannot, so a soft shadow reads slightly harder here.
+ *
+ * With no materialized mask there is nothing to show, and saying so is the point:
+ * the exporter reports that layer as skipped for the same reason.
+ */
+const SubjectLayerContent = React.memo(function SubjectLayerContent({
+  project,
+  layer,
+  outlinePx,
+  shadowOffsetPx,
+}: {
+  project: MemeEditProject;
+  layer: SubjectLayer;
+  outlinePx: number;
+  shadowOffsetPx: number;
+}) {
+  const cutoutUri = project.transient.maskTracks[layer.maskTrackId];
+  if (!cutoutUri) {
+    return (
+      <View style={[styles.subjectFill, styles.unavailableFill]} pointerEvents="none">
+        <Text style={styles.unavailableText}>Subject mask unavailable</Text>
+      </View>
+    );
+  }
+  const outlineStamps = outlinePx > 0 && layer.outlineColor
+    ? Array.from({ length: 8 }, (_unused, index) => {
+        const angle = (index * Math.PI) / 4;
+        return { left: Math.cos(angle) * outlinePx, top: Math.sin(angle) * outlinePx };
+      })
+    : [];
   return (
-    <View style={[styles.subjectFill, !hasMask && styles.unavailableFill]} pointerEvents="none">
-      <Text style={styles.unavailableText}>{hasMask ? 'Subject mask' : 'Subject mask unavailable'}</Text>
+    <View style={styles.subjectFill} pointerEvents="none">
+      {shadowOffsetPx > 0 && (
+        <Image
+          source={{ uri: cutoutUri }}
+          style={[StyleSheet.absoluteFill, { left: shadowOffsetPx, top: shadowOffsetPx, opacity: 0.55 }]}
+          contentFit="contain"
+          tintColor="#000000"
+          cachePolicy="none"
+        />
+      )}
+      {outlineStamps.map((offset) => (
+        <Image
+          key={`${offset.left}:${offset.top}`}
+          source={{ uri: cutoutUri }}
+          style={[StyleSheet.absoluteFill, { left: offset.left, top: offset.top }]}
+          contentFit="contain"
+          tintColor={layer.outlineColor ?? undefined}
+          cachePolicy="none"
+        />
+      ))}
+      <Image
+        source={{ uri: cutoutUri }}
+        style={StyleSheet.absoluteFill}
+        contentFit="contain"
+        cachePolicy="none"
+      />
     </View>
   );
 });
