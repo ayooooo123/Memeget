@@ -19,9 +19,12 @@ import {
   bulkUpdateMemeTags,
   clearIndexErrors,
   clearIndexErrorsFor,
+  countMemes,
   countMemesDescribed,
   countMemesNeedingVision,
+  countMemesNeedingEmbeddings,
   dot,
+  eachMemeEmbedding,
   getAllMemeEmbeddings,
   getAllThumbUris,
   getDescribedVisionRecords,
@@ -644,9 +647,16 @@ export async function runIndex(
   // the calibrated scale. Free-ish: `know` is already built and it is pure
   // vector math over stored embeddings.
   if ((await getSetting(RECALIBRATED_TAGS_KEY).catch(() => null)) !== '1') {
-    opts.onProgress?.({ processed: total, total, added, current: 'recalibrating tags…' });
+    // This walks the WHOLE library, so it is the longest stage of a re-index on
+    // a big collection. Without per-row ticks the card sat on one static line
+    // for minutes and read as a hang — stream the real count instead.
+    opts.onProgress?.({ processed: 0, total: 0, added, current: 'recalibrating tags…' });
     try {
-      const res = await retagWithKnowledge(know, { shouldCancel: opts.shouldCancel });
+      const res = await retagWithKnowledge(know, {
+        shouldCancel: opts.shouldCancel,
+        onProgress: (done, rows) =>
+          opts.onProgress?.({ processed: done, total: rows, added, current: 'recalibrating tags…' }),
+      });
       // A stopped pass wrote partial progress, so leave the flag off and let
       // the next index finish the rest.
       if (!res.cancelled) await setSetting(RECALIBRATED_TAGS_KEY, '1');
@@ -668,9 +678,14 @@ export async function runIndex(
   // of new embeddings, tags and OCR lands at once, and the user is already
   // waiting on a long job so the extra second is invisible. Best-effort — a
   // folder we can't write to must never fail the index that just succeeded.
+  // On a large library this is tens of MB through SAF and is NOT cancellable,
+  // so it must show progress: a silent minute here reads as a frozen index.
   try {
     status('saving knowledge to your folder…');
-    await syncAllSidecars();
+    await syncAllSidecars({
+      onChunk: (done, chunks) =>
+        opts.onProgress?.({ processed: done, total: chunks, added, current: 'saving knowledge to your folder…' }),
+    });
   } catch {
     // next pass tries again; the DB remains the live copy either way
   }
@@ -940,7 +955,10 @@ async function retagWithKnowledge(
   know: Knowledge,
   opts: { onProgress?: (done: number, total: number) => void; shouldCancel?: () => boolean } = {}
 ): Promise<RetagResult> {
-  const rows = await getAllMemeEmbeddings();
+  // Every row from eachMemeEmbedding() is visited, so the denominator is the
+  // whole library — countMemesNeedingEmbeddings() counted a different set and
+  // made the reported progress meaningless (often "N/0").
+  const totalRows = await countMemes();
 
   // Classify every meme up front. This is pure JS vector math over the whole
   // library, so we time-slice (createYielder) — otherwise the awaited DB writes
@@ -950,17 +968,20 @@ async function retagWithKnowledge(
   const updates: { id: number; tags: Tag[]; extraTerms: string }[] = [];
   const tick = createYielder();
   let cancelled = false;
-  for (let i = 0; i < rows.length; i++) {
+  let i = 0;
+
+  for await (const row of eachMemeEmbedding()) {
     // Cancellable (the Stop button reaches this now): rows classified so far
     // are still written below, so a stopped re-tag makes partial progress.
     if (opts.shouldCancel?.()) {
       cancelled = true;
       break;
     }
-    const row = rows[i];
+
     // Degraded rows (files the pipeline couldn't process) have no embedding.
     if (row.embedding.length === 0) {
-      opts.onProgress?.(i + 1, rows.length);
+      opts.onProgress?.(i + 1, totalRows);
+      i++;
       continue;
     }
     const vec = Array.from(row.embedding);
@@ -972,6 +993,7 @@ async function retagWithKnowledge(
     }
     const visual = mergeClassified(prompts.tags, classifyExemplars(vec, know.exemplarHeads, know.mean));
     const base = mergeTags(visual, ocrTags(row.ocrText));
+
     // Preserve VLM tags and every user-owned tag. Re-tagging applies new taught
     // knowledge; it must not erase a tag the user assigned, taught, or accepted
     // through look-alike propagation.
@@ -987,8 +1009,9 @@ async function retagWithKnowledge(
     if (extraTerms !== row.extraTerms || JSON.stringify(merged) !== row.rawTags) {
       updates.push({ id: row.id, tags: merged, extraTerms });
     }
-    opts.onProgress?.(i + 1, rows.length);
+    opts.onProgress?.(i + 1, totalRows);
     await tick();
+    i++;
   }
 
   // Single transaction for all the writes — fast even on a big library.
