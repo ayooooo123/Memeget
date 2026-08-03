@@ -1940,47 +1940,68 @@ export async function propagateTagToSimilarMemes(
   );
   const sources = srcRows.map(toRecord).filter((s) => s.imageEmbedding.length > 0);
   if (sources.length === 0) return { propagated: 0 };
+  // Streamed on purpose: loading every candidate row's vectors at once OOM'd on
+  // large libraries. Only the tiny PropagationHit (id/score/margin) is retained
+  // per match; the ≤PROPAGATE_MAX_TARGETS winners are re-read for their text
+  // afterwards, so peak memory is one row plus the hit list.
   const stmt = await db.prepareAsync(
     `SELECT id, tags, extra_terms, embedding, visual_embedding, visual_model FROM memes WHERE pending = 0 AND id NOT IN (${marks})`
   );
-  let updates: { id: number; tags: Tag[]; extraTerms: string }[] = [];
+  const labelKey = normalizeLabel(trimmed);
+  // A label already held from a user-owned source is left alone; automatic
+  // prompt/vision/OCR matches are still scored so propagation can promote them.
+  const hasDurableLabel = (rawTags: string): boolean =>
+    safeParseTags(rawTags).some(
+      (t) =>
+        normalizeLabel(t.label) === labelKey &&
+        (t.source === 'manual' || t.source === 'exemplar' || t.source === 'propagated')
+    );
+
+  const hits: PropagationHit[] = [];
   try {
-    const result = await stmt.executeAsync<VectorCols & { id: number; tags: string; extra_terms: string }>(...sourceIds);
-    
-    const labelKey = normalizeLabel(trimmed);
-    const hasDurableLabel = (rawTags: string): boolean =>
-      safeParseTags(rawTags).some((t) => t.label === labelKey && t.source !== 'vision' && t.source !== 'prompt');
-
+    const result = await stmt.executeAsync<
+      VectorCols & { id: number; tags: string; extra_terms: string }
+    >(...sourceIds);
+    let i = 0;
     for await (const row of result) {
-      if (hasDurableLabel(row.tags)) continue;
-
-      const cand = toRecord(row);
-      if (cand.imageEmbedding.length === 0) continue;
-
-      // selectPairVectors handles space routing (DINO vs CLIP) and vector shape
-      const match = selectPairVectors(sources, cand);
-      if (!match) continue;
-
-      let maxScore = -1;
-      for (const src of match.sources) {
-        const score = dot(src, match.target);
-        if (score > maxScore) maxScore = score;
-      }
-
-      if (maxScore >= match.threshold) {
-        const existing = safeParseTags(row.tags);
-        // Filter out any vision/prompt tag with this label so the manual one
-        // cleanly replaces it, upgrading its durability.
-        const cleaned = existing.filter((t) => t.label !== labelKey);
-        cleaned.push({ label: labelKey, source: 'propagated' });
-        
-        // Extra terms stay intact, new label gets added
-        const extraTerms = unionTerms(row.extra_terms ?? '', labelKey);
-        updates.push({ id: row.id, tags: cleaned, extraTerms });
+      const hit = scorePropagationCandidate(
+        sources,
+        { id: row.id, hasDurableLabel: hasDurableLabel(row.tags), record: toRecord(row) },
+        VISUAL_EMBEDDING_MODEL
+      );
+      if (hit) hits.push(hit);
+      // Same chunked yield as the search scans, so spreading across a big
+      // library never hitches the UI.
+      if ((i++ & (SEARCH_CHUNK - 1)) === SEARCH_CHUNK - 1) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
       }
     }
   } finally {
     await stmt.finalizeAsync();
+  }
+
+  // Margin-ranked and capped: bounds both the write and the blast radius of a
+  // mis-tag. Dropping this cap would let one tag rewrite an entire library.
+  const winners = rankPropagationHits(hits);
+  if (winners.length === 0) return { propagated: 0 };
+
+  const winnerMarks = winners.map(() => '?').join(',');
+  const winnerRows = await db.getAllAsync<{ id: number; tags: string; extra_terms: string }>(
+    `SELECT id, tags, extra_terms FROM memes WHERE id IN (${winnerMarks})`,
+    ...winners.map((w) => w.id)
+  );
+  const byId = new Map(winnerRows.map((r) => [r.id, r]));
+  const updates: { id: number; tags: Tag[]; extraTerms: string }[] = [];
+  for (const w of winners) {
+    const row = byId.get(w.id);
+    if (!row) continue; // deleted between the scan and the write
+    const next = upsertDurableTag(safeParseTags(row.tags), row.extra_terms ?? '', {
+      label: trimmed,
+      category: 'user',
+      source: 'propagated',
+      score: w.score,
+    });
+    updates.push({ id: w.id, tags: next.tags, extraTerms: next.extraTerms });
   }
 
   await bulkUpdateMemeTags(updates);
