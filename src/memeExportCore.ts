@@ -270,10 +270,69 @@ export function uniqueExportName(name: string, taken: Iterable<string>): string 
   }
 }
 
-/** Human summary of a finished export, including truths the render had to bend. */
-export function exportSummary(result: MemeExportResult, destinationLabel: string): string {
-  if (result.warnings.length === 0) return `Saved to ${destinationLabel}`;
-  return `Saved to ${destinationLabel} — ${result.warnings.join('; ')}`;
+export interface ExportDestinationSpec {
+  id: ExportDestination;
+  label: string;
+  hint: string;
+}
+
+export interface DestinationAvailability {
+  /** memeget-bg's file clipboard is built in. */
+  canCopy: boolean;
+  /** memeget-bg can write to the public Downloads collection. */
+  canDownload: boolean;
+}
+
+/**
+ * The destinations actually offered for a finished render.
+ *
+ * Saving into the library is always offered: it is the only one that needs no
+ * native capability beyond the renderer that already ran, and it is the one
+ * that makes the variation a real meme. The other two are gated on the native
+ * module, because in Expo Go or a JS-only build they silently do nothing —
+ * offering a button that no-ops is worse than not offering it.
+ */
+export function exportDestinations(availability: DestinationAvailability): ExportDestinationSpec[] {
+  const specs: ExportDestinationSpec[] = [
+    { id: 'library', label: 'Save as new meme', hint: 'Adds it to your library and indexes it for search' },
+  ];
+  if (availability.canCopy) {
+    specs.push({ id: 'clipboard', label: 'Copy', hint: 'Copies the file so you can paste it into another app' });
+  }
+  if (availability.canDownload) {
+    specs.push({ id: 'downloads', label: 'Save to Downloads', hint: 'Writes a copy into your phone’s Downloads folder' });
+  }
+  return specs;
+}
+
+/** Where a destination reports it put the file, for the confirmation toast. */
+export function destinationLabel(destination: ExportDestination, folderName: string): string {
+  switch (destination) {
+    case 'library':
+      return folderName;
+    case 'downloads':
+      return 'Downloads';
+    case 'clipboard':
+      return 'the clipboard';
+  }
+}
+
+/**
+ * Human summary of a finished export, including truths the render had to bend.
+ *
+ * The verb has to match the destination. "Saved to the clipboard" is wrong in a
+ * way users notice, and a toast that misdescribes what just happened is how
+ * someone goes looking in Downloads for a file that is on the clipboard.
+ */
+export function exportSummary(
+  result: MemeExportResult,
+  destination: ExportDestination,
+  folderName: string
+): string {
+  const where = destinationLabel(destination, folderName);
+  const head = destination === 'clipboard' ? 'Copied — paste it anywhere' : `Saved to ${where}`;
+  if (result.warnings.length === 0) return head;
+  return `${head} — ${result.warnings.join('; ')}`;
 }
 
 /** A skipped layer is a warning, never a silent omission. */
