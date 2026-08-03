@@ -28,7 +28,7 @@ function run(state: ExportState, ...events: Parameters<typeof memeExportReducer>
   return events.reduce(memeExportReducer, state);
 }
 
-function started(destination: 'library' | 'clipboard' | 'downloads' = 'library', revision = 1) {
+function started(destination: 'library' | 'clipboard' | 'downloads' = 'library', revision = 'plan-a') {
   const state = run(initialExportState(), { type: 'start', destination, revision });
   if (state.phase.kind !== 'running') throw new Error('expected running');
   return { state, runId: state.phase.runId };
@@ -96,7 +96,7 @@ describe('a single run resolves exactly once', () => {
 
   it('refuses a second start while one is running', () => {
     const { state } = started();
-    expect(run(state, { type: 'start', destination: 'downloads', revision: 1 })).toBe(state);
+    expect(run(state, { type: 'start', destination: 'downloads', revision: 'plan-a' })).toBe(state);
   });
 
   it('cannot fail after it has succeeded', () => {
@@ -149,37 +149,37 @@ describe('cancellation', () => {
 describe('the cached render', () => {
   it('is reused when a second destination is chosen', () => {
     // The point of the cache: choosing Copy after Save must not re-encode.
-    const { state, runId } = started('library', 7);
+    const { state, runId } = started('library', 'plan-a');
     const ready = run(state, { type: 'succeeded', runId, result: result() });
-    expect(reusableResult(ready, 7)).not.toBeNull();
-    expect(run(ready, { type: 'start', destination: 'clipboard', revision: 7 })).toBe(ready);
+    expect(reusableResult(ready, 'plan-a')).not.toBeNull();
+    expect(run(ready, { type: 'start', destination: 'clipboard', revision: 'plan-a' })).toBe(ready);
   });
 
   it('is never reused for a project that has since changed', () => {
     // The dangerous one: silently saving the PREVIOUS edit.
-    const { state, runId } = started('library', 7);
+    const { state, runId } = started('library', 'plan-a');
     const ready = run(state, { type: 'succeeded', runId, result: result() });
-    expect(reusableResult(ready, 8)).toBeNull();
+    expect(reusableResult(ready, 'plan-b')).toBeNull();
   });
 
   it('is swept when the project changes underneath it', () => {
-    const { state, runId } = started('library', 7);
+    const { state, runId } = started('library', 'plan-a');
     const ready = run(state, { type: 'succeeded', runId, result: result('/cache/old.png') });
-    const changed = run(ready, { type: 'projectChanged', revision: 8 });
+    const changed = run(ready, { type: 'projectChanged', revision: 'plan-b' });
     expect(changed.phase.kind).toBe('idle');
     expect(changed.orphans).toContain('/cache/old.png');
   });
 
   it('survives a projectChanged that reports the same revision', () => {
-    const { state, runId } = started('library', 7);
+    const { state, runId } = started('library', 'plan-a');
     const ready = run(state, { type: 'succeeded', runId, result: result() });
-    expect(run(ready, { type: 'projectChanged', revision: 7 })).toBe(ready);
+    expect(run(ready, { type: 'projectChanged', revision: 'plan-a' })).toBe(ready);
   });
 
   it('is swept when a fresh render supersedes it', () => {
-    const { state, runId } = started('library', 7);
+    const { state, runId } = started('library', 'plan-a');
     const ready = run(state, { type: 'succeeded', runId, result: result('/cache/v1.png') });
-    const again = run(ready, { type: 'start', destination: 'library', revision: 8 });
+    const again = run(ready, { type: 'start', destination: 'library', revision: 'plan-b' });
     expect(again.phase.kind).toBe('running');
     expect(again.orphans).toContain('/cache/v1.png');
   });
@@ -203,22 +203,22 @@ describe('the cached render', () => {
 
 describe('failure', () => {
   it('keeps the destination so retry means what was asked', () => {
-    const { state, runId } = started('downloads', 3);
+    const { state, runId } = started('downloads', 'plan-a');
     const failed = run(state, { type: 'failed', runId, message: 'no encoder' });
     expect(failed.phase).toMatchObject({ kind: 'failed', destination: 'downloads', message: 'no encoder' });
   });
 
   it('can be retried without the editor losing the project', () => {
-    const { state, runId } = started('downloads', 3);
-    const retried = run(state, { type: 'failed', runId, message: 'no encoder' }, { type: 'start', destination: 'downloads', revision: 3 });
+    const { state, runId } = started('downloads', 'plan-a');
+    const retried = run(state, { type: 'failed', runId, message: 'no encoder' }, { type: 'start', destination: 'downloads', revision: 'plan-a' });
     expect(retried.phase.kind).toBe('running');
     expect(isExportBusy(retried)).toBe(true);
   });
 
   it('clears itself when the user edits instead of retrying', () => {
-    const { state, runId } = started('downloads', 3);
+    const { state, runId } = started('downloads', 'plan-a');
     const failed = run(state, { type: 'failed', runId, message: 'no encoder' });
-    expect(run(failed, { type: 'projectChanged', revision: 4 }).phase.kind).toBe('idle');
+    expect(run(failed, { type: 'projectChanged', revision: 'plan-b' }).phase.kind).toBe('idle');
   });
 
   it('is dismissible', () => {

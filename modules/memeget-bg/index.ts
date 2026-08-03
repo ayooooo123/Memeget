@@ -430,3 +430,15 @@ export async function saveToDownloads(
   if (!native || typeof native.saveToDownloads !== 'function') return null;
   return native.saveToDownloads(srcPath, name, mimeType);
 }
+
+// Whether the two non-library export destinations can actually do anything.
+//
+// Both functions above degrade quietly — false / null — so a caller that does
+// not check gets a button that appears to work and does nothing. The editor's
+// destination picker gates on these instead of offering a dead option. They
+// mirror the exact guards those functions use, deliberately: one place to be
+// wrong is better than two that can disagree.
+export const fileClipboardAvailable =
+  native != null && typeof native.copyFileToClipboard === 'function';
+
+export const downloadsAvailable = native != null && typeof native.saveToDownloads === 'function';

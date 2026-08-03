@@ -47,6 +47,8 @@ import { noteCodecInteractive } from '../interactive';
 import { success, tap, thud, warn } from '../haptics';
 import {
   copyFileToClipboard,
+  downloadsAvailable,
+  fileClipboardAvailable,
   imageRendererNativeAvailable,
   renderImageProject,
   saveToDownloads,
@@ -55,6 +57,17 @@ import {
 import type { MemeEditProject } from '../memeEditProjectCore';
 import { buildImageRenderPlan, imageRenderPlanUnavailableLayers } from '../memeImageRenderCore';
 import { compatibleCopyTarget } from '../memeActionsCore';
+import {
+  type ExportDestination,
+  type MemeExportResult,
+  exportDestinations,
+  exportOutputSpec,
+  exportSummary,
+  initialExportState,
+  memeExportReducer,
+  reusableResult,
+  skippedLayerWarning,
+} from '../memeExportCore';
 import { mimeForName } from '../mediaFormats';
 import {
   deleteCache,
@@ -686,47 +699,158 @@ export const MemeGrid = React.memo(function MemeGrid({
     setStudioOpen(true);
   };
 
-  // Render the studio's structured project into a real full-resolution PNG and
-  // hand it to the same collection path a shared meme takes: saveSharedFiles
-  // writes it into the linked folder and inserts the pending row, onCreated
-  // indexes it. The original file is never touched — the remix lands as its
-  // own single library item.
-  const onStudioExport = useCallback(async (project: MemeEditProject) => {
-    const item = selected;
-    if (!item || busy) return;
-    noteInteractive();
-    setBusy(true);
-    let rendered: string | null = null;
-    try {
-      const plan = buildImageRenderPlan(project, { planId: `meme-remix-${item.id}` });
-      const skipped = imageRenderPlanUnavailableLayers(plan);
-      rendered = await renderImageProject(JSON.stringify(plan));
-      if (!rendered) throw new Error('Image export needs a native build');
-      const stem = item.name.replace(/\.[^./]+$/, '') || 'meme';
+  // Render the studio's structured project once, then send that one file where
+  // the user asks. Rendering is the expensive half — a full-resolution compose
+  // and encode — so picking a second destination reuses the SAME rendered file
+  // rather than doing it again. `memeExportCore` owns when that reuse is legal:
+  // the cache key is the render plan's own serialization, so any edit at all
+  // invalidates it and the user can never be handed a stale render of an
+  // earlier version of their meme.
+  const exportStateRef = useRef(initialExportState());
+
+  const deliverExport = useCallback(
+    async (item: MemeRecord, destination: ExportDestination, result: MemeExportResult) => {
+      if (destination === 'downloads') {
+        const dest = await saveToDownloads(result.path, result.name, result.mimeType);
+        if (!dest) throw new Error('This build cannot write to Downloads');
+        success();
+        showToast(exportSummary(result, 'downloads', dest), result.warnings.length ? 'info' : 'success');
+        return true;
+      }
+      if (destination === 'clipboard') {
+        const copied = await copyFileToClipboard(result.path, result.name, result.mimeType).catch(() => false);
+        if (!copied) throw new Error('This build cannot copy files');
+        success();
+        showToast(exportSummary(result, 'clipboard', ''), result.warnings.length ? 'info' : 'success');
+        // Safe to sweep the source: the native side copies the bytes into
+        // cacheDir/clipboard and shares THAT via FileProvider, so the clipboard
+        // does not reference our render. The plain copy path already relies on
+        // this — it deletes its transcoded file immediately after copying.
+        return true;
+      }
       const saved = await saveSharedFiles([
-        { path: rendered, fileName: `${stem}-remix.png`, mimeType: 'image/png' },
+        { path: result.path, fileName: result.name, mimeType: result.mimeType },
       ]);
       if (saved.saved.length === 0) {
         if (saved.duplicates > 0) {
           showToast('That exact remix is already in your library', 'info');
-          return;
+          return true;
         }
         throw new Error(`Could not save the rendered meme into ${saved.folderName}`);
       }
       onCreated?.(saved.saved);
       success();
-      showToast(
-        skipped.length > 0
-          ? `Saved to ${saved.folderName} — ${skipped.length} layer${skipped.length === 1 ? '' : 's'} could not be rendered`
-          : `Saved to ${saved.folderName}`,
-        skipped.length > 0 ? 'info' : 'success'
-      );
+      showToast(exportSummary(result, 'library', saved.folderName), result.warnings.length ? 'info' : 'success');
       setStudioOpen(false);
-    } finally {
-      if (rendered) await deleteCache(rendered).catch(() => {});
-      setBusy(false);
-    }
-  }, [busy, onCreated, selected]);
+      return true;
+    },
+    [onCreated]
+  );
+
+  const runStudioExport = useCallback(
+    async (project: MemeEditProject, item: MemeRecord, destination: ExportDestination) => {
+      const plan = buildImageRenderPlan(project, { planId: `meme-remix-${item.id}` });
+      const planJson = JSON.stringify(plan);
+      const dispatch = (event: Parameters<typeof memeExportReducer>[1]) => {
+        exportStateRef.current = memeExportReducer(exportStateRef.current, event);
+      };
+
+      let result = reusableResult(exportStateRef.current, planJson);
+      let rendered: string | null = null;
+      if (!result) {
+        dispatch({ type: 'start', destination, revision: planJson });
+        const phase = exportStateRef.current.phase;
+        const runId = phase.kind === 'running' ? phase.runId : -1;
+        try {
+          rendered = await renderImageProject(planJson);
+          if (!rendered) throw new Error('Image export needs a native build');
+          result = {
+            path: rendered,
+            name: exportOutputSpec(item.name, 'image').name,
+            mimeType: 'image/png',
+            warnings: skippedLayerWarning(imageRenderPlanUnavailableLayers(plan).length),
+          };
+          dispatch({ type: 'succeeded', runId, result });
+        } catch (error) {
+          dispatch({ type: 'failed', runId, message: String(error) });
+          throw error;
+        }
+      }
+
+      await deliverExport(item, destination, result);
+      // The render is deliberately KEPT after delivery. Every destination has
+      // copied the bytes somewhere durable, so the cached file is no longer
+      // load-bearing — but holding it is what makes a second destination
+      // instant instead of a second full-resolution encode, which is the whole
+      // point of the picker. It is bounded at one file: starting a render for a
+      // changed project orphans the previous one, and closing the studio sweeps
+      // whatever is left.
+      const orphans = exportStateRef.current.orphans;
+      if (orphans.length > 0) {
+        dispatch({ type: 'orphansDrained' });
+        await Promise.all(orphans.map((path) => deleteCache(path).catch(() => {})));
+      }
+    },
+    [deliverExport]
+  );
+
+  // Closing the studio ends the kept render's useful life: it can no longer be
+  // re-delivered, so it becomes cache the user cannot see and would never
+  // reclaim. Keyed on the flag rather than wired into a close handler because
+  // there are several ways out — Save closes it, the close button, the Android
+  // back gesture — and a sweep attached to only one of them is a leak that only
+  // shows up on the paths nobody tested.
+  useEffect(() => {
+    if (studioOpen) return;
+    const state = exportStateRef.current;
+    const pending = [
+      ...state.orphans,
+      ...(state.phase.kind === 'ready' ? [state.phase.result.path] : []),
+    ];
+    if (pending.length === 0) return;
+    exportStateRef.current = initialExportState();
+    for (const path of pending) void deleteCache(path).catch(() => {});
+  }, [studioOpen]);
+
+  const onStudioExport = useCallback(
+    async (project: MemeEditProject) => {
+      const item = selected;
+      if (!item || busy) return;
+      const destinations = exportDestinations({
+        canCopy: fileClipboardAvailable,
+        canDownload: downloadsAvailable,
+      });
+      const destination = await new Promise<ExportDestination | null>((resolve) => {
+        if (destinations.length === 1) {
+          resolve(destinations[0].id);
+          return;
+        }
+        Alert.alert(
+          'Export this meme',
+          'It renders once, so picking a second destination afterwards is instant.',
+          [
+            ...destinations.map((spec) => ({ text: spec.label, onPress: () => resolve(spec.id) })),
+            { text: 'Cancel', style: 'cancel' as const, onPress: () => resolve(null) },
+          ],
+          { cancelable: true, onDismiss: () => resolve(null) }
+        );
+      });
+      if (!destination) return;
+
+      noteInteractive();
+      setBusy(true);
+      try {
+        await runStudioExport(project, item, destination);
+      } catch (error) {
+        // The studio stays open with the project intact so the user can retry
+        // or change something, rather than losing the edit to a failed encode.
+        showToast(`Could not export: ${String(error)}`, 'error');
+      } finally {
+        setBusy(false);
+      }
+    },
+    [busy, runStudioExport, selected]
+  );
 
   const onCopy = async () => {
     if (!selected || busy) return;

@@ -38,6 +38,17 @@ export interface MemeExportResult {
 /** Where a finished render is sent. The render itself is destination-agnostic. */
 export type ExportDestination = 'library' | 'clipboard' | 'downloads';
 
+/**
+ * Identity of the thing that was rendered.
+ *
+ * Deliberately the render plan's own serialization, not a counter: two projects
+ * that serialize identically produce byte-identical output, so the cached
+ * render is genuinely reusable, and any difference at all invalidates it. A
+ * counter would have to be threaded through every mutation and would silently
+ * miss one; a hash would trade a real correctness guarantee for a few bytes.
+ */
+export type ExportRevision = string;
+
 export type ExportPhase =
   | { kind: 'idle' }
   | {
@@ -46,11 +57,11 @@ export type ExportPhase =
       progress: MemeExportProgress;
       /** Cancel is a REQUEST; the run is not over until the worker acknowledges. */
       cancelRequested: boolean;
-      revision: number;
+      revision: ExportRevision;
       runId: number;
     }
-  | { kind: 'ready'; result: MemeExportResult; revision: number }
-  | { kind: 'failed'; message: string; destination: ExportDestination; revision: number }
+  | { kind: 'ready'; result: MemeExportResult; revision: ExportRevision }
+  | { kind: 'failed'; message: string; destination: ExportDestination; revision: ExportRevision }
   | { kind: 'cancelled' };
 
 export interface ExportState {
@@ -66,13 +77,13 @@ export interface ExportState {
 }
 
 export type ExportEvent =
-  | { type: 'start'; destination: ExportDestination; revision: number }
+  | { type: 'start'; destination: ExportDestination; revision: ExportRevision }
   | { type: 'progress'; runId: number; progress: MemeExportProgress }
   | { type: 'succeeded'; runId: number; result: MemeExportResult }
   | { type: 'failed'; runId: number; message: string }
   | { type: 'cancel' }
   | { type: 'cancelAcknowledged'; runId: number; partialPath?: string | null }
-  | { type: 'projectChanged'; revision: number }
+  | { type: 'projectChanged'; revision: ExportRevision }
   | { type: 'consumed' }
   | { type: 'dismiss' }
   | { type: 'orphansDrained' };
@@ -115,7 +126,7 @@ export function mergeExportProgress(
 }
 
 /** The snapshot is only reusable while it still describes the current project. */
-export function reusableResult(state: ExportState, revision: number): MemeExportResult | null {
+export function reusableResult(state: ExportState, revision: ExportRevision): MemeExportResult | null {
   return state.phase.kind === 'ready' && state.phase.revision === revision ? state.phase.result : null;
 }
 
