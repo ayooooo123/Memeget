@@ -1,0 +1,86 @@
+{
+  "schemaVersion": 1,
+  "reviewedAtUtc": "2026-08-02T06:53:49Z",
+  "reviewMethod": "Vision review of full-cadence chronological strips containing every JPEG frame, arranged one row per second and assessed for normal-playback continuity, coverage, pumping, and false positives.",
+  "personalMedia": false,
+  "reviews": [
+    {
+      "fixtureId": "one_person",
+      "workingSize": 256,
+      "maskFps": 8,
+      "fileName": "video-segmentation-playback-one_person-256-8fps.zip",
+      "sha256": "02068583091ade36f8878ac29dedc9f8f5549f103ae050a60d87f02d63a4e0da",
+      "verdict": "FAIL",
+      "observedDefects": [
+        "Frequent person-mask dropouts and adjacent-frame on/off flicker.",
+        "Abrupt area and boundary pumping from absent or partial coverage to large blobs.",
+        "False-positive mask regions on curb, grass, and landscaping separate from the person."
+      ]
+    },
+    {
+      "fixtureId": "two_people_crossing_occluding",
+      "workingSize": 256,
+      "maskFps": 8,
+      "fileName": "video-segmentation-playback-two_people_crossing_occluding-256-8fps.zip",
+      "sha256": "4867e23ff54a1c74d480c02e847c90e6103922257eb1e1c5a156d89d768b9091",
+      "verdict": "FAIL",
+      "observedDefects": [
+        "Most visible pedestrians remain unmasked or only partially covered through crossings.",
+        "Mask fragments appear and disappear between adjacent frames instead of maintaining coverage through occlusion.",
+        "Large false-positive regions occur on the ground, path, grass, and right image edge."
+      ]
+    },
+    {
+      "fixtureId": "fast_motion",
+      "workingSize": 256,
+      "maskFps": 8,
+      "fileName": "video-segmentation-playback-fast_motion-256-8fps.zip",
+      "sha256": "9a80c106cf5db239cdb4ceb1ee6b54c52aee3377630b62e83bcbb2c89e3ea0e9",
+      "verdict": "FAIL",
+      "observedDefects": [
+        "Most visible pedestrians are unmasked or receive sparse, misaligned partial coverage.",
+        "Large right and lower-edge blobs repeatedly grow, shrink, and disappear between adjacent frames.",
+        "Persistent false-positive masks occur on the dark border, grass, pavement, and background objects."
+      ]
+    },
+    {
+      "fixtureId": "one_person",
+      "workingSize": 512,
+      "maskFps": 15,
+      "fileName": "video-segmentation-playback-one_person-512-15fps.zip",
+      "sha256": "b88b00d5c8e2ad2c30762807271c59ce13fba83ba3ccbefd111eae378b5581a3",
+      "verdict": "FAIL",
+      "observedDefects": [
+        "Frequent person-mask dropouts and frame-to-frame flicker remain at the larger working size.",
+        "Person coverage is partial and pumps in size and shape across adjacent frames.",
+        "Large false-positive regions recur at the grass and sidewalk boundary."
+      ]
+    },
+    {
+      "fixtureId": "two_people_crossing_occluding",
+      "workingSize": 512,
+      "maskFps": 15,
+      "fileName": "video-segmentation-playback-two_people_crossing_occluding-512-15fps.zip",
+      "sha256": "b6295ab26729599e22aefc795a19347de24c222f8ec7045d8e64b57b5a160338",
+      "verdict": "FAIL",
+      "observedDefects": [
+        "Several visible pedestrians remain unmasked during crossings and clustered occlusion.",
+        "Adjacent frames show dropouts and short merged blobs rather than stable subject-shaped coverage.",
+        "Mask size pumps and false-positive patches appear on pavement and adjacent non-person areas."
+      ]
+    },
+    {
+      "fixtureId": "fast_motion",
+      "workingSize": 512,
+      "maskFps": 15,
+      "fileName": "video-segmentation-playback-fast_motion-512-15fps.zip",
+      "sha256": "25827716fd35fcdd1dd6a3f41b705479668b2c96c7ee25cdd79d6d2dbca9a139",
+      "verdict": "FAIL",
+      "observedDefects": [
+        "Many pedestrians remain entirely unmasked; detected coverage is tiny, partial, or misaligned.",
+        "Frequent adjacent-frame dropouts and border-area pumping remain visible at 15 FPS.",
+        "False-positive blobs and strips recur on grass, paths, and image borders."
+      ]
+    }
+  ]
+}

@@ -1,0 +1,114 @@
+{
+  "version": 1,
+  "id": "gate-transparent",
+  "timeUs": 0,
+  "source": {
+    "uri": "SOURCE_URI",
+    "widthPx": 640,
+    "heightPx": 400,
+    "rotation": 0,
+    "flipX": false,
+    "flipY": false,
+    "crop": {
+      "x": 0,
+      "y": 0,
+      "width": 1,
+      "height": 1
+    }
+  },
+  "output": {
+    "widthPx": 640,
+    "heightPx": 400,
+    "fullWidthPx": 640,
+    "fullHeightPx": 400,
+    "downscaled": false,
+    "scale": 1,
+    "maxPixels": 16000000
+  },
+  "background": {
+    "mode": "transparent",
+    "color": "#00000000",
+    "assetUri": null,
+    "blurScale": 0
+  },
+  "layers": [
+    {
+      "kind": "cover",
+      "id": "cover-solid",
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "width": 160,
+        "height": 100
+      },
+      "mode": "solid",
+      "color": "#FF00FF",
+      "pixelSizePx": 8
+    },
+    {
+      "kind": "text",
+      "id": "text-burn",
+      "spec": {
+        "id": "text-burn",
+        "preset": "impact",
+        "text": "HELLO",
+        "displayText": "HELLO",
+        "normalized": {
+          "center": {
+            "x": 0.5,
+            "y": 0.5
+          },
+          "width": 0.9,
+          "fontSize": 0.18
+        },
+        "canvas": {
+          "widthDip": 640,
+          "heightDip": 400,
+          "centerDip": {
+            "x": 320,
+            "y": 200
+          },
+          "wrapWidthDip": 576,
+          "fontSizeDip": 72
+        },
+        "transform": {
+          "scale": 1,
+          "rotationDegrees": 0,
+          "opacity": 1
+        },
+        "font": {
+          "family": "Anton",
+          "weight": "900",
+          "lineHeightRatio": 0.95,
+          "letterSpacingEm": 0.018,
+          "includeFontPadding": false
+        },
+        "align": "center",
+        "fill": {
+          "color": "#FFFFFF",
+          "opacity": 1
+        },
+        "outline": {
+          "color": "#000000",
+          "widthDip": 4
+        },
+        "backing": {
+          "color": null,
+          "radiusDip": 0,
+          "paddingXDip": 0,
+          "paddingYDip": 0,
+          "tail": "none"
+        },
+        "layout": {
+          "lines": [],
+          "widthDip": 576,
+          "heightDip": 0,
+          "lineHeightDip": 68.4
+        },
+        "diagnostics": {
+          "androidStaticLayoutToleranceDip": 2
+        }
+      }
+    }
+  ]
+}

@@ -20,11 +20,114 @@ export interface ExtractedAudio {
   durationSec: number;
 }
 
+export interface MediaProbeResult {
+  kind: 'image' | 'video';
+  width: number;
+  height: number;
+  rotationDegrees: 0 | 90 | 180 | 270;
+  // Apply flips in encoded-pixel space before the clockwise rotation. Together
+  // these fields preserve every EXIF orientation, including mirrored variants.
+  flipX: boolean;
+  flipY: boolean;
+  durationUs: number | null;
+  frameRate: number | null;
+  videoMime: string | null;
+  audioMime: string | null;
+  hasAudio: boolean;
+  seekable: boolean;
+  byteSize: number | null;
+  modifiedTimeMs: number | null;
+  stableId: string;
+  displayName: string | null;
+}
+export interface NativeMemeTextLayoutLine {
+  text: string;
+  start: number;
+  end: number;
+  widthDip: number;
+  topDip: number;
+  baselineDip: number;
+}
+
+export interface NativeMemeTextLayoutResult {
+  widthDip: number;
+  heightDip: number;
+  includeFontPadding: false;
+  toleranceDip: number;
+  lines: NativeMemeTextLayoutLine[];
+}
+
+export interface NativeNormalizedPoint {
+  x: number;
+  y: number;
+}
+
+export interface NativeNormalizedRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface NativeDetectedTextElement {
+  text: string;
+  box: NativeNormalizedRect | null;
+  cornerPoints: NativeNormalizedPoint[];
+  languages: string[];
+}
+
+export interface NativeDetectedTextLine extends NativeDetectedTextElement {
+  elements: NativeDetectedTextElement[];
+}
+
+export interface NativeDetectedTextBlock extends NativeDetectedTextElement {
+  lines: NativeDetectedTextLine[];
+}
+
+export interface NativeDetectedTextResult {
+  sourceWidth: number;
+  sourceHeight: number;
+  rotation: 0 | 90 | 180 | 270;
+  languages: string[];
+  blocks: NativeDetectedTextBlock[];
+}
+
+export interface NativeBorderColorSample {
+  hex: string;
+  sampleCount: number;
+}
+
+export interface NativeImagePixelGrid {
+  rows: number;
+  columns: number;
+  colors: string[];
+}
+
+// What a composition wants to pull an asset in for. Mirrors
+// RetainedRangeComposition.AssetRole; the names cross the bridge verbatim.
+export type CompositionAssetRole = 'TITLE_CARD' | 'REPLACEMENT_VIDEO' | 'REPLACEMENT_AUDIO';
+
+export interface CompositionAssetRequirement {
+  uri: string;
+  role: CompositionAssetRole;
+  // Stated, never sniffed: media3 guesses a still image's type from the file
+  // extension, so a mismatch between the claim and the bytes must be a
+  // rejection rather than a silent substitution.
+  mimeType?: string | null;
+}
+
+export interface CompositionAssetRejection {
+  uri: string;
+  role: CompositionAssetRole;
+  reason: string;
+}
+
 interface MemegetBgNative {
   getPower(): NativePower;
   startForeground(title: string, text: string, progress: number, total: number): void;
   stopForeground(): void;
   getModifiedTime(uri: string): number | null;
+  probeMedia(source: string): Promise<MediaProbeResult>;
   extractAudio(source: string, maxSeconds: number): Promise<ExtractedAudio | null>;
   extractVideoFrame(source: string, seconds: number): Promise<string | null>;
   extractVideoFramePlayer(source: string, seconds: number): Promise<string | null>;
@@ -37,8 +140,36 @@ interface MemegetBgNative {
     coverBottom: boolean
   ): Promise<string>;
   transcodeVideoToMp4(source: string): Promise<string>;
+  renderImageProject(planJson: string): Promise<string>;
+  inspectCompositionAssets(requirementsJson: string): Promise<CompositionAssetRejection[]>;
   copyFileToClipboard(uri: string, name: string, mimeType: string): Promise<void>;
   saveToDownloads(srcPath: string, name: string, mimeType: string): Promise<string>;
+  measureMemeTextLayout(
+    text: string,
+    fontFamily: string,
+    fontWeight: number,
+    fontSizeDip: number,
+    lineHeightDip: number,
+    letterSpacingEm: number,
+    widthDip: number,
+    align: string
+  ): Promise<NativeMemeTextLayoutResult>;
+  detectTextRegions(source: string): Promise<NativeDetectedTextResult>;
+  sampleImageBorderColor(
+    source: string,
+    x: number,
+    y: number,
+    width: number,
+    height: number
+  ): Promise<NativeBorderColorSample>;
+  sampleImagePixelGrid(
+    source: string,
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+    pixelSize: number
+  ): Promise<NativeImagePixelGrid>;
 }
 
 // Optional on purpose: in Expo Go, in the JS-only dev flow, or before a native
@@ -91,6 +222,53 @@ export function getFileModifiedTime(uri: string): number | null {
   } catch {
     return null;
   }
+}
+
+// Probe local media in native code without copying or uploading it. A missing
+// native module is the only null case; readable source/decoder failures reject.
+export async function probeMedia(source: string): Promise<MediaProbeResult | null> {
+  if (!native) return null;
+  return native.probeMedia(source);
+}
+
+export const textDetectionNativeAvailable =
+  native != null && typeof native.detectTextRegions === 'function';
+export const borderColorSamplerNativeAvailable =
+  native != null && typeof native.sampleImageBorderColor === 'function';
+
+export async function detectTextRegions(source: string): Promise<NativeDetectedTextResult | null> {
+  if (!native || typeof native.detectTextRegions !== 'function') return null;
+  return native.detectTextRegions(source);
+}
+
+export async function sampleImageBorderColor(
+  source: string,
+  rect: NativeNormalizedRect
+): Promise<NativeBorderColorSample | null> {
+  if (!native || typeof native.sampleImageBorderColor !== 'function') return null;
+  return native.sampleImageBorderColor(
+    source,
+    rect.x,
+    rect.y,
+    rect.width,
+    rect.height
+  );
+}
+
+export async function sampleImagePixelGrid(
+  source: string,
+  rect: NativeNormalizedRect,
+  pixelSize: number
+): Promise<NativeImagePixelGrid | null> {
+  if (!native || typeof native.sampleImagePixelGrid !== 'function') return null;
+  return native.sampleImagePixelGrid(
+    source,
+    rect.x,
+    rect.y,
+    rect.width,
+    rect.height,
+    pixelSize
+  );
 }
 
 // True once the native audio decoder is built into the app — the audio
@@ -148,6 +326,64 @@ export const mediaEditorNativeAvailable =
   native != null &&
   typeof native.renderMemeVariation === 'function' &&
   typeof native.transcodeVideoToMp4 === 'function';
+
+// True once the native still renderer is built into the app. The studio gates
+// its export button on this rather than silently producing nothing.
+export const imageRendererNativeAvailable =
+  native != null && typeof native.renderImageProject === 'function';
+
+// Render a full-resolution PNG from a serialized image render plan (see
+// src/memeImageRenderCore.ts) and return its file:// path in the app cache —
+// the caller owns moving or deleting it. Resolves null ONLY when the native
+// module is absent; a genuine decode/draw/encode failure rejects with the
+// native reason so the studio can show it instead of a silent no-op.
+export async function renderImageProject(planJson: string): Promise<string | null> {
+  if (!native || typeof native.renderImageProject !== 'function') return null;
+  return native.renderImageProject(planJson);
+}
+
+// True once the native composition asset guard is built in. Without it the
+// studio has no way to know whether a title card is really decodable, so it
+// gates on this rather than letting the exporter discover it.
+export const compositionAssetGuardNativeAvailable =
+  native != null && typeof native.inspectCompositionAssets === 'function';
+
+// Header-decode every asset a video composition wants to reference and return
+// the ones it cannot honour, each with a sentence to show the user. An empty
+// array means every asset checked out; null means the native module is absent,
+// which is NOT the same as "all good" — gate on
+// `compositionAssetGuardNativeAvailable` to tell them apart. A malformed
+// requirement list rejects.
+export async function inspectCompositionAssets(
+  requirements: readonly CompositionAssetRequirement[]
+): Promise<CompositionAssetRejection[] | null> {
+  if (!native || typeof native.inspectCompositionAssets !== 'function') return null;
+  if (requirements.length === 0) return [];
+  return native.inspectCompositionAssets(JSON.stringify(requirements));
+}
+
+export async function measureMemeTextLayout(input: {
+  text: string;
+  fontFamily: string;
+  fontWeight: number;
+  fontSizeDip: number;
+  lineHeightDip: number;
+  letterSpacingEm: number;
+  widthDip: number;
+  align: string;
+}): Promise<NativeMemeTextLayoutResult | null> {
+  if (!native || typeof native.measureMemeTextLayout !== 'function') return null;
+  return native.measureMemeTextLayout(
+    input.text,
+    input.fontFamily,
+    input.fontWeight,
+    input.fontSizeDip,
+    input.lineHeightDip,
+    input.letterSpacingEm,
+    input.widthDip,
+    input.align
+  );
+}
 
 export async function renderMemeVariation(
   source: string,

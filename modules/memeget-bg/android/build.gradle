@@ -15,12 +15,24 @@ expoModule {
 // dependency. We only need to declare our namespace and any extra deps.
 android {
   namespace 'expo.modules.memegetbg'
+  defaultConfig {
+    testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
+  }
+  sourceSets {
+    androidTest {
+      assets.srcDir 'src/androidTest/fixtures'
+    }
+  }
 }
 
 dependencies {
   implementation 'androidx.core:core-ktx:1.13.1'
   // Read a linked SAF document's lastModified() for the library's recency sort.
   implementation 'androidx.documentfile:documentfile:1.0.1'
+
+  // Match expo-text-extractor's resolved on-device OCR stack exactly. This
+  // module needs a direct compile dependency to expose real OCR geometry.
+  implementation 'com.google.android.gms:play-services-mlkit-text-recognition:19.0.1'
 
   // ExoPlayer frame extraction for the last-resort poster path
   // (VideoPlayerFrameExtractor). Pinned to the SAME media3 version expo-video
@@ -30,4 +42,11 @@ dependencies {
   implementation 'androidx.media3:media3-transformer:1.9.0'
   implementation 'androidx.media3:media3-effect:1.9.0'
   implementation 'androidx.media3:media3-inspector:1.9.0'
+
+  // Task 0.2 device gate only. Production segmentation is intentionally not
+  // implemented until the measured gate accepts a configuration.
+  androidTestImplementation 'com.google.mediapipe:tasks-vision:0.10.29'
+
+  androidTestImplementation 'androidx.test:runner:1.6.2'
+  androidTestImplementation 'androidx.test.ext:junit:1.2.1'
 }

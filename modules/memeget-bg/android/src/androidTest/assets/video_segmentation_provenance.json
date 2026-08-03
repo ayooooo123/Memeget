@@ -1,0 +1,85 @@
+{
+  "schemaVersion": 1,
+  "tasksVision": {
+    "group": "com.google.mediapipe",
+    "artifact": "tasks-vision",
+    "version": "0.10.29",
+    "pomUrl": "https://dl.google.com/dl/android/maven2/com/google/mediapipe/tasks-vision/0.10.29/tasks-vision-0.10.29.pom",
+    "pomAsset": "tasks-vision-0.10.29.pom",
+    "pomSha256": "718c0702d999da9581753b883e3ebdad993e1ba01bfd1e7715187f9050906428",
+    "license": "Apache-2.0",
+    "licenseUrl": "https://www.apache.org/licenses/LICENSE-2.0.txt",
+    "licenseAsset": "Apache-2.0.txt",
+    "licenseAssetSha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+  },
+  "model": {
+    "asset": "selfie_segmenter_float16_v1.tflite",
+    "name": "MediaPipe SelfieSegmenter (square)",
+    "version": "1",
+    "downloadUrl": "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/1/selfie_segmenter.tflite",
+    "sha256": "191ac9529ae506ee0beefa6b2c945a172dab9d07d1e802a290a4e4038226658b",
+    "bytes": 249537,
+    "inputShape": "256x256x3",
+    "quantization": "float16",
+    "output": "single person-confidence mask",
+    "license": "Apache-2.0",
+    "licenseAsset": "Apache-2.0.txt",
+    "licenseAssetSha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+    "licenseUrl": "https://www.apache.org/licenses/LICENSE-2.0.txt",
+    "modelCardUrl": "https://storage.googleapis.com/mediapipe-assets/Model%20Card%20MediaPipe%20Selfie%20Segmentation.pdf",
+    "modelCardAsset": "selfie-segmentation-model-card.pdf",
+    "modelCardSha256": "ef2e8d350891ba71699ac1e079658e697fc8d48c0f9253922990e907ecdade60",
+    "officialCatalogUrl": "https://developers.google.com/edge/mediapipe/solutions/vision/image_segmenter#models"
+  },
+  "fixtureSource": {
+    "personalMedia": false,
+    "description": "Public OpenCV pedestrian sample vtest.avi; no user or maintainer media and no identities are used.",
+    "downloadUrl": "https://raw.githubusercontent.com/opencv/opencv/4.12.0/samples/data/vtest.avi",
+    "sha256": "45cddc9490be69345cbdab64ca583be65987e864ca408038e648db99e10516cf",
+    "license": "Apache-2.0",
+    "licenseUrl": "https://raw.githubusercontent.com/opencv/opencv/4.12.0/LICENSE",
+    "licenseAsset": "opencv-4.12.0-LICENSE.txt",
+    "licenseAssetSha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+  },
+  "generator": {
+    "script": "fixtures/generate-video-segmentation-fixtures.sh",
+    "scriptAsset": "generate-video-segmentation-fixtures.sh",
+    "scriptSha256": "e2d1f046c00f4e7fd1bbaf6775ebd079266ba0e61f95c2ad5fdf8da8404f7a0b",
+    "ffmpegVersion": "8.1.2-tessus",
+    "downloadUrl": "https://evermeet.cx/ffmpeg/ffmpeg-8.1.2.zip",
+    "archiveSha256": "e91df72a1ee7c26606f90dd2dd4dcccc6a75140ff9ea6fdd50faae828b82ba69",
+    "binarySha256": "60725ea0467ccaf900bf294d3567c302a802dc661f03bdde6aa7ecc9ccf05c4f"
+  },
+  "fixtures": [
+    {
+      "id": "one_person",
+      "asset": "video_segmentation_one_person_10s_720p.mp4",
+      "sha256": "4cae38ceb3c6ff8faab4026b5ff3cb8907ca381e4b44bec47815471e6446453f",
+      "bytes": 899703,
+      "width": 1280,
+      "height": 720,
+      "nominalDurationMs": 10000,
+      "description": "One visible pedestrian, source seconds 40-47 slowed to ten seconds and tightly cropped; dark synthetic side padding."
+    },
+    {
+      "id": "two_people_crossing_occluding",
+      "asset": "video_segmentation_two_crossing_10s_720p.mp4",
+      "sha256": "12c6173e83dc4ede1b4c016b16612df7b16932243c09cbe1d681a4c1735166d3",
+      "bytes": 2641403,
+      "width": 1280,
+      "height": 720,
+      "nominalDurationMs": 10000,
+      "description": "Source seconds 65-75 with multiple pedestrians including observable crossings and partial occlusion; scaled and padded to 720p."
+    },
+    {
+      "id": "fast_motion",
+      "asset": "video_segmentation_fast_motion_10s_720p.mp4",
+      "sha256": "f4ff899061b78f5fb204daf68ffe25289d1eba84528ed424e83255995d8b0f67",
+      "bytes": 3421846,
+      "width": 1280,
+      "height": 720,
+      "nominalDurationMs": 10000,
+      "description": "Source seconds 20-60 accelerated four times, then scaled and padded to 720p."
+    }
+  ]
+}
