@@ -346,6 +346,102 @@ export function exportSummary(
   return `${head} — ${result.warnings.join('; ')}`;
 }
 
+export interface ExportRunEffects {
+  /** Produce the file. Returns its cache path, or null when unavailable. */
+  render: () => Promise<string | null>;
+  /** Describe the file that `render` just produced. */
+  describe: (path: string) => MemeExportResult;
+  /** Put it where the user asked. Throwing here is a real failure. */
+  deliver: (result: MemeExportResult) => Promise<void>;
+  /** Delete a cache file that nobody owns any more. Must not throw. */
+  sweep: (path: string) => Promise<void>;
+}
+
+/**
+ * One export, start to finish, with the effects injected.
+ *
+ * The interesting behaviour is not in any single transition but in the
+ * ORCHESTRATION — render only when the cache misses, deliver, then sweep what
+ * the reducer orphaned. Left inline in the component that sequence is
+ * unverifiable without a device, and it is exactly where a leak or a
+ * double-render would hide. So it lives here and takes its side effects as
+ * arguments.
+ *
+ * Returns the next state; the caller holds it. Rethrows a render or delivery
+ * failure AFTER recording it, so the UI can show an error while the machine
+ * stays consistent.
+ */
+export async function runExport(
+  state: ExportState,
+  input: { destination: ExportDestination; revision: ExportRevision },
+  effects: ExportRunEffects
+): Promise<ExportState> {
+  let next = state;
+  const dispatch = (event: ExportEvent) => {
+    next = memeExportReducer(next, event);
+  };
+
+  let result = reusableResult(next, input.revision);
+  if (!result) {
+    dispatch({ type: 'start', destination: input.destination, revision: input.revision });
+    const phase = next.phase;
+    if (phase.kind !== 'running') {
+      // Something else is already running; refusing is the reducer's decision
+      // and not an error to surface.
+      return next;
+    }
+    const { runId } = phase;
+    try {
+      const path = await effects.render();
+      if (!path) throw new Error('This build cannot render');
+      result = effects.describe(path);
+      dispatch({ type: 'succeeded', runId, result });
+    } catch (error) {
+      dispatch({ type: 'failed', runId, message: String(error) });
+      next = await drainOrphans(next, effects.sweep);
+      throw error;
+    }
+    // Cancel may have landed while the render was in flight, in which case the
+    // reducer has already discarded the result and orphaned its file.
+    if (next.phase.kind !== 'ready') return drainOrphans(next, effects.sweep);
+  }
+
+  try {
+    await effects.deliver(result);
+  } finally {
+    next = await drainOrphans(next, effects.sweep);
+  }
+  return next;
+}
+
+/**
+ * Delete everything the reducer has disowned, and tell it they are gone.
+ *
+ * Draining is marked BEFORE the deletes await so a concurrent run cannot see
+ * the same paths and delete them twice.
+ */
+export async function drainOrphans(
+  state: ExportState,
+  sweep: (path: string) => Promise<void>
+): Promise<ExportState> {
+  if (state.orphans.length === 0) return state;
+  const paths = state.orphans;
+  const next = memeExportReducer(state, { type: 'orphansDrained' });
+  await Promise.all(paths.map((path) => sweep(path)));
+  return next;
+}
+
+/**
+ * Everything still on disk when the editor closes.
+ *
+ * The kept render is deliberately not swept on delivery — that is what makes a
+ * second destination instant — so closing is the moment it stops being
+ * reachable and starts being garbage.
+ */
+export function abandonedPaths(state: ExportState): string[] {
+  return [...state.orphans, ...(state.phase.kind === 'ready' ? [state.phase.result.path] : [])];
+}
+
 /** A skipped layer is a warning, never a silent omission. */
 export function skippedLayerWarning(count: number): string[] {
   if (count <= 0) return [];
