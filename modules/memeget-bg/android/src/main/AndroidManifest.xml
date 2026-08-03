@@ -7,6 +7,17 @@
   <uses-permission android:name="android.permission.WAKE_LOCK" />
 
   <application>
+    <!-- Ask Play Store to prefetch the ML Kit subject segmentation model at
+         install time. This is the cheap path and it covers Play Store installs
+         only — a sideloaded APK (which is how this app is installed) never gets
+         it, so MemeStillSubjectSegmenter also requests the optional module
+         explicitly through ModuleInstallClient. Both, not either: the manifest
+         declaration means the model is usually already there, and the explicit
+         request means the feature still works when it is not. -->
+    <meta-data
+      android:name="com.google.mlkit.vision.DEPENDENCIES"
+      android:value="subject_segment" />
+
     <service
       android:name="expo.modules.memegetbg.KeepAliveService"
       android:exported="false"

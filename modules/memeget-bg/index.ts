@@ -122,6 +122,70 @@ export interface CompositionAssetRejection {
   reason: string;
 }
 
+// One materialized still-image cutout: subject pixels with alpha, already
+// cropped to the subject's own bounds and written to the cache as a PNG.
+//
+// The bitmap deliberately does NOT cross the bridge. A 16 MP alpha channel in
+// the JS heap is how this app OOM'd before, so JS holds this reference plus
+// normalized geometry and the renderer reads the file natively.
+export interface NativeSubjectCutout {
+  id: string;
+  // null for the combined "all subjects" cutout.
+  subjectIndex: number | null;
+  cutoutUri: string;
+  // Where the cutout sits in the EXIF-oriented source frame.
+  bounds: NativeNormalizedRect;
+  widthPx: number;
+  heightPx: number;
+  // Fraction of the frame the subject's alpha covers, measured natively.
+  coverage: number;
+  bytes: number;
+}
+
+export interface NativeSubjectCutoutResult {
+  requestId: string;
+  sourceWidth: number;
+  sourceHeight: number;
+  // Size segmentation actually ran at, after the native memory ceiling.
+  workingWidth: number;
+  workingHeight: number;
+  sampleSize: number;
+  estimatedPeakBytes: number;
+  ceilingBytes: number;
+  directory: string;
+  // null when the image genuinely has no subject. That is a RESULT, not an
+  // error — the promise resolves.
+  combined: NativeSubjectCutout | null;
+  subjects: NativeSubjectCutout[];
+  droppedSubjects: number;
+}
+
+export interface SubjectSegmentationProgressEvent {
+  requestId: string;
+  phase: 'downloading' | 'segmenting';
+  bytesDownloaded?: number;
+  totalBytes?: number;
+}
+
+// One progress report from a running video export. `stage` is an
+// `ExportStage` from src/memeExportCore.ts; `progress` is null whenever media3
+// genuinely cannot report a fraction on this device, which is not the same as
+// zero and must not be drawn as an empty bar.
+export interface NativeVideoExportProgressEvent {
+  exportId: string;
+  stage: string;
+  progress: number | null;
+  detail: string;
+}
+
+export interface NativeVideoExportResult {
+  // file:// path of the finished MP4 in the app cache. The caller owns deleting it.
+  path: string;
+  // Truths the render had to bend: a codec or frame size the device would not
+  // give us. Empty means the file is exactly what was asked for.
+  warnings: string[];
+}
+
 interface MemegetBgNative {
   getPower(): NativePower;
   startForeground(title: string, text: string, progress: number, total: number): void;
@@ -170,6 +234,23 @@ interface MemegetBgNative {
     height: number,
     pixelSize: number
   ): Promise<NativeImagePixelGrid>;
+  subjectSegmentationModuleInstalled(): Promise<boolean>;
+  segmentImageSubjects(source: string, requestId: string): Promise<NativeSubjectCutoutResult>;
+  cancelSubjectSegmentation(requestId: string): void;
+  releaseSubjectCutouts(requestId: string): Promise<boolean>;
+  sweepSubjectCutouts(): Promise<number>;
+  exportVideoProject(planJson: string, exportId: string): Promise<NativeVideoExportResult>;
+  cancelVideoExport(exportId: string): boolean;
+  // Expo native modules are EventEmitters; the cutout download and the video
+  // export report through this rather than being polled.
+  addListener(
+    event: 'onSubjectSegmentationProgress',
+    listener: (payload: SubjectSegmentationProgressEvent) => void
+  ): { remove(): void };
+  addListener(
+    event: 'onVideoExportProgress',
+    listener: (payload: NativeVideoExportProgressEvent) => void
+  ): { remove(): void };
 }
 
 // Optional on purpose: in Expo Go, in the JS-only dev flow, or before a native
@@ -442,3 +523,128 @@ export const fileClipboardAvailable =
   native != null && typeof native.copyFileToClipboard === 'function';
 
 export const downloadsAvailable = native != null && typeof native.saveToDownloads === 'function';
+
+// Whether still-image subject cutouts exist in this build at all.
+//
+// Same contract as the two flags above, for the same reason: `segmentImageSubjects`
+// resolves null without the native module, and a Cutout button that silently
+// does nothing is worse than one that is absent. Note what this does NOT say —
+// whether the ML Kit model is on the device. That is a separate, changeable
+// fact; ask `subjectSegmentationModuleInstalled()`.
+export const subjectSegmentationAvailable =
+  native != null && typeof native.segmentImageSubjects === 'function';
+
+// Whether Play services already holds the segmentation model. False means the
+// first cutout will download it (~a few MB), which is a user-visible wait the
+// studio announces instead of hiding behind a spinner. Resolves false when the
+// native module is missing, and also when the probe itself cannot run — both
+// mean "assume a download", which is the safe thing to tell the user.
+export async function subjectSegmentationModuleInstalled(): Promise<boolean> {
+  if (!native || typeof native.subjectSegmentationModuleInstalled !== 'function') return false;
+  return native.subjectSegmentationModuleInstalled();
+}
+
+// Segment the subjects of a local still image, materializing one cutout PNG per
+// subject plus a combined one under a per-request cache directory the caller
+// releases with `releaseSubjectCutouts`.
+//
+// Resolves null ONLY when the native module is absent. A real failure REJECTS
+// with one of the E_CUTOUT_* codes so the caller can offer the right remedy
+// (see classifyCutoutFailure in src/memeCutoutCore.ts) — and an image with no
+// subject RESOLVES with `combined: null`, because "nothing to cut out" is an
+// answer, not an error.
+export async function segmentImageSubjects(
+  source: string,
+  requestId: string
+): Promise<NativeSubjectCutoutResult | null> {
+  if (!native || typeof native.segmentImageSubjects !== 'function') return null;
+  return native.segmentImageSubjects(source, requestId);
+}
+
+// Ask an in-flight segmentation to stop. Fire-and-forget: the run rejects with
+// E_CUTOUT_CANCELLED at its next checkpoint, which is what the caller waits on.
+export function cancelSubjectSegmentation(requestId: string): void {
+  if (!native || typeof native.cancelSubjectSegmentation !== 'function') return;
+  native.cancelSubjectSegmentation(requestId);
+}
+
+// Delete one request's cutout files. Returns false when there was nothing to
+// delete (or no native module), true when a directory went away.
+export async function releaseSubjectCutouts(requestId: string): Promise<boolean> {
+  if (!native || typeof native.releaseSubjectCutouts !== 'function') return false;
+  return native.releaseSubjectCutouts(requestId);
+}
+
+// Drop cutout directories old enough that no session can still be using them,
+// returning how many went away. Cheap enough to call when the studio opens.
+export async function sweepSubjectCutouts(): Promise<number> {
+  if (!native || typeof native.sweepSubjectCutouts !== 'function') return 0;
+  return native.sweepSubjectCutouts();
+}
+
+// Subscribe to model-download / segmentation progress. Returns a no-op
+// unsubscribe when events are unavailable, so callers never branch on it.
+export function addSubjectSegmentationProgressListener(
+  listener: (payload: SubjectSegmentationProgressEvent) => void
+): { remove(): void } {
+  if (!native || typeof native.addListener !== 'function') return { remove() {} };
+  return native.addListener('onSubjectSegmentationProgress', listener);
+}
+
+// True once the native video exporter is built in. Without it the studio has
+// no way to render a video project, so it gates its export button on this
+// rather than offering one that silently does nothing.
+export const videoExporterNativeAvailable =
+  native != null && typeof native.exportVideoProject === 'function';
+
+// The rejection code the native exporter uses for a cancel. Cancelling is a
+// normal outcome, so the caller has to be able to tell it from a failure after
+// the reason has been flattened into an Error.
+export const VIDEO_EXPORT_CANCELLED_CODE = 'E_VIDEO_EXPORT_CANCELLED';
+
+export function isVideoExportCancellation(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) return false;
+  if ('code' in error && error.code === VIDEO_EXPORT_CANCELLED_CODE) return true;
+  // Expo flattens the code into the message on some paths, and a cancel that
+  // reads as a failure shows the user a red error for something they asked for.
+  return 'message' in error && String(error.message).includes(VIDEO_EXPORT_CANCELLED_CODE);
+}
+
+// Render a video composition plan (src/memeVideoCompositionCore.ts) to an MP4
+// in the app cache. Resolves ONLY when the native side has verified a complete
+// file; rejects once on failure or cancellation. Null means the native module
+// isn't built in — gate on `videoExporterNativeAvailable` to tell that apart
+// from a render that failed.
+//
+// `exportId` is the handle `cancelVideoExport` needs, and the progress
+// subscription is scoped to this call: it is removed on every settle, so a
+// finished export can never move a later run's progress bar.
+export async function exportVideoProject(
+  planJson: string,
+  exportId: string,
+  onProgress?: (event: NativeVideoExportProgressEvent) => void
+): Promise<NativeVideoExportResult | null> {
+  if (!native || typeof native.exportVideoProject !== 'function') return null;
+  const subscription =
+    onProgress && typeof native.addListener === 'function'
+      ? native.addListener('onVideoExportProgress', (event) => {
+          if (event?.exportId === exportId) onProgress(event);
+        })
+      : null;
+  try {
+    return await native.exportVideoProject(planJson, exportId);
+  } finally {
+    subscription?.remove();
+  }
+}
+
+// Ask a running export to stop. False means there was nothing to cancel; the
+// export's own promise is what reports that it finished unwinding.
+export function cancelVideoExport(exportId: string): boolean {
+  if (!native || typeof native.cancelVideoExport !== 'function') return false;
+  try {
+    return native.cancelVideoExport(exportId) === true;
+  } catch {
+    return false;
+  }
+}
