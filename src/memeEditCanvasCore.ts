@@ -2,6 +2,7 @@ import {
   applyProjectAction,
   beginProjectTransaction,
   commitProjectTransaction,
+  isLayerActiveAt,
   redoProjectHistory,
   undoProjectHistory,
   type MemeEditLayer,
@@ -81,12 +82,39 @@ export interface CapturedTransformGesture {
 
 export type ProjectHistoryCommand = 'undo' | 'redo';
 
-export type MemeEditToolId = 'layers' | 'text' | 'transform' | 'replace-text' | 'timeline' | 'audio';
+export type MemeEditToolId = 'layers' | 'text' | 'transform' | 'replace-text' | 'timeline' | 'motion' | 'audio';
 
 export function memeEditToolsForSource(kind: MemeEditProject['source']['kind']): MemeEditToolId[] {
   return kind === 'image'
     ? ['layers', 'text', 'transform', 'replace-text']
-    : ['layers', 'text', 'timeline', 'audio'];
+    : ['layers', 'text', 'timeline', 'motion', 'audio'];
+}
+
+// One 60fps frame. Below this a report is decoder jitter rather than a new
+// frame, and re-evaluating every overlay for it buys nothing visible.
+const PLAYHEAD_DEAD_BAND_US = 16_667;
+
+/**
+ * The preview playhead after a player time report. This is the ONLY thing that
+ * moves it: the Before/After hold is not an input here, which is what makes
+ * releasing the hold land on the frame it hid rather than on a reset player.
+ */
+export function nextCanvasPlayheadUs(
+  currentUs: number,
+  reportedUs: number,
+  durationUs: number | null
+): number {
+  const boundedUs = durationUs === null || durationUs <= 0 ? reportedUs : Math.min(durationUs, reportedUs);
+  return Math.abs(currentUs - boundedUs) < PLAYHEAD_DEAD_BAND_US ? currentUs : boundedUs;
+}
+
+/**
+ * Whether an overlay is off screen at this instant. Before/After is a pure
+ * render-time answer laid over the layer's own active range — it suppresses
+ * drawing and nothing else.
+ */
+export function canvasLayerHidden(layer: MemeEditLayer, timeUs: number, before: boolean): boolean {
+  return before || !isLayerActiveAt(layer, timeUs);
 }
 
 export interface ProjectHistoryCommandAvailability {

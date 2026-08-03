@@ -483,7 +483,10 @@ export function outputTimeToSourceTimeUs(
   return null;
 }
 
-export function isLayerActiveAt(layer: MemeEditLayer, timeUs: number): boolean {
+// Takes only the timed part of a layer: the motion tool and the native overlay
+// evaluator both answer this question about a bare transform track, and a second
+// copy of the boundary rule is exactly the drift this contract exists to stop.
+export function isLayerActiveAt(layer: { active: TimeRangeUs | null }, timeUs: number): boolean {
   if (layer.active === null) return true;
   return timeUs >= layer.active.startUs && timeUs <= layer.active.endUs;
 }
