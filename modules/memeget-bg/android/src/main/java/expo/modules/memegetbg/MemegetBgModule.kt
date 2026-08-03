@@ -18,6 +18,7 @@ import androidx.documentfile.provider.DocumentFile
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.Promise
 import expo.modules.kotlin.modules.ModuleDefinition
+import org.json.JSONArray
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
@@ -118,6 +119,24 @@ class MemegetBgModule : Module() {
       val ctx = appContext.reactContext
         ?: throw IllegalStateException("React context unavailable")
       MemeImageRenderer.render(ctx, planJson)
+    }
+
+    // Screen the assets a video composition plan (src/memeVideoCompositionCore.ts) wants to pull
+    // in — title cards today, replacement clips and music beds as they land. Returns one entry per
+    // asset the composition cannot honour, each with a sentence the studio can show. An empty list
+    // means every asset checked out. Async because it opens and header-decodes real files.
+    AsyncFunction("inspectCompositionAssets") { requirementsJson: String ->
+      val ctx = appContext.reactContext
+        ?: throw IllegalStateException("React context unavailable")
+      RetainedRangeComposition
+        .inspectAssets(ctx, compositionAssetRequirements(requirementsJson))
+        .map { rejection ->
+          mapOf(
+            "uri" to rejection.uri,
+            "role" to rejection.role.name,
+            "reason" to rejection.reason
+          )
+        }
     }
 
     // WebM is playable in Memeget but not accepted by several mobile paste
@@ -359,6 +378,27 @@ class MemegetBgModule : Module() {
     Function("stopForeground") {
       val ctx = appContext.reactContext ?: return@Function null
       ctx.stopService(Intent(ctx, KeepAliveService::class.java))
+    }
+  }
+
+  // The JS side owns the plan shape, so the bridge only marshals: `[{uri, role, mimeType?}]`.
+  // Bounded by the composition's own item ceiling — a caller that hands over an unbounded list is
+  // asking this to header-decode an unbounded number of files on a background thread.
+  private fun compositionAssetRequirements(
+    requirementsJson: String
+  ): List<RetainedRangeComposition.AssetRequirement> {
+    val entries = JSONArray(requirementsJson)
+    require(entries.length() <= RetainedRangeComposition.MAX_SEGMENTS) {
+      "At most ${RetainedRangeComposition.MAX_SEGMENTS} assets can be inspected at once, " +
+        "got ${entries.length()}"
+    }
+    return (0 until entries.length()).map { index ->
+      val entry = entries.getJSONObject(index)
+      RetainedRangeComposition.AssetRequirement(
+        uri = entry.getString("uri"),
+        role = RetainedRangeComposition.AssetRole.valueOf(entry.getString("role")),
+        declaredMimeType = entry.optString("mimeType").ifBlank { null }
+      )
     }
   }
 }

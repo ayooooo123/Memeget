@@ -103,7 +103,24 @@ export interface NativeImagePixelGrid {
   colors: string[];
 }
 
+// What a composition wants to pull an asset in for. Mirrors
+// RetainedRangeComposition.AssetRole; the names cross the bridge verbatim.
+export type CompositionAssetRole = 'TITLE_CARD' | 'REPLACEMENT_VIDEO' | 'REPLACEMENT_AUDIO';
 
+export interface CompositionAssetRequirement {
+  uri: string;
+  role: CompositionAssetRole;
+  // Stated, never sniffed: media3 guesses a still image's type from the file
+  // extension, so a mismatch between the claim and the bytes must be a
+  // rejection rather than a silent substitution.
+  mimeType?: string | null;
+}
+
+export interface CompositionAssetRejection {
+  uri: string;
+  role: CompositionAssetRole;
+  reason: string;
+}
 
 interface MemegetBgNative {
   getPower(): NativePower;
@@ -124,6 +141,7 @@ interface MemegetBgNative {
   ): Promise<string>;
   transcodeVideoToMp4(source: string): Promise<string>;
   renderImageProject(planJson: string): Promise<string>;
+  inspectCompositionAssets(requirementsJson: string): Promise<CompositionAssetRejection[]>;
   copyFileToClipboard(uri: string, name: string, mimeType: string): Promise<void>;
   saveToDownloads(srcPath: string, name: string, mimeType: string): Promise<string>;
   measureMemeTextLayout(
@@ -322,6 +340,26 @@ export const imageRendererNativeAvailable =
 export async function renderImageProject(planJson: string): Promise<string | null> {
   if (!native || typeof native.renderImageProject !== 'function') return null;
   return native.renderImageProject(planJson);
+}
+
+// True once the native composition asset guard is built in. Without it the
+// studio has no way to know whether a title card is really decodable, so it
+// gates on this rather than letting the exporter discover it.
+export const compositionAssetGuardNativeAvailable =
+  native != null && typeof native.inspectCompositionAssets === 'function';
+
+// Header-decode every asset a video composition wants to reference and return
+// the ones it cannot honour, each with a sentence to show the user. An empty
+// array means every asset checked out; null means the native module is absent,
+// which is NOT the same as "all good" — gate on
+// `compositionAssetGuardNativeAvailable` to tell them apart. A malformed
+// requirement list rejects.
+export async function inspectCompositionAssets(
+  requirements: readonly CompositionAssetRequirement[]
+): Promise<CompositionAssetRejection[] | null> {
+  if (!native || typeof native.inspectCompositionAssets !== 'function') return null;
+  if (requirements.length === 0) return [];
+  return native.inspectCompositionAssets(JSON.stringify(requirements));
 }
 
 export async function measureMemeTextLayout(input: {
