@@ -35,11 +35,23 @@ class KeepAliveService : Service() {
     val progress = intent?.getIntExtra(EXTRA_PROGRESS, -1) ?: -1
     val total = intent?.getIntExtra(EXTRA_MAX, -1) ?: -1
 
+    // Unconditionally, and before anything else: every startForegroundService is a promise that
+    // this call happens within a few seconds, and Android kills the PROCESS when it does not -
+    // observed on a Pixel as ForegroundServiceDidNotStartInTimeException when an export was
+    // cancelled before the service had even been created. That is also why stopping goes through
+    // an intent instead of stopService: intents are ordered, so the stop cannot overtake the
+    // start it is cancelling.
     val notification = buildNotification(title, text, progress, total)
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
       startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
     } else {
       startForeground(NOTIFICATION_ID, notification)
+    }
+
+    if (intent?.action == ACTION_STOP) {
+      stopForeground(STOP_FOREGROUND_REMOVE)
+      stopSelf()
+      return START_NOT_STICKY
     }
 
     if (wakeLock == null) {
@@ -84,6 +96,8 @@ class KeepAliveService : Service() {
     const val EXTRA_TEXT = "text"
     const val EXTRA_PROGRESS = "progress"
     const val EXTRA_MAX = "max"
+    /** Intent action that ends the service, ordered behind whatever start it is cancelling. */
+    const val ACTION_STOP = "expo.modules.memegetbg.KEEP_ALIVE_STOP"
     private const val CHANNEL_ID = "memeget_bg"
     private const val NOTIFICATION_ID = 4242
     private const val MAX_WAKE_MS = 6L * 60L * 60L * 1000L // 6h, matching the FGS cap
