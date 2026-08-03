@@ -182,12 +182,18 @@ class VideoSegmentationDeviceGateTest {
     resolver.openOutputStream(uri)?.use { it.write(bytes) }
       ?: error("Could not write Downloads/$name")
 
-    // The delete above only matches rows this install still owns. Gradle uninstalls and
-    // reinstalls the instrumentation APK on every connected run, which drops that owner
-    // attribution, so an artifact left by an earlier run survives the delete and MediaStore
-    // silently de-duplicates this insert into "name (1).ext". A host-side pull of the exact
-    // name then returns the PREVIOUS run's bytes, which would be committed as if it were
-    // evidence from this run. Fail loudly rather than publish silently stale evidence.
+    // Observed behaviour, reproduced on demand: an artifact left on the device by an
+    // earlier run is NOT matched by the delete above, and MediaStore then silently
+    // de-duplicates this insert into "name (1).ext". A host-side pull of the exact name
+    // returns the PREVIOUS run's bytes, which would be committed as if it were evidence
+    // from this run. The gate JSON carries observedAtUtc, but the mask PNGs and playback
+    // archives carry no internal timestamp, so nothing about stale output looks wrong.
+    //
+    // The mechanism is NOT confirmed. "Owner attribution is dropped when Gradle uninstalls
+    // and reinstalls the instrumentation APK" is the best theory, but a file planted via
+    // adb shell was attributed to this app's uid and the delete still did not match it, so
+    // same-package ownership is demonstrably not sufficient. The guard below does not
+    // depend on knowing why; it only depends on the rename being observable.
     val publishedName = resolver.query(
       uri,
       arrayOf(MediaStore.MediaColumns.DISPLAY_NAME),
@@ -197,8 +203,13 @@ class VideoSegmentationDeviceGateTest {
     )?.use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else null }
     assertEquals(
       "MediaStore de-duplicated Downloads/$name, so a stale artifact from an earlier " +
-        "install is still on the device and this run's bytes were written elsewhere. " +
-        "Clear it first: adb shell rm -f \"/sdcard/Download/video-segmentation-*\"",
+        "run is still on the device and this run's bytes were written elsewhere. " +
+        "Publishing is partial and the device is left dirty: Downloads already holds " +
+        "this run's gate JSON, which is fresh and references all 33 artifacts, plus " +
+        "only the artifacts published before this one, mixed with stale leftovers. " +
+        "Pulling that set yields a current-looking JSON backed by incomplete and " +
+        "possibly stale evidence. Do not salvage it. Clear the device and rerun: " +
+        "adb shell rm -f \"/sdcard/Download/video-segmentation-*\"",
       name,
       publishedName
     )
