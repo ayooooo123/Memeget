@@ -130,7 +130,7 @@ export const MemeVideoAudioTool = React.memo(function MemeVideoAudioTool({
         </PressableScale>
 
         <View
-          style={[styles.sliderRow, (disabled || muted) && styles.disabledBlock]}
+          style={[styles.sliderRow, disabled && styles.disabledBlock]}
           accessibilityLabel={`Volume, ${volumeLabel}`}
         >
           <View style={styles.sliderLabels}>
