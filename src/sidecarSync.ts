@@ -73,7 +73,8 @@ export interface SidecarRestoreResult {
 
 export async function syncFolderSidecar(
   folderUri: string,
-  folderName: string
+  folderName: string,
+  opts: { onChunk?: (done: number, total: number) => void } = {}
 ): Promise<SidecarSyncResult> {
   const result: SidecarSyncResult = {
     folder: folderName,
@@ -152,7 +153,9 @@ export async function syncFolderSidecar(
 
   const groups = groupChunks(memes, Object.keys(previous?.chunks ?? {}));
   const stamps = new Map<string, ChunkStamp>();
+  let chunkIndex = 0;
   for (const [key, list] of groups) {
+    opts.onChunk?.(chunkIndex++, groups.size);
     const fileName = chunkFileName(key);
     const payload = serializeChunk(key, list);
     const stamp: ChunkStamp = {
@@ -248,21 +251,28 @@ export async function syncFolderSidecar(
 // second one.
 let inFlight: Promise<SidecarSyncResult[]> | null = null;
 
-export function syncAllSidecars(): Promise<SidecarSyncResult[]> {
-  inFlight ??= runSync().finally(() => {
+// `onChunk` reports write progress for the run this call actually starts. A
+// caller that joins an in-flight sync gets the same promise but no ticks —
+// there is only one writer, and it already has an owner reporting for it.
+export function syncAllSidecars(
+  opts: { onChunk?: (done: number, total: number) => void } = {}
+): Promise<SidecarSyncResult[]> {
+  inFlight ??= runSync(opts).finally(() => {
     inFlight = null;
   });
   return inFlight;
 }
 
-async function runSync(): Promise<SidecarSyncResult[]> {
+async function runSync(
+  opts: { onChunk?: (done: number, total: number) => void } = {}
+): Promise<SidecarSyncResult[]> {
   // Stamped BEFORE the writes: a mutation landing mid-sync may miss this pass,
   // and must still read as dirty afterwards so it gets its own.
   const startedAt = Date.now();
   const out: SidecarSyncResult[] = [];
   for (const folder of await getFolders()) {
     try {
-      out.push(await syncFolderSidecar(folder.uri, folder.name));
+      out.push(await syncFolderSidecar(folder.uri, folder.name, { onChunk: opts.onChunk }));
     } catch {
       out.push({
         folder: folder.name,
