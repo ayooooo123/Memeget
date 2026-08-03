@@ -17,6 +17,7 @@ import java.io.File
 import java.io.IOException
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.max
 import kotlin.math.roundToInt
 
@@ -72,6 +73,7 @@ object MemeVideoExporter {
   data class Outcome(val uri: String, val warnings: List<String>)
 
   private val runs = ConcurrentHashMap<String, Run>()
+  private val pollers = AtomicInteger(0)
 
   /**
    * Start an export. [onSettled] is called exactly once, on the main looper.
@@ -111,6 +113,16 @@ object MemeVideoExporter {
 
   /** Ids of exports that have not settled yet. Test hook: a leak is invisible from the outside. */
   fun activeExportIds(): Set<String> = runs.keys.toSet()
+
+  /**
+   * How many exports are still pulling progress out of media3.
+   *
+   * Counted because a poll loop that outlives its export is invisible: a cancelled transformer
+   * answers `PROGRESS_STATE_NOT_STARTED`, so the leaked loop reports nothing, changes nothing, and
+   * just wakes the main looper five times a second holding a transformer that should be gone.
+   * Anything but zero between exports is that leak.
+   */
+  internal fun activePollCount(): Int = pollers.get()
 
   /** Where renders land while nobody has claimed them yet. */
   internal fun exportCacheDir(context: Context): File = File(context.cacheDir, OUTPUT_DIR)
@@ -217,11 +229,14 @@ object MemeVideoExporter {
     private fun startPolling() {
       if (polling) return
       polling = true
+      pollers.incrementAndGet()
       handler.postDelayed(poll, POLL_INTERVAL_MS)
     }
 
     private fun stopPolling() {
+      if (!polling) return
       polling = false
+      pollers.decrementAndGet()
       handler.removeCallbacks(poll)
     }
 

@@ -3,6 +3,7 @@ package expo.modules.memegetbg
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.BlurMaskFilter
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Matrix
@@ -20,8 +21,10 @@ import org.json.JSONArray
 import org.json.JSONException
 import org.json.JSONObject
 import kotlin.math.ceil
+import kotlin.math.cos
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.sin
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
@@ -60,6 +63,38 @@ internal object MemeImageRenderer {
 
   // Mirrors MAX_MOSAIC_CELLS in src/memeImageRenderCore.ts.
   private const val MAX_MOSAIC_CELLS = 65_536L
+
+  /**
+   * Pixel budget for ONE decoded subject cutout.
+   *
+   * A cutout is already decoded no larger than the rect it is drawn into, so a
+   * small sticker costs almost nothing. This is the ceiling for the other case —
+   * a full-frame cutout on a 16 MP export — because the output bitmap is 64 MB
+   * on its own, and an unbounded RGBA cutout beside it plus the alpha silhouette
+   * the sticker effects extract is exactly the second full-resolution allocation
+   * that OOM'd this app. A quarter of the output budget is 16 MB, and it costs
+   * nothing visible: ML Kit's mask resolution is far below 4 MP, so the detail
+   * was never there to lose.
+   */
+  private const val MAX_CUTOUT_DECODE_PIXELS = MAX_OUTPUT_PIXELS / 4
+
+  /** Stamps around the silhouette that make up an outline. */
+  private const val OUTLINE_STAMPS = 16
+
+  /** Hard cap on a sticker effect, so a malformed plan cannot ask for a mile. */
+  private const val MAX_STICKER_EFFECT_PX = 512f
+
+  /** Below this radius a BlurMaskFilter does nothing but cost an allocation. */
+  private const val MIN_BLUR_RADIUS_PX = 0.5f
+
+  /** Sticker shadow colour when a plan names none: black at 55%. */
+  private const val DEFAULT_SHADOW_COLOR = 0x8C000000.toInt()
+
+  /** Strongest background blur: the source is drawn 1/32 size and stretched. */
+  private const val MAX_BLUR_DOWNSCALE = 31f
+
+  /** Never blur below this edge; past it the "blur" is visible blocks. */
+  private const val MIN_BLUR_EDGE = 24
 
   // A wrap width is an output-pixel measurement; nothing legible needs more,
   // and this keeps a finite-but-absurd plan value from reaching roundToInt.
@@ -111,6 +146,7 @@ internal object MemeImageRenderer {
           "cover" -> drawCover(canvas, bitmap, layer)
           "text" -> drawText(context, canvas, layer)
           "media" -> drawMedia(context, canvas, layer)
+          "subject" -> drawSubject(context, canvas, layer)
         }
       }
       return writePng(context, bitmap, plan.optString("id", "meme"))
@@ -132,11 +168,91 @@ internal object MemeImageRenderer {
       // pixels untouched so the alpha channel survives the encode.
       "transparent" -> Unit
       "solid" -> canvas.drawColor(parseColor(background.optString("color"), Color.BLACK))
+      // The subject is composited on top of another picture; drawing the source
+      // here instead would quietly ignore the background the user chose.
+      "image" -> drawBackgroundImage(context, canvas, background)
+      "blurred-source" -> drawBlurredSource(context, canvas, background, source)
       else -> {
         val under = parseColor(background.optString("color"), Color.TRANSPARENT)
         if (Color.alpha(under) != 0) canvas.drawColor(under)
         drawTransformedSource(context, canvas, source)
       }
+    }
+  }
+
+  /**
+   * Cover-fit a replacement background over the whole canvas.
+   *
+   * A background the user picked and we cannot read is a failure, not a reason
+   * to fall back to the source: substituting the photo they were removing would
+   * look like the cutout silently did nothing.
+   */
+  private fun drawBackgroundImage(context: Context, canvas: Canvas, background: JSONObject) {
+    val assetUri = background.optString("assetUri")
+    if (assetUri.isEmpty()) {
+      throw IOException("Render plan asks for a replacement background but names no image")
+    }
+    val asset = try {
+      decodeSource(context, assetUri, canvas.width.toDouble(), canvas.height.toDouble())
+    } catch (error: IOException) {
+      throw IOException("Could not read the replacement background: ${error.message}", error)
+    }
+    try {
+      val scale = max(canvas.width / asset.width.toFloat(), canvas.height / asset.height.toFloat())
+      val matrix = asset.orientationMatrix()
+      matrix.postScale(scale, scale)
+      matrix.postTranslate(
+        (canvas.width - asset.width * scale) / 2f,
+        (canvas.height - asset.height * scale) / 2f
+      )
+      canvas.drawBitmap(
+        asset.bitmap,
+        matrix,
+        Paint(Paint.ANTI_ALIAS_FLAG).apply { isFilterBitmap = true }
+      )
+    } finally {
+      asset.recycle()
+    }
+  }
+
+  /**
+   * The source, blurred behind the subject.
+   *
+   * Downscale-then-upscale rather than a real Gaussian: a separable blur at
+   * export resolution needs a second full-size buffer and a pass per axis, and
+   * RenderEffect only applies to RenderNodes. Drawing the source into a
+   * thumbnail and letting bilinear filtering stretch it back is one small
+   * allocation, and because [drawTransformedSource] sizes its own decode from
+   * the canvas it is handed, the SOURCE decode shrinks with it — a blurred
+   * background costs less than a sharp one.
+   */
+  private fun drawBlurredSource(
+    context: Context,
+    canvas: Canvas,
+    background: JSONObject,
+    source: JSONObject
+  ) {
+    val blurScale = finiteFloat(background, "blurScale", 0.0).coerceIn(0f, 1f)
+    if (blurScale <= 0f) {
+      drawTransformedSource(context, canvas, source)
+      return
+    }
+    val factor = 1f + blurScale * MAX_BLUR_DOWNSCALE
+    val smallWidth = max(MIN_BLUR_EDGE, (canvas.width / factor).roundToInt())
+      .coerceAtMost(canvas.width)
+    val smallHeight = max(MIN_BLUR_EDGE, (canvas.height / factor).roundToInt())
+      .coerceAtMost(canvas.height)
+    val small = Bitmap.createBitmap(smallWidth, smallHeight, Bitmap.Config.ARGB_8888)
+    try {
+      drawTransformedSource(context, Canvas(small), source)
+      canvas.drawBitmap(
+        small,
+        null,
+        RectF(0f, 0f, canvas.width.toFloat(), canvas.height.toFloat()),
+        Paint(Paint.ANTI_ALIAS_FLAG).apply { isFilterBitmap = true }
+      )
+    } finally {
+      small.recycle()
     }
   }
 
@@ -596,6 +712,195 @@ internal object MemeImageRenderer {
       }
     } finally {
       overlay.recycle()
+    }
+  }
+
+  /**
+   * Draw a subject cutout: shadow, outline, then the subject itself.
+   *
+   * The alpha lives in the PNG the segmenter wrote, so there is no mask
+   * arithmetic here — this scales that bitmap into the rect the plan resolved,
+   * which is the same rect the preview resolved from the same function
+   * (resolveCutoutPlacement in src/memeImageRenderCore.ts) against the preview
+   * canvas. Effect sizes arrive in OUTPUT pixels for exactly the same reason.
+   */
+  private fun drawSubject(context: Context, canvas: Canvas, layer: JSONObject) {
+    val rect = readRect(layer.getJSONObject("rect")) ?: return
+    val cutoutUri = layer.optString("cutoutUri")
+    if (cutoutUri.isEmpty()) return
+    // Decode no bigger than the destination, and never past the cutout budget.
+    val budgetScale = cutoutDecodeScale(rect)
+    val cutout = decodeSource(
+      context,
+      cutoutUri,
+      rect.width().toDouble() * budgetScale,
+      rect.height().toDouble() * budgetScale
+    )
+    try {
+      if (cutout.width <= 0 || cutout.height <= 0) return
+      // Contain, never cover: a cutout's aspect ratio IS its shape, and cropping
+      // it would clip the subject the user is looking at.
+      val scale = min(rect.width() / cutout.width, rect.height() / cutout.height)
+      val drawnWidth = cutout.width * scale
+      val drawnHeight = cutout.height * scale
+      val matrix = cutout.orientationMatrix()
+      matrix.postScale(scale, scale)
+      matrix.postTranslate(
+        rect.centerX() - drawnWidth / 2f,
+        rect.centerY() - drawnHeight / 2f
+      )
+      val opacity = (finiteDouble(layer, "opacity", 1.0).coerceIn(0.0, 1.0) * 255)
+        .roundToInt()
+        .coerceIn(0, 255)
+      val checkpoint = canvas.save()
+      try {
+        canvas.rotate(finiteFloat(layer, "rotationDegrees", 0.0), rect.centerX(), rect.centerY())
+        val shadowBlurPx = finiteFloat(layer, "shadowBlurPx", 0.0)
+          .coerceIn(0f, MAX_STICKER_EFFECT_PX)
+        val shadowOffsetPx = finiteFloat(layer, "shadowOffsetPx", 0.0)
+          .coerceIn(0f, MAX_STICKER_EFFECT_PX)
+        if (shadowBlurPx > 0f || shadowOffsetPx > 0f) {
+          drawCutoutShadow(
+            canvas = canvas,
+            cutout = cutout.bitmap,
+            matrix = matrix,
+            sourceScale = scale,
+            blurPx = shadowBlurPx,
+            offsetPx = shadowOffsetPx,
+            color = parseColor(layer.optString("shadowColor"), DEFAULT_SHADOW_COLOR),
+            opacity = opacity
+          )
+        }
+        val outlinePx = finiteFloat(layer, "outlinePx", 0.0).coerceIn(0f, MAX_STICKER_EFFECT_PX)
+        val outlineColor = layer.optString("outlineColor")
+        if (outlinePx > 0f && outlineColor.isNotBlank()) {
+          drawCutoutOutline(
+            canvas = canvas,
+            cutout = cutout.bitmap,
+            matrix = matrix,
+            radiusPx = outlinePx,
+            color = parseColor(outlineColor, Color.WHITE),
+            opacity = opacity
+          )
+        }
+        canvas.drawBitmap(
+          cutout.bitmap,
+          matrix,
+          Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            isFilterBitmap = true
+            alpha = opacity
+          }
+        )
+      } finally {
+        canvas.restoreToCount(checkpoint)
+      }
+    } finally {
+      cutout.recycle()
+    }
+  }
+
+  /**
+   * How much of the destination rect a cutout decode may cover, so a full-frame
+   * cutout cannot become a second full-resolution bitmap.
+   */
+  private fun cutoutDecodeScale(rect: RectF): Double {
+    val wanted = rect.width().toDouble() * rect.height().toDouble()
+    if (!wanted.isFinite() || wanted <= MAX_CUTOUT_DECODE_PIXELS) return 1.0
+    return sqrt(MAX_CUTOUT_DECODE_PIXELS.toDouble() / wanted)
+  }
+
+  /**
+   * The subject's silhouette, blurred and offset.
+   *
+   * `extractAlpha` gives a one-byte-per-pixel copy of just the alpha channel — a
+   * quarter of the cutout, itself already bounded — and the blur is applied while
+   * extracting, in SOURCE pixels, which is why the plan's output-pixel radius is
+   * divided by the draw scale. The offset is applied after the matrix, so it
+   * stays in the output pixels the plan stated.
+   */
+  private fun drawCutoutShadow(
+    canvas: Canvas,
+    cutout: Bitmap,
+    matrix: Matrix,
+    sourceScale: Float,
+    blurPx: Float,
+    offsetPx: Float,
+    color: Int,
+    opacity: Int
+  ) {
+    val sourceRadius = if (sourceScale > 0f) blurPx / sourceScale else blurPx
+    val offsetXY = IntArray(2)
+    val blurPaint = if (sourceRadius >= MIN_BLUR_RADIUS_PX) {
+      Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        maskFilter = BlurMaskFilter(sourceRadius, BlurMaskFilter.Blur.NORMAL)
+      }
+    } else {
+      null
+    }
+    val silhouette = try {
+      cutout.extractAlpha(blurPaint, offsetXY)
+    } catch (error: Throwable) {
+      // A silhouette we cannot build is a missing shadow, not a failed export.
+      return
+    }
+    try {
+      val shadowMatrix = Matrix(matrix)
+      // extractAlpha's bitmap starts at offsetXY in the cutout's own space.
+      shadowMatrix.preTranslate(offsetXY[0].toFloat(), offsetXY[1].toFloat())
+      shadowMatrix.postTranslate(offsetPx, offsetPx)
+      canvas.drawBitmap(
+        silhouette,
+        shadowMatrix,
+        // An ALPHA_8 bitmap takes its colour from the paint.
+        Paint(Paint.ANTI_ALIAS_FLAG).apply {
+          isFilterBitmap = true
+          this.color = color
+          alpha = Color.alpha(color) * opacity / 255
+        }
+      )
+    } finally {
+      silhouette.recycle()
+    }
+  }
+
+  /**
+   * A sticker outline: the silhouette stamped in a ring around itself.
+   *
+   * Dilation by stamping, not by blurring: a blurred alpha fades out, which reads
+   * as a glow rather than the hard border a sticker has. Sixteen stamps of an
+   * antialiased silhouette leave no visible scalloping at the radii these
+   * fractions produce, and each stamp is a bounded ALPHA_8 draw.
+   */
+  private fun drawCutoutOutline(
+    canvas: Canvas,
+    cutout: Bitmap,
+    matrix: Matrix,
+    radiusPx: Float,
+    color: Int,
+    opacity: Int
+  ) {
+    val silhouette = try {
+      cutout.extractAlpha()
+    } catch (error: Throwable) {
+      return
+    }
+    try {
+      val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        isFilterBitmap = true
+        this.color = color
+        alpha = Color.alpha(color) * opacity / 255
+      }
+      for (index in 0 until OUTLINE_STAMPS) {
+        val angle = index * 2.0 * Math.PI / OUTLINE_STAMPS
+        val stamped = Matrix(matrix)
+        stamped.postTranslate(
+          (cos(angle) * radiusPx).toFloat(),
+          (sin(angle) * radiusPx).toFloat()
+        )
+        canvas.drawBitmap(silhouette, stamped, paint)
+      }
+    } finally {
+      silhouette.recycle()
     }
   }
 

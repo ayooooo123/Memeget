@@ -10,6 +10,7 @@
 // The plan is JSON only: no functions, no clock reads, no randomness. The
 // native renderer receives exactly what these tests pin down.
 import {
+  evaluateMaskTrackRect,
   interpolateCoverCorrections,
   interpolateTransformKeyframes,
   isLayerActiveAt,
@@ -18,6 +19,7 @@ import {
   type MediaOverlayLayer,
   type MemeEditLayer,
   type MemeEditProject,
+  type NormalizedPoint,
   type NormalizedRect,
   type QuarterRotation,
   type SubjectLayer,
@@ -47,6 +49,23 @@ export const MEME_MEDIA_LAYER_BASE_WIDTH = 0.28;
 // cell edge grow with the region; MemeImageRenderer.kt clamps identically, so
 // the plan always states the cell the renderer really uses.
 export const MAX_MOSAIC_CELLS = 65_536;
+
+/**
+ * Sticker effect sizes, as a fraction of the cutout's own drawn short edge.
+ *
+ * Unit scales in the project have to become pixels somewhere, and that somewhere
+ * has to be shared: the preview resolves them against the preview canvas and the
+ * exporter against the output canvas, so a sticker that looks right at 640 px
+ * only looks right at 4000 px if BOTH use these numbers. The fractions are tied
+ * to the cutout rather than to the canvas so a small sticker gets a small
+ * outline instead of a slab.
+ */
+export const CUTOUT_OUTLINE_MAX_FRACTION = 0.06;
+export const CUTOUT_SHADOW_BLUR_MAX_FRACTION = 0.08;
+export const CUTOUT_SHADOW_OFFSET_MAX_FRACTION = 0.05;
+
+/** Sticker shadow colour: black at 55%, dark enough to read on any background. */
+export const CUTOUT_SHADOW_COLOR = '#8C000000';
 
 export function mosaicCellFloorPx(rect: ImageRenderPixelRect): number {
   const area = Math.max(0, rect.width) * Math.max(0, rect.height);
@@ -120,12 +139,36 @@ export interface ImageRenderMediaLayerPlan {
   opacity: number;
 }
 
+/**
+ * Where a resolved cutout is drawn and how, in OUTPUT pixels.
+ *
+ * The renderer receives pixels, not scales: the alpha lives in `cutoutUri` (a
+ * native PNG), and every effect size has already been resolved against this
+ * output size by [resolveCutoutPlacement] — the same function the preview calls
+ * with the preview canvas. That is the only reason a sticker can look identical
+ * at 640 px and at 16 MP.
+ */
+export interface ImageRenderSubjectLayerPlan {
+  kind: 'subject';
+  id: string;
+  cutoutUri: string;
+  rect: ImageRenderPixelRect;
+  rotationDegrees: number;
+  opacity: number;
+  /** null when the layer has no outline; then `outlinePx` is 0. */
+  outlineColor: string | null;
+  outlinePx: number;
+  shadowColor: string;
+  shadowBlurPx: number;
+  shadowOffsetPx: number;
+}
+
 export type ImageRenderUnavailableReason =
-  // The subject layer's mask track has no materialized bitmap at all.
+  // The subject layer's mask track has no materialized cutout to draw. Nothing
+  // else about a subject layer is unsupported any more: a resolved mask IS
+  // composited (see subjectPlan), so a reason for "we could but won't" would be
+  // a limitation that no longer exists.
   | 'subject-mask-missing'
-  // A mask exists, but subject compositing is owned by the segmentation task;
-  // rendering a guess here would fake a cutout.
-  | 'subject-compositing-unsupported'
   // Video overlays would need a decoded frame at a chosen timestamp; the still
   // exporter does not pick one silently.
   | 'video-overlay-unsupported';
@@ -141,6 +184,7 @@ export type ImageRenderLayerPlan =
   | ImageRenderCoverLayerPlan
   | ImageRenderTextLayerPlan
   | ImageRenderMediaLayerPlan
+  | ImageRenderSubjectLayerPlan
   | ImageRenderUnavailableLayerPlan;
 
 export interface ImageRenderPlan {
@@ -275,6 +319,103 @@ function mediaPlan(
 }
 
 
+/** Canvas a cutout is resolved against: the preview surface or the output. */
+export interface CutoutCanvasSize {
+  widthPx: number;
+  heightPx: number;
+}
+
+export interface CutoutPlacement {
+  rect: ImageRenderPixelRect;
+  rotationDegrees: number;
+  opacity: number;
+  outlinePx: number;
+  shadowBlurPx: number;
+  shadowOffsetPx: number;
+}
+
+/**
+ * Resolve a subject layer onto a canvas.
+ *
+ * `trackRect` is where segmentation found the subject, in the project's own
+ * normalized frame; the keyframe then moves and scales it. At the moment a
+ * cutout is applied the keyframe centre IS the track rect's centre and the scale
+ * is 1, so an untouched cutout lands exactly on its own pixels — dragging it is
+ * what makes it a sticker.
+ *
+ * Preview and export both call this, with different canvases and nothing else
+ * different. A mask that composites at preview scale but not at full resolution
+ * is the classic version of this bug, and one shared resolver is what makes it
+ * impossible rather than merely unlikely.
+ */
+export function resolveCutoutPlacement(
+  layer: Pick<SubjectLayer, 'outlineColor' | 'outlineScale' | 'shadowScale'>,
+  keyframe: TransformKeyframe,
+  trackRect: NormalizedRect,
+  canvas: CutoutCanvasSize
+): CutoutPlacement {
+  const scale = Math.max(0.01, finite(keyframe.scale, 1));
+  const width = Math.max(0, finite(trackRect.width, 0)) * canvas.widthPx * scale;
+  const height = Math.max(0, finite(trackRect.height, 0)) * canvas.heightPx * scale;
+  const centerX = canvas.widthPx * Math.min(1, Math.max(0, finite(keyframe.center.x, 0.5)));
+  const centerY = canvas.heightPx * Math.min(1, Math.max(0, finite(keyframe.center.y, 0.5)));
+  // Effects scale with the cutout's short edge, so a thumbnail-sized sticker
+  // gets a hairline and a full-frame one gets a border.
+  const reference = Math.min(width, height);
+  const outlineScale = Math.min(1, Math.max(0, finite(layer.outlineScale, 0)));
+  const shadowScale = Math.min(1, Math.max(0, finite(layer.shadowScale, 0)));
+  return {
+    rect: {
+      x: round(centerX - width / 2),
+      y: round(centerY - height / 2),
+      width: round(width),
+      height: round(height),
+    },
+    rotationDegrees: round(finite(keyframe.rotationDegrees, 0)),
+    opacity: round(Math.min(1, Math.max(0, finite(keyframe.opacity, 1)))),
+    // No colour means no outline; the two always travel together.
+    outlinePx:
+      layer.outlineColor === null
+        ? 0
+        : round(outlineScale * CUTOUT_OUTLINE_MAX_FRACTION * reference),
+    shadowBlurPx: round(shadowScale * CUTOUT_SHADOW_BLUR_MAX_FRACTION * reference),
+    shadowOffsetPx: round(shadowScale * CUTOUT_SHADOW_OFFSET_MAX_FRACTION * reference),
+  };
+}
+
+function subjectPlan(
+  layer: SubjectLayer,
+  keyframe: TransformKeyframe,
+  project: MemeEditProject,
+  output: ImageRenderPlanOutput
+): ImageRenderLayerPlan {
+  const cutoutUri = project.transient.maskTracks[layer.maskTrackId];
+  const track = project.maskTracks.find((candidate) => candidate.id === layer.maskTrackId);
+  const trackRect = track ? evaluateMaskTrackRect(track, IMAGE_RENDER_TIME_US) : null;
+  // No materialized cutout, or no mask geometry to place it with: there is
+  // nothing to draw and the caller has to be told, not shown a blank sticker.
+  if (!cutoutUri || !trackRect) {
+    return { kind: 'unavailable', id: layer.id, layerKind: 'subject', reason: 'subject-mask-missing' };
+  }
+  const placement = resolveCutoutPlacement(layer, keyframe, trackRect, {
+    widthPx: output.widthPx,
+    heightPx: output.heightPx,
+  });
+  return {
+    kind: 'subject',
+    id: layer.id,
+    cutoutUri,
+    rect: placement.rect,
+    rotationDegrees: placement.rotationDegrees,
+    opacity: placement.opacity,
+    outlineColor: layer.outlineColor,
+    outlinePx: placement.outlinePx,
+    shadowColor: CUTOUT_SHADOW_COLOR,
+    shadowBlurPx: placement.shadowBlurPx,
+    shadowOffsetPx: placement.shadowOffsetPx,
+  };
+}
+
 export function buildImageRenderPlan(
   project: MemeEditProject,
   options: ImageRenderPlanOptions
@@ -290,19 +431,12 @@ export function buildImageRenderPlan(
       layers.push(coverPlan(layer, output));
       continue;
     }
-    if (layer.kind === 'subject') {
-      layers.push({
-        kind: 'unavailable',
-        id: layer.id,
-        layerKind: 'subject',
-        reason: project.transient.maskTracks[layer.maskTrackId]
-          ? 'subject-compositing-unsupported'
-          : 'subject-mask-missing',
-      });
-      continue;
-    }
     const keyframe = resolvedKeyframe(layer.keyframes);
     if (!keyframe) continue;
+    if (layer.kind === 'subject') {
+      layers.push(subjectPlan(layer, keyframe, project, output));
+      continue;
+    }
     if (layer.kind === 'media') {
       layers.push(mediaPlan(layer, keyframe, output));
       continue;
@@ -348,4 +482,175 @@ export function imageRenderPlanUnavailableLayers(
   return plan.layers.filter(
     (layer): layer is ImageRenderUnavailableLayerPlan => layer.kind === 'unavailable'
   );
+}
+
+/**
+ * Preview/export parity fixtures for subject cutouts.
+ *
+ * The pattern MemeDynamicOverlay and MemeTextLayout already use: one committed
+ * JSON, generated here, read by both a Jest test and an instrumented test on the
+ * device. Eyeballing a preview against an export cannot catch a cutout that is
+ * placed correctly at 300 px and two pixels off at 4000 px; a fixture both sides
+ * are measured against can.
+ *
+ * Every canvas here shares one aspect ratio on purpose: it makes the drawn
+ * rectangle's aspect identical at both scales, so the device test can generate a
+ * matching cutout and compare the OPAQUE PIXEL bounds it actually rendered
+ * against `normalizedRect`, rather than trusting the plan it was handed.
+ */
+export const CUTOUT_PARITY_FIXTURE_VERSION = 1;
+
+/** Device-side tolerance: rounding plus one pixel of antialiased edge. */
+export const CUTOUT_PARITY_TOLERANCE_PX = 2;
+
+export interface CutoutParityPlacement extends CutoutPlacement {
+  /** Index into `CutoutParityFixtures.canvases`. */
+  canvas: number;
+}
+
+export interface CutoutParityCase {
+  id: string;
+  trackRect: NormalizedRect;
+  center: NormalizedPoint;
+  scale: number;
+  rotationDegrees: number;
+  opacity: number;
+  outlineColor: string | null;
+  outlineScale: number;
+  shadowScale: number;
+  /**
+   * True when the drawn pixels' bounding box IS the placement rect — no
+   * rotation, no outline or shadow spilling past it, nothing clipped by the
+   * canvas edge. Only those cases can be checked against real rendered pixels.
+   */
+  pixelVerifiable: boolean;
+  placements: CutoutParityPlacement[];
+  /** The placement as a fraction of the canvas: identical at every scale. */
+  normalizedRect: NormalizedRect;
+}
+
+export interface CutoutParityFixtures {
+  version: number;
+  tolerancePx: number;
+  canvases: CutoutCanvasSize[];
+  cases: CutoutParityCase[];
+}
+
+export function buildCutoutParityFixtures(): CutoutParityFixtures {
+  const canvases: CutoutCanvasSize[] = [
+    { widthPx: 1200, heightPx: 800 },
+    // Same 3:2 aspect, a sixteenth of the pixels: the preview surface.
+    { widthPx: 300, heightPx: 200 },
+  ];
+  const inputs: Omit<CutoutParityCase, 'placements' | 'normalizedRect'>[] = [
+    {
+      id: 'identity',
+      trackRect: { x: 0.3, y: 0.25, width: 0.4, height: 0.5 },
+      center: { x: 0.5, y: 0.5 },
+      scale: 1,
+      rotationDegrees: 0,
+      opacity: 1,
+      outlineColor: null,
+      outlineScale: 0,
+      shadowScale: 0,
+      pixelVerifiable: true,
+    },
+    {
+      id: 'moved-and-scaled',
+      trackRect: { x: 0.1, y: 0.2, width: 0.3, height: 0.3 },
+      center: { x: 0.6, y: 0.45 },
+      scale: 1.5,
+      rotationDegrees: 0,
+      opacity: 1,
+      outlineColor: null,
+      outlineScale: 0,
+      shadowScale: 0,
+      pixelVerifiable: true,
+    },
+    {
+      id: 'tiny-sticker',
+      trackRect: { x: 0.4, y: 0.4, width: 0.08, height: 0.12 },
+      center: { x: 0.5, y: 0.5 },
+      scale: 1,
+      rotationDegrees: 0,
+      opacity: 1,
+      outlineColor: null,
+      outlineScale: 0,
+      shadowScale: 0,
+      pixelVerifiable: true,
+    },
+    {
+      id: 'half-opacity',
+      trackRect: { x: 0.2, y: 0.3, width: 0.5, height: 0.4 },
+      center: { x: 0.5, y: 0.5 },
+      scale: 1,
+      rotationDegrees: 0,
+      opacity: 0.5,
+      outlineColor: null,
+      outlineScale: 0,
+      shadowScale: 0,
+      pixelVerifiable: true,
+    },
+    {
+      // Effects spill past the placement rect, so pixels cannot be compared to
+      // it — but the resolved sizes still have to agree across scales.
+      id: 'outline-and-shadow',
+      trackRect: { x: 0.25, y: 0.25, width: 0.4, height: 0.4 },
+      center: { x: 0.45, y: 0.55 },
+      scale: 1.2,
+      rotationDegrees: 0,
+      opacity: 1,
+      outlineColor: '#FFFFFF',
+      outlineScale: 0.5,
+      shadowScale: 0.75,
+      pixelVerifiable: false,
+    },
+    {
+      id: 'rotated',
+      trackRect: { x: 0.3, y: 0.3, width: 0.3, height: 0.45 },
+      center: { x: 0.5, y: 0.5 },
+      scale: 1,
+      rotationDegrees: 30,
+      opacity: 1,
+      outlineColor: null,
+      outlineScale: 0,
+      shadowScale: 0,
+      pixelVerifiable: false,
+    },
+  ];
+  return {
+    version: CUTOUT_PARITY_FIXTURE_VERSION,
+    tolerancePx: CUTOUT_PARITY_TOLERANCE_PX,
+    canvases,
+    cases: inputs.map((input) => {
+      const keyframe: TransformKeyframe = {
+        timeUs: IMAGE_RENDER_TIME_US,
+        center: input.center,
+        scale: input.scale,
+        rotationDegrees: input.rotationDegrees,
+        opacity: input.opacity,
+        easing: 'hold',
+      };
+      const layer = {
+        outlineColor: input.outlineColor,
+        outlineScale: input.outlineScale,
+        shadowScale: input.shadowScale,
+      };
+      const placements = canvases.map((canvas, index) => ({
+        canvas: index,
+        ...resolveCutoutPlacement(layer, keyframe, input.trackRect, canvas),
+      }));
+      const reference = placements[0];
+      return {
+        ...input,
+        placements,
+        normalizedRect: {
+          x: round(reference.rect.x / canvases[0].widthPx),
+          y: round(reference.rect.y / canvases[0].heightPx),
+          width: round(reference.rect.width / canvases[0].widthPx),
+          height: round(reference.rect.height / canvases[0].heightPx),
+        },
+      };
+    }),
+  };
 }

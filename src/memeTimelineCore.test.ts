@@ -209,6 +209,29 @@ describe('thumbnail ticks', () => {
     const ticks = timelineThumbnailTicks(scale({ durationUs: 0 }), { tileWidthPx: 48, maxTiles: 64 });
     expect(ticks).toEqual([{ timeUs: 0, xPx: 0, widthPx: 48 }]);
   });
+
+  // Regression: tiles used to be a fixed `tileWidthPx` wide while the interval
+  // that placed them was chosen to be at LEAST that wide, so on a real device
+  // the strip rendered as 44dp tiles at 73dp spacing — a dotted line, not a
+  // filmstrip. A tile now fills its interval.
+  test('tiles abut so the strip is continuous, and are never narrower than the tile width', () => {
+    for (const zoom of [1, 2, 8]) {
+      const view = scale({ durationUs: 5_050_000, viewportWidthPx: 370, zoom });
+      const ticks = timelineThumbnailTicks(view, { tileWidthPx: 44, maxTiles: 48 });
+      expect(ticks.length).toBeGreaterThan(1);
+      for (let index = 1; index < ticks.length; index += 1) {
+        expect(ticks[index - 1].xPx + ticks[index - 1].widthPx).toBeCloseTo(ticks[index].xPx, 6);
+      }
+      for (const tick of ticks.slice(0, -1)) expect(tick.widthPx).toBeGreaterThanOrEqual(44);
+    }
+  });
+
+  test('the final tile is clipped to the content edge instead of overhanging it', () => {
+    const view = scale({ durationUs: 5_050_000, viewportWidthPx: 370, zoom: 1 });
+    const ticks = timelineThumbnailTicks(view, { tileWidthPx: 44, maxTiles: 48 });
+    const last = ticks[ticks.length - 1];
+    expect(last.xPx + last.widthPx).toBeLessThanOrEqual(timelineContentWidthPx(view) + 1e-6);
+  });
 });
 
 describe('trim handle clamping', () => {

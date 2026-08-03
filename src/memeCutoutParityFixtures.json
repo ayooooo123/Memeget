@@ -1,0 +1,352 @@
+{
+  "version": 1,
+  "tolerancePx": 2,
+  "canvases": [
+    {
+      "widthPx": 1200,
+      "heightPx": 800
+    },
+    {
+      "widthPx": 300,
+      "heightPx": 200
+    }
+  ],
+  "cases": [
+    {
+      "id": "identity",
+      "trackRect": {
+        "x": 0.3,
+        "y": 0.25,
+        "width": 0.4,
+        "height": 0.5
+      },
+      "center": {
+        "x": 0.5,
+        "y": 0.5
+      },
+      "scale": 1,
+      "rotationDegrees": 0,
+      "opacity": 1,
+      "outlineColor": null,
+      "outlineScale": 0,
+      "shadowScale": 0,
+      "pixelVerifiable": true,
+      "placements": [
+        {
+          "canvas": 0,
+          "rect": {
+            "x": 360,
+            "y": 200,
+            "width": 480,
+            "height": 400
+          },
+          "rotationDegrees": 0,
+          "opacity": 1,
+          "outlinePx": 0,
+          "shadowBlurPx": 0,
+          "shadowOffsetPx": 0
+        },
+        {
+          "canvas": 1,
+          "rect": {
+            "x": 90,
+            "y": 50,
+            "width": 120,
+            "height": 100
+          },
+          "rotationDegrees": 0,
+          "opacity": 1,
+          "outlinePx": 0,
+          "shadowBlurPx": 0,
+          "shadowOffsetPx": 0
+        }
+      ],
+      "normalizedRect": {
+        "x": 0.3,
+        "y": 0.25,
+        "width": 0.4,
+        "height": 0.5
+      }
+    },
+    {
+      "id": "moved-and-scaled",
+      "trackRect": {
+        "x": 0.1,
+        "y": 0.2,
+        "width": 0.3,
+        "height": 0.3
+      },
+      "center": {
+        "x": 0.6,
+        "y": 0.45
+      },
+      "scale": 1.5,
+      "rotationDegrees": 0,
+      "opacity": 1,
+      "outlineColor": null,
+      "outlineScale": 0,
+      "shadowScale": 0,
+      "pixelVerifiable": true,
+      "placements": [
+        {
+          "canvas": 0,
+          "rect": {
+            "x": 450,
+            "y": 180,
+            "width": 540,
+            "height": 360
+          },
+          "rotationDegrees": 0,
+          "opacity": 1,
+          "outlinePx": 0,
+          "shadowBlurPx": 0,
+          "shadowOffsetPx": 0
+        },
+        {
+          "canvas": 1,
+          "rect": {
+            "x": 112.5,
+            "y": 45,
+            "width": 135,
+            "height": 90
+          },
+          "rotationDegrees": 0,
+          "opacity": 1,
+          "outlinePx": 0,
+          "shadowBlurPx": 0,
+          "shadowOffsetPx": 0
+        }
+      ],
+      "normalizedRect": {
+        "x": 0.375,
+        "y": 0.225,
+        "width": 0.45,
+        "height": 0.45
+      }
+    },
+    {
+      "id": "tiny-sticker",
+      "trackRect": {
+        "x": 0.4,
+        "y": 0.4,
+        "width": 0.08,
+        "height": 0.12
+      },
+      "center": {
+        "x": 0.5,
+        "y": 0.5
+      },
+      "scale": 1,
+      "rotationDegrees": 0,
+      "opacity": 1,
+      "outlineColor": null,
+      "outlineScale": 0,
+      "shadowScale": 0,
+      "pixelVerifiable": true,
+      "placements": [
+        {
+          "canvas": 0,
+          "rect": {
+            "x": 552,
+            "y": 352,
+            "width": 96,
+            "height": 96
+          },
+          "rotationDegrees": 0,
+          "opacity": 1,
+          "outlinePx": 0,
+          "shadowBlurPx": 0,
+          "shadowOffsetPx": 0
+        },
+        {
+          "canvas": 1,
+          "rect": {
+            "x": 138,
+            "y": 88,
+            "width": 24,
+            "height": 24
+          },
+          "rotationDegrees": 0,
+          "opacity": 1,
+          "outlinePx": 0,
+          "shadowBlurPx": 0,
+          "shadowOffsetPx": 0
+        }
+      ],
+      "normalizedRect": {
+        "x": 0.46,
+        "y": 0.44,
+        "width": 0.08,
+        "height": 0.12
+      }
+    },
+    {
+      "id": "half-opacity",
+      "trackRect": {
+        "x": 0.2,
+        "y": 0.3,
+        "width": 0.5,
+        "height": 0.4
+      },
+      "center": {
+        "x": 0.5,
+        "y": 0.5
+      },
+      "scale": 1,
+      "rotationDegrees": 0,
+      "opacity": 0.5,
+      "outlineColor": null,
+      "outlineScale": 0,
+      "shadowScale": 0,
+      "pixelVerifiable": true,
+      "placements": [
+        {
+          "canvas": 0,
+          "rect": {
+            "x": 300,
+            "y": 240,
+            "width": 600,
+            "height": 320
+          },
+          "rotationDegrees": 0,
+          "opacity": 0.5,
+          "outlinePx": 0,
+          "shadowBlurPx": 0,
+          "shadowOffsetPx": 0
+        },
+        {
+          "canvas": 1,
+          "rect": {
+            "x": 75,
+            "y": 60,
+            "width": 150,
+            "height": 80
+          },
+          "rotationDegrees": 0,
+          "opacity": 0.5,
+          "outlinePx": 0,
+          "shadowBlurPx": 0,
+          "shadowOffsetPx": 0
+        }
+      ],
+      "normalizedRect": {
+        "x": 0.25,
+        "y": 0.3,
+        "width": 0.5,
+        "height": 0.4
+      }
+    },
+    {
+      "id": "outline-and-shadow",
+      "trackRect": {
+        "x": 0.25,
+        "y": 0.25,
+        "width": 0.4,
+        "height": 0.4
+      },
+      "center": {
+        "x": 0.45,
+        "y": 0.55
+      },
+      "scale": 1.2,
+      "rotationDegrees": 0,
+      "opacity": 1,
+      "outlineColor": "#FFFFFF",
+      "outlineScale": 0.5,
+      "shadowScale": 0.75,
+      "pixelVerifiable": false,
+      "placements": [
+        {
+          "canvas": 0,
+          "rect": {
+            "x": 252,
+            "y": 248,
+            "width": 576,
+            "height": 384
+          },
+          "rotationDegrees": 0,
+          "opacity": 1,
+          "outlinePx": 11.52,
+          "shadowBlurPx": 23.04,
+          "shadowOffsetPx": 14.4
+        },
+        {
+          "canvas": 1,
+          "rect": {
+            "x": 63,
+            "y": 62,
+            "width": 144,
+            "height": 96
+          },
+          "rotationDegrees": 0,
+          "opacity": 1,
+          "outlinePx": 2.88,
+          "shadowBlurPx": 5.76,
+          "shadowOffsetPx": 3.6
+        }
+      ],
+      "normalizedRect": {
+        "x": 0.21,
+        "y": 0.31,
+        "width": 0.48,
+        "height": 0.48
+      }
+    },
+    {
+      "id": "rotated",
+      "trackRect": {
+        "x": 0.3,
+        "y": 0.3,
+        "width": 0.3,
+        "height": 0.45
+      },
+      "center": {
+        "x": 0.5,
+        "y": 0.5
+      },
+      "scale": 1,
+      "rotationDegrees": 30,
+      "opacity": 1,
+      "outlineColor": null,
+      "outlineScale": 0,
+      "shadowScale": 0,
+      "pixelVerifiable": false,
+      "placements": [
+        {
+          "canvas": 0,
+          "rect": {
+            "x": 420,
+            "y": 220,
+            "width": 360,
+            "height": 360
+          },
+          "rotationDegrees": 30,
+          "opacity": 1,
+          "outlinePx": 0,
+          "shadowBlurPx": 0,
+          "shadowOffsetPx": 0
+        },
+        {
+          "canvas": 1,
+          "rect": {
+            "x": 105,
+            "y": 55,
+            "width": 90,
+            "height": 90
+          },
+          "rotationDegrees": 30,
+          "opacity": 1,
+          "outlinePx": 0,
+          "shadowBlurPx": 0,
+          "shadowOffsetPx": 0
+        }
+      ],
+      "normalizedRect": {
+        "x": 0.35,
+        "y": 0.275,
+        "width": 0.3,
+        "height": 0.45
+      }
+    }
+  ]
+}

@@ -37,11 +37,12 @@ export function foldNativeExportProgress(
 ): MemeExportProgress {
   const stage = EXPORT_STAGES.find((candidate) => candidate === report.stage);
   if (!stage) return current;
-  const progress =
-    typeof report.progress === 'number' && Number.isFinite(report.progress) ? report.progress : null;
+  // The fraction goes through untouched: `mergeExportProgress` already clamps it and already
+  // reads a non-finite one as "no fraction". Re-checking it here was dead code — a mutation that
+  // deleted the check changed nothing, which is how it was found.
   return mergeExportProgress(current, {
     stage,
-    progress,
+    progress: report.progress,
     detail: typeof report.detail === 'string' ? report.detail : '',
   });
 }
