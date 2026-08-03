@@ -2,6 +2,8 @@ import {
   EXPORT_STAGES,
   type ExportState,
   type MemeExportResult,
+  destinationLabel,
+  exportDestinations,
   exportOutputSpec,
   exportSummary,
   initialExportState,
@@ -266,6 +268,41 @@ describe('output naming', () => {
   });
 });
 
+describe('destinations offered', () => {
+  it('offers only the destinations the build can actually perform', () => {
+    // A button that silently no-ops is worse than an absent one.
+    expect(exportDestinations({ canCopy: false, canDownload: false }).map((d) => d.id)).toEqual(['library']);
+    expect(exportDestinations({ canCopy: true, canDownload: true }).map((d) => d.id)).toEqual([
+      'library',
+      'clipboard',
+      'downloads',
+    ]);
+    expect(exportDestinations({ canCopy: false, canDownload: true }).map((d) => d.id)).toEqual([
+      'library',
+      'downloads',
+    ]);
+  });
+
+  it('always offers the library, since that needs no extra native capability', () => {
+    for (const canCopy of [true, false]) {
+      for (const canDownload of [true, false]) {
+        expect(exportDestinations({ canCopy, canDownload })[0].id).toBe('library');
+      }
+    }
+  });
+
+  it('gives every destination a distinct label and a hint', () => {
+    const specs = exportDestinations({ canCopy: true, canDownload: true });
+    expect(new Set(specs.map((s) => s.label)).size).toBe(specs.length);
+    for (const spec of specs) expect(spec.hint.length).toBeGreaterThan(0);
+  });
+
+  it('names the library destination by the folder it actually wrote to', () => {
+    expect(destinationLabel('library', 'Memes')).toBe('Memes');
+    expect(destinationLabel('downloads', 'Memes')).toBe('Downloads');
+  });
+});
+
 describe('what the user is told', () => {
   it('reports skipped layers rather than omitting them silently', () => {
     expect(skippedLayerWarning(0)).toEqual([]);
@@ -274,12 +311,17 @@ describe('what the user is told', () => {
   });
 
   it('surfaces every warning in the summary', () => {
-    expect(exportSummary(result('/p', ['2 layers could not be rendered', 'audio re-encoded']), 'Downloads')).toBe(
-      'Saved to Downloads — 2 layers could not be rendered; audio re-encoded'
-    );
+    expect(
+      exportSummary(result('/p', ['2 layers could not be rendered', 'audio re-encoded']), 'downloads', 'Memes')
+    ).toBe('Saved to Downloads — 2 layers could not be rendered; audio re-encoded');
   });
 
   it('stays quiet when there is nothing to warn about', () => {
-    expect(exportSummary(result(), 'Memes')).toBe('Saved to Memes');
+    expect(exportSummary(result(), 'library', 'Memes')).toBe('Saved to Memes');
+  });
+
+  it('does not claim a clipboard copy was "saved" somewhere', () => {
+    // A toast saying "Saved to the clipboard" sends people looking in Downloads.
+    expect(exportSummary(result(), 'clipboard', 'Memes')).toBe('Copied — paste it anywhere');
   });
 });
