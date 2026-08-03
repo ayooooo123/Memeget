@@ -46,19 +46,30 @@ import { buildExemplarHeads, noteInteractive, saveSharedFiles, type ExemplarMode
 import { noteCodecInteractive } from '../interactive';
 import { success, tap, thud, warn } from '../haptics';
 import {
+  cancelVideoExport,
+  compositionAssetGuardNativeAvailable,
   copyFileToClipboard,
   downloadsAvailable,
+  exportVideoProject,
   fileClipboardAvailable,
   imageRendererNativeAvailable,
+  inspectCompositionAssets,
   renderImageProject,
   saveToDownloads,
   transcodeVideoToMp4,
+  videoExporterNativeAvailable,
 } from '../../modules/memeget-bg';
 import type { MemeEditProject } from '../memeEditProjectCore';
 import { buildImageRenderPlan, imageRenderPlanUnavailableLayers } from '../memeImageRenderCore';
+import {
+  buildVideoCompositionPlan,
+  videoCompositionPlanAssetRequirements,
+  videoCompositionPlanIsBuildable,
+} from '../memeVideoCompositionCore';
 import { compatibleCopyTarget } from '../memeActionsCore';
 import {
   type ExportDestination,
+  type MemeExportProgress,
   type MemeExportResult,
   abandonedPaths,
   exportDestinations,
@@ -68,6 +79,11 @@ import {
   runExport,
   skippedLayerWarning,
 } from '../memeExportCore';
+import {
+  ExportCancelledError,
+  foldNativeExportProgress,
+  renderUnlessCancelled,
+} from '../memeVideoExportCore';
 import { mimeForName } from '../mediaFormats';
 import {
   deleteCache,
@@ -750,8 +766,107 @@ export const MemeGrid = React.memo(function MemeGrid({
     [onCreated]
   );
 
+  // A video export is slow enough to watch and slow enough to regret, so unlike
+  // the still path it reports progress and can be stopped. Both live here
+  // rather than in the state machine: the machine owns whether a cancel wins,
+  // this owns telling the encoder about it.
+  const [exportProgress, setExportProgress] = useState<MemeExportProgress | null>(null);
+  const exportCancelledRef = useRef(false);
+  const exportIdRef = useRef<string | null>(null);
+
+  const cancelStudioExport = useCallback(() => {
+    if (exportCancelledRef.current) return;
+    exportCancelledRef.current = true;
+    warn();
+    const exportId = exportIdRef.current;
+    // Fire-and-forget on purpose: the export's own promise is what reports that
+    // the encoder finished unwinding, and a cancel that raced the finish is
+    // caught on this side by `renderUnlessCancelled`.
+    if (exportId) cancelVideoExport(exportId);
+    setExportProgress((current) =>
+      current ? { ...current, detail: 'Cancelling…' } : current
+    );
+  }, []);
+
+  const runVideoExport = useCallback(
+    async (project: MemeEditProject, item: MemeRecord, destination: ExportDestination) => {
+      const plan = buildVideoCompositionPlan(project, { planId: `meme-remix-${item.id}` });
+      if (!videoCompositionPlanIsBuildable(plan)) {
+        // The plan already carries a sentence per refusal; showing the first is
+        // more useful than "export failed".
+        throw new Error(plan.rejections[0]?.message ?? 'This project cannot be exported as a video');
+      }
+      // Screen the assets before an encoder is started: a card media3 cannot
+      // decode fails deep inside the export, a minute in, with a codec error.
+      const requirements = videoCompositionPlanAssetRequirements(plan);
+      if (compositionAssetGuardNativeAvailable && requirements.length > 0) {
+        const rejected = await inspectCompositionAssets(requirements);
+        if (rejected && rejected.length > 0) throw new Error(rejected[0].reason);
+      }
+
+      const planJson = JSON.stringify(plan);
+      const spec = exportOutputSpec(item.name, 'video');
+      const exportId = `${plan.id}-${Date.now()}`;
+      exportCancelledRef.current = false;
+      exportIdRef.current = exportId;
+      setExportProgress({ stage: 'preparing', progress: null, detail: 'Preparing the composition' });
+      // Filled in by the render and read by `describe`, which runs immediately
+      // after it: the fallbacks media3 applied are only knowable once the file
+      // exists, and they have to reach the user with the result.
+      let nativeWarnings: string[] = [];
+      try {
+        exportStateRef.current = await runExport(
+          exportStateRef.current,
+          { destination, revision: planJson },
+          {
+            render: () =>
+              renderUnlessCancelled({
+                render: async () => {
+                  const rendered = await exportVideoProject(planJson, exportId, (event) =>
+                    setExportProgress((current) =>
+                      foldNativeExportProgress(
+                        current ?? { stage: 'preparing', progress: null, detail: '' },
+                        event
+                      )
+                    )
+                  );
+                  if (!rendered) return null;
+                  nativeWarnings = rendered.warnings;
+                  return rendered.path;
+                },
+                cancelled: () => exportCancelledRef.current,
+                discard: (path) => deleteCache(path).catch(() => {}),
+              }),
+            describe: (path) => ({
+              path,
+              name: spec.name,
+              mimeType: spec.mimeType,
+              // Layers are not part of a composition plan yet, so a project that
+              // has them exports without them. Saying so is the difference
+              // between a known limitation and a silent truncation.
+              warnings: [...nativeWarnings, ...skippedLayerWarning(project.layers.length)],
+            }),
+            deliver: (result) => {
+              setExportProgress({ stage: 'saving', progress: null, detail: 'Saving the result' });
+              return deliverExport(item, destination, result);
+            },
+            sweep: (path) => deleteCache(path).catch(() => {}),
+          }
+        );
+      } finally {
+        exportIdRef.current = null;
+        setExportProgress(null);
+      }
+    },
+    [deliverExport]
+  );
+
   const runStudioExport = useCallback(
     async (project: MemeEditProject, item: MemeRecord, destination: ExportDestination) => {
+      if (project.source.kind === 'video') {
+        await runVideoExport(project, item, destination);
+        return;
+      }
       const plan = buildImageRenderPlan(project, { planId: `meme-remix-${item.id}` });
       const planJson = JSON.stringify(plan);
       // The plan's own serialization is the cache key: identical plan, identical
@@ -772,7 +887,7 @@ export const MemeGrid = React.memo(function MemeGrid({
         }
       );
     },
-    [deliverExport]
+    [deliverExport, runVideoExport]
   );
 
   // Closing the studio ends the kept render's useful life: it can no longer be
@@ -819,9 +934,14 @@ export const MemeGrid = React.memo(function MemeGrid({
       try {
         await runStudioExport(project, item, destination);
       } catch (error) {
-        // The studio stays open with the project intact so the user can retry
-        // or change something, rather than losing the edit to a failed encode.
-        showToast(`Could not export: ${String(error)}`, 'error');
+        // Stopping an export is something the user asked for, not a failure to
+        // apologise for; only a real one gets an error toast. Either way the
+        // studio stays open with the project intact, so the edit survives.
+        if (error instanceof ExportCancelledError) {
+          showToast('Export cancelled', 'info');
+        } else {
+          showToast(`Could not export: ${String(error)}`, 'error');
+        }
       } finally {
         setBusy(false);
       }
@@ -1347,8 +1467,63 @@ export const MemeGrid = React.memo(function MemeGrid({
         visible={studioOpen && !!selected}
         exportBusy={busy}
         onClose={() => setStudioOpen(false)}
-        onExport={selected?.kind === 'image' && imageRendererNativeAvailable ? onStudioExport : undefined}
+        onExport={
+          // A studio export is only offered when this build can actually
+          // perform it: the video path needs the media3 exporter, the still
+          // path the bitmap renderer. An ungated button looks like it works
+          // while doing nothing at all.
+          (selected?.kind === 'video' ? videoExporterNativeAvailable : imageRendererNativeAvailable)
+            ? onStudioExport
+            : undefined
+        }
       />
+
+      {/*
+        A video encode takes long enough that a frozen studio reads as a crash,
+        and long enough that the user changes their mind. This sheet is the only
+        place either is visible, so it renders above the studio modal.
+      */}
+      <Modal
+        visible={exportProgress !== null}
+        transparent
+        animationType="fade"
+        statusBarTranslucent
+        // Back gesture asks to stop the export rather than dismissing the sheet
+        // and leaving an encoder running behind it.
+        onRequestClose={cancelStudioExport}
+      >
+        <View style={styles.exportRoot}>
+          <View style={styles.exportSheet}>
+            <Text style={styles.sheetHeading}>Rendering your remix</Text>
+            <Text style={styles.teachHint}>
+              {exportProgress?.detail ?? ''}
+              {exportProgress?.progress != null
+                ? ` — ${Math.round(exportProgress.progress * 100)}%`
+                : ''}
+            </Text>
+            <View style={styles.exportTrack}>
+              {exportProgress?.progress != null ? (
+                <View style={[styles.exportFill, { width: `${Math.round(exportProgress.progress * 100)}%` }]} />
+              ) : (
+                // media3 cannot always report a fraction; a spinner says
+                // "working" without a bar that pretends to know how far.
+                <ActivityIndicator size="small" color={colors.accent} />
+              )}
+            </View>
+            <View style={styles.teachActions}>
+              <PressableScale
+                style={[styles.teachAction, styles.teachCancel]}
+                onPress={cancelStudioExport}
+                disabled={exportCancelledRef.current}
+                accessibilityRole="button"
+                accessibilityLabel="Stop this export"
+              >
+                <Text style={styles.teachCancelText}>Stop</Text>
+              </PressableScale>
+            </View>
+          </View>
+        </View>
+      </Modal>
 
       <Modal
         visible={teaching || confirming !== null}
@@ -2280,6 +2455,31 @@ const styles = StyleSheet.create({
     paddingTop: 10,
     gap: space.md,
   },
+
+  // Centred rather than a bottom sheet: the export sheet is modal over the
+  // studio and there is nothing behind it worth reaching past.
+  exportRoot: {
+    flex: 1,
+    backgroundColor: colors.scrim,
+    justifyContent: 'center',
+    padding: space.lg,
+  },
+  exportSheet: {
+    backgroundColor: colors.surface,
+    borderRadius: radius.xl,
+    borderWidth: 1,
+    borderColor: colors.borderLight,
+    padding: space.lg,
+    gap: space.md,
+  },
+  exportTrack: {
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: colors.surface2,
+    overflow: 'hidden',
+    justifyContent: 'center',
+  },
+  exportFill: { height: 8, borderRadius: 4, backgroundColor: colors.accent },
   sheetHeading: { color: colors.text, fontWeight: '800', fontSize: 17, letterSpacing: -0.3 },
   segRow: {
     flexDirection: 'row',

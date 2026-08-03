@@ -27,6 +27,15 @@ class MemegetBgModule : Module() {
   override fun definition() = ModuleDefinition {
     Name("MemegetBg")
 
+    // Download/segmentation progress for still-image cutouts. Emitted from a
+    // background thread while `segmentImageSubjects` is in flight, because the
+    // one-time model download is a user-visible wait that has to be cancellable
+    // rather than a spinner with no end in sight.
+    //
+    // `onVideoExportProgress` is the same idea for a video export, tagged with the caller's
+    // `exportId` so a stale subscription cannot drive the current run's progress bar.
+    Events("onSubjectSegmentationProgress", "onVideoExportProgress")
+
     View(MemeTextPreviewView::class) {
       Events("onMetrics")
       Prop("text") { view: MemeTextPreviewView, value: String -> view.setText(value) }
@@ -156,6 +165,52 @@ class MemegetBgModule : Module() {
       }
     }
 
+    // The real video export: a media3 Transformer run over the composition plan built by
+    // src/memeVideoCompositionCore.ts. Progress arrives as `onVideoExportProgress`; this promise
+    // settles exactly once - resolved only for a verified, complete file, rejected for a failure
+    // or a cancel - because a second resolve turns one render into two memes.
+    AsyncFunction("exportVideoProject") { planJson: String, exportId: String, promise: Promise ->
+      val ctx = appContext.reactContext
+        ?: return@AsyncFunction promise.reject("E_CONTEXT", "React context unavailable", null)
+      MemeVideoExporter.start(
+        ctx,
+        exportId,
+        planJson,
+        onProgress = { progress ->
+          this@MemegetBgModule.sendEvent(
+            "onVideoExportProgress",
+            mapOf(
+              "exportId" to exportId,
+              "stage" to progress.stage,
+              "progress" to progress.fraction,
+              "detail" to progress.detail
+            )
+          )
+        },
+        onSettled = { result ->
+          result.fold(
+            onSuccess = { outcome ->
+              promise.resolve(mapOf("path" to outcome.uri, "warnings" to outcome.warnings))
+            },
+            onFailure = { error ->
+              // A cancel is not an error the user needs a red toast for, and once the message has
+              // crossed the bridge the code is the only thing that still tells them apart.
+              val code = if (error is MemeVideoExporter.CancelledException) {
+                "E_VIDEO_EXPORT_CANCELLED"
+              } else {
+                "E_VIDEO_EXPORT"
+              }
+              promise.reject(code, error.message ?: error.toString(), error)
+            }
+          )
+        }
+      )
+    }
+
+    // Ask a running export to stop. False means there was nothing to cancel; the export's own
+    // promise is what reports that the cancel finished releasing everything.
+    Function("cancelVideoExport") { exportId: String -> MemeVideoExporter.cancel(exportId) }
+
 
     // Copy a finished export file (written to the app cache) into the public
     // Downloads folder so it lands there directly, no share-sheet round trip.
@@ -234,6 +289,60 @@ class MemegetBgModule : Module() {
       val ctx = appContext.reactContext
         ?: throw IllegalStateException("React context unavailable")
       MemeTextDetector.detect(ctx, source).toMap()
+    }
+
+    // Whether the optional ML Kit subject segmentation module is already on the
+    // device. Cheap probe that does NOT trigger an install, so the studio can
+    // decide up front whether the user is about to wait for a download.
+    AsyncFunction("subjectSegmentationModuleInstalled") {
+      val ctx = appContext.reactContext
+        ?: throw IllegalStateException("React context unavailable")
+      MemeStillSubjectSegmenter.moduleInstalled(ctx)
+    }
+
+    // Segment the subjects of a local still image and materialize one cutout PNG
+    // per subject plus a combined one, all inside a per-request cache directory
+    // the caller releases. Rejects with the segmenter's own failure code
+    // (E_CUTOUT_OFFLINE / E_CUTOUT_MODULE_UNAVAILABLE / E_CUTOUT_CANCELLED /
+    // E_CUTOUT_FAILED) so JS can offer the right remedy; an image with no
+    // subject RESOLVES with a null combined cutout, because that is not a
+    // failure.
+    AsyncFunction("segmentImageSubjects") { source: String, requestId: String, promise: Promise ->
+      val ctx = appContext.reactContext
+        ?: return@AsyncFunction promise.reject("E_CONTEXT", "React context unavailable", null)
+      try {
+        promise.resolve(
+          MemeStillSubjectSegmenter.segment(ctx, source, requestId) { payload ->
+            this@MemegetBgModule.sendEvent("onSubjectSegmentationProgress", payload)
+          }.toMap()
+        )
+      } catch (error: SubjectCutoutException) {
+        promise.reject(error.failure.code, error.message, error)
+      } catch (error: Throwable) {
+        promise.reject(SubjectCutoutFailure.FAILED.code, error.message, error)
+      }
+    }
+
+    // Ask an in-flight request to stop. Returns immediately: the run itself
+    // rejects with E_CUTOUT_CANCELLED once it reaches its next checkpoint.
+    Function("cancelSubjectSegmentation") { requestId: String ->
+      MemeStillSubjectSegmenter.requestCancel(requestId)
+    }
+
+    // Delete one request's cutout files. Called when the studio drops a cutout
+    // or supersedes it — these are full-resolution PNGs in the cache and nothing
+    // else knows they became garbage.
+    AsyncFunction("releaseSubjectCutouts") { requestId: String ->
+      val ctx = appContext.reactContext
+        ?: throw IllegalStateException("React context unavailable")
+      MemeStillSubjectSegmenter.release(ctx, requestId)
+    }
+
+    // Drop cutout directories old enough that no session can be using them.
+    AsyncFunction("sweepSubjectCutouts") {
+      val ctx = appContext.reactContext
+        ?: throw IllegalStateException("React context unavailable")
+      MemeStillSubjectSegmenter.sweepStaleRequests(ctx)
     }
 
     // Sample a bounded ring outside a normalized region on a downsampled,
@@ -360,25 +469,38 @@ class MemegetBgModule : Module() {
       )
     }
 
+    // One lease for the JS caller, held through as many progress updates as it likes. The count
+    // lives in KeepAliveLease because the video exporter holds a lease of its own: without it,
+    // whichever of the two finished first would stop the service out from under the other.
     Function("startForeground") { title: String, text: String, progress: Int, total: Int ->
       val ctx = appContext.reactContext ?: return@Function null
-      val intent = Intent(ctx, KeepAliveService::class.java).apply {
-        putExtra(KeepAliveService.EXTRA_TITLE, title)
-        putExtra(KeepAliveService.EXTRA_TEXT, text)
-        putExtra(KeepAliveService.EXTRA_PROGRESS, progress)
-        putExtra(KeepAliveService.EXTRA_MAX, total)
-      }
-      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-        ctx.startForegroundService(intent)
+      if (jsKeepAlive) {
+        KeepAliveLease.update(ctx, title, text, progress, total)
       } else {
-        ctx.startService(intent)
+        jsKeepAlive = true
+        KeepAliveLease.acquire(ctx, title, text, progress, total)
       }
     }
 
     Function("stopForeground") {
       val ctx = appContext.reactContext ?: return@Function null
-      ctx.stopService(Intent(ctx, KeepAliveService::class.java))
+      releaseJsKeepAlive(ctx)
     }
+
+    // A JS reload destroys the module without calling stopForeground, and a lease nobody holds a
+    // reference to keeps the notification up until the process dies.
+    OnDestroy {
+      appContext.reactContext?.let { releaseJsKeepAlive(it) }
+    }
+  }
+
+  // Whether the JS side is currently holding its single lease.
+  private var jsKeepAlive = false
+
+  private fun releaseJsKeepAlive(context: Context) {
+    if (!jsKeepAlive) return
+    jsKeepAlive = false
+    KeepAliveLease.release(context)
   }
 
   // The JS side owns the plan shape, so the bridge only marshals: `[{uri, role, mimeType?}]`.

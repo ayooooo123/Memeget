@@ -258,6 +258,10 @@ object RetainedRangeComposition {
    *   invent an audio track the user never had, so this is not defaulted from "there is a card".
    * @param outputSize The frame every item is presented into. Required whenever a card is present
    *   (see the class comment); `null` keeps the pre-card behaviour of letting the source decide.
+   * @param sourceVideoEffects Effects that describe the SOURCE frame - the project's rotation,
+   *   flips and crop - applied to [Range] items only, before the shared [Presentation]. A [Card]
+   *   is authored for the output frame the plan already chose, so cropping it would cut away part
+   *   of an image the user positioned deliberately.
    */
   fun buildTimeline(
     uri: String,
@@ -266,6 +270,7 @@ object RetainedRangeComposition {
     speed: Float = 1f,
     sourceHasAudio: Boolean = true,
     outputSize: Size? = null,
+    sourceVideoEffects: List<Effect> = emptyList(),
     audioProcessors: List<AudioProcessor> = emptyList(),
     videoEffects: List<Effect> = emptyList()
   ): Composition {
@@ -308,10 +313,13 @@ object RetainedRangeComposition {
       Presentation.createForWidthAndHeight(it.width, it.height, Presentation.LAYOUT_SCALE_TO_FIT)
     }
     val items = segments.map { segment ->
-      val itemEffects = buildList(2) {
+      val itemEffects = buildList(2 + sourceVideoEffects.size) {
         if (speedProcessor != null) {
           add(SequenceSpeedTimestampEffect(speedProcessor::getSpeedAdjustedTimeAsync))
         }
+        // Shared instances across items, like the presentation below: the source geometry is the
+        // same frame-to-frame, so an equal effect list keeps the shader chain from rebuilding.
+        if (segment is Range) addAll(sourceVideoEffects)
         if (presentation != null) add(presentation)
       }
       when (segment) {
