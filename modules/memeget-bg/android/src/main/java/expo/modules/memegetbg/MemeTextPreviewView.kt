@@ -27,8 +27,18 @@ internal data class MemeTextDrawBoundsPx(
   val outerHeightPx: Int
 )
 
-internal class MemeTextPreviewView(
+internal class MemeTextPreviewView
+@JvmOverloads
+constructor(
   context: Context,
+  // @JvmOverloads is load-bearing, not decoration. Kotlin compiles a defaulted
+  // parameter into (Context, MemeTextDensity) plus a synthetic bitmask overload
+  // and NO plain (Context) — verified in bytecode. Expo's
+  // ViewDefinitionBuilder.createViewFactory reflects for exactly (Context) or
+  // (Context, AppContext), so without this the module registers fine and then
+  // red-boxes "Didn't find a correct constructor" the first time a text layer
+  // is added. Every other test constructs this directly with both arguments,
+  // which is precisely why none of them caught it.
   private val density: MemeTextDensity = MemeTextDensity(context.resources.displayMetrics.density)
 ) : View(context) {
   private val textPaint = TextPaint(TextPaint.ANTI_ALIAS_FLAG)
