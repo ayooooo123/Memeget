@@ -81,12 +81,12 @@ export interface CapturedTransformGesture {
 
 export type ProjectHistoryCommand = 'undo' | 'redo';
 
-export type MemeEditToolId = 'layers' | 'text' | 'transform' | 'replace-text';
+export type MemeEditToolId = 'layers' | 'text' | 'transform' | 'replace-text' | 'timeline' | 'audio';
 
 export function memeEditToolsForSource(kind: MemeEditProject['source']['kind']): MemeEditToolId[] {
   return kind === 'image'
     ? ['layers', 'text', 'transform', 'replace-text']
-    : ['layers', 'text'];
+    : ['layers', 'text', 'timeline', 'audio'];
 }
 
 export interface ProjectHistoryCommandAvailability {
