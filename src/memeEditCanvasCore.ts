@@ -87,6 +87,7 @@ export type MemeEditToolId =
   | 'text'
   | 'transform'
   | 'replace-text'
+  | 'subject'
   | 'timeline'
   | 'frames'
   | 'motion'
@@ -94,8 +95,49 @@ export type MemeEditToolId =
 
 export function memeEditToolsForSource(kind: MemeEditProject['source']['kind']): MemeEditToolId[] {
   return kind === 'image'
-    ? ['layers', 'text', 'transform', 'replace-text']
+    ? ['layers', 'text', 'transform', 'replace-text', 'subject']
     : ['layers', 'text', 'timeline', 'frames', 'motion', 'audio'];
+}
+
+/**
+ * Tool rail metrics.
+ *
+ * Wide enough for "Replace text" and "Transform" at caption size without
+ * truncating — the rail used to flex its cells, so eight video tools on a
+ * ~384dp screen got about 48dp each and the words were cut mid-syllable.
+ */
+export const TOOL_RAIL_ITEM_WIDTH = 76;
+export const TOOL_RAIL_GAP = 8;
+
+/**
+ * Scroll offset that brings the tool at `index` fully into view, with one
+ * neighbour's worth of lead-in so the rail visibly has more to its left. Never
+ * negative: the first few tools should not scroll the rail at all.
+ */
+export function toolRailScrollOffsetPx(index: number): number {
+  const stride = TOOL_RAIL_ITEM_WIDTH + TOOL_RAIL_GAP;
+  return Math.max(0, (index - 1) * stride);
+}
+
+/** Height of the tool panel's header, which stays visible when collapsed. */
+export const SIDE_PANE_HEADER_HEIGHT = 52;
+
+/**
+ * How tall the tool panel should be in the stacked (phone) layout.
+ *
+ * It used to be a flat 240dp. On a ~816dp-tall phone that is nearly a third of
+ * the screen handed to a panel that is frequently showing "No editable layers
+ * yet", while the thing being edited — the canvas, the only direct-manipulation
+ * surface in the app — got what was left. A proportional height keeps the
+ * balance the same on a small phone and a tall one, and collapsing hands the
+ * space back entirely without losing the panel's header or its state.
+ */
+export function studioSidePaneHeight(availableHeightDp: number, collapsed: boolean): number {
+  if (collapsed) return SIDE_PANE_HEADER_HEIGHT;
+  if (!Number.isFinite(availableHeightDp) || availableHeightDp <= 0) return 240;
+  // Floor keeps the panel usable (a preset grid row plus its heading); ceiling
+  // stops a tablet-height screen from giving the panel more than it can fill.
+  return Math.min(280, Math.max(180, Math.round(availableHeightDp * 0.34)));
 }
 
 // One 60fps frame. Below this a report is decoder jitter rather than a new
@@ -148,8 +190,16 @@ export interface StudioHeaderRowLayout {
 
 export interface StudioHeaderLayout {
   mode: 'single-row' | 'compact-two-row';
-  showFullExportLabel: boolean;
-  exportLabel: 'Export' | 'Out';
+  /**
+   * Whether the secondary commands (Before/Undo/Redo) show their word as well
+   * as their glyph. When space runs out THEY give it up — never the export
+   * button. Undo and redo are the two most conventional glyphs in software;
+   * "export" abbreviates to nothing a person recognises. The previous rule
+   * abbreviated it to "Out", which on a Pixel 9 Pro (~384dp) meant the primary
+   * action of the whole editor permanently read as a non-word.
+   */
+  showCommandLabels: boolean;
+  exportLabel: 'Export';
   rows: StudioHeaderRowLayout[];
 }
 
@@ -161,7 +211,7 @@ export interface StudioExportControlInput {
 }
 
 export interface StudioExportControlState {
-  label: 'Export' | 'Out' | 'No export' | 'Export unavailable';
+  label: 'Export' | 'No export' | 'Export unavailable';
   disabled: boolean;
   accessibilityState: { disabled: boolean };
 }
@@ -203,17 +253,19 @@ export function memeRemixHeaderLayout(width: number): StudioHeaderLayout {
   if (width < 430) {
     return {
       mode: 'compact-two-row',
-      showFullExportLabel: false,
-      exportLabel: 'Out',
+      // Glyph-only secondaries buy roughly 150dp, which is far more than
+      // "Export" needs — so the primary action never has to shrink.
+      showCommandLabels: false,
+      exportLabel: 'Export',
       rows: [
         { key: 'identity', controls: ['Cancel', 'TitleStatus'], maxWidth: width, minControlSize: 44 },
-        { key: 'commands', controls: ['Before', 'Undo', 'Redo', 'Out'], maxWidth: width, minControlSize: 44 },
+        { key: 'commands', controls: ['Before', 'Undo', 'Redo', 'Export'], maxWidth: width, minControlSize: 44 },
       ],
     };
   }
   return {
     mode: 'single-row',
-    showFullExportLabel: true,
+    showCommandLabels: true,
     exportLabel: 'Export',
     rows: [
       { key: 'single', controls: ['Cancel', 'TitleStatus', 'Before', 'Undo', 'Redo', 'Export'], maxWidth: width, minControlSize: 44 },

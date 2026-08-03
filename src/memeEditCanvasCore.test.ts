@@ -17,6 +17,9 @@ import {
   layerHandleTouchInsideMedia,
   memeRemixExportControlState,
   memeEditToolsForSource,
+  toolRailScrollOffsetPx,
+  TOOL_RAIL_ITEM_WIDTH,
+  TOOL_RAIL_GAP,
   projectHistoryCommandAvailability,
   runProjectHistoryCommand,
   nextDuplicateLayerId,
@@ -88,11 +91,15 @@ describe('containedMediaRect', () => {
 });
 
 describe('source-specific editor tools', () => {
-  test('exposes image transform and text replacement only for image projects', () => {
-    expect(memeEditToolsForSource('image')).toEqual(['layers', 'text', 'transform', 'replace-text']);
+  test('exposes image transform, text replacement and cutouts only for image projects', () => {
+    expect(memeEditToolsForSource('image')).toEqual(['layers', 'text', 'transform', 'replace-text', 'subject']);
     expect(memeEditToolsForSource('video')).toContain('audio');
     expect(memeEditToolsForSource('video')).not.toContain('transform');
     expect(memeEditToolsForSource('video')).not.toContain('replace-text');
+    // ML Kit Subject Segmentation is a still-image API; offering it on a video
+    // would be a button that cannot work. Video isolation is a separate,
+    // gated feature that has not passed its gate.
+    expect(memeEditToolsForSource('video')).not.toContain('subject');
   });
 
   test('offers frame stepping only where there are frames to step', () => {
@@ -326,11 +333,12 @@ describe('studio shell UI contracts', () => {
     for (const width of [320, 360, 375, 390]) {
       const layout = memeRemixHeaderLayout(width);
       expect(layout.mode).toBe('compact-two-row');
-      expect(layout.showFullExportLabel).toBe(false);
-      expect(layout.exportLabel).toBe('Out');
+      // Secondaries lose their words; the primary action never does.
+      expect(layout.showCommandLabels).toBe(false);
+      expect(layout.exportLabel).toBe('Export');
       expect(layout.rows).toEqual([
         { key: 'identity', controls: ['Cancel', 'TitleStatus'], maxWidth: width, minControlSize: 44 },
-        { key: 'commands', controls: ['Before', 'Undo', 'Redo', 'Out'], maxWidth: width, minControlSize: 44 },
+        { key: 'commands', controls: ['Before', 'Undo', 'Redo', 'Export'], maxWidth: width, minControlSize: 44 },
       ]);
       for (const row of layout.rows) {
         expect(row.maxWidth).toBeLessThanOrEqual(width);
@@ -340,7 +348,7 @@ describe('studio shell UI contracts', () => {
 
     expect(memeRemixHeaderLayout(430)).toEqual({
       mode: 'single-row',
-      showFullExportLabel: true,
+      showCommandLabels: true,
       exportLabel: 'Export',
       rows: [
         { key: 'single', controls: ['Cancel', 'TitleStatus', 'Before', 'Undo', 'Redo', 'Export'], maxWidth: 430, minControlSize: 44 },
@@ -348,10 +356,46 @@ describe('studio shell UI contracts', () => {
     });
   });
 
+  test('the export button is never abbreviated, at any width a phone can have', () => {
+    // Regression guard. This read "Out" on a Pixel 9 Pro (~384dp) — the primary
+    // action of the entire editor, permanently labelled with a non-word, on the
+    // device it actually ships to. Narrow screens abbreviate the SECONDARY
+    // commands instead, which is what glyphs are for.
+    for (let width = 280; width <= 1024; width += 8) {
+      const layout = memeRemixHeaderLayout(width);
+      expect(layout.exportLabel).toBe('Export');
+      expect(layout.rows.at(-1)?.controls).toContain('Export');
+      expect(layout.rows.flatMap((r) => r.controls)).not.toContain('Out');
+    }
+  });
+
+  test('the tool rail keeps the active tool reachable without truncating labels', () => {
+    // The rail used to flex its cells across the row. A video source offers
+    // eight tools, so on a ~384dp phone each got about 48dp — "Transform"
+    // rendered as "Transfo…" with the badge overlapping the word. Fixed-width
+    // cells plus horizontal scrolling is the fix, and the offset math is what
+    // stops a selected tool from sitting off-screen with no scroll affordance.
+    expect(toolRailScrollOffsetPx(0)).toBe(0);
+    expect(toolRailScrollOffsetPx(1)).toBe(0);
+    // From the third tool on, scroll but keep one neighbour visible as a hint
+    // that the rail continues to the left.
+    expect(toolRailScrollOffsetPx(2)).toBe(TOOL_RAIL_ITEM_WIDTH + TOOL_RAIL_GAP);
+    expect(toolRailScrollOffsetPx(5)).toBe(4 * (TOOL_RAIL_ITEM_WIDTH + TOOL_RAIL_GAP));
+
+    for (let i = 0; i < 8; i += 1) {
+      expect(toolRailScrollOffsetPx(i)).toBeGreaterThanOrEqual(0);
+      if (i > 0) expect(toolRailScrollOffsetPx(i)).toBeGreaterThanOrEqual(toolRailScrollOffsetPx(i - 1));
+    }
+
+    // A video project genuinely needs more tools than fit; that is the case the
+    // old fixed row silently mangled.
+    expect(memeEditToolsForSource('video').length).toBeGreaterThan(4);
+  });
+
   test('export control is disabled whenever the editor or export callback is unavailable', () => {
     const compact = memeRemixHeaderLayout(390);
     expect(memeRemixExportControlState(compact, { ready: true, exportBusy: false, discarding: false, hasExport: true })).toEqual({
-      label: 'Out',
+      label: 'Export',
       disabled: false,
       accessibilityState: { disabled: false },
     });

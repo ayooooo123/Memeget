@@ -46,7 +46,7 @@ import {
   type TransformKeyframe,
   type TimeRangeUs,
 } from '../memeEditProjectCore';
-import { beforeAfterAccessibilityNextState, beforeAfterPointerNextState, canDuplicateLayer, commitGestureTransaction, memeRemixExportControlState, memeRemixHeaderLayout, nextDuplicateLayerId, projectHistoryCommandAvailability, runProjectHistoryCommand, selectedLayerIdAfterDelete } from '../memeEditCanvasCore';
+import { beforeAfterAccessibilityNextState, beforeAfterPointerNextState, canDuplicateLayer, commitGestureTransaction, memeRemixExportControlState, memeRemixHeaderLayout, studioSidePaneHeight, nextDuplicateLayerId, projectHistoryCommandAvailability, runProjectHistoryCommand, selectedLayerIdAfterDelete } from '../memeEditCanvasCore';
 import { videoAudioActions, type VideoAudioChange } from '../memeVideoAudioCore';
 import {
   createSeekThrottle,
@@ -65,6 +65,7 @@ import { MemeEditToolRail, type MemeEditTool } from './MemeEditToolRail';
 import { MemeFrameStrip } from './MemeFrameStrip';
 import { MemeLayerList } from './MemeLayerList';
 import { MemeTextInspector } from './MemeTextInspector';
+import { MemeSubjectTool } from './MemeSubjectTool';
 import { MemeTextReplaceTool } from './MemeTextReplaceTool';
 import { MemeTimeline } from './MemeTimeline';
 import { MemeTransformInspector } from './MemeTransformInspector';
@@ -99,6 +100,8 @@ function selectedLayerSummary(project: MemeEditProject, selectedLayerId: string 
 
 function HeaderButton({
   label,
+  glyph,
+  showLabel = true,
   hint,
   onPress,
   disabled,
@@ -111,6 +114,9 @@ function HeaderButton({
   onAccessibilityAction,
 }: {
   label: string;
+  /** Shown instead of the word when space is tight. */
+  glyph?: string;
+  showLabel?: boolean;
   hint: string;
   onPress?: () => void;
   disabled?: boolean;
@@ -122,6 +128,10 @@ function HeaderButton({
   accessibilityActions?: { name: string; label?: string }[];
   onAccessibilityAction?: (event: AccessibilityActionEvent) => void;
 }) {
+  // Only ever collapse to a glyph, never to a truncated word: "Out" for Export
+  // is not shorter, it is unreadable. accessibilityLabel keeps the real word in
+  // every case, so a screen reader is unaffected by the visual abbreviation.
+  const iconOnly = !showLabel && !!glyph;
   return (
     <PressableScale
       scaleTo={0.94}
@@ -129,7 +139,13 @@ function HeaderButton({
       onPress={onPress}
       onPressIn={onPressIn}
       onPressOut={onPressOut}
-      style={[styles.headerButton, primary && styles.headerPrimary, danger && styles.headerDanger, selected && styles.headerSelected]}
+      style={[
+        styles.headerButton,
+        iconOnly && styles.headerButtonIcon,
+        primary && styles.headerPrimary,
+        danger && styles.headerDanger,
+        selected && styles.headerSelected,
+      ]}
       accessibilityRole="button"
       accessibilityLabel={label}
       accessibilityHint={hint}
@@ -137,7 +153,18 @@ function HeaderButton({
       accessibilityActions={accessibilityActions}
       onAccessibilityAction={onAccessibilityAction}
     >
-      <Text style={[styles.headerButtonText, primary && styles.headerPrimaryText, danger && styles.headerDangerText, selected && styles.headerSelectedText]}>{label}</Text>
+      <Text
+        style={[
+          styles.headerButtonText,
+          iconOnly && styles.headerButtonGlyph,
+          primary && styles.headerPrimaryText,
+          danger && styles.headerDangerText,
+          selected && styles.headerSelectedText,
+        ]}
+        numberOfLines={1}
+      >
+        {iconOnly ? glyph : label}
+      </Text>
     </PressableScale>
   );
 }
@@ -179,6 +206,10 @@ export function MemeRemixStudio({
   const [state, setState] = useState<LoadState>({ kind: 'closed' });
   const [retryNonce, setRetryNonce] = useState(0);
   const [activeTool, setActiveTool] = useState<MemeEditTool>('layers');
+  // Collapsing the tool panel is the one lever that meaningfully grows the
+  // canvas on a phone, so it is a first-class piece of editor state rather than
+  // a transient animation flag.
+  const [panelCollapsed, setPanelCollapsed] = useState(false);
   const [cleanupPending, setCleanupPending] = useState(false);
   const [selectedLayerId, setSelectedLayerId] = useState<string | null>(null);
   const [before, setBefore] = useState(false);
@@ -629,6 +660,25 @@ export function MemeRemixStudio({
     });
   }, [discarding, exportBusy, flushPendingTextSnapshot, onExport, project, ready]);
   const headerLayout = memeRemixHeaderLayout(width);
+  const sidePaneHeight = studioSidePaneHeight(height, panelCollapsed);
+  const panelTitle =
+    activeTool === 'layers'
+      ? 'Layer tray'
+      : activeTool === 'text'
+        ? 'Text'
+        : activeTool === 'transform'
+          ? 'Image transform'
+          : activeTool === 'timeline'
+            ? 'Timeline'
+            : activeTool === 'frames'
+              ? 'Frames'
+              : activeTool === 'motion'
+                ? 'Motion'
+                : activeTool === 'audio'
+                  ? 'Audio & speed'
+                  : activeTool === 'subject'
+                    ? 'Cut out subject'
+                    : 'Replace text';
 
   const status = project
     ? `${project.source.kind.toUpperCase()} · ${project.source.width}×${project.source.height}${project.source.durationUs ? ` · ${(project.source.durationUs / 1_000_000).toFixed(1)}s` : ''}`
@@ -679,9 +729,10 @@ export function MemeRemixStudio({
                 </View>
               </View>
               <View style={[styles.topBarRow, styles.commandRow]}>
-                <HeaderButton label="Before" hint="Hold to hide all edit layers without resetting video playback. Screen reader activate toggles before and after." disabled={!ready} selected={before} onPressIn={showBefore} onPressOut={hideBefore} accessibilityActions={[{ name: 'activate', label: before ? 'Show edited layers' : 'Show original media' }]} onAccessibilityAction={toggleBeforeForAccessibility} />
-                <HeaderButton label="Undo" hint="Undo the last edit transaction" onPress={undo} disabled={!canUndo || disabled} />
-                <HeaderButton label="Redo" hint="Redo the next edit transaction" onPress={redo} disabled={!canRedo || disabled} />
+                <HeaderButton label="Before" glyph="◑" showLabel={headerLayout.showCommandLabels} hint="Hold to hide all edit layers without resetting video playback. Screen reader activate toggles before and after." disabled={!ready} selected={before} onPressIn={showBefore} onPressOut={hideBefore} accessibilityActions={[{ name: 'activate', label: before ? 'Show edited layers' : 'Show original media' }]} onAccessibilityAction={toggleBeforeForAccessibility} />
+                <HeaderButton label="Undo" glyph="↶" showLabel={headerLayout.showCommandLabels} hint="Undo the last edit transaction" onPress={undo} disabled={!canUndo || disabled} />
+                <HeaderButton label="Redo" glyph="↷" showLabel={headerLayout.showCommandLabels} hint="Redo the next edit transaction" onPress={redo} disabled={!canRedo || disabled} />
+                <View style={styles.commandSpacer} />
                 <HeaderButton label={exportControl.label} hint="Render this project at full resolution and save it as a new meme" onPress={exportProject} disabled={exportControl.disabled} primary={!!onExport} />
               </View>
             </>
@@ -728,11 +779,23 @@ export function MemeRemixStudio({
                 <Text style={styles.readoutText}>{selectedLayerSummary(project, selectedLayerId)}</Text>
               </View>
             </View>
-            <View style={[styles.sidePane, compact && styles.sidePaneCompact]}>
-              <View style={styles.sideHead}>
-                <Text style={styles.sideTitle}>{activeTool === 'layers' ? 'Layer tray' : activeTool === 'text' ? 'Text' : activeTool === 'transform' ? 'Image transform' : activeTool === 'timeline' ? 'Timeline' : activeTool === 'frames' ? 'Frames' : activeTool === 'motion' ? 'Motion' : activeTool === 'audio' ? 'Audio & speed' : 'Replace text'}</Text>
-                <Text style={styles.sideMeta}>{project.layers.length} layer{project.layers.length === 1 ? '' : 's'}</Text>
-              </View>
+            <View style={[styles.sidePane, compact && { height: sidePaneHeight, width: '100%' }]}>
+              <PressableScale
+                scaleTo={0.98}
+                style={styles.sideHead}
+                onPress={compact ? () => setPanelCollapsed((v) => !v) : undefined}
+                disabled={!compact}
+                accessibilityRole="button"
+                accessibilityLabel={panelTitle}
+                accessibilityHint={panelCollapsed ? 'Expand the tool panel' : 'Collapse the tool panel to give the canvas more room'}
+                accessibilityState={{ expanded: !panelCollapsed }}
+              >
+                <Text style={styles.sideTitle}>{panelTitle}</Text>
+                <View style={styles.sideHeadRight}>
+                  <Text style={styles.sideMeta}>{project.layers.length} layer{project.layers.length === 1 ? '' : 's'}</Text>
+                  {compact ? <Text style={styles.sideChevron}>{panelCollapsed ? '▴' : '▾'}</Text> : null}
+                </View>
+              </PressableScale>
               {activeTool === 'layers' ? (
                 <MemeLayerList
                   project={project}
@@ -807,6 +870,15 @@ export function MemeRemixStudio({
                   onChange={commitVideoAudio}
                   onPreviewAudio={setPreviewAudio}
                 />
+              ) : activeTool === 'subject' ? (
+                <MemeSubjectTool
+                  project={project}
+                  sourceUri={project.transient.materializedSourceUri ?? project.source.uri}
+                  idPrefix={`subject-${project.source.kind}`}
+                  disabled={disabled}
+                  onApplyActions={commitMotionActions}
+                  onSelectLayer={selectLayer}
+                />
               ) : (
                 <MemeTextReplaceTool
                   project={project}
@@ -874,7 +946,11 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: space.sm,
   },
-  commandRow: { justifyContent: 'space-between' },
+  commandRow: { justifyContent: 'flex-start', gap: space.xs },
+  // Pushes Export to the trailing edge and puts real distance between it and
+  // Undo/Redo. It is the only destructive-ish, forward-moving action in the
+  // row; sitting flush against Redo it gets hit by accident.
+  commandSpacer: { flex: 1 },
   titleBlock: { flex: 1, minWidth: 0, gap: 2, paddingHorizontal: space.xs },
   title: { ...type.title, color: colors.text },
   status: { ...type.caption, color: colors.muted, fontVariant: ['tabular-nums'] },
@@ -889,10 +965,15 @@ const styles = StyleSheet.create({
     borderColor: colors.border,
     backgroundColor: colors.surface2,
   },
+  // Square when it is a glyph: a 58dp-wide pill around a single arrow reads as
+  // an empty button.
+  headerButtonIcon: { minWidth: 44, paddingHorizontal: 0 },
   headerPrimary: { backgroundColor: colors.volt, borderColor: colors.volt },
   headerDanger: { backgroundColor: colors.dangerDim, borderColor: colors.danger },
   headerSelected: { borderColor: colors.volt },
   headerButtonText: { ...type.caption, color: colors.textDim, fontWeight: '800' },
+  // Glyphs need more size than words to read at the same weight.
+  headerButtonGlyph: { fontSize: 18, lineHeight: 22, fontWeight: '600' },
   headerPrimaryText: { color: colors.onVolt },
   headerDangerText: { color: colors.danger },
   headerSelectedText: { color: colors.volt },
@@ -914,7 +995,10 @@ const styles = StyleSheet.create({
     borderColor: colors.border,
     backgroundColor: colors.surface,
   },
-  sidePaneCompact: { width: '100%', maxHeight: 240 },
+  sideHeadRight: { flexDirection: 'row', alignItems: 'center', gap: space.sm },
+  // Points the way the panel will MOVE, not the way it currently is:
+  // a collapsed panel offers to go up, an expanded one offers to go down.
+  sideChevron: { ...type.caption, color: colors.muted, fontSize: 14 },
   sideHead: {
     minHeight: 52,
     flexDirection: 'row',
