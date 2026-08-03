@@ -87,7 +87,9 @@ describe('containedMediaRect', () => {
 describe('source-specific editor tools', () => {
   test('exposes image transform and text replacement only for image projects', () => {
     expect(memeEditToolsForSource('image')).toEqual(['layers', 'text', 'transform', 'replace-text']);
-    expect(memeEditToolsForSource('video')).toEqual(['layers', 'text']);
+    expect(memeEditToolsForSource('video')).toContain('audio');
+    expect(memeEditToolsForSource('video')).not.toContain('transform');
+    expect(memeEditToolsForSource('video')).not.toContain('replace-text');
   });
 });
 

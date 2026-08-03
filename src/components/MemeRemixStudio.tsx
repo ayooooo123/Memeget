@@ -44,20 +44,36 @@ import {
   type MemeEditProjectAction,
   type ProjectHistory,
   type TransformKeyframe,
+  type TimeRangeUs,
 } from '../memeEditProjectCore';
 import { beforeAfterAccessibilityNextState, beforeAfterPointerNextState, canDuplicateLayer, commitGestureTransaction, memeRemixExportControlState, memeRemixHeaderLayout, nextDuplicateLayerId, projectHistoryCommandAvailability, runProjectHistoryCommand, selectedLayerIdAfterDelete } from '../memeEditCanvasCore';
+import { videoAudioActions, type VideoAudioChange } from '../memeVideoAudioCore';
+import {
+  createSeekThrottle,
+  flushSeekThrottle,
+  nextSeekThrottleState,
+  reconcileLayersForRetainedRanges,
+  resolvePlayheadUs,
+  seekTargetForLayerSelection,
+} from '../memeTimelineCore';
 import { tap, warn } from '../haptics';
 import { colors, radius, space, type } from '../theme';
 import type { MemeRecord } from '../types';
 import { PressableScale } from './ui';
-import { MemeEditCanvas } from './MemeEditCanvas';
+import { MemeEditCanvas, type VideoSeekRequest } from './MemeEditCanvas';
 import { MemeEditToolRail, type MemeEditTool } from './MemeEditToolRail';
 import { MemeLayerList } from './MemeLayerList';
 import { MemeTextInspector } from './MemeTextInspector';
 import { MemeTextReplaceTool } from './MemeTextReplaceTool';
+import { MemeTimeline } from './MemeTimeline';
 import { MemeTransformInspector } from './MemeTransformInspector';
+import { MemeVideoAudioTool } from './MemeVideoAudioTool';
 
 type StudioItem = Pick<MemeRecord, 'id' | 'kind' | 'name' | 'uri' | 'modifiedAt'>;
+
+// Floor between scrub seeks. ExoPlayer coalesces badly under a finger moving at
+// 60Hz; ~8 seeks a second keeps the preview responsive without queueing them.
+const SCRUB_SEEK_INTERVAL_MS = 120;
 
 type LoadState =
   | { kind: 'closed' }
@@ -171,14 +187,23 @@ export function MemeRemixStudio({
   const [textRegions, setTextRegions] = useState<TextRegionCandidate[]>([]);
   const [selectedTextRegion, setSelectedTextRegion] = useState<TextRegionCandidate | null>(null);
   const [manualTextRegionMode, setManualTextRegionMode] = useState(false);
+  const [previewAudio, setPreviewAudio] = useState<{ muted: boolean; volume: number } | null>(null);
+  const [playbackUs, setPlaybackUs] = useState(0);
+  const [scrubUs, setScrubUs] = useState<number | null>(null);
+  const [seekRequest, setSeekRequest] = useState<VideoSeekRequest | null>(null);
   const autosaveRef = useRef<MemeEditAutosaveController | null>(null);
   const sourceControllerRef = useRef<MemeEditSourceSessionController | null>(null);
   const closedRef = useRef(true);
   const pendingTextFlushRef = useRef<(() => MemeEditProject | null) | null>(null);
   const pendingTextProjectRef = useRef<MemeEditProject | null>(null);
+  const seekThrottleRef = useRef(createSeekThrottle());
+  const seekNonceRef = useRef(0);
 
   const ready = state.kind === 'ready' ? state : null;
   const project = ready?.history.present ?? null;
+  // The playhead follows the finger at full gesture rate; only the seeks that
+  // reach ExoPlayer are throttled.
+  const playheadUs = resolvePlayheadUs(scrubUs, playbackUs);
 
   const registerPendingTextFlush = useCallback((flush: () => MemeEditProject | null) => {
     pendingTextFlushRef.current = flush;
@@ -236,6 +261,10 @@ export function MemeRemixStudio({
       setSelectedTextRegion(null);
       setManualTextRegionMode(false);
       setActiveTool('layers');
+      setPlaybackUs(0);
+      setScrubUs(null);
+      setSeekRequest(null);
+      seekThrottleRef.current = createSeekThrottle();
       setState({ kind: 'closed' });
       void (async () => {
         try {
@@ -256,6 +285,10 @@ export function MemeRemixStudio({
     setSelectedTextRegion(null);
     setManualTextRegionMode(false);
     setActiveTool('layers');
+    setPlaybackUs(0);
+    setScrubUs(null);
+    setSeekRequest(null);
+    seekThrottleRef.current = createSeekThrottle();
     setInlineError('');
 
     const safeSetState = (next: LoadState) => {
@@ -362,6 +395,47 @@ export function MemeRemixStudio({
   const commitLayerKeyframes = useCallback((layerId: string, keyframes: TransformKeyframe[]) => {
     if (!discarding) setHistory((history) => commitGestureTransaction(history, [{ type: 'set-layer-keyframes', id: layerId, keyframes }]));
   }, [discarding, setHistory]);
+  const requestSeek = useCallback((timeUs: number) => {
+    seekNonceRef.current += 1;
+    setSeekRequest({ timeUs, nonce: seekNonceRef.current });
+  }, []);
+  // Called at full gesture rate by the timeline. The throttle decides how much
+  // of that the decoder actually sees.
+  const scrubPlayhead = useCallback((sourceTimeUs: number) => {
+    setScrubUs(sourceTimeUs);
+    const step = nextSeekThrottleState(seekThrottleRef.current, sourceTimeUs, Date.now(), SCRUB_SEEK_INTERVAL_MS);
+    seekThrottleRef.current = step.state;
+    if (step.seekUs !== null) requestSeek(step.seekUs);
+  }, [requestSeek]);
+  const endScrub = useCallback((sourceTimeUs: number) => {
+    const step = flushSeekThrottle(seekThrottleRef.current, Date.now());
+    seekThrottleRef.current = step.state;
+    if (step.seekUs !== null) requestSeek(step.seekUs);
+    setPlaybackUs(sourceTimeUs);
+    setScrubUs(null);
+  }, [requestSeek]);
+  // Selecting a layer parks the playhead where that layer is actually visible,
+  // so direct manipulation never happens against a frame the layer is absent from.
+  const selectLayer = useCallback((id: string | null) => {
+    setSelectedLayerId(id);
+    if (!project || project.source.kind !== 'video' || id === null) return;
+    const target = seekTargetForLayerSelection(project.layers.find((layer) => layer.id === id) ?? null, playheadUs);
+    if (target === null) return;
+    setScrubUs(null);
+    setPlaybackUs(target);
+    seekThrottleRef.current = createSeekThrottle();
+    requestSeek(target);
+  }, [playheadUs, project, requestSeek]);
+  // One trim gesture, one undo entry: the retained-range change and every layer
+  // it invalidates go into a single transaction.
+  const commitRetainedRanges = useCallback((retainedRanges: TimeRangeUs[]) => {
+    if (!project || discarding) return;
+    const plan = reconcileLayersForRetainedRanges(project, retainedRanges);
+    if (plan.actions.length === 0) return;
+    setHistory((history) => commitGestureTransaction(history, plan.actions));
+    setSelectedLayerId((current) => (current !== null && plan.removedLayerIds.includes(current) ? null : current));
+    tap();
+  }, [discarding, project, setHistory]);
 
   const previewImageBase = useCallback((base: BaseTransform) => {
     if (project?.source.kind === 'image' && !discarding) setPreviewBase(base);
@@ -389,6 +463,13 @@ export function MemeRemixStudio({
   const addRegionLayers = useCallback((layers: MemeEditLayer[]) => {
     if (discarding || layers.length === 0) return;
     setHistory((history) => commitGestureTransaction(history, [{ type: 'add-layers', layers }]));
+  }, [discarding, setHistory]);
+
+  // One completed gesture, one undo entry. The in-flight value never reaches
+  // history; it only drives the preview player so what you hear is honest.
+  const commitVideoAudio = useCallback((change: VideoAudioChange) => {
+    if (discarding) return;
+    setHistory((history) => commitGestureTransaction(history, videoAudioActions(history.present, change)));
   }, [discarding, setHistory]);
 
   const beginTextTransaction = useCallback(() => {
@@ -607,7 +688,7 @@ export function MemeRemixStudio({
                 project={canvasProject ?? project}
                 selectedLayerId={selectedLayerId}
                 before={before}
-                onSelectLayer={setSelectedLayerId}
+                onSelectLayer={selectLayer}
                 onCommitLayerKeyframes={commitLayerKeyframes}
                 disabled={disabled}
                 textRegions={activeTool === 'replace-text' ? textRegions : []}
@@ -616,6 +697,9 @@ export function MemeRemixStudio({
                 onSelectTextRegion={setSelectedTextRegion}
                 onChangeSelectedTextRegion={setSelectedTextRegion}
                 onManualTextRegionComplete={() => setManualTextRegionMode(false)}
+                previewAudio={previewAudio}
+                seekRequest={seekRequest}
+                onPlaybackTimeUs={activeTool === 'timeline' ? setPlaybackUs : undefined}
               />
               <View style={styles.readout} pointerEvents="none">
                 <Text style={styles.readoutText}>{selectedLayerSummary(project, selectedLayerId)}</Text>
@@ -623,14 +707,14 @@ export function MemeRemixStudio({
             </View>
             <View style={[styles.sidePane, compact && styles.sidePaneCompact]}>
               <View style={styles.sideHead}>
-                <Text style={styles.sideTitle}>{activeTool === 'layers' ? 'Layer tray' : activeTool === 'text' ? 'Text' : activeTool === 'transform' ? 'Image transform' : 'Replace text'}</Text>
+                <Text style={styles.sideTitle}>{activeTool === 'layers' ? 'Layer tray' : activeTool === 'text' ? 'Text' : activeTool === 'transform' ? 'Image transform' : activeTool === 'timeline' ? 'Timeline' : activeTool === 'audio' ? 'Audio & speed' : 'Replace text'}</Text>
                 <Text style={styles.sideMeta}>{project.layers.length} layer{project.layers.length === 1 ? '' : 's'}</Text>
               </View>
               {activeTool === 'layers' ? (
                 <MemeLayerList
                   project={project}
                   selectedLayerId={selectedLayerId}
-                  onSelectLayer={setSelectedLayerId}
+                  onSelectLayer={selectLayer}
                   onMoveLayer={moveLayer}
                   onDuplicateLayer={duplicateLayer}
                   onDeleteLayer={deleteLayer}
@@ -645,7 +729,7 @@ export function MemeRemixStudio({
                   disabled={disabled}
                   bottomInset={Platform.OS === 'android' ? keyboardHeight : 0}
                   onApplyAction={applyAction}
-                  onSelectLayer={setSelectedLayerId}
+                  onSelectLayer={selectLayer}
                   onDuplicateLayer={duplicateLayer}
                   onDeleteLayer={deleteLayer}
                   onMoveLayer={moveLayer}
@@ -664,6 +748,24 @@ export function MemeRemixStudio({
                   />
                   <HeaderButton label={discarding ? 'Discarding…' : 'Discard draft'} hint="Delete this source's saved edit draft" onPress={discard} disabled={discarding} danger />
                 </View>
+              ) : activeTool === 'timeline' ? (
+                <MemeTimeline
+                  project={project}
+                  playheadUs={playheadUs}
+                  selectedLayerId={selectedLayerId}
+                  disabled={disabled}
+                  onScrubPlayhead={scrubPlayhead}
+                  onScrubEnd={endScrub}
+                  onCommitRetainedRanges={commitRetainedRanges}
+                  onSelectLayer={selectLayer}
+                />
+              ) : activeTool === 'audio' ? (
+                <MemeVideoAudioTool
+                  project={project}
+                  disabled={disabled}
+                  onChange={commitVideoAudio}
+                  onPreviewAudio={setPreviewAudio}
+                />
               ) : (
                 <MemeTextReplaceTool
                   project={project}
@@ -680,7 +782,7 @@ export function MemeRemixStudio({
                     if (enabled) setSelectedTextRegion(null);
                   }}
                   onAddLayers={addRegionLayers}
-                  onSelectLayer={setSelectedLayerId}
+                  onSelectLayer={selectLayer}
                 />
               )}
             </View>

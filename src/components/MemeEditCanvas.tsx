@@ -51,6 +51,7 @@ import {
   type TransformKeyframe,
 } from '../memeEditProjectCore';
 import { MEME_MEDIA_LAYER_BASE_WIDTH } from '../memeImageRenderCore';
+import { videoAudioPreview } from '../memeVideoAudioCore';
 import { buildMemeTextLayoutSpec, compareNativeMemeTextLayoutResults, memeTextBackingRadiusForPreview, memeTextMeasureKey, nativeMemeTextLayoutInputFromSpec, type MemeTextLayoutSpec, type NativeMemeTextLayoutResult } from '../memeTextLayoutCore';
 import { colors, radius, space, type } from '../theme';
 import { useConst } from '../reactUtils';
@@ -133,25 +134,58 @@ function rectStyle(rect: NormalizedRect, mediaRect: ViewRect) {
 }
 
 
+// A seek the studio wants applied to the preview player. The nonce is what makes
+// it a one-shot command instead of a value: two seeks to the same source time
+// during a throttled scrub must both land.
+export interface VideoSeekRequest {
+  timeUs: number;
+  nonce: number;
+}
+
 const SourceVideo = React.memo(function SourceVideo({
   uri,
   style,
+  muted,
+  volume,
+  speed,
+  seekRequest,
   onTimeUs,
 }: {
   uri: string;
   style: ViewStyle;
+  muted: boolean;
+  volume: number;
+  speed: number;
+  seekRequest: VideoSeekRequest | null;
   onTimeUs: (timeUs: number) => void;
 }) {
   const player = useVideoPlayer(uri, (instance) => {
     instance.loop = true;
     instance.play();
   });
+  // Written on every change, not just on creation: the audio tool's promise is
+  // that what you hear now is what the export will carry, and the speed the
+  // preview runs at is measured to match the exported rate.
+  useEffect(() => {
+    player.muted = muted;
+    player.volume = volume;
+  }, [muted, player, volume]);
+  useEffect(() => {
+    player.playbackRate = speed;
+  }, [player, speed]);
   useEffect(() => {
     const timer = setInterval(() => {
       onTimeUs(Math.max(0, Math.round((player.currentTime ?? 0) * 1_000_000)));
     }, PREVIEW_TIME_POLL_MS);
     return () => clearInterval(timer);
   }, [onTimeUs, player]);
+  // Nonce-keyed rather than time-keyed: scrubbing back to a time the player is
+  // already near must still seek, and a throttled drag legitimately repeats a
+  // position. Writing `currentTime` is the documented expo-video seek.
+  useEffect(() => {
+    if (seekRequest === null) return;
+    player.currentTime = Math.max(0, seekRequest.timeUs) / 1_000_000;
+  }, [player, seekRequest]);
   return <VideoView pointerEvents="none" style={[styles.sourceMedia, style]} player={player} contentFit="fill" nativeControls={false} />;
 });
 
@@ -159,13 +193,20 @@ const SourceMedia = React.memo(function SourceMedia({
   project,
   uri,
   mediaRect,
+  previewAudio,
+  seekRequest,
   onTimeUs,
 }: {
   project: MemeEditProject;
   uri: string;
   mediaRect: ViewRect;
+  previewAudio: { muted: boolean; volume: number } | null;
+  seekRequest: VideoSeekRequest | null;
   onTimeUs: (timeUs: number) => void;
 }) {
+  // An in-flight slider drag wins over the committed value so the preview
+  // tracks the gesture; both go through the same honesty clamp.
+  const audio = videoAudioPreview(previewAudio ?? project.video?.audio ?? { muted: false, volume: 1 });
   const frame = sourceFrameForVisibleCrop(
     { x: 0, y: 0, width: mediaRect.width, height: mediaRect.height },
     project.base
@@ -202,7 +243,15 @@ const SourceMedia = React.memo(function SourceMedia({
         ]}
       >
         {project.source.kind === 'video' ? (
-          <SourceVideo uri={uri} style={videoStyle} onTimeUs={onTimeUs} />
+          <SourceVideo
+            uri={uri}
+            style={videoStyle}
+            muted={audio.muted}
+            volume={audio.playerVolume}
+            speed={project.video?.speed ?? 1}
+            seekRequest={seekRequest}
+            onTimeUs={onTimeUs}
+          />
         ) : (
           <Image
             source={{ uri }}
@@ -900,6 +949,9 @@ export const MemeEditCanvas = React.memo(function MemeEditCanvas({
   onSelectTextRegion,
   onChangeSelectedTextRegion,
   onManualTextRegionComplete,
+  previewAudio = null,
+  seekRequest = null,
+  onPlaybackTimeUs,
 }: {
   project: MemeEditProject;
   selectedLayerId: string | null;
@@ -913,6 +965,10 @@ export const MemeEditCanvas = React.memo(function MemeEditCanvas({
   onSelectTextRegion?: (region: TextRegionCandidate | null) => void;
   onChangeSelectedTextRegion?: (region: TextRegionCandidate) => void;
   onManualTextRegionComplete?: () => void;
+  previewAudio?: { muted: boolean; volume: number } | null;
+  seekRequest?: VideoSeekRequest | null;
+  /** Attach only while something outside needs the playhead; it fires ~30×/s. */
+  onPlaybackTimeUs?: (timeUs: number) => void;
 }) {
   const [viewSize, setViewSize] = React.useState<ViewSize | null>(null);
   const [activeTimeUs, setActiveTimeUs] = React.useState(0);
@@ -943,12 +999,10 @@ export const MemeEditCanvas = React.memo(function MemeEditCanvas({
   }, []);
   const onVideoTime = useCallback((timeUs: number) => {
     const durationUs = project.source.durationUs;
-    setActiveTimeUs((current) => {
-      if (Math.abs(current - timeUs) < 16_667) return current;
-      if (durationUs === null || durationUs <= 0) return timeUs;
-      return Math.min(durationUs, timeUs);
-    });
-  }, [project.source.durationUs]);
+    const boundedUs = durationUs === null || durationUs <= 0 ? timeUs : Math.min(durationUs, timeUs);
+    onPlaybackTimeUs?.(boundedUs);
+    setActiveTimeUs((current) => (Math.abs(current - boundedUs) < 16_667 ? current : boundedUs));
+  }, [onPlaybackTimeUs, project.source.durationUs]);
   const manualStart = useRef<NormalizedPoint | null>(null);
   const manualPan = useMemo(() => PanResponder.create({
     onStartShouldSetPanResponder: () =>
@@ -1012,7 +1066,7 @@ export const MemeEditCanvas = React.memo(function MemeEditCanvas({
     <View style={styles.root} onLayout={onLayout} {...selectPan.panHandlers} accessibilityLabel="Meme editing canvas">
       <View style={styles.checker} pointerEvents="none" />
       {mediaRect ? (
-        <SourceMedia project={project} uri={sourceUri} mediaRect={mediaRect} onTimeUs={onVideoTime} />
+        <SourceMedia project={project} uri={sourceUri} mediaRect={mediaRect} previewAudio={previewAudio} seekRequest={seekRequest} onTimeUs={onVideoTime} />
       ) : (
         <View style={styles.loadingBox}><Text style={styles.unavailableText}>Measuring canvas…</Text></View>
       )}
