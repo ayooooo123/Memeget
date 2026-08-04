@@ -395,6 +395,111 @@ export function dragKeyframeByViewDelta(
   };
 }
 
+/**
+ * Where meme captions actually go.
+ *
+ * Not arbitrary thirds: the format is top text and bottom text, horizontally
+ * centred, and a dead-centre option for single-caption images. Snapping to
+ * these is the difference between "drag until it looks straight" and "it lands
+ * where you meant", and it is the single most repeated gesture in the editor.
+ */
+export const CAPTION_SNAP_X = [0.5] as const;
+export const CAPTION_SNAP_Y = [0.12, 0.5, 0.88] as const;
+/** Snap radius in normalized units — about 3% of the image on each axis. */
+export const CAPTION_SNAP_TOLERANCE = 0.03;
+
+export interface SnappedCenter {
+  center: NormalizedPoint;
+  /** The guide each axis locked onto, or null. Drives guide lines and haptics. */
+  snappedX: number | null;
+  snappedY: number | null;
+}
+
+function nearestGuide(value: number, guides: readonly number[], tolerance: number): number | null {
+  if (!(tolerance > 0) || !finite(value)) return null;
+  let best: number | null = null;
+  let bestDistance = tolerance;
+  for (const guide of guides) {
+    const distance = Math.abs(value - guide);
+    // Strictly-less keeps the FIRST of two equidistant guides, so the result is
+    // stable rather than depending on array order changing under you.
+    if (distance < bestDistance) {
+      best = guide;
+      bestDistance = distance;
+    }
+  }
+  return best;
+}
+
+/**
+ * Pull a dragged centre onto the caption guides when it is close enough.
+ *
+ * Axes snap independently: dragging a caption down the middle of the image
+ * should hold its horizontal centring the whole way, which is exactly the
+ * behaviour that makes the gesture feel guided rather than sticky.
+ */
+export function snapCaptionCenter(
+  center: NormalizedPoint,
+  tolerance: number = CAPTION_SNAP_TOLERANCE
+): SnappedCenter {
+  const snappedX = nearestGuide(center.x, CAPTION_SNAP_X, tolerance);
+  const snappedY = nearestGuide(center.y, CAPTION_SNAP_Y, tolerance);
+  return {
+    center: { x: snappedX ?? center.x, y: snappedY ?? center.y },
+    snappedX,
+    snappedY,
+  };
+}
+
+/**
+ * True when a snap just engaged on an axis that was previously free.
+ *
+ * The haptic belongs on the TRANSITION, not on the state: ticking every frame
+ * while a caption sits on a guide turns a satisfying click into a buzz.
+ */
+export function snapDidEngage(previous: SnappedCenter | null, next: SnappedCenter): boolean {
+  const gainedX = next.snappedX !== null && previous?.snappedX == null;
+  const gainedY = next.snappedY !== null && previous?.snappedY == null;
+  return gainedX || gainedY;
+}
+
+export type CaptionSlot = 'top' | 'middle' | 'bottom';
+
+/**
+ * Where a one-tap caption lands.
+ *
+ * Adding "top text" is the defining meme gesture and it used to cost an add,
+ * then a drag, then a squint. These are the same guides a drag snaps to, from
+ * one source, so a tapped caption sits exactly where a dragged one would.
+ */
+export function captionSlotCenter(slot: CaptionSlot): NormalizedPoint {
+  const y = slot === 'top' ? CAPTION_SNAP_Y[0] : slot === 'middle' ? CAPTION_SNAP_Y[1] : CAPTION_SNAP_Y[2];
+  return { x: CAPTION_SNAP_X[0], y };
+}
+
+/**
+ * The slot a new caption should take, given what is already on the image.
+ *
+ * Top first, then bottom, then middle — the order people actually fill them.
+ * Once all three are occupied it keeps returning bottom rather than refusing:
+ * stacking two captions in one place is a normal thing to want, and blocking it
+ * would be the tool arguing with the user.
+ */
+export function nextCaptionSlot(usedSlots: readonly CaptionSlot[]): CaptionSlot {
+  const used = new Set(usedSlots);
+  if (!used.has('top')) return 'top';
+  if (!used.has('bottom')) return 'bottom';
+  if (!used.has('middle')) return 'middle';
+  return 'bottom';
+}
+
+/** Which slot an existing centre is sitting in, for nextCaptionSlot. */
+export function captionSlotOf(center: NormalizedPoint, tolerance = CAPTION_SNAP_TOLERANCE): CaptionSlot | null {
+  const y = nearestGuide(center.y, CAPTION_SNAP_Y, tolerance);
+  if (y === null) return null;
+  return y === CAPTION_SNAP_Y[0] ? 'top' : y === CAPTION_SNAP_Y[1] ? 'middle' : 'bottom';
+}
+
 function distance(a: ViewPoint, b: ViewPoint): number {
   if (!validPoint(a) || !validPoint(b)) return Number.NaN;
   return Math.hypot(a.x - b.x, a.y - b.y);

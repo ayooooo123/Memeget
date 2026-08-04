@@ -17,6 +17,11 @@ import {
   layerHandleTouchInsideMedia,
   memeRemixExportControlState,
   memeEditToolsForSource,
+  snapCaptionCenter,
+  snapDidEngage,
+  captionSlotCenter,
+  captionSlotOf,
+  nextCaptionSlot,
   toolRailScrollOffsetPx,
   TOOL_RAIL_ITEM_WIDTH,
   TOOL_RAIL_GAP,
@@ -500,5 +505,107 @@ describe('deterministic layer IDs', () => {
     expect(selectedLayerIdAfterDelete(ids, 'top', 'top')).toBe('middle');
     expect(selectedLayerIdAfterDelete(ids, 'bottom', 'other')).toBe('other');
     expect(selectedLayerIdAfterDelete(['only'], 'only', 'only')).toBeNull();
+  });
+});
+
+
+describe('caption snapping', () => {
+  test('pulls a near-miss onto the guide and leaves a clear miss alone', () => {
+    // The gesture this exists for: dragging a caption to the top and having it
+    // land straight instead of one pixel off.
+    expect(snapCaptionCenter({ x: 0.51, y: 0.13 }).center).toEqual({ x: 0.5, y: 0.12 });
+    const free = snapCaptionCenter({ x: 0.2, y: 0.35 });
+    expect(free.center).toEqual({ x: 0.2, y: 0.35 });
+    expect(free.snappedX).toBeNull();
+    expect(free.snappedY).toBeNull();
+  });
+
+  test('snaps each axis independently', () => {
+    // Dragging straight down the middle must hold horizontal centring the whole
+    // way; losing it mid-drag is what makes snapping feel sticky instead of
+    // guided.
+    const midDrag = snapCaptionCenter({ x: 0.5, y: 0.4 });
+    expect(midDrag.snappedX).toBe(0.5);
+    expect(midDrag.snappedY).toBeNull();
+    expect(midDrag.center).toEqual({ x: 0.5, y: 0.4 });
+
+    // And the other direction, which is the one that bites: a caption parked
+    // off to the left at the top must keep its x. Coupling the axes would yank
+    // it to the middle the moment it touched the top guide.
+    const topLeft = snapCaptionCenter({ x: 0.2, y: 0.12 });
+    expect(topLeft.snappedY).toBe(0.12);
+    expect(topLeft.snappedX).toBeNull();
+    expect(topLeft.center).toEqual({ x: 0.2, y: 0.12 });
+  });
+
+  test('takes the nearest guide when two are in reach', () => {
+    // 0.30 is 0.18 from the top guide and 0.20 from centre; 0.32 reverses it.
+    expect(snapCaptionCenter({ x: 0.5, y: 0.3 }, 0.25).snappedY).toBe(0.12);
+    expect(snapCaptionCenter({ x: 0.5, y: 0.32 }, 0.25).snappedY).toBe(0.5);
+  });
+
+  test('can be turned off', () => {
+    const off = snapCaptionCenter({ x: 0.501, y: 0.121 }, 0);
+    expect(off.center).toEqual({ x: 0.501, y: 0.121 });
+    expect(off.snappedX).toBeNull();
+  });
+
+  test('is idempotent, so a held drag does not drift', () => {
+    const once = snapCaptionCenter({ x: 0.51, y: 0.13 });
+    const twice = snapCaptionCenter(once.center);
+    expect(twice.center).toEqual(once.center);
+  });
+
+  test('survives nonsense coordinates without snapping them somewhere', () => {
+    const bad = snapCaptionCenter({ x: Number.NaN, y: Number.POSITIVE_INFINITY });
+    expect(bad.snappedX).toBeNull();
+    expect(bad.snappedY).toBeNull();
+  });
+
+  test('ticks only when a snap engages, not while it is held', () => {
+    // A haptic on the state rather than the transition turns a satisfying click
+    // into a buzz for the whole drag.
+    const free = snapCaptionCenter({ x: 0.2, y: 0.35 });
+    const locked = snapCaptionCenter({ x: 0.5, y: 0.12 });
+    expect(snapDidEngage(null, free)).toBe(false);
+    expect(snapDidEngage(free, locked)).toBe(true);
+    expect(snapDidEngage(locked, locked)).toBe(false);
+    // Leaving and re-entering ticks again.
+    expect(snapDidEngage(locked, free)).toBe(false);
+    expect(snapDidEngage(free, locked)).toBe(true);
+  });
+
+  test('engaging a second axis ticks even while the first stays held', () => {
+    const xOnly = snapCaptionCenter({ x: 0.5, y: 0.4 });
+    const both = snapCaptionCenter({ x: 0.5, y: 0.12 });
+    expect(snapDidEngage(xOnly, both)).toBe(true);
+  });
+});
+
+describe('one-tap captions', () => {
+  test('lands a tapped caption exactly where a dragged one would snap', () => {
+    // One source of truth for both gestures, or the two disagree by a hair and
+    // the editor feels imprecise.
+    for (const slot of ['top', 'middle', 'bottom'] as const) {
+      const center = captionSlotCenter(slot);
+      expect(snapCaptionCenter(center).center).toEqual(center);
+      expect(captionSlotOf(center)).toBe(slot);
+    }
+  });
+
+  test('fills top, then bottom, then middle', () => {
+    expect(nextCaptionSlot([])).toBe('top');
+    expect(nextCaptionSlot(['top'])).toBe('bottom');
+    expect(nextCaptionSlot(['top', 'bottom'])).toBe('middle');
+  });
+
+  test('keeps working once every slot is taken', () => {
+    // Stacking a second bottom caption is a normal thing to want; refusing
+    // would be the tool arguing with the user.
+    expect(nextCaptionSlot(['top', 'bottom', 'middle'])).toBe('bottom');
+  });
+
+  test('does not claim a slot for a caption parked somewhere else', () => {
+    expect(captionSlotOf({ x: 0.5, y: 0.4 })).toBeNull();
   });
 });

@@ -2,7 +2,13 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 
 import { PROJECT_LIMITS, type MemeEditProject, type MemeEditProjectAction, type TextLayer } from '../memeEditProjectCore';
-import { nextDuplicateLayerId } from '../memeEditCanvasCore';
+import {
+  captionSlotCenter,
+  captionSlotOf,
+  nextCaptionSlot,
+  nextDuplicateLayerId,
+  type CaptionSlot,
+} from '../memeEditCanvasCore';
 import {
   MEME_TEXT_BOUNDS,
   MEME_TEXT_COLOR_SWATCHES,
@@ -296,11 +302,24 @@ export const MemeTextInspector = React.memo(function MemeTextInspector({
     onCommitTextTransaction?.();
   }, [disabled, layerWithPendingText, onApplyAction, onCommitTextTransaction]);
 
-  const addText = useCallback((preset: MemeTextPresetId = 'impact') => {
+  const addText = useCallback((preset: MemeTextPresetId = 'impact', slot?: CaptionSlot) => {
     if (!canAdd) return;
     flushText(true);
-    const id = nextDuplicateLayerId(idPrefix, projectRef.current.layers.map((candidate) => candidate.id));
-    const next = createMemeTextLayer(id, preset, { text: 'Meme text' });
+    const layers = projectRef.current.layers;
+    const id = nextDuplicateLayerId(idPrefix, layers.map((candidate) => candidate.id));
+    // Place it where captions actually go. Without this a new caption lands
+    // dead centre on top of the image, and the first thing anyone does is drag
+    // it to the top — a step the editor can just take for them.
+    const used = layers.flatMap((candidate) =>
+      'keyframes' in candidate && candidate.keyframes.length > 0
+        ? [captionSlotOf(candidate.keyframes[0].center)].filter((value): value is CaptionSlot => value !== null)
+        : []
+    );
+    const center = captionSlotCenter(slot ?? nextCaptionSlot(used));
+    const next = createMemeTextLayer(id, preset, {
+      text: 'Meme text',
+      keyframes: [{ timeUs: 0, center, scale: 1, rotationDegrees: 0, opacity: 1, easing: 'linear' }],
+    });
     onApplyAction({ type: 'add-layer', layer: next });
     onSelectLayer(id);
   }, [canAdd, flushText, idPrefix, onApplyAction, onSelectLayer]);
@@ -319,9 +338,26 @@ export const MemeTextInspector = React.memo(function MemeTextInspector({
         </View>
         <ControlButton
           label="Add text"
-          hint={canAdd ? 'Add a new editable meme text layer' : 'Project is at the layer limit'}
+          hint={canAdd ? 'Adds a caption in the next free position' : 'Project is at the layer limit'}
           disabled={!canAdd}
           onPress={() => addText('impact')}
+        />
+      </View>
+
+      {/* The two captions every meme format is built from, one tap each. This
+          is the whole reason the tool exists, so it goes above the presets. */}
+      <View style={styles.captionRow}>
+        <ControlButton
+          label="Top caption"
+          hint={canAdd ? 'Adds bold caption text across the top' : 'Project is at the layer limit'}
+          disabled={!canAdd}
+          onPress={() => addText('impact', 'top')}
+        />
+        <ControlButton
+          label="Bottom caption"
+          hint={canAdd ? 'Adds bold caption text across the bottom' : 'Project is at the layer limit'}
+          disabled={!canAdd}
+          onPress={() => addText('impact', 'bottom')}
         />
       </View>
 
@@ -493,6 +529,7 @@ export const MemeTextInspector = React.memo(function MemeTextInspector({
 
 const styles = StyleSheet.create({
   root: { gap: space.md, padding: space.md },
+  captionRow: { flexDirection: 'row', gap: space.sm },
   headerRow: { minHeight: 44, flexDirection: 'row', alignItems: 'center', gap: space.sm },
   headerCopy: { flex: 1, minWidth: 0, gap: 2 },
   title: { ...type.title, color: colors.text },
