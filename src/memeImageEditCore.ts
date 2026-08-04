@@ -735,10 +735,19 @@ function averageColor(colors: readonly string[]): string {
  * histogram is genuinely bimodal, and luminance alone separates it without the
  * cost or instability of clustering in full RGB.
  *
- * The SMALLER cluster is the text. Glyph strokes cover far less of a text box
- * than the space around them — that is what makes text legible — so area is a
- * reliable discriminator and does not care whether the text is light-on-dark or
- * dark-on-light.
+ * The SMALLER cluster is the text. Glyph strokes cover less of a text box than
+ * the space around them — that is what makes text legible — so area separates
+ * them without caring whether the text is light-on-dark or dark-on-light.
+ *
+ * KNOWN LIMIT, stated because it is real rather than hypothetical: this assumes
+ * the box is reasonably tight around the text. A very loose box drags in enough
+ * surrounding image to shift which cluster is larger, and heavy letterforms
+ * cropped tightly can push glyph coverage past half. Both invert the result. A
+ * border-of-the-grid prior was tried as a fix and removed again — it does not
+ * survive either case (the edge of a loose box is mixed, and the edge of a
+ * tight box is glyph), and no test could justify the extra code. The honest
+ * mitigation is the contrast floor in inferOriginalTextStyle, which refuses to
+ * claim a style it cannot read.
  */
 export function splitGlyphAndBackground(colors: readonly string[]): {
   glyph: string;
@@ -778,6 +787,7 @@ export function splitGlyphAndBackground(colors: readonly string[]): {
 
   const glyphMembers = lowMembers.length <= highMembers.length ? lowMembers : highMembers;
   const backgroundMembers = glyphMembers === lowMembers ? highMembers : lowMembers;
+
   const glyph = averageColor(glyphMembers.map((p) => p.color));
   const background = averageColor(backgroundMembers.map((p) => p.color));
   return { glyph, background, contrast: contrastRatio(glyph, background) };
