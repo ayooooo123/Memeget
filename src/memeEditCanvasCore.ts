@@ -111,20 +111,40 @@ export const TOOL_RAIL_GAP = 8;
 /** Horizontal padding at each end of the rail's content. */
 export const TOOL_RAIL_PADDING = 16;
 /**
- * How much of the previous tool stays visible when the rail scrolls. Deliberate
- * and small: a full cell's worth of lead-in left "Layers" rendered as a sliced
- * "ers", which reads as a clipping bug rather than as an invitation to scroll.
+ * How much of a neighbouring tool stays visible once the rail HAS to scroll.
+ * Deliberate and small — it is a hint that the row continues, not a label.
  */
 export const TOOL_RAIL_PEEK = 26;
 
 /**
- * Scroll offset that brings the tool at `index` into view with a consistent
- * peek of its neighbour. Never negative: the first tools should not scroll the
- * rail at all.
+ * Minimal scroll that brings the tool at `index` fully into view.
+ *
+ * Minimal matters. Scrolling unconditionally to a computed position moved the
+ * rail even when the target was already visible, which left the first tool
+ * sliced into a fragment ("Layers" reading as "ers") for no reason at all. So
+ * this returns the CURRENT offset unchanged whenever the tool already fits, and
+ * otherwise moves just far enough, keeping a peek on whichever side it came
+ * from.
  */
-export function toolRailScrollOffsetPx(index: number): number {
+export function toolRailScrollOffsetPx(
+  index: number,
+  viewportPx: number,
+  currentPx = 0
+): number {
   const stride = TOOL_RAIL_ITEM_WIDTH + TOOL_RAIL_GAP;
-  return Math.max(0, TOOL_RAIL_PADDING + index * stride - TOOL_RAIL_PEEK);
+  const current = Number.isFinite(currentPx) ? Math.max(0, currentPx) : 0;
+  if (!(viewportPx > 0)) return current;
+
+  const left = TOOL_RAIL_PADDING + index * stride;
+  const right = left + TOOL_RAIL_ITEM_WIDTH;
+
+  // No upper clamp here on purpose: the ScrollView will not scroll past its own
+  // content, and this module does not know how many tools exist. Inventing a
+  // total to clamp against would be a second source of truth for the rail's
+  // width, and the wrong one.
+  if (left < current) return Math.max(0, left - TOOL_RAIL_PEEK);
+  if (right > current + viewportPx) return Math.max(0, right - viewportPx + TOOL_RAIL_PEEK);
+  return current;
 }
 
 /** Height of the tool panel's header, which stays visible when collapsed. */

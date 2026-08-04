@@ -376,27 +376,34 @@ describe('studio shell UI contracts', () => {
     }
   });
 
-  test('the tool rail keeps the active tool reachable without truncating labels', () => {
-    // The rail used to flex its cells across the row. A video source offers
-    // eight tools, so on a ~384dp phone each got about 48dp — "Transform"
-    // rendered as "Transfo…" with the badge overlapping the word. Fixed-width
-    // cells plus horizontal scrolling is the fix, and the offset math is what
-    // stops a selected tool from sitting off-screen with no scroll affordance.
+  test('the tool rail scrolls only when it has to, and minimally', () => {
+    // A video source offers eight tools; at ~384dp only four fit, so the rail
+    // must scroll — but scrolling when the target is ALREADY visible is what
+    // sliced "Layers" into "ers" at the screen edge for no reason.
     const stride = TOOL_RAIL_ITEM_WIDTH + TOOL_RAIL_GAP;
-    expect(toolRailScrollOffsetPx(0)).toBe(0);
+    const viewport = 384;
 
-    for (let i = 1; i < 8; i += 1) {
-      const offset = toolRailScrollOffsetPx(i);
-      // Deliberate, consistent peek of the previous tool rather than a whole
-      // cell's worth: a half-sliced "Layers" reads as a clipping bug, which is
-      // exactly how it looked on device before this.
-      expect(TOOL_RAIL_PADDING + i * stride - offset).toBe(TOOL_RAIL_PEEK);
-      expect(offset).toBeGreaterThanOrEqual(0);
-      expect(offset).toBeGreaterThanOrEqual(toolRailScrollOffsetPx(i - 1));
-    }
+    // Tools that already fit leave the offset exactly where it was.
+    expect(toolRailScrollOffsetPx(0, viewport, 0)).toBe(0);
+    expect(toolRailScrollOffsetPx(1, viewport, 0)).toBe(0);
+    expect(toolRailScrollOffsetPx(3, viewport, 0)).toBe(0);
 
-    // A video project genuinely needs more tools than fit; that is the case the
-    // old fixed row silently mangled.
+    // One that runs off the right edge scrolls just far enough, plus a peek.
+    const far = toolRailScrollOffsetPx(7, viewport, 0);
+    expect(far).toBeGreaterThan(0);
+    const rightEdge = TOOL_RAIL_PADDING + 7 * stride + TOOL_RAIL_ITEM_WIDTH;
+    expect(far).toBe(rightEdge - viewport + TOOL_RAIL_PEEK);
+
+    // Coming back to an earlier tool scrolls left, keeping a peek on that side.
+    const back = toolRailScrollOffsetPx(0, viewport, far);
+    expect(back).toBe(0);
+    const backToTwo = toolRailScrollOffsetPx(2, viewport, far);
+    expect(backToTwo).toBe(Math.max(0, TOOL_RAIL_PADDING + 2 * stride - TOOL_RAIL_PEEK));
+
+    // Never negative, and an unmeasured viewport holds still rather than jumping.
+    for (let i = 0; i < 8; i += 1) expect(toolRailScrollOffsetPx(i, viewport, 0)).toBeGreaterThanOrEqual(0);
+    expect(toolRailScrollOffsetPx(7, 0, 120)).toBe(120);
+
     expect(memeEditToolsForSource('video').length).toBeGreaterThan(4);
   });
 

@@ -1,5 +1,5 @@
-import React, { useEffect, useRef } from 'react';
-import { ScrollView, StyleSheet, Text, View } from 'react-native';
+import React, { useEffect, useRef, useState } from 'react';
+import { ScrollView, StyleSheet, Text } from 'react-native';
 
 import { memeEditToolsForSource, toolRailScrollOffsetPx, TOOL_RAIL_ITEM_WIDTH, TOOL_RAIL_GAP, TOOL_RAIL_PADDING, type MemeEditToolId } from '../memeEditCanvasCore';
 import type { MediaEditKind } from '../memeEditProjectCore';
@@ -25,7 +25,7 @@ const TOOLS: readonly ToolSpec[] = [
   { id: 'layers', label: 'Layers', hint: 'Show layer order and layer actions', mark: '▤' },
   { id: 'text', label: 'Text', hint: 'Add and style meme text layers', mark: 'A' },
   { id: 'transform', label: 'Transform', hint: 'Crop, rotate, or flip this image', mark: '⌗' },
-  { id: 'replace-text', label: 'Replace text', hint: 'Detect text or draw a box, then Cover, Pixelate, or Replace', mark: '▨' },
+  { id: 'replace-text', label: 'Replace', hint: 'Detect text or draw a box, then Cover, Pixelate, or Replace', mark: '▨' },
   { id: 'subject', label: 'Cut out', hint: 'Isolate the subject and replace or remove the background', mark: '✂' },
   { id: 'timeline', label: 'Timeline', hint: 'Scrub, trim, split, and see when each layer is on screen', mark: '⏱' },
   { id: 'frames', label: 'Frames', hint: 'Scroll to any exact source frame and step one frame at a time', mark: '⊞' },
@@ -47,6 +47,8 @@ export const MemeEditToolRail = React.memo(function MemeEditToolRail({
   const availableTools = memeEditToolsForSource(sourceKind);
   const tools = TOOLS.filter((tool) => availableTools.includes(tool.id));
   const scroller = useRef<ScrollView>(null);
+  const viewport = useRef(0);
+  const offset = useRef(0);
 
   // A video source offers eight tools; at ~384dp only four fit. Without this,
   // selecting a tool programmatically (or reopening on one) leaves the active
@@ -54,7 +56,13 @@ export const MemeEditToolRail = React.memo(function MemeEditToolRail({
   useEffect(() => {
     const index = tools.findIndex((tool) => tool.id === activeTool);
     if (index < 0) return;
-    scroller.current?.scrollTo({ x: toolRailScrollOffsetPx(index), animated: true });
+    const next = toolRailScrollOffsetPx(index, viewport.current, offset.current);
+    // Already visible -> the offset comes back unchanged and the rail holds
+    // still, which is the difference between "scrolls when it must" and
+    // "twitches whenever you change tool".
+    if (next === offset.current) return;
+    offset.current = next;
+    scroller.current?.scrollTo({ x: next, animated: true });
   }, [activeTool, tools]);
 
   return (
@@ -64,6 +72,13 @@ export const MemeEditToolRail = React.memo(function MemeEditToolRail({
       showsHorizontalScrollIndicator={false}
       style={styles.rail}
       contentContainerStyle={styles.railContent}
+      onLayout={(event) => {
+        viewport.current = event.nativeEvent.layout.width;
+      }}
+      scrollEventThrottle={64}
+      onScroll={(event) => {
+        offset.current = event.nativeEvent.contentOffset.x;
+      }}
       accessibilityRole="toolbar"
       accessibilityLabel="Editing tools"
     >
