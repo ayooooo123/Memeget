@@ -12,14 +12,17 @@ import {
   borderColorSamplerNativeAvailable,
   detectTextRegions,
   sampleImageBorderColor,
+  sampleImagePixelGrid,
   textDetectionNativeAvailable,
 } from '../../modules/memeget-bg';
 import {
   createTextRegionLayers,
   canApplyTextRegionAction,
   flattenDetectedTextRegions,
+  inferOriginalTextStyle,
   remapNormalizedRect,
   type DetectedTextResult,
+  type InferredTextStyle,
   type TextRegionAction,
   type TextRegionCandidate,
   textRegionFingerprint,
@@ -88,6 +91,10 @@ export const MemeTextReplaceTool = React.memo(function MemeTextReplaceTool({
   const [replacementText, setReplacementText] = useState('');
   const [pixelSize, setPixelSize] = useState(12);
   const [applyError, setApplyError] = useState('');
+  // The look of the text being replaced. Sampled, never assumed — null means we
+  // genuinely could not read it, which the UI says out loud.
+  const [inferredStyle, setInferredStyle] = useState<InferredTextStyle | null>(null);
+  const [showAdjust, setShowAdjust] = useState(false);
   const [sampledRegionKey, setSampledRegionKey] = useState<string | null>(null);
   const [paletteRegionKey, setPaletteRegionKey] = useState<string | null>(null);
   const detectionRequest = useRef(0);
@@ -116,29 +123,63 @@ export const MemeTextReplaceTool = React.memo(function MemeTextReplaceTool({
       return;
     }
     if (!borderColorSamplerNativeAvailable) {
-      setSampleStatus('Border sampling is unavailable in this build. Choose a palette fill.');
+      setSampleStatus('');
+      setPaletteRegionKey(currentRegionKey);
       return;
     }
     const sourceRect = remapNormalizedRect(selectedRegion.rect, project.base, FULL_IMAGE_BASE);
     if (!sourceRect) {
-      setSampleStatus('The selected region is outside the source image. Adjust the box to sample a fill.');
+      setSampleStatus('That box is outside the image — drag it back over the picture.');
       return;
     }
-    setSampleStatus('Sampling the nearby border color…');
+    setSampleStatus('Matching the original text…');
+
+    // Two samples, two jobs. The border colour is what the cover is painted
+    // with; the pixel grid INSIDE the box is what tells us how the original
+    // text looked, so the replacement can keep that look instead of arriving as
+    // a default caption.
     sampleImageBorderColor(sourceUri, sourceRect)
       .then((sample) => {
         if (sampleRequest.current !== request) return;
         if (!sample) {
-          setSampleStatus('Border sampling is unavailable in this build. Choose a palette fill.');
+          // Claim the default for this region so the action is never blocked
+          // with no way for the user to discover why.
+          setPaletteRegionKey(currentRegionKey);
           return;
         }
         if (!colorOverridden.current) setSelectedColor(sample.hex);
         setSampledRegionKey(currentRegionKey);
-        setSampleStatus(`Sampled fill ${sample.hex} from ${sample.sampleCount} nearby opaque pixels.`);
       })
-      .catch((error) => {
+      .catch(() => {
+        if (sampleRequest.current === request) setPaletteRegionKey(currentRegionKey);
+      });
+
+    sampleImagePixelGrid(sourceUri, sourceRect, 8)
+      .then((grid) => {
+        if (sampleRequest.current !== request) return;
+        if (!grid) {
+          setInferredStyle(null);
+          setSampleStatus('');
+          setPaletteRegionKey((key) => key ?? currentRegionKey);
+          return;
+        }
+        const style = inferOriginalTextStyle({
+          sampledColors: grid.colors,
+          originalText: selectedRegion.text,
+          regionHeight: selectedRegion.rect.height,
+          lineCount: Math.max(1, selectedRegion.text.split('\n').length),
+        });
+        // Only claim a match when the glyphs were genuinely separable. Below
+        // that the numbers are noise and pretending otherwise would restyle the
+        // meme in a way the user did not ask for.
+        const readable = style.contrast >= 1.6;
+        setInferredStyle(readable ? style : null);
+        setSampleStatus(readable ? `Matching the original text — ${style.color}` : '');
+      })
+      .catch(() => {
         if (sampleRequest.current === request) {
-          setSampleStatus(`Could not sample the border color: ${String(error)}`);
+          setInferredStyle(null);
+          setSampleStatus('');
         }
       });
   }, [
@@ -192,6 +233,16 @@ export const MemeTextReplaceTool = React.memo(function MemeTextReplaceTool({
     sourceUri,
   ]);
 
+  // Opening the tool and being told to press "Detect text" is a step with no
+  // decision in it. Run it once automatically; the button stays for retries.
+  const autoDetected = useRef(false);
+  useEffect(() => {
+    if (autoDetected.current || disabled || detecting) return;
+    if (!textDetectionNativeAvailable || regions.length > 0) return;
+    autoDetected.current = true;
+    detect();
+  }, [detect, detecting, disabled, regions.length]);
+
   const chooseColor = useCallback((color: string) => {
     colorOverridden.current = true;
     if (currentRegionKey) setPaletteRegionKey(currentRegionKey);
@@ -227,6 +278,7 @@ export const MemeTextReplaceTool = React.memo(function MemeTextReplaceTool({
       textId,
       color: selectedColor,
       pixelSize,
+      inferredStyle,
     });
     onAddLayers(layers);
     onSelectLayer(layers[layers.length - 1].id);
@@ -243,6 +295,7 @@ export const MemeTextReplaceTool = React.memo(function MemeTextReplaceTool({
     replacementText,
     selectedColor,
     selectedRegion,
+    inferredStyle,
   ]);
 
   return (
@@ -253,12 +306,12 @@ export const MemeTextReplaceTool = React.memo(function MemeTextReplaceTool({
     >
       <Text style={styles.title}>Replace text</Text>
       <Text style={styles.copy}>
-        Detect text on this device or draw a manual box. Cover uses a sampled solid fill, Pixelate adds a coarse mosaic, and Replace adds the cover plus editable text. These are explicit local editing layers; the original stays unchanged.
+        Tap any text on the image, then type what it should say instead. The new text keeps the original's look. Your original file is never changed.
       </Text>
 
       {!textDetectionNativeAvailable && (
         <View style={styles.notice} accessibilityRole="text">
-          <Text style={styles.noticeText}>On-device text detection is unavailable in this build. Manual region remains available.</Text>
+          <Text style={styles.noticeText}>This build cannot find text automatically. Draw a box around the text instead.</Text>
         </View>
       )}
       <View style={styles.topActions}>
@@ -271,7 +324,7 @@ export const MemeTextReplaceTool = React.memo(function MemeTextReplaceTool({
           accessibilityHint="Find real text boxes in the local image on this device"
           accessibilityState={{ busy: detecting, disabled: !!disabled || detecting || !textDetectionNativeAvailable }}
         >
-          {detecting ? <ActivityIndicator color={colors.onVolt} /> : <Text style={styles.primaryActionText}>{detectError ? 'Retry detection' : 'Detect text'}</Text>}
+          {detecting ? <ActivityIndicator color={colors.onVolt} /> : <Text style={styles.primaryActionText}>{detectError ? 'Try again' : 'Find text'}</Text>}
         </PressableScale>
         <PressableScale
           onPress={() => onManualModeChange(!manualMode)}
@@ -282,21 +335,20 @@ export const MemeTextReplaceTool = React.memo(function MemeTextReplaceTool({
           accessibilityHint="Draw a box over text that detection missed"
           accessibilityState={{ selected: manualMode, disabled: !!disabled }}
         >
-          <Text style={styles.secondaryActionText}>{manualMode ? 'Drawing manual box…' : 'Manual region'}</Text>
+          <Text style={styles.secondaryActionText}>{manualMode ? 'Draw a box…' : 'Draw a box'}</Text>
         </PressableScale>
       </View>
       {!!detectError && <Text style={styles.error} accessibilityRole="alert">{detectError}</Text>}
       {!detecting && regions.length > 0 && (
-        <Text style={styles.metric}>{regions.length} selectable text box{regions.length === 1 ? '' : 'es'} above the image.</Text>
+        <Text style={styles.metric}>Found {regions.length} piece{regions.length === 1 ? '' : 's'} of text — tap one on the image.</Text>
       )}
 
       {selectedRegion ? (
         <View style={styles.selectionPanel}>
-          <Text style={styles.selectionTitle}>Selected {selectedRegion.source} region</Text>
-          <Text style={styles.metric}>
-            {Math.round(selectedRegion.rect.width * 100)}% × {Math.round(selectedRegion.rect.height * 100)}% of visible image. Drag the box or its corner handle to adjust it before applying.
-          </Text>
-          <Text style={styles.fieldLabel}>Replacement text</Text>
+          {/* The text field IS the feature. It opens pre-filled with what the
+              meme actually says, so the interaction is "edit this text", not
+              "compose a replacement and then reason about cover fills". */}
+          <Text style={styles.fieldLabel}>Change this text</Text>
           <TextInput
             value={replacementText}
             onChangeText={setReplacementText}
@@ -304,86 +356,119 @@ export const MemeTextReplaceTool = React.memo(function MemeTextReplaceTool({
             multiline
             maxLength={20_000}
             style={styles.input}
-            placeholder="Replacement text"
+            placeholder="Type the new text"
             placeholderTextColor={colors.faint}
-            accessibilityLabel="Replacement text"
-            accessibilityHint="Edit the text that Replace will add"
+            accessibilityLabel="New text"
+            accessibilityHint="Replaces the text you tapped, keeping its original style"
           />
+          <Text style={styles.metric}>
+            {inferredStyle
+              ? `Keeping the original style — ${inferredStyle.preset === 'impact' ? 'bold outlined caption' : inferredStyle.uppercase ? 'caps' : 'plain text'}, sampled colour.`
+              : 'The original style could not be read here, so a plain caption is used.'}
+          </Text>
 
-          <Text style={styles.fieldLabel}>Solid cover fill</Text>
-          <Text style={styles.metric}>{sampleStatus || 'Select a sampled or palette fill.'}</Text>
-          <View style={styles.palette} accessibilityRole="radiogroup" accessibilityLabel="Cover fill colors">
-            {COVER_COLORS.map((color) => (
-              <PressableScale
-                key={color}
-                onPress={() => chooseColor(color)}
-                disabled={disabled}
-                style={[styles.swatch, { backgroundColor: color }, selectedColor === color && styles.swatchSelected]}
-                accessibilityRole="radio"
-                accessibilityLabel={`Use ${color} cover fill`}
-                accessibilityState={{ checked: selectedColor === color, disabled: !!disabled }}
-              >
-                <Text style={[styles.swatchMark, color === '#000000' && styles.swatchMarkLight]}>{selectedColor === color ? 'Selected' : ''}</Text>
-              </PressableScale>
-            ))}
-          </View>
+          <PressableScale
+            onPress={() => apply('replace')}
+            disabled={!!disabled || !replacementText.trim()}
+            style={styles.primaryAction}
+            accessibilityRole="button"
+            accessibilityLabel="Replace this text"
+            accessibilityHint="Covers the original and adds your text in the same style, in one undo step"
+            accessibilityState={{ disabled: !!disabled || !replacementText.trim() }}
+          >
+            <Text style={styles.primaryActionText}>Replace this text</Text>
+          </PressableScale>
 
-          <View style={styles.pixelRow}>
-            <Text style={styles.fieldLabel}>Pixel size {pixelSize}</Text>
-            <View style={styles.stepper}>
-              <PressableScale
-                onPress={() => setPixelSize((value) => Math.max(1, value - 2))}
-                disabled={disabled || pixelSize <= 1}
-                style={styles.stepButton}
-                accessibilityRole="button"
-                accessibilityLabel="Decrease pixel size"
-              ><Text style={styles.stepText}>−</Text></PressableScale>
-              <PressableScale
-                onPress={() => setPixelSize((value) => Math.min(256, value + 2))}
-                disabled={disabled || pixelSize >= 256}
-                style={styles.stepButton}
-                accessibilityRole="button"
-                accessibilityLabel="Increase pixel size"
-              ><Text style={styles.stepText}>+</Text></PressableScale>
-            </View>
-          </View>
+          {/* Everything below is refinement. It used to be mandatory — the
+              Replace button stayed disabled until a fill was chosen, with no
+              explanation — which is what made this tool feel broken. */}
+          <PressableScale
+            onPress={() => setShowAdjust((value) => !value)}
+            style={styles.disclosure}
+            accessibilityRole="button"
+            accessibilityLabel={showAdjust ? 'Hide options' : 'More options'}
+            accessibilityState={{ expanded: showAdjust }}
+          >
+            <Text style={styles.disclosureText}>{showAdjust ? 'Fewer options ▴' : 'More options ▾'}</Text>
+          </PressableScale>
 
-          <View style={styles.applyActions} accessibilityRole="toolbar" accessibilityLabel="Selected text region actions">
-            {(['cover', 'pixelate', 'replace'] as const).map((action) => {
-              const actionDisabled = !!disabled || !currentRegionKey || !canApplyTextRegionAction(
-                action,
-                currentRegionKey,
-                sampledRegionKey,
-                paletteRegionKey
-              );
-              return (
+          {showAdjust ? (
+            <>
+              <Text style={styles.metric}>
+                {Math.round(selectedRegion.rect.width * 100)}% × {Math.round(selectedRegion.rect.height * 100)}% of the image. Drag the box or its corner handle to adjust it.
+              </Text>
+              <Text style={styles.fieldLabel}>Patch colour</Text>
+              <Text style={styles.metric}>{sampleStatus || 'Sampled from the image.'}</Text>
+              <View style={styles.palette} accessibilityRole="radiogroup" accessibilityLabel="Patch colour">
+                {COVER_COLORS.map((color) => (
+                  <PressableScale
+                    key={color}
+                    onPress={() => chooseColor(color)}
+                    disabled={disabled}
+                    style={[styles.swatch, { backgroundColor: color }, selectedColor === color && styles.swatchSelected]}
+                    accessibilityRole="radio"
+                    accessibilityLabel={`Use ${color}`}
+                    accessibilityState={{ checked: selectedColor === color, disabled: !!disabled }}
+                  />
+                ))}
+              </View>
+
+              <View style={styles.pixelRow}>
+                <Text style={styles.fieldLabel}>Blur size {pixelSize}</Text>
+                <View style={styles.stepper}>
+                  <PressableScale
+                    onPress={() => setPixelSize((value) => Math.max(1, value - 2))}
+                    disabled={disabled || pixelSize <= 1}
+                    style={styles.stepButton}
+                    accessibilityRole="button"
+                    accessibilityLabel="Decrease blur size"
+                  ><Text style={styles.stepText}>−</Text></PressableScale>
+                  <PressableScale
+                    onPress={() => setPixelSize((value) => Math.min(256, value + 2))}
+                    disabled={disabled || pixelSize >= 256}
+                    style={styles.stepButton}
+                    accessibilityRole="button"
+                    accessibilityLabel="Increase blur size"
+                  ><Text style={styles.stepText}>+</Text></PressableScale>
+                </View>
+              </View>
+
+              <View style={styles.applyActions} accessibilityRole="toolbar" accessibilityLabel="Other ways to remove this text">
                 <PressableScale
-                  key={action}
-                  onPress={() => apply(action)}
-                  disabled={actionDisabled}
-                  style={action === 'replace' ? styles.primaryAction : styles.secondaryAction}
+                  onPress={() => apply('cover')}
+                  disabled={!!disabled}
+                  style={styles.secondaryAction}
                   accessibilityRole="button"
-                  accessibilityLabel={action === 'cover' ? 'Cover selected region' : action === 'pixelate' ? 'Pixelate selected region' : 'Replace selected text'}
-                  accessibilityHint={action === 'replace' ? 'Add a solid cover and editable text in one undo step' : `${action === 'cover' ? 'Add a sampled solid fill' : 'Add bounded pixelation'} in one undo step`}
-                  accessibilityState={{ disabled: actionDisabled }}
+                  accessibilityLabel="Just hide the text"
+                  accessibilityHint="Paints over it with the patch colour and adds no new text"
                 >
-                  <Text style={action === 'replace' ? styles.primaryActionText : styles.secondaryActionText}>
-                    {action === 'cover' ? 'Cover' : action === 'pixelate' ? 'Pixelate' : 'Replace'}
-                  </Text>
+                  <Text style={styles.secondaryActionText}>Just hide it</Text>
                 </PressableScale>
-              );
-            })}
-          </View>
+                <PressableScale
+                  onPress={() => apply('pixelate')}
+                  disabled={!!disabled}
+                  style={styles.secondaryAction}
+                  accessibilityRole="button"
+                  accessibilityLabel="Pixelate the text"
+                  accessibilityHint="Covers it with a coarse mosaic instead of a solid patch"
+                >
+                  <Text style={styles.secondaryActionText}>Pixelate</Text>
+                </PressableScale>
+              </View>
+            </>
+          ) : null}
           {!!applyError && <Text style={styles.error} accessibilityRole="alert">{applyError}</Text>}
         </View>
       ) : (
-        <Text style={styles.empty}>Tap a detected box above the image, or draw a manual rectangle.</Text>
+        <Text style={styles.empty}>Tap any text on the image above to change it.</Text>
       )}
     </ScrollView>
   );
 });
 
 const styles = StyleSheet.create({
+  disclosure: { paddingVertical: space.xs, alignItems: 'center' },
+  disclosureText: { ...type.caption, color: colors.muted },
   root: { padding: space.md, gap: space.sm, paddingBottom: space.xxl },
   title: { ...type.title, color: colors.text },
   copy: { ...type.body, color: colors.textDim },
