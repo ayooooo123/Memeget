@@ -18,6 +18,7 @@ import type {
   RectCorrectionKeyframe,
   SubjectLayer,
   TextLayer,
+  TextStyle,
   TransformKeyframe,
 } from './memeEditProjectCore';
 
@@ -102,6 +103,11 @@ export interface TextRegionLayerInput {
   textId: string;
   color: string;
   pixelSize: number;
+  /**
+   * The look of the text being replaced, when it could be read off the image.
+   * Absent means "could not tell" — the caller must not fabricate one.
+   */
+  inferredStyle?: InferredTextStyle | null;
 }
 
 function round(value: number): number {
@@ -690,6 +696,161 @@ export function replacementTextColorsForCover(
     : { color: light, outlineColor: dark, outlineScale: 0.04 };
 }
 
+/** What the text being replaced actually looked like. */
+export interface InferredTextStyle {
+  /** Colour of the glyphs themselves, read from the image. */
+  color: string;
+  outlineColor: string;
+  outlineScale: number;
+  /** Dominant colour behind the glyphs — what a cover should be painted with. */
+  backgroundColor: string;
+  preset: TextStyle['preset'];
+  uppercase: boolean;
+  /** Fraction of the region height one line of text occupies. */
+  fontSize: number;
+  /** How separable the glyphs were from their background, 1..21. */
+  contrast: number;
+}
+
+function averageColor(colors: readonly string[]): string {
+  if (colors.length === 0) return '#000000';
+  let r = 0;
+  let g = 0;
+  let b = 0;
+  for (const color of colors) {
+    const [cr, cg, cb] = colorChannels(color);
+    r += cr;
+    g += cg;
+    b += cb;
+  }
+  const to2 = (value: number) => Math.round(value / colors.length).toString(16).padStart(2, '0');
+  return `#${to2(r)}${to2(g)}${to2(b)}`.toUpperCase();
+}
+
+/**
+ * Split sampled pixels into glyphs and background.
+ *
+ * One-dimensional 2-means over luminance, which is the right tool here: text on
+ * a meme is deliberately high-contrast against whatever it sits on, so the
+ * histogram is genuinely bimodal, and luminance alone separates it without the
+ * cost or instability of clustering in full RGB.
+ *
+ * The SMALLER cluster is the text. Glyph strokes cover far less of a text box
+ * than the space around them — that is what makes text legible — so area is a
+ * reliable discriminator and does not care whether the text is light-on-dark or
+ * dark-on-light.
+ */
+export function splitGlyphAndBackground(colors: readonly string[]): {
+  glyph: string;
+  background: string;
+  contrast: number;
+} | null {
+  const usable = colors.filter((color) => /^#?[0-9a-f]{3,8}$/i.test(color.trim()));
+  if (usable.length < 4) return null;
+
+  const points = usable.map((color) => ({ color, luminance: relativeLuminance(color) }));
+  let low = Math.min(...points.map((p) => p.luminance));
+  let high = Math.max(...points.map((p) => p.luminance));
+  if (high - low < 0.02) return null; // flat region: no text to read a style from
+
+  // Lloyd's algorithm converges in a handful of passes on one dimension.
+  for (let pass = 0; pass < 12; pass += 1) {
+    const lowGroup: number[] = [];
+    const highGroup: number[] = [];
+    for (const point of points) {
+      (Math.abs(point.luminance - low) <= Math.abs(point.luminance - high) ? lowGroup : highGroup).push(point.luminance);
+    }
+    if (lowGroup.length === 0 || highGroup.length === 0) break;
+    const nextLow = lowGroup.reduce((a, b) => a + b, 0) / lowGroup.length;
+    const nextHigh = highGroup.reduce((a, b) => a + b, 0) / highGroup.length;
+    if (Math.abs(nextLow - low) < 1e-6 && Math.abs(nextHigh - high) < 1e-6) {
+      low = nextLow;
+      high = nextHigh;
+      break;
+    }
+    low = nextLow;
+    high = nextHigh;
+  }
+
+  const lowMembers = points.filter((p) => Math.abs(p.luminance - low) <= Math.abs(p.luminance - high));
+  const highMembers = points.filter((p) => Math.abs(p.luminance - low) > Math.abs(p.luminance - high));
+  if (lowMembers.length === 0 || highMembers.length === 0) return null;
+
+  const glyphMembers = lowMembers.length <= highMembers.length ? lowMembers : highMembers;
+  const backgroundMembers = glyphMembers === lowMembers ? highMembers : lowMembers;
+  const glyph = averageColor(glyphMembers.map((p) => p.color));
+  const background = averageColor(backgroundMembers.map((p) => p.color));
+  return { glyph, background, contrast: contrastRatio(glyph, background) };
+}
+
+/** True when the original was written in caps — the default for meme text. */
+export function looksAllCaps(text: string): boolean {
+  const letters = text.replace(/[^\p{L}]/gu, '');
+  if (letters.length < 2) return false;
+  return letters === letters.toUpperCase();
+}
+
+/**
+ * Reconstruct the look of the text being replaced, so the replacement reads as
+ * an edit of the meme rather than a sticker dropped on top of it.
+ *
+ * Everything here is derived from the original: the glyph colour is sampled
+ * rather than assumed black-or-white, the size comes from the height of ONE
+ * line rather than the whole block, and capitalisation is carried over.
+ */
+export function inferOriginalTextStyle(input: {
+  /** Pixels sampled from inside the region, row-major. */
+  sampledColors: readonly string[];
+  originalText: string;
+  /** Region height as a fraction of the image. */
+  regionHeight: number;
+  /** Lines of text inside the region; 1 when unknown. */
+  lineCount: number;
+}): InferredTextStyle {
+  const lines = Math.max(1, Math.round(finite(input.lineCount, 1)));
+  const height = Math.max(0, finite(input.regionHeight, 0));
+  const uppercase = looksAllCaps(input.originalText);
+  const split = splitGlyphAndBackground(input.sampledColors);
+
+  // Cap height is roughly 72% of the line box; dividing by the line count is
+  // what stops a three-line block from producing one enormous line of text.
+  const fontSize = clamp((height / lines) * 0.72, MEME_TEXT_BOUNDS.minFontSize, MEME_TEXT_BOUNDS.maxFontSize);
+
+  if (!split || split.contrast < 1.6) {
+    // Could not read the original — say so by falling back to the cover-based
+    // choice rather than inventing a colour that might vanish into the image.
+    const fallbackBackground = split?.background ?? '#000000';
+    return {
+      ...replacementTextColorsForCover(fallbackBackground),
+      backgroundColor: fallbackBackground,
+      preset: uppercase ? 'impact' : 'plain',
+      uppercase,
+      fontSize,
+      contrast: split?.contrast ?? 1,
+    };
+  }
+
+  // A meme caption is caps with a hard outline; a subtitle or watermark is not.
+  // Getting this wrong is very visible, so it keys off the two signals that are
+  // actually reliable: capitalisation and how hard the contrast is.
+  const preset: TextStyle['preset'] = uppercase && split.contrast >= 4 ? 'impact' : uppercase ? 'label' : 'plain';
+  const outlineColor = contrastRatio(split.glyph, '#000000') >= contrastRatio(split.glyph, '#FFFFFF')
+    ? '#000000'
+    : '#FFFFFF';
+  return {
+    color: split.glyph,
+    outlineColor,
+    // Impact-style text carries a visible stroke; quieter text should not gain
+    // one it never had.
+    outlineScale: preset === 'impact' ? 0.06 : 0.02,
+    backgroundColor: split.background,
+    preset,
+    uppercase,
+    fontSize,
+    contrast: split.contrast,
+  };
+}
+
 export function createTextRegionLayers(input: TextRegionLayerInput): MemeEditLayer[] {
   const rect = clippedUnitRect(input.rect);
   if (!rect) throw new RangeError('Text region must overlap the visible image.');
@@ -706,11 +867,26 @@ export function createTextRegionLayers(input: TextRegionLayerInput): MemeEditLay
   };
   if (input.action !== 'replace') return [cover];
   const center = { x: round(rect.x + rect.width / 2), y: round(rect.y + rect.height / 2) };
-  const text = createMemeTextLayer(input.textId, 'plain', {
+  // When the original's look was readable, inherit it: preset, glyph colour,
+  // outline, capitalisation and per-line size. That is what makes a replacement
+  // read as an edit of the meme rather than a sticker dropped onto it. Without
+  // it every replacement came out as the same default caption regardless of
+  // what it was standing in for.
+  const inferred = input.inferredStyle ?? null;
+  const text = createMemeTextLayer(input.textId, inferred?.preset ?? 'plain', {
     text: input.text,
     width: clamp(rect.width, MEME_TEXT_BOUNDS.minWrapWidth, MEME_TEXT_BOUNDS.maxWrapWidth),
-    fontSize: clamp(rect.height * 0.72, MEME_TEXT_BOUNDS.minFontSize, MEME_TEXT_BOUNDS.maxFontSize),
-    style: replacementTextColorsForCover(input.color),
+    fontSize: inferred
+      ? inferred.fontSize
+      : clamp(rect.height * 0.72, MEME_TEXT_BOUNDS.minFontSize, MEME_TEXT_BOUNDS.maxFontSize),
+    style: inferred
+      ? {
+          color: inferred.color,
+          outlineColor: inferred.outlineColor,
+          outlineScale: inferred.outlineScale,
+          uppercase: inferred.uppercase,
+        }
+      : replacementTextColorsForCover(input.color),
     active: null,
     keyframes: [{
       timeUs: 0,

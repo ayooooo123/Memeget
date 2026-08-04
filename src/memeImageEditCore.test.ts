@@ -21,6 +21,9 @@ import {
   visibleImageDimensions,
   textRegionFingerprint,
   type DetectedTextResult,
+  splitGlyphAndBackground,
+  inferOriginalTextStyle,
+  looksAllCaps,
 } from './memeImageEditCore';
 import { commitGestureTransaction } from './memeEditCanvasCore';
 import {
@@ -566,5 +569,98 @@ describe('real OCR region normalization and replacement layers', () => {
 
     expect(() => applyProjectAction(history, { type: 'add-layers', layers })).toThrow(/64 layer/);
     expect(history.present).toBe(project);
+  });
+});
+
+
+describe('reading the style of the text being replaced', () => {
+  // A meme caption: white glyphs on a dark photo. Glyph pixels are the minority
+  // because strokes cover far less area than the space around them.
+  const whiteOnDark = [
+    ...Array(24).fill('#101014'),
+    ...Array(6).fill('#FFFFFF'),
+  ];
+  // An impact-style caption in the classic other direction.
+  const blackOnWhite = [
+    ...Array(24).fill('#FAFAFA'),
+    ...Array(6).fill('#000000'),
+  ];
+
+  test('picks the glyph colour off the image instead of guessing black or white', () => {
+    const split = splitGlyphAndBackground([
+      ...Array(20).fill('#1B1B22'),
+      ...Array(5).fill('#F2C14E'),
+    ]);
+    expect(split).not.toBeNull();
+    // A yellow caption must come back yellow. Choosing by contrast alone would
+    // have returned #FFFFFF and quietly restyled the meme.
+    expect(split!.glyph).toBe('#F2C14E');
+    expect(split!.background).toBe('#1B1B22');
+    expect(split!.contrast).toBeGreaterThan(4);
+  });
+
+  test('identifies glyphs by area, not by being darker or lighter', () => {
+    expect(splitGlyphAndBackground(whiteOnDark)!.glyph).toBe('#FFFFFF');
+    expect(splitGlyphAndBackground(blackOnWhite)!.glyph).toBe('#000000');
+  });
+
+  test('refuses to read a style from a flat region', () => {
+    // No text here. Inventing a colour would put invisible text on the meme.
+    expect(splitGlyphAndBackground(Array(30).fill('#334455'))).toBeNull();
+    // The case that actually matters: a solid background carrying compression
+    // noise. It is not uniform, so the two clusters are both non-empty and the
+    // algorithm will happily "find" glyphs in the dither unless the spread is
+    // checked. Believing that noise means restyling the meme from nothing.
+    const noisy = ['#334455', '#334456', '#344455', '#334454', '#333455', '#344456'];
+    expect(splitGlyphAndBackground([...noisy, ...noisy, ...noisy, ...noisy, ...noisy])).toBeNull();
+    expect(splitGlyphAndBackground([])).toBeNull();
+    expect(splitGlyphAndBackground(['#fff', '#000'])).toBeNull();
+  });
+
+  test('sizes text from one line, not from the whole block', () => {
+    // Height chosen to stay clear of the font-size clamps at both ends, so the
+    // assertion is about the per-line division and not about clamping.
+    const one = inferOriginalTextStyle({ sampledColors: whiteOnDark, originalText: 'TOP TEXT', regionHeight: 0.15, lineCount: 1 });
+    const three = inferOriginalTextStyle({ sampledColors: whiteOnDark, originalText: 'A\nB\nC', regionHeight: 0.15, lineCount: 3 });
+    // The bug this prevents: a three-line block rendering as one giant line.
+    expect(three.fontSize).toBeLessThan(one.fontSize);
+    expect(three.fontSize).toBeCloseTo(one.fontSize / 3, 5);
+  });
+
+  test('carries capitalisation over from the original', () => {
+    expect(inferOriginalTextStyle({ sampledColors: whiteOnDark, originalText: 'ONE DOES NOT SIMPLY', regionHeight: 0.2, lineCount: 1 }).uppercase).toBe(true);
+    expect(inferOriginalTextStyle({ sampledColors: whiteOnDark, originalText: 'a quiet subtitle', regionHeight: 0.2, lineCount: 1 }).uppercase).toBe(false);
+    // Digits and punctuation alone are not evidence of shouting.
+    expect(looksAllCaps('123 456')).toBe(false);
+    expect(looksAllCaps('A')).toBe(false);
+  });
+
+  test('gives shouted high-contrast text an outline and quiet text none', () => {
+    const caption = inferOriginalTextStyle({ sampledColors: whiteOnDark, originalText: 'GIGACHAD', regionHeight: 0.2, lineCount: 1 });
+    expect(caption.preset).toBe('impact');
+    expect(caption.outlineScale).toBeGreaterThan(0.04);
+
+    const quiet = inferOriginalTextStyle({ sampledColors: whiteOnDark, originalText: 'photo credit', regionHeight: 0.05, lineCount: 1 });
+    expect(quiet.preset).toBe('plain');
+    expect(quiet.outlineScale).toBeLessThan(0.04);
+  });
+
+  test('falls back honestly when the original cannot be read', () => {
+    const flat = inferOriginalTextStyle({ sampledColors: Array(30).fill('#808080'), originalText: 'WHATEVER', regionHeight: 0.2, lineCount: 1 });
+    // No sampled colour is claimed; contrast reports that nothing was learned.
+    expect(flat.contrast).toBeLessThanOrEqual(1.6);
+    expect(['#000000', '#FFFFFF']).toContain(flat.color);
+  });
+
+  test('the outline always contrasts with the glyph it outlines', () => {
+    for (const glyph of ['#FFFFFF', '#000000', '#F2C14E', '#1B1B22', '#7A7A7A']) {
+      const style = inferOriginalTextStyle({
+        sampledColors: [...Array(20).fill('#808080'), ...Array(5).fill(glyph)],
+        originalText: 'TEST TEXT',
+        regionHeight: 0.2,
+        lineCount: 1,
+      });
+      expect(contrastRatio(style.color, style.outlineColor)).toBeGreaterThan(1.5);
+    }
   });
 });
