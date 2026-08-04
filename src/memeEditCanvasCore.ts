@@ -108,15 +108,23 @@ export function memeEditToolsForSource(kind: MemeEditProject['source']['kind']):
  */
 export const TOOL_RAIL_ITEM_WIDTH = 76;
 export const TOOL_RAIL_GAP = 8;
+/** Horizontal padding at each end of the rail's content. */
+export const TOOL_RAIL_PADDING = 16;
+/**
+ * How much of the previous tool stays visible when the rail scrolls. Deliberate
+ * and small: a full cell's worth of lead-in left "Layers" rendered as a sliced
+ * "ers", which reads as a clipping bug rather than as an invitation to scroll.
+ */
+export const TOOL_RAIL_PEEK = 26;
 
 /**
- * Scroll offset that brings the tool at `index` fully into view, with one
- * neighbour's worth of lead-in so the rail visibly has more to its left. Never
- * negative: the first few tools should not scroll the rail at all.
+ * Scroll offset that brings the tool at `index` into view with a consistent
+ * peek of its neighbour. Never negative: the first tools should not scroll the
+ * rail at all.
  */
 export function toolRailScrollOffsetPx(index: number): number {
   const stride = TOOL_RAIL_ITEM_WIDTH + TOOL_RAIL_GAP;
-  return Math.max(0, (index - 1) * stride);
+  return Math.max(0, TOOL_RAIL_PADDING + index * stride - TOOL_RAIL_PEEK);
 }
 
 /** Height of the tool panel's header, which stays visible when collapsed. */

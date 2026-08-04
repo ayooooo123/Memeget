@@ -824,7 +824,14 @@ export function MemeRemixStudio({
                   onCommitTextTransaction={commitTextTransaction}
                 />
               ) : activeTool === 'transform' ? (
-                <View style={styles.transformPanel}>
+                // The panel has a bounded height, so anything taller than it
+                // must scroll or it is simply invisible. This one silently
+                // clipped its crop-ratio chips and the discard button.
+                <ScrollView
+                  style={styles.transformPanel}
+                  contentContainerStyle={styles.transformPanelContent}
+                  keyboardShouldPersistTaps="handled"
+                >
                   <MemeTransformInspector
                     project={project}
                     base={previewBase ?? project.base}
@@ -833,7 +840,7 @@ export function MemeRemixStudio({
                     onCommitBase={commitImageBase}
                   />
                   <HeaderButton label={discarding ? 'Discarding…' : 'Discard draft'} hint="Delete this source's saved edit draft" onPress={discard} disabled={discarding} danger />
-                </View>
+                </ScrollView>
               ) : activeTool === 'timeline' ? (
                 <MemeTimeline
                   project={project}
@@ -1022,7 +1029,8 @@ const styles = StyleSheet.create({
     borderColor: colors.borderLight,
   },
   readoutText: { ...type.caption, color: colors.textDim, fontVariant: ['tabular-nums'] },
-  transformPanel: { gap: space.md, padding: space.md },
+  transformPanel: { flex: 1 },
+  transformPanelContent: { padding: space.md, gap: space.md },
   transformTitle: { ...type.title, color: colors.text },
   transformCopy: { ...type.body, color: colors.textDim, lineHeight: 21 },
   transformMetric: {

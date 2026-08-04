@@ -20,6 +20,8 @@ import {
   toolRailScrollOffsetPx,
   TOOL_RAIL_ITEM_WIDTH,
   TOOL_RAIL_GAP,
+  TOOL_RAIL_PADDING,
+  TOOL_RAIL_PEEK,
   projectHistoryCommandAvailability,
   runProjectHistoryCommand,
   nextDuplicateLayerId,
@@ -375,16 +377,17 @@ describe('studio shell UI contracts', () => {
     // rendered as "Transfo…" with the badge overlapping the word. Fixed-width
     // cells plus horizontal scrolling is the fix, and the offset math is what
     // stops a selected tool from sitting off-screen with no scroll affordance.
+    const stride = TOOL_RAIL_ITEM_WIDTH + TOOL_RAIL_GAP;
     expect(toolRailScrollOffsetPx(0)).toBe(0);
-    expect(toolRailScrollOffsetPx(1)).toBe(0);
-    // From the third tool on, scroll but keep one neighbour visible as a hint
-    // that the rail continues to the left.
-    expect(toolRailScrollOffsetPx(2)).toBe(TOOL_RAIL_ITEM_WIDTH + TOOL_RAIL_GAP);
-    expect(toolRailScrollOffsetPx(5)).toBe(4 * (TOOL_RAIL_ITEM_WIDTH + TOOL_RAIL_GAP));
 
-    for (let i = 0; i < 8; i += 1) {
-      expect(toolRailScrollOffsetPx(i)).toBeGreaterThanOrEqual(0);
-      if (i > 0) expect(toolRailScrollOffsetPx(i)).toBeGreaterThanOrEqual(toolRailScrollOffsetPx(i - 1));
+    for (let i = 1; i < 8; i += 1) {
+      const offset = toolRailScrollOffsetPx(i);
+      // Deliberate, consistent peek of the previous tool rather than a whole
+      // cell's worth: a half-sliced "Layers" reads as a clipping bug, which is
+      // exactly how it looked on device before this.
+      expect(TOOL_RAIL_PADDING + i * stride - offset).toBe(TOOL_RAIL_PEEK);
+      expect(offset).toBeGreaterThanOrEqual(0);
+      expect(offset).toBeGreaterThanOrEqual(toolRailScrollOffsetPx(i - 1));
     }
 
     // A video project genuinely needs more tools than fit; that is the case the

@@ -1,7 +1,7 @@
 import React, { useEffect, useRef } from 'react';
 import { ScrollView, StyleSheet, Text, View } from 'react-native';
 
-import { memeEditToolsForSource, toolRailScrollOffsetPx, TOOL_RAIL_ITEM_WIDTH, TOOL_RAIL_GAP, type MemeEditToolId } from '../memeEditCanvasCore';
+import { memeEditToolsForSource, toolRailScrollOffsetPx, TOOL_RAIL_ITEM_WIDTH, TOOL_RAIL_GAP, TOOL_RAIL_PADDING, type MemeEditToolId } from '../memeEditCanvasCore';
 import type { MediaEditKind } from '../memeEditProjectCore';
 
 import { colors, radius, space, type } from '../theme';
@@ -102,7 +102,8 @@ const styles = StyleSheet.create({
   railContent: {
     alignItems: 'center',
     gap: TOOL_RAIL_GAP,
-    paddingHorizontal: space.md,
+    // Must match TOOL_RAIL_PADDING: the scroll-offset math assumes it.
+    paddingHorizontal: TOOL_RAIL_PADDING,
     paddingVertical: space.sm,
   },
   tool: {
