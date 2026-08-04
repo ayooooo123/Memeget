@@ -1,8 +1,10 @@
-import React, { useCallback, useEffect, useMemo, useRef } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Animated, PanResponder, Platform, StyleSheet, Text, View, type ImageStyle, type LayoutChangeEvent, type ViewStyle } from 'react-native';
 import { Image } from 'expo-image';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import { requireNativeViewManager } from 'expo-modules-core';
+
+import { tap } from '../haptics';
 
 import { measureMemeTextLayout, sampleImagePixelGrid, type NativeImagePixelGrid } from '../../modules/memeget-bg';
 import {
@@ -11,6 +13,9 @@ import {
   canvasLayerVisualDescriptor,
   captureTransformGesture,
   dragKeyframeByViewDelta,
+  snapCaptionCenter,
+  snapDidEngage,
+  type SnappedCenter,
   gestureMoveShouldClaim,
   layerBodyTouchInsideMedia,
   layerHandlePoints,
@@ -389,7 +394,12 @@ const TransformableLayerView = React.memo(function TransformableLayerView({
   onSelectLayer,
   disabled,
   onCommitLayerKeyframes,
-}: CanvasLayerProps & { layer: TextLayer | SubjectLayer | MediaOverlayLayer }) {
+  onSnapChange,
+}: CanvasLayerProps & {
+  layer: TextLayer | SubjectLayer | MediaOverlayLayer;
+  /** Reports the live snap lock so the canvas can draw guides. */
+  onSnapChange?: (snap: SnappedCenter | null) => void;
+}) {
   const translate = useConst(() => new Animated.ValueXY({ x: 0, y: 0 }));
   const scalePreview = useConst(() => new Animated.Value(1));
   const rotatePreview = useConst(() => new Animated.Value(0));
@@ -400,6 +410,9 @@ const TransformableLayerView = React.memo(function TransformableLayerView({
     handle: ViewPoint;
   } | null>(null);
   const dragStartAccepted = useRef(false);
+  // Held in a ref, not state: it changes mid-gesture and re-rendering the
+  // dragged layer on every lock would fight the Animated transform.
+  const snapRef = useRef<SnappedCenter | null>(null);
   const resizeStartAccepted = useRef(false);
   const rotateStartAccepted = useRef(false);
   const evaluatedKeyframe = firstKeyframe(layer, activeTimeUs);
@@ -478,22 +491,47 @@ const TransformableLayerView = React.memo(function TransformableLayerView({
       translate.setValue({ x: 0, y: 0 });
     },
     onPanResponderMove: (_event, gesture) => {
-      if (dragStartAccepted.current) translate.setValue({ x: gesture.dx, y: gesture.dy });
+      if (!dragStartAccepted.current) return;
+      translate.setValue({ x: gesture.dx, y: gesture.dy });
+      const start = gestureStart.current;
+      if (!start) return;
+      // Snapping is computed every frame but only ESCAPES this closure when the
+      // lock actually changes. The drag itself stays on the Animated value, so
+      // no per-frame re-render — the guides and the tick ride the transition.
+      const projected = dragKeyframeByViewDelta(
+        start.keyframe,
+        { dx: gesture.dx, dy: gesture.dy } satisfies ViewDelta,
+        mediaRect
+      );
+      const snapped = snapCaptionCenter(projected.center);
+      const previous = snapRef.current;
+      if (snapped.snappedX === previous?.snappedX && snapped.snappedY === previous?.snappedY) return;
+      if (snapDidEngage(previous, snapped)) tap();
+      snapRef.current = snapped;
+      onSnapChange?.(snapped);
     },
     onPanResponderRelease: (_event, gesture) => {
       const start = gestureStart.current;
       if (dragStartAccepted.current && start) {
-        commit(dragKeyframeByViewDelta(start.keyframe, { dx: gesture.dx, dy: gesture.dy } satisfies ViewDelta, mediaRect), start.timeUs);
+        const dragged = dragKeyframeByViewDelta(start.keyframe, { dx: gesture.dx, dy: gesture.dy } satisfies ViewDelta, mediaRect);
+        // Commit the SNAPPED position, so what the guides promised is what
+        // lands. Committing the raw drag would leave the caption a hair off the
+        // line the user just saw it lock onto.
+        commit({ ...dragged, center: snapCaptionCenter(dragged.center).center }, start.timeUs);
       }
       dragStartAccepted.current = false;
       gestureStart.current = null;
+      snapRef.current = null;
+      onSnapChange?.(null);
     },
     onPanResponderTerminate: () => {
       translate.setValue({ x: 0, y: 0 });
       dragStartAccepted.current = false;
       gestureStart.current = null;
+      snapRef.current = null;
+      onSnapChange?.(null);
     },
-  }), [commit, disabled, handles.center, handles.resize, keyframe, layer.id, mediaRect, onSelectLayer, translate, visualWidth]);
+  }), [commit, disabled, handles.center, handles.resize, keyframe, layer.id, mediaRect, onSelectLayer, onSnapChange, translate, visualWidth]);
 
   const resizePan = useMemo(() => PanResponder.create({
     onStartShouldSetPanResponder: (event) => {
@@ -1150,6 +1188,10 @@ export const MemeEditCanvas = React.memo(function MemeEditCanvas({
     onChangeSelectedTextRegion,
     onManualTextRegionComplete,
   ]);
+  // Only ever set on a snap transition, so this re-renders a handful of times
+  // per drag rather than per frame.
+  const [activeSnap, setActiveSnap] = useState<SnappedCenter | null>(null);
+
   const selectPan = useMemo(() => PanResponder.create({
     onStartShouldSetPanResponder: (event) => {
       if (!mediaRect || manualTextRegionMode) return false;
@@ -1174,8 +1216,26 @@ export const MemeEditCanvas = React.memo(function MemeEditCanvas({
         if (layer.kind === 'cover') {
           return <CoverLayerView key={layer.id} project={project} layer={layer} mediaRect={mediaRect} selected={selectedLayerId === layer.id} hidden={hidden} activeTimeUs={activeTimeUs} disabled={disabled} onSelectLayer={onSelectLayer} onCommitLayerKeyframes={onCommitLayerKeyframes} />;
         }
-        return <TransformableLayerView key={layer.id} project={project} layer={layer} mediaRect={mediaRect} selected={selectedLayerId === layer.id} hidden={hidden} activeTimeUs={activeTimeUs} disabled={disabled} onSelectLayer={onSelectLayer} onCommitLayerKeyframes={onCommitLayerKeyframes} />;
+        return <TransformableLayerView key={layer.id} project={project} layer={layer} mediaRect={mediaRect} selected={selectedLayerId === layer.id} hidden={hidden} activeTimeUs={activeTimeUs} disabled={disabled} onSelectLayer={onSelectLayer} onCommitLayerKeyframes={onCommitLayerKeyframes} onSnapChange={setActiveSnap} />;
       })}
+      {mediaRect && activeSnap?.snappedX != null && (
+        <View
+          pointerEvents="none"
+          style={[
+            styles.snapGuideVertical,
+            { left: mediaRect.x + activeSnap.snappedX * mediaRect.width, top: mediaRect.y, height: mediaRect.height },
+          ]}
+        />
+      )}
+      {mediaRect && activeSnap?.snappedY != null && (
+        <View
+          pointerEvents="none"
+          style={[
+            styles.snapGuideHorizontal,
+            { top: mediaRect.y + activeSnap.snappedY * mediaRect.height, left: mediaRect.x, width: mediaRect.width },
+          ]}
+        />
+      )}
       {mediaRect && textRegions.map((region) => (
         <TextRegionOverlay
           key={region.id}
@@ -1220,6 +1280,21 @@ export const MemeEditCanvas = React.memo(function MemeEditCanvas({
 });
 
 const styles = StyleSheet.create({
+  // Guides appear only while a drag is locked to one. Volt is the app's focus
+  // colour, so the line reads as "the editor is helping" rather than as part of
+  // the meme.
+  snapGuideVertical: {
+    position: 'absolute',
+    width: 1,
+    backgroundColor: colors.volt,
+    opacity: 0.9,
+  },
+  snapGuideHorizontal: {
+    position: 'absolute',
+    height: 1,
+    backgroundColor: colors.volt,
+    opacity: 0.9,
+  },
   root: { flex: 1, minHeight: 260, backgroundColor: colors.bg, overflow: 'hidden' },
   checker: { ...StyleSheet.absoluteFill, backgroundColor: colors.bg },
   sourceMedia: { position: 'absolute', backgroundColor: colors.surface },
