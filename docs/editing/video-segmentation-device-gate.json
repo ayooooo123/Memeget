@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "task": "0.2",
-  "observedAtUtc": "2026-08-02T06:14:51.342Z",
+  "observedAtUtc": "2026-08-03T19:27:32.049Z",
   "gateStatus": "FAIL",
   "device": {
     "manufacturer": "Google",
@@ -326,9 +326,9 @@
       }
     ],
     "failedBoundaries": [],
-    "modelProvenanceComplete": true,
-    "allDigestsMatch": true,
-    "allProvenanceBoundariesMatch": true
+    "modelProvenanceComplete": false,
+    "allDigestsMatch": false,
+    "allProvenanceBoundariesMatch": false
   },
   "nativeArtifact": {
     "tasksVisionArtifactVersion": "0.10.29",
@@ -336,7 +336,7 @@
     "packagedNativeLibraries": [
       {
         "apk": "base.apk",
-        "apkSha256": "a189d240d08ee8e06e61eeea3731c010e9e7734260cbbc63e209f05c983722b3",
+        "apkSha256": "9ae6687441f9d72b2f6ed4fed7d0a774cdc344ee9aec3ee0558bf56c37cbbd1e",
         "entry": "lib\/arm64-v8a\/libmediapipe_tasks_vision_jni.so",
         "abi": "arm64-v8a",
         "bytes": 10422840,
@@ -354,7 +354,7 @@
       },
       {
         "apk": "base.apk",
-        "apkSha256": "a189d240d08ee8e06e61eeea3731c010e9e7734260cbbc63e209f05c983722b3",
+        "apkSha256": "9ae6687441f9d72b2f6ed4fed7d0a774cdc344ee9aec3ee0558bf56c37cbbd1e",
         "entry": "lib\/armeabi-v7a\/libmediapipe_tasks_vision_jni.so",
         "abi": "armeabi-v7a",
         "bytes": 6920096,
@@ -372,7 +372,7 @@
       },
       {
         "apk": "base.apk",
-        "apkSha256": "a189d240d08ee8e06e61eeea3731c010e9e7734260cbbc63e209f05c983722b3",
+        "apkSha256": "9ae6687441f9d72b2f6ed4fed7d0a774cdc344ee9aec3ee0558bf56c37cbbd1e",
         "entry": "lib\/x86\/libmediapipe_tasks_vision_jni.so",
         "abi": "x86",
         "bytes": 13888228,
@@ -390,7 +390,7 @@
       },
       {
         "apk": "base.apk",
-        "apkSha256": "a189d240d08ee8e06e61eeea3731c010e9e7734260cbbc63e209f05c983722b3",
+        "apkSha256": "9ae6687441f9d72b2f6ed4fed7d0a774cdc344ee9aec3ee0558bf56c37cbbd1e",
         "entry": "lib\/x86_64\/libmediapipe_tasks_vision_jni.so",
         "abi": "x86_64",
         "bytes": 12596280,
@@ -417,7 +417,7 @@
       "arm64-v8a"
     ],
     "devicePageSizeBytes": 4096,
-    "arm64ApkSha256": "a189d240d08ee8e06e61eeea3731c010e9e7734260cbbc63e209f05c983722b3",
+    "arm64ApkSha256": "9ae6687441f9d72b2f6ed4fed7d0a774cdc344ee9aec3ee0558bf56c37cbbd1e",
     "arm64ElfLoadSegmentAlignmentsBytes": [
       16384,
       16384,
@@ -468,14 +468,16 @@
       "maskFps": 8,
       "status": "COMPLETED",
       "qualityStatus": "FAIL",
-      "worstPipelineRuntimeMs": 24476,
-      "worstRuntimeXRealtime": 2.4476,
-      "peakPssBytes": 209313792,
-      "baselinePssBytesForWorstDelta": 94990336,
-      "peakPssDeltaBytes": 90347520,
+      "worstPipelineRuntimeMs": 31838,
+      "worstRuntimeXRealtime": 3.1838,
+      "peakPssBytes": 196250624,
+      "baselinePssBytesForWorstDelta": 90357760,
+      "peakPssDeltaBytes": 82767872,
       "pssDeltaBudgetBytes": 134217728,
       "underPssDeltaBudget": true,
-      "withinThreeTimesRealtime": true,
+      "withinThreeTimesRealtime": false,
+      "fixtureCount": 3,
+      "completedFixtureCount": 3,
       "fixtures": [
         {
           "id": "one_person",
@@ -494,22 +496,22 @@
           "maskWidth": 256,
           "maskHeight": 144,
           "confidenceMaskCount": 1,
-          "pipelineRuntimeMs": 24476,
-          "runtimeXRealtime": 2.4476,
-          "throughputFramesPerSecond": 3.2685079261317207,
+          "pipelineRuntimeMs": 29206,
+          "runtimeXRealtime": 2.9206,
+          "throughputFramesPerSecond": 2.739163185646785,
           "inferenceLatencyMs": {
-            "median": 56.043538,
-            "p95": 86.424439,
-            "max": 95.220134
+            "median": 78.955974,
+            "p95": 93.552287,
+            "max": 109.660645
           },
           "sequentialDecodeIntervalMs": {
-            "median": 201.564941,
-            "p95": 227.899781,
-            "max": 282.263346
+            "median": 221.065958,
+            "p95": 250.558675,
+            "max": 340.427775
           },
-          "baselinePssBytes": 94990336,
-          "peakPssBytes": 185337856,
-          "peakPssDeltaBytes": 90347520,
+          "baselinePssBytes": 90357760,
+          "peakPssBytes": 173125632,
+          "peakPssDeltaBytes": 82767872,
           "pssDeltaBudgetBytes": 134217728,
           "underPssDeltaBudget": true,
           "quality": {
@@ -556,22 +558,22 @@
           "maskWidth": 256,
           "maskHeight": 144,
           "confidenceMaskCount": 1,
-          "pipelineRuntimeMs": 23220,
-          "runtimeXRealtime": 2.322,
-          "throughputFramesPerSecond": 3.4453057708871664,
+          "pipelineRuntimeMs": 26673,
+          "runtimeXRealtime": 2.6673,
+          "throughputFramesPerSecond": 2.99928766917857,
           "inferenceLatencyMs": {
-            "median": 65.093261,
-            "p95": 84.20699,
-            "max": 91.773926
+            "median": 77.606812,
+            "p95": 92.850301,
+            "max": 102.386556
           },
           "sequentialDecodeIntervalMs": {
-            "median": 196.115682,
-            "p95": 228.439575,
-            "max": 289.026855
+            "median": 201.545939,
+            "p95": 245.39681,
+            "max": 266.78711
           },
-          "baselinePssBytes": 166793216,
-          "peakPssBytes": 209313792,
-          "peakPssDeltaBytes": 42520576,
+          "baselinePssBytes": 153955328,
+          "peakPssBytes": 196250624,
+          "peakPssDeltaBytes": 42295296,
           "pssDeltaBudgetBytes": 134217728,
           "underPssDeltaBudget": true,
           "quality": {
@@ -618,22 +620,22 @@
           "maskWidth": 256,
           "maskHeight": 144,
           "confidenceMaskCount": 1,
-          "pipelineRuntimeMs": 24376,
-          "runtimeXRealtime": 2.4376,
-          "throughputFramesPerSecond": 3.2819166393173616,
+          "pipelineRuntimeMs": 31838,
+          "runtimeXRealtime": 3.1838,
+          "throughputFramesPerSecond": 2.512720648281927,
           "inferenceLatencyMs": {
-            "median": 70.269612,
-            "p95": 92.408651,
-            "max": 99.554687
+            "median": 85.521078,
+            "p95": 103.53715,
+            "max": 105.996582
           },
           "sequentialDecodeIntervalMs": {
-            "median": 197.585409,
-            "p95": 222.872152,
-            "max": 290.038208
+            "median": 233.258341,
+            "p95": 250.756185,
+            "max": 327.667318
           },
-          "baselinePssBytes": 169275392,
-          "peakPssBytes": 209049600,
-          "peakPssDeltaBytes": 39774208,
+          "baselinePssBytes": 152681472,
+          "peakPssBytes": 189953024,
+          "peakPssDeltaBytes": 37271552,
           "pssDeltaBudgetBytes": 134217728,
           "underPssDeltaBudget": true,
           "quality": {
@@ -664,6 +666,7 @@
           "evidenceFileName": "video-segmentation-mask-fast_motion-256-8fps.png"
         }
       ],
+      "playbackReviewPass": false,
       "accepted": false
     },
     {
@@ -673,14 +676,16 @@
       "maskFps": 12,
       "status": "COMPLETED",
       "qualityStatus": "FAIL",
-      "worstPipelineRuntimeMs": 42675,
-      "worstRuntimeXRealtime": 4.2675,
-      "peakPssBytes": 210129920,
-      "baselinePssBytesForWorstDelta": 136454144,
-      "peakPssDeltaBytes": 66899968,
+      "worstPipelineRuntimeMs": 48970,
+      "worstRuntimeXRealtime": 4.897,
+      "peakPssBytes": 192413696,
+      "baselinePssBytesForWorstDelta": 121733120,
+      "peakPssDeltaBytes": 70680576,
       "pssDeltaBudgetBytes": 134217728,
       "underPssDeltaBudget": true,
       "withinThreeTimesRealtime": false,
+      "fixtureCount": 3,
+      "completedFixtureCount": 3,
       "fixtures": [
         {
           "id": "one_person",
@@ -699,22 +704,22 @@
           "maskWidth": 256,
           "maskHeight": 144,
           "confidenceMaskCount": 1,
-          "pipelineRuntimeMs": 37538,
-          "runtimeXRealtime": 3.7538,
-          "throughputFramesPerSecond": 3.196760615909212,
+          "pipelineRuntimeMs": 44690,
+          "runtimeXRealtime": 4.469,
+          "throughputFramesPerSecond": 2.6851644663235623,
           "inferenceLatencyMs": {
-            "median": 73.883504,
-            "p95": 97.835978,
-            "max": 107.032918
+            "median": 85.90393,
+            "p95": 104.166667,
+            "max": 114.663859
           },
           "sequentialDecodeIntervalMs": {
-            "median": 195.48234,
-            "p95": 243.726848,
-            "max": 263.282512
+            "median": 222.545858,
+            "p95": 245.435018,
+            "max": 331.964315
           },
-          "baselinePssBytes": 136454144,
-          "peakPssBytes": 203354112,
-          "peakPssDeltaBytes": 66899968,
+          "baselinePssBytes": 157714432,
+          "peakPssBytes": 188577792,
+          "peakPssDeltaBytes": 30863360,
           "pssDeltaBudgetBytes": 134217728,
           "underPssDeltaBudget": true,
           "quality": {
@@ -761,22 +766,22 @@
           "maskWidth": 256,
           "maskHeight": 144,
           "confidenceMaskCount": 1,
-          "pipelineRuntimeMs": 42675,
-          "runtimeXRealtime": 4.2675,
-          "throughputFramesPerSecond": 2.81195079086116,
+          "pipelineRuntimeMs": 48970,
+          "runtimeXRealtime": 4.897,
+          "throughputFramesPerSecond": 2.450479885644272,
           "inferenceLatencyMs": {
-            "median": 81.433309,
-            "p95": 104.733602,
-            "max": 117.419109
+            "median": 91.006999,
+            "p95": 103.540731,
+            "max": 108.977661
           },
           "sequentialDecodeIntervalMs": {
-            "median": 212.230754,
-            "p95": 250.765788,
-            "max": 305.319377
+            "median": 229.646281,
+            "p95": 255.322917,
+            "max": 334.993408
           },
-          "baselinePssBytes": 169167872,
-          "peakPssBytes": 209028096,
-          "peakPssDeltaBytes": 39860224,
+          "baselinePssBytes": 133390336,
+          "peakPssBytes": 185884672,
+          "peakPssDeltaBytes": 52494336,
           "pssDeltaBudgetBytes": 134217728,
           "underPssDeltaBudget": true,
           "quality": {
@@ -823,22 +828,22 @@
           "maskWidth": 256,
           "maskHeight": 144,
           "confidenceMaskCount": 1,
-          "pipelineRuntimeMs": 40727,
-          "runtimeXRealtime": 4.0727,
-          "throughputFramesPerSecond": 2.946448302109166,
+          "pipelineRuntimeMs": 45022,
+          "runtimeXRealtime": 4.5022,
+          "throughputFramesPerSecond": 2.665363600017769,
           "inferenceLatencyMs": {
-            "median": 78.802938,
-            "p95": 99.372152,
-            "max": 103.366374
+            "median": 82.24467,
+            "p95": 98.742228,
+            "max": 103.876465
           },
           "sequentialDecodeIntervalMs": {
-            "median": 207.594198,
-            "p95": 248.096843,
-            "max": 268.956055
+            "median": 225.221599,
+            "p95": 244.696248,
+            "max": 328.460531
           },
-          "baselinePssBytes": 148921344,
-          "peakPssBytes": 210129920,
-          "peakPssDeltaBytes": 61208576,
+          "baselinePssBytes": 121733120,
+          "peakPssBytes": 192413696,
+          "peakPssDeltaBytes": 70680576,
           "pssDeltaBudgetBytes": 134217728,
           "underPssDeltaBudget": true,
           "quality": {
@@ -869,6 +874,7 @@
           "evidenceFileName": "video-segmentation-mask-fast_motion-256-12fps.png"
         }
       ],
+      "playbackReviewPass": false,
       "accepted": false
     },
     {
@@ -878,14 +884,16 @@
       "maskFps": 15,
       "status": "COMPLETED",
       "qualityStatus": "FAIL",
-      "worstPipelineRuntimeMs": 45952,
-      "worstRuntimeXRealtime": 4.5952,
-      "peakPssBytes": 214630400,
-      "baselinePssBytesForWorstDelta": 148504576,
-      "peakPssDeltaBytes": 49860608,
+      "worstPipelineRuntimeMs": 58158,
+      "worstRuntimeXRealtime": 5.8158,
+      "peakPssBytes": 200805376,
+      "baselinePssBytesForWorstDelta": 127230976,
+      "peakPssDeltaBytes": 67733504,
       "pssDeltaBudgetBytes": 134217728,
       "underPssDeltaBudget": true,
       "withinThreeTimesRealtime": false,
+      "fixtureCount": 3,
+      "completedFixtureCount": 3,
       "fixtures": [
         {
           "id": "one_person",
@@ -904,22 +912,22 @@
           "maskWidth": 256,
           "maskHeight": 144,
           "confidenceMaskCount": 1,
-          "pipelineRuntimeMs": 45952,
-          "runtimeXRealtime": 4.5952,
-          "throughputFramesPerSecond": 3.264275766016713,
+          "pipelineRuntimeMs": 56326,
+          "runtimeXRealtime": 5.6326,
+          "throughputFramesPerSecond": 2.663068565138657,
           "inferenceLatencyMs": {
-            "median": 74.150309,
-            "p95": 100.452799,
-            "max": 106.198934
+            "median": 87.535929,
+            "p95": 104.759969,
+            "max": 132.183472
           },
           "sequentialDecodeIntervalMs": {
-            "median": 190.428955,
-            "p95": 236.871786,
-            "max": 262.603475
+            "median": 222.746175,
+            "p95": 245.201294,
+            "max": 354.627808
           },
-          "baselinePssBytes": 178502656,
-          "peakPssBytes": 214630400,
-          "peakPssDeltaBytes": 36127744,
+          "baselinePssBytes": 153137152,
+          "peakPssBytes": 198375424,
+          "peakPssDeltaBytes": 45238272,
           "pssDeltaBudgetBytes": 134217728,
           "underPssDeltaBudget": true,
           "quality": {
@@ -966,22 +974,22 @@
           "maskWidth": 256,
           "maskHeight": 144,
           "confidenceMaskCount": 1,
-          "pipelineRuntimeMs": 43803,
-          "runtimeXRealtime": 4.3803,
-          "throughputFramesPerSecond": 3.4244229847270735,
+          "pipelineRuntimeMs": 58158,
+          "runtimeXRealtime": 5.8158,
+          "throughputFramesPerSecond": 2.5791808521613535,
           "inferenceLatencyMs": {
-            "median": 60.447509,
-            "p95": 87.379069,
-            "max": 117.726359
+            "median": 88.271362,
+            "p95": 101.02539,
+            "max": 120.539877
           },
           "sequentialDecodeIntervalMs": {
-            "median": 195.402995,
-            "p95": 230.052368,
-            "max": 273.185099
+            "median": 224.563965,
+            "p95": 243.39738,
+            "max": 338.028768
           },
-          "baselinePssBytes": 171393024,
-          "peakPssBytes": 209558528,
-          "peakPssDeltaBytes": 38165504,
+          "baselinePssBytes": 144179200,
+          "peakPssBytes": 200805376,
+          "peakPssDeltaBytes": 56626176,
           "pssDeltaBudgetBytes": 134217728,
           "underPssDeltaBudget": true,
           "quality": {
@@ -1028,22 +1036,22 @@
           "maskWidth": 256,
           "maskHeight": 144,
           "confidenceMaskCount": 1,
-          "pipelineRuntimeMs": 41707,
-          "runtimeXRealtime": 4.1707,
-          "throughputFramesPerSecond": 3.5965185700242164,
+          "pipelineRuntimeMs": 55924,
+          "runtimeXRealtime": 5.5924,
+          "throughputFramesPerSecond": 2.6822115728488662,
           "inferenceLatencyMs": {
-            "median": 61.744018,
-            "p95": 86.058065,
-            "max": 101.741618
+            "median": 84.873372,
+            "p95": 103.450114,
+            "max": 111.231038
           },
           "sequentialDecodeIntervalMs": {
-            "median": 183.105673,
-            "p95": 214.457519,
-            "max": 231.199544
+            "median": 222.476359,
+            "p95": 243.583008,
+            "max": 282.645549
           },
-          "baselinePssBytes": 148504576,
-          "peakPssBytes": 198365184,
-          "peakPssDeltaBytes": 49860608,
+          "baselinePssBytes": 127230976,
+          "peakPssBytes": 194964480,
+          "peakPssDeltaBytes": 67733504,
           "pssDeltaBudgetBytes": 134217728,
           "underPssDeltaBudget": true,
           "quality": {
@@ -1074,6 +1082,7 @@
           "evidenceFileName": "video-segmentation-mask-fast_motion-256-15fps.png"
         }
       ],
+      "playbackReviewPass": false,
       "accepted": false
     },
     {
@@ -1083,14 +1092,16 @@
       "maskFps": 8,
       "status": "COMPLETED",
       "qualityStatus": "FAIL",
-      "worstPipelineRuntimeMs": 48867,
-      "worstRuntimeXRealtime": 4.8867,
-      "peakPssBytes": 209248256,
-      "baselinePssBytesForWorstDelta": 135224320,
-      "peakPssDeltaBytes": 74023936,
+      "worstPipelineRuntimeMs": 45867,
+      "worstRuntimeXRealtime": 4.5867,
+      "peakPssBytes": 217273344,
+      "baselinePssBytesForWorstDelta": 121721856,
+      "peakPssDeltaBytes": 85219328,
       "pssDeltaBudgetBytes": 134217728,
       "underPssDeltaBudget": true,
       "withinThreeTimesRealtime": false,
+      "fixtureCount": 3,
+      "completedFixtureCount": 3,
       "fixtures": [
         {
           "id": "one_person",
@@ -1109,22 +1120,22 @@
           "maskWidth": 384,
           "maskHeight": 216,
           "confidenceMaskCount": 1,
-          "pipelineRuntimeMs": 40885,
-          "runtimeXRealtime": 4.0885,
-          "throughputFramesPerSecond": 1.9567078390607802,
+          "pipelineRuntimeMs": 44732,
+          "runtimeXRealtime": 4.4732,
+          "throughputFramesPerSecond": 1.788428865241885,
           "inferenceLatencyMs": {
-            "median": 64.746908,
-            "p95": 93.536906,
-            "max": 100.948853
+            "median": 81.595134,
+            "p95": 105.834961,
+            "max": 148.869466
           },
           "sequentialDecodeIntervalMs": {
-            "median": 386.224651,
-            "p95": 420.038086,
-            "max": 492.845907
+            "median": 403.095907,
+            "p95": 438.547567,
+            "max": 528.219971
           },
-          "baselinePssBytes": 135224320,
-          "peakPssBytes": 209248256,
-          "peakPssDeltaBytes": 74023936,
+          "baselinePssBytes": 121721856,
+          "peakPssBytes": 206941184,
+          "peakPssDeltaBytes": 85219328,
           "pssDeltaBudgetBytes": 134217728,
           "underPssDeltaBudget": true,
           "quality": {
@@ -1171,22 +1182,22 @@
           "maskWidth": 384,
           "maskHeight": 216,
           "confidenceMaskCount": 1,
-          "pipelineRuntimeMs": 41342,
-          "runtimeXRealtime": 4.1342,
-          "throughputFramesPerSecond": 1.9350781287794494,
+          "pipelineRuntimeMs": 45867,
+          "runtimeXRealtime": 4.5867,
+          "throughputFramesPerSecond": 1.744173370833061,
           "inferenceLatencyMs": {
-            "median": 61.008179,
-            "p95": 90.271037,
-            "max": 98.052124
+            "median": 84.593547,
+            "p95": 95.925985,
+            "max": 107.898275
           },
           "sequentialDecodeIntervalMs": {
-            "median": 391.358236,
-            "p95": 431.897868,
-            "max": 482.213704
+            "median": 416.525065,
+            "p95": 439.349243,
+            "max": 515.361288
           },
-          "baselinePssBytes": 149846016,
-          "peakPssBytes": 192856064,
-          "peakPssDeltaBytes": 43010048,
+          "baselinePssBytes": 187511808,
+          "peakPssBytes": 217273344,
+          "peakPssDeltaBytes": 29761536,
           "pssDeltaBudgetBytes": 134217728,
           "underPssDeltaBudget": true,
           "quality": {
@@ -1233,22 +1244,22 @@
           "maskWidth": 384,
           "maskHeight": 216,
           "confidenceMaskCount": 1,
-          "pipelineRuntimeMs": 48867,
-          "runtimeXRealtime": 4.8867,
-          "throughputFramesPerSecond": 1.6370966091636483,
+          "pipelineRuntimeMs": 45706,
+          "runtimeXRealtime": 4.5706,
+          "throughputFramesPerSecond": 1.7503172450006563,
           "inferenceLatencyMs": {
-            "median": 69.706788,
-            "p95": 93.237101,
-            "max": 103.565226
+            "median": 82.718791,
+            "p95": 101.922322,
+            "max": 105.64091
           },
           "sequentialDecodeIntervalMs": {
-            "median": 475.004435,
-            "p95": 567.547404,
-            "max": 576.535116
+            "median": 404.973592,
+            "p95": 447.469401,
+            "max": 524.631795
           },
-          "baselinePssBytes": 139433984,
-          "peakPssBytes": 193818624,
-          "peakPssDeltaBytes": 54384640,
+          "baselinePssBytes": 134157312,
+          "peakPssBytes": 206113792,
+          "peakPssDeltaBytes": 71956480,
           "pssDeltaBudgetBytes": 134217728,
           "underPssDeltaBudget": true,
           "quality": {
@@ -1279,6 +1290,7 @@
           "evidenceFileName": "video-segmentation-mask-fast_motion-384-8fps.png"
         }
       ],
+      "playbackReviewPass": false,
       "accepted": false
     },
     {
@@ -1288,14 +1300,16 @@
       "maskFps": 12,
       "status": "COMPLETED",
       "qualityStatus": "FAIL",
-      "worstPipelineRuntimeMs": 82699,
-      "worstRuntimeXRealtime": 8.2699,
-      "peakPssBytes": 217587712,
-      "baselinePssBytesForWorstDelta": 154200064,
-      "peakPssDeltaBytes": 62217216,
+      "worstPipelineRuntimeMs": 66126,
+      "worstRuntimeXRealtime": 6.6126,
+      "peakPssBytes": 208683008,
+      "baselinePssBytesForWorstDelta": 138417152,
+      "peakPssDeltaBytes": 69427200,
       "pssDeltaBudgetBytes": 134217728,
       "underPssDeltaBudget": true,
       "withinThreeTimesRealtime": false,
+      "fixtureCount": 3,
+      "completedFixtureCount": 3,
       "fixtures": [
         {
           "id": "one_person",
@@ -1314,22 +1328,22 @@
           "maskWidth": 384,
           "maskHeight": 216,
           "confidenceMaskCount": 1,
-          "pipelineRuntimeMs": 82699,
-          "runtimeXRealtime": 8.2699,
-          "throughputFramesPerSecond": 1.451045357259459,
+          "pipelineRuntimeMs": 65687,
+          "runtimeXRealtime": 6.5687,
+          "throughputFramesPerSecond": 1.8268454945422992,
           "inferenceLatencyMs": {
-            "median": 77.709555,
-            "p95": 99.504639,
-            "max": 162.843222
+            "median": 82.822265,
+            "p95": 99.786622,
+            "max": 107.000936
           },
           "sequentialDecodeIntervalMs": {
-            "median": 541.478109,
-            "p95": 588.244263,
-            "max": 620.898763
+            "median": 399.951863,
+            "p95": 428.317953,
+            "max": 507.037598
           },
-          "baselinePssBytes": 173348864,
-          "peakPssBytes": 217587712,
-          "peakPssDeltaBytes": 44238848,
+          "baselinePssBytes": 158450688,
+          "peakPssBytes": 203553792,
+          "peakPssDeltaBytes": 45103104,
           "pssDeltaBudgetBytes": 134217728,
           "underPssDeltaBudget": true,
           "quality": {
@@ -1376,22 +1390,22 @@
           "maskWidth": 384,
           "maskHeight": 216,
           "confidenceMaskCount": 1,
-          "pipelineRuntimeMs": 78864,
-          "runtimeXRealtime": 7.8864,
-          "throughputFramesPerSecond": 1.5216068167985393,
+          "pipelineRuntimeMs": 64962,
+          "runtimeXRealtime": 6.4962,
+          "throughputFramesPerSecond": 1.8472337674332686,
           "inferenceLatencyMs": {
-            "median": 82.355021,
-            "p95": 108.847574,
-            "max": 120.470337
+            "median": 80.851237,
+            "p95": 101.917359,
+            "max": 110.54419
           },
           "sequentialDecodeIntervalMs": {
-            "median": 505.092407,
-            "p95": 564.966756,
-            "max": 593.037354
+            "median": 387.967692,
+            "p95": 426.643961,
+            "max": 529.421753
           },
-          "baselinePssBytes": 148944896,
-          "peakPssBytes": 208379904,
-          "peakPssDeltaBytes": 59435008,
+          "baselinePssBytes": 138417152,
+          "peakPssBytes": 207844352,
+          "peakPssDeltaBytes": 69427200,
           "pssDeltaBudgetBytes": 134217728,
           "underPssDeltaBudget": true,
           "quality": {
@@ -1438,22 +1452,22 @@
           "maskWidth": 384,
           "maskHeight": 216,
           "confidenceMaskCount": 1,
-          "pipelineRuntimeMs": 67010,
-          "runtimeXRealtime": 6.701,
-          "throughputFramesPerSecond": 1.7907774958961349,
+          "pipelineRuntimeMs": 66126,
+          "runtimeXRealtime": 6.6126,
+          "throughputFramesPerSecond": 1.814717357771527,
           "inferenceLatencyMs": {
-            "median": 74.816569,
-            "p95": 103.61792,
-            "max": 136.529786
+            "median": 83.190918,
+            "p95": 101.559815,
+            "max": 112.59554
           },
           "sequentialDecodeIntervalMs": {
-            "median": 414.410848,
-            "p95": 469.05477,
-            "max": 542.416626
+            "median": 396.721314,
+            "p95": 433.989705,
+            "max": 505.859457
           },
-          "baselinePssBytes": 154200064,
-          "peakPssBytes": 216417280,
-          "peakPssDeltaBytes": 62217216,
+          "baselinePssBytes": 164467712,
+          "peakPssBytes": 208683008,
+          "peakPssDeltaBytes": 44215296,
           "pssDeltaBudgetBytes": 134217728,
           "underPssDeltaBudget": true,
           "quality": {
@@ -1484,6 +1498,7 @@
           "evidenceFileName": "video-segmentation-mask-fast_motion-384-12fps.png"
         }
       ],
+      "playbackReviewPass": false,
       "accepted": false
     },
     {
@@ -1493,14 +1508,16 @@
       "maskFps": 15,
       "status": "COMPLETED",
       "qualityStatus": "FAIL",
-      "worstPipelineRuntimeMs": 81083,
-      "worstRuntimeXRealtime": 8.1083,
-      "peakPssBytes": 230210560,
-      "baselinePssBytesForWorstDelta": 132383744,
-      "peakPssDeltaBytes": 89026560,
+      "worstPipelineRuntimeMs": 97971,
+      "worstRuntimeXRealtime": 9.7971,
+      "peakPssBytes": 206717952,
+      "baselinePssBytesForWorstDelta": 122029056,
+      "peakPssDeltaBytes": 76900352,
       "pssDeltaBudgetBytes": 134217728,
       "underPssDeltaBudget": true,
       "withinThreeTimesRealtime": false,
+      "fixtureCount": 3,
+      "completedFixtureCount": 3,
       "fixtures": [
         {
           "id": "one_person",
@@ -1519,22 +1536,22 @@
           "maskWidth": 384,
           "maskHeight": 216,
           "confidenceMaskCount": 1,
-          "pipelineRuntimeMs": 77585,
-          "runtimeXRealtime": 7.7585,
-          "throughputFramesPerSecond": 1.9333634078752335,
+          "pipelineRuntimeMs": 77346,
+          "runtimeXRealtime": 7.7346,
+          "throughputFramesPerSecond": 1.9393375223023814,
           "inferenceLatencyMs": {
-            "median": 71.215413,
-            "p95": 96.817464,
-            "max": 110.30253
+            "median": 74.733154,
+            "p95": 100.127807,
+            "max": 121.572999
           },
           "sequentialDecodeIntervalMs": {
-            "median": 388.428833,
-            "p95": 422.575765,
-            "max": 486.101441
+            "median": 385.984579,
+            "p95": 422.303955,
+            "max": 497.05009
           },
-          "baselinePssBytes": 174863360,
-          "peakPssBytes": 219208704,
-          "peakPssDeltaBytes": 44345344,
+          "baselinePssBytes": 144070656,
+          "peakPssBytes": 206717952,
+          "peakPssDeltaBytes": 62647296,
           "pssDeltaBudgetBytes": 134217728,
           "underPssDeltaBudget": true,
           "quality": {
@@ -1581,22 +1598,22 @@
           "maskWidth": 384,
           "maskHeight": 216,
           "confidenceMaskCount": 1,
-          "pipelineRuntimeMs": 81083,
-          "runtimeXRealtime": 8.1083,
-          "throughputFramesPerSecond": 1.8499562177028477,
+          "pipelineRuntimeMs": 97971,
+          "runtimeXRealtime": 9.7971,
+          "throughputFramesPerSecond": 1.5310653152463485,
           "inferenceLatencyMs": {
-            "median": 80.469197,
-            "p95": 98.879557,
-            "max": 106.718303
+            "median": 77.047201,
+            "p95": 112.94279,
+            "max": 132.998657
           },
           "sequentialDecodeIntervalMs": {
-            "median": 394.80892,
-            "p95": 419.853841,
-            "max": 544.152222
+            "median": 520.104127,
+            "p95": 589.987997,
+            "max": 613.832927
           },
-          "baselinePssBytes": 132383744,
-          "peakPssBytes": 221410304,
-          "peakPssDeltaBytes": 89026560,
+          "baselinePssBytes": 145671168,
+          "peakPssBytes": 191311872,
+          "peakPssDeltaBytes": 45640704,
           "pssDeltaBudgetBytes": 134217728,
           "underPssDeltaBudget": true,
           "quality": {
@@ -1643,22 +1660,22 @@
           "maskWidth": 384,
           "maskHeight": 216,
           "confidenceMaskCount": 1,
-          "pipelineRuntimeMs": 80583,
-          "runtimeXRealtime": 8.0583,
-          "throughputFramesPerSecond": 1.8614347939391682,
+          "pipelineRuntimeMs": 91590,
+          "runtimeXRealtime": 9.159,
+          "throughputFramesPerSecond": 1.6377333770062235,
           "inferenceLatencyMs": {
-            "median": 78.670411,
-            "p95": 99.894572,
-            "max": 118.76294
+            "median": 85.836222,
+            "p95": 104.485596,
+            "max": 118.96879
           },
           "sequentialDecodeIntervalMs": {
-            "median": 393.472412,
-            "p95": 422.034586,
-            "max": 587.846233
+            "median": 453.87089,
+            "p95": 512.009033,
+            "max": 627.619386
           },
-          "baselinePssBytes": 194548736,
-          "peakPssBytes": 230210560,
-          "peakPssDeltaBytes": 35661824,
+          "baselinePssBytes": 122029056,
+          "peakPssBytes": 198929408,
+          "peakPssDeltaBytes": 76900352,
           "pssDeltaBudgetBytes": 134217728,
           "underPssDeltaBudget": true,
           "quality": {
@@ -1689,6 +1706,7 @@
           "evidenceFileName": "video-segmentation-mask-fast_motion-384-15fps.png"
         }
       ],
+      "playbackReviewPass": false,
       "accepted": false
     },
     {
@@ -1698,14 +1716,16 @@
       "maskFps": 8,
       "status": "COMPLETED",
       "qualityStatus": "FAIL",
-      "worstPipelineRuntimeMs": 67833,
-      "worstRuntimeXRealtime": 6.7833,
-      "peakPssBytes": 239621120,
-      "baselinePssBytesForWorstDelta": 155079680,
-      "peakPssDeltaBytes": 84541440,
+      "worstPipelineRuntimeMs": 84414,
+      "worstRuntimeXRealtime": 8.4414,
+      "peakPssBytes": 223342592,
+      "baselinePssBytesForWorstDelta": 134534144,
+      "peakPssDeltaBytes": 75389952,
       "pssDeltaBudgetBytes": 134217728,
       "underPssDeltaBudget": true,
       "withinThreeTimesRealtime": false,
+      "fixtureCount": 3,
+      "completedFixtureCount": 3,
       "fixtures": [
         {
           "id": "one_person",
@@ -1724,22 +1744,22 @@
           "maskWidth": 512,
           "maskHeight": 288,
           "confidenceMaskCount": 1,
-          "pipelineRuntimeMs": 67295,
-          "runtimeXRealtime": 6.7295,
-          "throughputFramesPerSecond": 1.1887956014562746,
+          "pipelineRuntimeMs": 84414,
+          "runtimeXRealtime": 8.4414,
+          "throughputFramesPerSecond": 0.9477100954817921,
           "inferenceLatencyMs": {
-            "median": 79.716228,
-            "p95": 98.095947,
-            "max": 152.259237
+            "median": 71.439046,
+            "p95": 105.90861,
+            "max": 126.758871
           },
           "sequentialDecodeIntervalMs": {
-            "median": 674.792521,
-            "p95": 692.488038,
-            "max": 801.542888
+            "median": 900.852947,
+            "p95": 958.896933,
+            "max": 1009.822673
           },
-          "baselinePssBytes": 155079680,
-          "peakPssBytes": 239621120,
-          "peakPssDeltaBytes": 84541440,
+          "baselinePssBytes": 134534144,
+          "peakPssBytes": 209924096,
+          "peakPssDeltaBytes": 75389952,
           "pssDeltaBudgetBytes": 134217728,
           "underPssDeltaBudget": true,
           "quality": {
@@ -1786,22 +1806,22 @@
           "maskWidth": 512,
           "maskHeight": 288,
           "confidenceMaskCount": 1,
-          "pipelineRuntimeMs": 67833,
-          "runtimeXRealtime": 6.7833,
-          "throughputFramesPerSecond": 1.179366974776289,
+          "pipelineRuntimeMs": 68182,
+          "runtimeXRealtime": 6.8182,
+          "throughputFramesPerSecond": 1.173330204452788,
           "inferenceLatencyMs": {
-            "median": 81.751506,
-            "p95": 100.689371,
-            "max": 127.841308
+            "median": 74.996175,
+            "p95": 97.338867,
+            "max": 124.239665
           },
           "sequentialDecodeIntervalMs": {
-            "median": 671.388957,
-            "p95": 691.017904,
-            "max": 797.172567
+            "median": 673.075114,
+            "p95": 737.65328,
+            "max": 902.726278
           },
-          "baselinePssBytes": 164738048,
-          "peakPssBytes": 231937024,
-          "peakPssDeltaBytes": 67198976,
+          "baselinePssBytes": 159580160,
+          "peakPssBytes": 223342592,
+          "peakPssDeltaBytes": 63762432,
           "pssDeltaBudgetBytes": 134217728,
           "underPssDeltaBudget": true,
           "quality": {
@@ -1848,22 +1868,22 @@
           "maskWidth": 512,
           "maskHeight": 288,
           "confidenceMaskCount": 1,
-          "pipelineRuntimeMs": 67125,
-          "runtimeXRealtime": 6.7125,
-          "throughputFramesPerSecond": 1.191806331471136,
+          "pipelineRuntimeMs": 67247,
+          "runtimeXRealtime": 6.7247,
+          "throughputFramesPerSecond": 1.189644147694321,
           "inferenceLatencyMs": {
-            "median": 79.570598,
-            "p95": 95.319946,
-            "max": 116.847819
+            "median": 82.786824,
+            "p95": 97.171386,
+            "max": 112.10551
           },
           "sequentialDecodeIntervalMs": {
-            "median": 670.789469,
-            "p95": 697.736206,
-            "max": 809.114055
+            "median": 663.820924,
+            "p95": 706.724935,
+            "max": 817.895142
           },
-          "baselinePssBytes": 194806784,
-          "peakPssBytes": 232066048,
-          "peakPssDeltaBytes": 37259264,
+          "baselinePssBytes": 160624640,
+          "peakPssBytes": 213803008,
+          "peakPssDeltaBytes": 53178368,
           "pssDeltaBudgetBytes": 134217728,
           "underPssDeltaBudget": true,
           "quality": {
@@ -1894,6 +1914,7 @@
           "evidenceFileName": "video-segmentation-mask-fast_motion-512-8fps.png"
         }
       ],
+      "playbackReviewPass": false,
       "accepted": false
     },
     {
@@ -1903,14 +1924,16 @@
       "maskFps": 12,
       "status": "COMPLETED",
       "qualityStatus": "FAIL",
-      "worstPipelineRuntimeMs": 99498,
-      "worstRuntimeXRealtime": 9.9498,
-      "peakPssBytes": 238943232,
-      "baselinePssBytesForWorstDelta": 169460736,
-      "peakPssDeltaBytes": 60157952,
+      "worstPipelineRuntimeMs": 99706,
+      "worstRuntimeXRealtime": 9.9706,
+      "peakPssBytes": 223873024,
+      "baselinePssBytesForWorstDelta": 129585152,
+      "peakPssDeltaBytes": 83316736,
       "pssDeltaBudgetBytes": 134217728,
       "underPssDeltaBudget": true,
       "withinThreeTimesRealtime": false,
+      "fixtureCount": 3,
+      "completedFixtureCount": 3,
       "fixtures": [
         {
           "id": "one_person",
@@ -1929,22 +1952,22 @@
           "maskWidth": 512,
           "maskHeight": 288,
           "confidenceMaskCount": 1,
-          "pipelineRuntimeMs": 99498,
-          "runtimeXRealtime": 9.9498,
-          "throughputFramesPerSecond": 1.2060543930531267,
+          "pipelineRuntimeMs": 99100,
+          "runtimeXRealtime": 9.91,
+          "throughputFramesPerSecond": 1.2108980827447022,
           "inferenceLatencyMs": {
-            "median": 78.026733,
-            "p95": 99.265381,
-            "max": 113.680257
+            "median": 82.02657,
+            "p95": 95.278931,
+            "max": 115.600586
           },
           "sequentialDecodeIntervalMs": {
-            "median": 661.611491,
-            "p95": 685.212606,
-            "max": 859.506104
+            "median": 656.370931,
+            "p95": 677.447836,
+            "max": 762.949301
           },
-          "baselinePssBytes": 206464000,
-          "peakPssBytes": 238943232,
-          "peakPssDeltaBytes": 32479232,
+          "baselinePssBytes": 162881536,
+          "peakPssBytes": 214972416,
+          "peakPssDeltaBytes": 52090880,
           "pssDeltaBudgetBytes": 134217728,
           "underPssDeltaBudget": true,
           "quality": {
@@ -1991,22 +2014,22 @@
           "maskWidth": 512,
           "maskHeight": 288,
           "confidenceMaskCount": 1,
-          "pipelineRuntimeMs": 98976,
-          "runtimeXRealtime": 9.8976,
-          "throughputFramesPerSecond": 1.2124151309408342,
+          "pipelineRuntimeMs": 99706,
+          "runtimeXRealtime": 9.9706,
+          "throughputFramesPerSecond": 1.2035384029045393,
           "inferenceLatencyMs": {
-            "median": 78.608439,
-            "p95": 101.417481,
-            "max": 110.073772
+            "median": 85.054891,
+            "p95": 97.677857,
+            "max": 102.984863
           },
           "sequentialDecodeIntervalMs": {
-            "median": 662.208618,
-            "p95": 679.960286,
-            "max": 785.611695
+            "median": 655.280802,
+            "p95": 676.316895,
+            "max": 769.676759
           },
-          "baselinePssBytes": 169460736,
-          "peakPssBytes": 229618688,
-          "peakPssDeltaBytes": 60157952,
+          "baselinePssBytes": 129585152,
+          "peakPssBytes": 212901888,
+          "peakPssDeltaBytes": 83316736,
           "pssDeltaBudgetBytes": 134217728,
           "underPssDeltaBudget": true,
           "quality": {
@@ -2053,22 +2076,22 @@
           "maskWidth": 512,
           "maskHeight": 288,
           "confidenceMaskCount": 1,
-          "pipelineRuntimeMs": 99057,
-          "runtimeXRealtime": 9.9057,
-          "throughputFramesPerSecond": 1.2114237257336684,
+          "pipelineRuntimeMs": 99635,
+          "runtimeXRealtime": 9.9635,
+          "throughputFramesPerSecond": 1.204396045566317,
           "inferenceLatencyMs": {
-            "median": 77.637085,
-            "p95": 97.674968,
-            "max": 105.978637
+            "median": 83.225464,
+            "p95": 98.050212,
+            "max": 101.870768
           },
           "sequentialDecodeIntervalMs": {
-            "median": 660.321493,
-            "p95": 693.583008,
-            "max": 833.152873
+            "median": 655.685751,
+            "p95": 689.24707,
+            "max": 759.033813
           },
-          "baselinePssBytes": 195949568,
-          "peakPssBytes": 235342848,
-          "peakPssDeltaBytes": 39393280,
+          "baselinePssBytes": 191422464,
+          "peakPssBytes": 223873024,
+          "peakPssDeltaBytes": 32450560,
           "pssDeltaBudgetBytes": 134217728,
           "underPssDeltaBudget": true,
           "quality": {
@@ -2099,6 +2122,7 @@
           "evidenceFileName": "video-segmentation-mask-fast_motion-512-12fps.png"
         }
       ],
+      "playbackReviewPass": false,
       "accepted": false
     },
     {
@@ -2108,14 +2132,16 @@
       "maskFps": 15,
       "status": "COMPLETED",
       "qualityStatus": "FAIL",
-      "worstPipelineRuntimeMs": 124101,
-      "worstRuntimeXRealtime": 12.4101,
-      "peakPssBytes": 239481856,
-      "baselinePssBytesForWorstDelta": 166029312,
-      "peakPssDeltaBytes": 67078144,
+      "worstPipelineRuntimeMs": 124206,
+      "worstRuntimeXRealtime": 12.4206,
+      "peakPssBytes": 227710976,
+      "baselinePssBytesForWorstDelta": 148652032,
+      "peakPssDeltaBytes": 79058944,
       "pssDeltaBudgetBytes": 134217728,
       "underPssDeltaBudget": true,
       "withinThreeTimesRealtime": false,
+      "fixtureCount": 3,
+      "completedFixtureCount": 3,
       "fixtures": [
         {
           "id": "one_person",
@@ -2134,22 +2160,22 @@
           "maskWidth": 512,
           "maskHeight": 288,
           "confidenceMaskCount": 1,
-          "pipelineRuntimeMs": 124101,
-          "runtimeXRealtime": 12.4101,
-          "throughputFramesPerSecond": 1.2086929194768776,
+          "pipelineRuntimeMs": 123229,
+          "runtimeXRealtime": 12.3229,
+          "throughputFramesPerSecond": 1.2172459404847884,
           "inferenceLatencyMs": {
-            "median": 81.528239,
-            "p95": 99.831705,
-            "max": 144.689127
+            "median": 83.079753,
+            "p95": 99.980347,
+            "max": 148.582601
           },
           "sequentialDecodeIntervalMs": {
-            "median": 660.218466,
-            "p95": 690.491049,
-            "max": 798.853191
+            "median": 651.856771,
+            "p95": 667.962891,
+            "max": 797.99935
           },
-          "baselinePssBytes": 181323776,
-          "peakPssBytes": 235536384,
-          "peakPssDeltaBytes": 54212608,
+          "baselinePssBytes": 187936768,
+          "peakPssBytes": 223639552,
+          "peakPssDeltaBytes": 35702784,
           "pssDeltaBudgetBytes": 134217728,
           "underPssDeltaBudget": true,
           "quality": {
@@ -2196,22 +2222,22 @@
           "maskWidth": 512,
           "maskHeight": 288,
           "confidenceMaskCount": 1,
-          "pipelineRuntimeMs": 123924,
-          "runtimeXRealtime": 12.3924,
-          "throughputFramesPerSecond": 1.2104192892417933,
+          "pipelineRuntimeMs": 122768,
+          "runtimeXRealtime": 12.2768,
+          "throughputFramesPerSecond": 1.22181676006777,
           "inferenceLatencyMs": {
-            "median": 79.963257,
-            "p95": 101.559001,
-            "max": 113.719319
+            "median": 82.458537,
+            "p95": 98.714314,
+            "max": 105.559244
           },
           "sequentialDecodeIntervalMs": {
-            "median": 658.07133,
-            "p95": 675.406291,
-            "max": 806.395264
+            "median": 652.487183,
+            "p95": 673.86316,
+            "max": 765.335572
           },
-          "baselinePssBytes": 179066880,
-          "peakPssBytes": 239481856,
-          "peakPssDeltaBytes": 60414976,
+          "baselinePssBytes": 174022656,
+          "peakPssBytes": 219172864,
+          "peakPssDeltaBytes": 45150208,
           "pssDeltaBudgetBytes": 134217728,
           "underPssDeltaBudget": true,
           "quality": {
@@ -2258,22 +2284,22 @@
           "maskWidth": 512,
           "maskHeight": 288,
           "confidenceMaskCount": 1,
-          "pipelineRuntimeMs": 123760,
-          "runtimeXRealtime": 12.376,
-          "throughputFramesPerSecond": 1.2120232708468002,
+          "pipelineRuntimeMs": 124206,
+          "runtimeXRealtime": 12.4206,
+          "throughputFramesPerSecond": 1.2076711269986957,
           "inferenceLatencyMs": {
-            "median": 80.267578,
-            "p95": 98.578939,
-            "max": 122.320882
+            "median": 83.925618,
+            "p95": 97.631998,
+            "max": 146.145752
           },
           "sequentialDecodeIntervalMs": {
-            "median": 659.035767,
-            "p95": 684.298178,
-            "max": 796.22872
+            "median": 655.737915,
+            "p95": 681.804647,
+            "max": 762.448853
           },
-          "baselinePssBytes": 166029312,
-          "peakPssBytes": 233107456,
-          "peakPssDeltaBytes": 67078144,
+          "baselinePssBytes": 148652032,
+          "peakPssBytes": 227710976,
+          "peakPssDeltaBytes": 79058944,
           "pssDeltaBudgetBytes": 134217728,
           "underPssDeltaBudget": true,
           "quality": {
@@ -2304,6 +2330,7 @@
           "evidenceFileName": "video-segmentation-mask-fast_motion-512-15fps.png"
         }
       ],
+      "playbackReviewPass": false,
       "accepted": false
     }
   ],
@@ -2315,7 +2342,7 @@
       "fileName": "video-segmentation-mask-one_person-256-8fps.png",
       "sha256": "609ce06dd51ed071ebf71e72f9e95451f1dad86886b701343eca57baa47f8cec",
       "bytes": 306240,
-      "pngEncodingRuntimeMs": 117,
+      "pngEncodingRuntimeMs": 151,
       "format": "PNG 5x2 contact sheet at source seconds 0-9 captured from the measured full configured-FPS series",
       "evidenceFramesProcessed": 80,
       "visualEncoding": "source RGB with configured-FPS EMA-smoothed >=0.5 mask tinted green and one-pixel mask boundary red"
@@ -2327,7 +2354,7 @@
       "fileName": "video-segmentation-mask-two_people_crossing_occluding-256-8fps.png",
       "sha256": "b5fc8c0520b150ceaa6053bfec147cb729fdf8a79b4a399fc34da4634a334578",
       "bytes": 639871,
-      "pngEncodingRuntimeMs": 164,
+      "pngEncodingRuntimeMs": 206,
       "format": "PNG 5x2 contact sheet at source seconds 0-9 captured from the measured full configured-FPS series",
       "evidenceFramesProcessed": 80,
       "visualEncoding": "source RGB with configured-FPS EMA-smoothed >=0.5 mask tinted green and one-pixel mask boundary red"
@@ -2339,7 +2366,7 @@
       "fileName": "video-segmentation-mask-fast_motion-256-8fps.png",
       "sha256": "6d5d1a46ad6b651d56d1a54b1e512cd38083c8020b9c50ce4670c4906fcc488c",
       "bytes": 648710,
-      "pngEncodingRuntimeMs": 141,
+      "pngEncodingRuntimeMs": 245,
       "format": "PNG 5x2 contact sheet at source seconds 0-9 captured from the measured full configured-FPS series",
       "evidenceFramesProcessed": 80,
       "visualEncoding": "source RGB with configured-FPS EMA-smoothed >=0.5 mask tinted green and one-pixel mask boundary red"
@@ -2351,7 +2378,7 @@
       "fileName": "video-segmentation-mask-one_person-256-12fps.png",
       "sha256": "46de725ec5a4d0afe073110ffc161239f4997cd041de6f3434394bfb69bd96e8",
       "bytes": 306199,
-      "pngEncodingRuntimeMs": 151,
+      "pngEncodingRuntimeMs": 171,
       "format": "PNG 5x2 contact sheet at source seconds 0-9 captured from the measured full configured-FPS series",
       "evidenceFramesProcessed": 120,
       "visualEncoding": "source RGB with configured-FPS EMA-smoothed >=0.5 mask tinted green and one-pixel mask boundary red"
@@ -2363,7 +2390,7 @@
       "fileName": "video-segmentation-mask-two_people_crossing_occluding-256-12fps.png",
       "sha256": "cd49934f55967e55356226f0bc37777d7d63dfdc60970eb9d145230592194c5d",
       "bytes": 639628,
-      "pngEncodingRuntimeMs": 143,
+      "pngEncodingRuntimeMs": 227,
       "format": "PNG 5x2 contact sheet at source seconds 0-9 captured from the measured full configured-FPS series",
       "evidenceFramesProcessed": 120,
       "visualEncoding": "source RGB with configured-FPS EMA-smoothed >=0.5 mask tinted green and one-pixel mask boundary red"
@@ -2375,7 +2402,7 @@
       "fileName": "video-segmentation-mask-fast_motion-256-12fps.png",
       "sha256": "c75c4af95c2ac6104678fdd9480668b364ee267f8e1ed32032fbcd3fe2add742",
       "bytes": 648764,
-      "pngEncodingRuntimeMs": 164,
+      "pngEncodingRuntimeMs": 227,
       "format": "PNG 5x2 contact sheet at source seconds 0-9 captured from the measured full configured-FPS series",
       "evidenceFramesProcessed": 120,
       "visualEncoding": "source RGB with configured-FPS EMA-smoothed >=0.5 mask tinted green and one-pixel mask boundary red"
@@ -2387,7 +2414,7 @@
       "fileName": "video-segmentation-mask-one_person-256-15fps.png",
       "sha256": "d4d95e59650c333e36b5c09e23cb6a846e96adc0c9f7f213047101cc22d928dd",
       "bytes": 306229,
-      "pngEncodingRuntimeMs": 75,
+      "pngEncodingRuntimeMs": 163,
       "format": "PNG 5x2 contact sheet at source seconds 0-9 captured from the measured full configured-FPS series",
       "evidenceFramesProcessed": 150,
       "visualEncoding": "source RGB with configured-FPS EMA-smoothed >=0.5 mask tinted green and one-pixel mask boundary red"
@@ -2399,7 +2426,7 @@
       "fileName": "video-segmentation-mask-two_people_crossing_occluding-256-15fps.png",
       "sha256": "7224c55a8ab09d26ec7994e0847ed50cac2d5432970a8aeb86c009f42bdcf523",
       "bytes": 639707,
-      "pngEncodingRuntimeMs": 149,
+      "pngEncodingRuntimeMs": 224,
       "format": "PNG 5x2 contact sheet at source seconds 0-9 captured from the measured full configured-FPS series",
       "evidenceFramesProcessed": 150,
       "visualEncoding": "source RGB with configured-FPS EMA-smoothed >=0.5 mask tinted green and one-pixel mask boundary red"
@@ -2411,7 +2438,7 @@
       "fileName": "video-segmentation-mask-fast_motion-256-15fps.png",
       "sha256": "b50eba9d1dfe82a92f1c592bc7991314eff057e594a64ce2e3b7038843505089",
       "bytes": 648872,
-      "pngEncodingRuntimeMs": 145,
+      "pngEncodingRuntimeMs": 213,
       "format": "PNG 5x2 contact sheet at source seconds 0-9 captured from the measured full configured-FPS series",
       "evidenceFramesProcessed": 150,
       "visualEncoding": "source RGB with configured-FPS EMA-smoothed >=0.5 mask tinted green and one-pixel mask boundary red"
@@ -2423,7 +2450,7 @@
       "fileName": "video-segmentation-mask-one_person-384-8fps.png",
       "sha256": "ab691f33132ef78a312842b7d1587db85be8205433bd0bbe62b54385652f1f3e",
       "bytes": 604200,
-      "pngEncodingRuntimeMs": 170,
+      "pngEncodingRuntimeMs": 217,
       "format": "PNG 5x2 contact sheet at source seconds 0-9 captured from the measured full configured-FPS series",
       "evidenceFramesProcessed": 80,
       "visualEncoding": "source RGB with configured-FPS EMA-smoothed >=0.5 mask tinted green and one-pixel mask boundary red"
@@ -2435,7 +2462,7 @@
       "fileName": "video-segmentation-mask-two_people_crossing_occluding-384-8fps.png",
       "sha256": "f7919bdcf6a04186fdcb90d2eef25ed27df0adcb5616d0c96bde6e8b783f9872",
       "bytes": 1328462,
-      "pngEncodingRuntimeMs": 331,
+      "pngEncodingRuntimeMs": 364,
       "format": "PNG 5x2 contact sheet at source seconds 0-9 captured from the measured full configured-FPS series",
       "evidenceFramesProcessed": 80,
       "visualEncoding": "source RGB with configured-FPS EMA-smoothed >=0.5 mask tinted green and one-pixel mask boundary red"
@@ -2447,7 +2474,7 @@
       "fileName": "video-segmentation-mask-fast_motion-384-8fps.png",
       "sha256": "cc3e125fd7625a64a2f6c79911d4ea5c45444847b2a695322ece20e90af567e5",
       "bytes": 1341349,
-      "pngEncodingRuntimeMs": 404,
+      "pngEncodingRuntimeMs": 368,
       "format": "PNG 5x2 contact sheet at source seconds 0-9 captured from the measured full configured-FPS series",
       "evidenceFramesProcessed": 80,
       "visualEncoding": "source RGB with configured-FPS EMA-smoothed >=0.5 mask tinted green and one-pixel mask boundary red"
@@ -2459,7 +2486,7 @@
       "fileName": "video-segmentation-mask-one_person-384-12fps.png",
       "sha256": "433d8d0c1264f137838f404f43570c876e97b19023246e7ed7e01e6e511f5bd6",
       "bytes": 604349,
-      "pngEncodingRuntimeMs": 279,
+      "pngEncodingRuntimeMs": 195,
       "format": "PNG 5x2 contact sheet at source seconds 0-9 captured from the measured full configured-FPS series",
       "evidenceFramesProcessed": 120,
       "visualEncoding": "source RGB with configured-FPS EMA-smoothed >=0.5 mask tinted green and one-pixel mask boundary red"
@@ -2483,7 +2510,7 @@
       "fileName": "video-segmentation-mask-fast_motion-384-12fps.png",
       "sha256": "0222601a3e6dc5ee819309ceecc9e3edf9f9a5d6ebf9d9689073865e5cdba3c3",
       "bytes": 1340900,
-      "pngEncodingRuntimeMs": 320,
+      "pngEncodingRuntimeMs": 355,
       "format": "PNG 5x2 contact sheet at source seconds 0-9 captured from the measured full configured-FPS series",
       "evidenceFramesProcessed": 120,
       "visualEncoding": "source RGB with configured-FPS EMA-smoothed >=0.5 mask tinted green and one-pixel mask boundary red"
@@ -2495,7 +2522,7 @@
       "fileName": "video-segmentation-mask-one_person-384-15fps.png",
       "sha256": "23520f2214dace34f91132bfca74bf40020838afd03367f52ef6784e1c8b1daf",
       "bytes": 604370,
-      "pngEncodingRuntimeMs": 178,
+      "pngEncodingRuntimeMs": 177,
       "format": "PNG 5x2 contact sheet at source seconds 0-9 captured from the measured full configured-FPS series",
       "evidenceFramesProcessed": 150,
       "visualEncoding": "source RGB with configured-FPS EMA-smoothed >=0.5 mask tinted green and one-pixel mask boundary red"
@@ -2507,7 +2534,7 @@
       "fileName": "video-segmentation-mask-two_people_crossing_occluding-384-15fps.png",
       "sha256": "0c835b0bf9c9c4ef8b82d4c41a8f353f2361e570cc1da1297ab1d0c86e376222",
       "bytes": 1328507,
-      "pngEncodingRuntimeMs": 363,
+      "pngEncodingRuntimeMs": 423,
       "format": "PNG 5x2 contact sheet at source seconds 0-9 captured from the measured full configured-FPS series",
       "evidenceFramesProcessed": 150,
       "visualEncoding": "source RGB with configured-FPS EMA-smoothed >=0.5 mask tinted green and one-pixel mask boundary red"
@@ -2519,7 +2546,7 @@
       "fileName": "video-segmentation-mask-fast_motion-384-15fps.png",
       "sha256": "ec400434fe98d3a1555c6a0786b76bfcca4940f9a2936dcef058b0d2e7121efc",
       "bytes": 1340851,
-      "pngEncodingRuntimeMs": 372,
+      "pngEncodingRuntimeMs": 408,
       "format": "PNG 5x2 contact sheet at source seconds 0-9 captured from the measured full configured-FPS series",
       "evidenceFramesProcessed": 150,
       "visualEncoding": "source RGB with configured-FPS EMA-smoothed >=0.5 mask tinted green and one-pixel mask boundary red"
@@ -2531,7 +2558,7 @@
       "fileName": "video-segmentation-mask-one_person-512-8fps.png",
       "sha256": "07eb521d483fae40709975bcfa1ec71b5064c8dd080007136e2040b07fa9753c",
       "bytes": 964013,
-      "pngEncodingRuntimeMs": 358,
+      "pngEncodingRuntimeMs": 372,
       "format": "PNG 5x2 contact sheet at source seconds 0-9 captured from the measured full configured-FPS series",
       "evidenceFramesProcessed": 80,
       "visualEncoding": "source RGB with configured-FPS EMA-smoothed >=0.5 mask tinted green and one-pixel mask boundary red"
@@ -2543,7 +2570,7 @@
       "fileName": "video-segmentation-mask-two_people_crossing_occluding-512-8fps.png",
       "sha256": "a18b4521155fbfbd57d0c6cefb23ceb563575184b6822c5a108604fe948155a5",
       "bytes": 2169854,
-      "pngEncodingRuntimeMs": 595,
+      "pngEncodingRuntimeMs": 574,
       "format": "PNG 5x2 contact sheet at source seconds 0-9 captured from the measured full configured-FPS series",
       "evidenceFramesProcessed": 80,
       "visualEncoding": "source RGB with configured-FPS EMA-smoothed >=0.5 mask tinted green and one-pixel mask boundary red"
@@ -2555,7 +2582,7 @@
       "fileName": "video-segmentation-mask-fast_motion-512-8fps.png",
       "sha256": "cf6388476b66dcd67dd2691c89e104c128df0ac0a9d5ee607dcea32a89e9d05c",
       "bytes": 2191804,
-      "pngEncodingRuntimeMs": 587,
+      "pngEncodingRuntimeMs": 561,
       "format": "PNG 5x2 contact sheet at source seconds 0-9 captured from the measured full configured-FPS series",
       "evidenceFramesProcessed": 80,
       "visualEncoding": "source RGB with configured-FPS EMA-smoothed >=0.5 mask tinted green and one-pixel mask boundary red"
@@ -2567,7 +2594,7 @@
       "fileName": "video-segmentation-mask-one_person-512-12fps.png",
       "sha256": "e7f3f51ff82599a0381c3c98a0876b8c6101f177c64eb534224b3a5a351d7576",
       "bytes": 963759,
-      "pngEncodingRuntimeMs": 348,
+      "pngEncodingRuntimeMs": 336,
       "format": "PNG 5x2 contact sheet at source seconds 0-9 captured from the measured full configured-FPS series",
       "evidenceFramesProcessed": 120,
       "visualEncoding": "source RGB with configured-FPS EMA-smoothed >=0.5 mask tinted green and one-pixel mask boundary red"
@@ -2579,7 +2606,7 @@
       "fileName": "video-segmentation-mask-two_people_crossing_occluding-512-12fps.png",
       "sha256": "64d67cd58f2172999e20b8779385d601bbf64e3d13b0817fafd551139a058c21",
       "bytes": 2170003,
-      "pngEncodingRuntimeMs": 576,
+      "pngEncodingRuntimeMs": 538,
       "format": "PNG 5x2 contact sheet at source seconds 0-9 captured from the measured full configured-FPS series",
       "evidenceFramesProcessed": 120,
       "visualEncoding": "source RGB with configured-FPS EMA-smoothed >=0.5 mask tinted green and one-pixel mask boundary red"
@@ -2591,7 +2618,7 @@
       "fileName": "video-segmentation-mask-fast_motion-512-12fps.png",
       "sha256": "757963fa45f1cf3152b566cced698e8eea8b66b286bbac272f71fd3ab539f54d",
       "bytes": 2191764,
-      "pngEncodingRuntimeMs": 582,
+      "pngEncodingRuntimeMs": 506,
       "format": "PNG 5x2 contact sheet at source seconds 0-9 captured from the measured full configured-FPS series",
       "evidenceFramesProcessed": 120,
       "visualEncoding": "source RGB with configured-FPS EMA-smoothed >=0.5 mask tinted green and one-pixel mask boundary red"
@@ -2603,7 +2630,7 @@
       "fileName": "video-segmentation-mask-one_person-512-15fps.png",
       "sha256": "137456b96e1af296c9c3d0c32d1a6b522b9c9a176c48544343203ad3f5d09432",
       "bytes": 963672,
-      "pngEncodingRuntimeMs": 351,
+      "pngEncodingRuntimeMs": 286,
       "format": "PNG 5x2 contact sheet at source seconds 0-9 captured from the measured full configured-FPS series",
       "evidenceFramesProcessed": 150,
       "visualEncoding": "source RGB with configured-FPS EMA-smoothed >=0.5 mask tinted green and one-pixel mask boundary red"
@@ -2615,7 +2642,7 @@
       "fileName": "video-segmentation-mask-two_people_crossing_occluding-512-15fps.png",
       "sha256": "4d8e52d1027f1ddd6b00c449393d56dd5822fa98e79193ba8be64b3ac0ce5908",
       "bytes": 2169910,
-      "pngEncodingRuntimeMs": 565,
+      "pngEncodingRuntimeMs": 573,
       "format": "PNG 5x2 contact sheet at source seconds 0-9 captured from the measured full configured-FPS series",
       "evidenceFramesProcessed": 150,
       "visualEncoding": "source RGB with configured-FPS EMA-smoothed >=0.5 mask tinted green and one-pixel mask boundary red"
@@ -2627,7 +2654,7 @@
       "fileName": "video-segmentation-mask-fast_motion-512-15fps.png",
       "sha256": "ca22d73c579d3b8c3506df641857cedfcb9bdc2bc7823952b1822b89e10a9de4",
       "bytes": 2191789,
-      "pngEncodingRuntimeMs": 549,
+      "pngEncodingRuntimeMs": 576,
       "format": "PNG 5x2 contact sheet at source seconds 0-9 captured from the measured full configured-FPS series",
       "evidenceFramesProcessed": 150,
       "visualEncoding": "source RGB with configured-FPS EMA-smoothed >=0.5 mask tinted green and one-pixel mask boundary red"
@@ -2639,11 +2666,12 @@
       "workingSize": 256,
       "maskFps": 8,
       "fileName": "video-segmentation-playback-one_person-256-8fps.zip",
-      "sha256": "74a86eb1bfc4a2977bbc788e5b1c2bf2988c69abdcf279a0aa9f72e12419b4af",
-      "bytes": 325686,
+      "sha256": "2e730fae867aa51a89599edca1923cd4496c626a324021b3beebb6c6ebc1c6f8",
+      "bytes": 327144,
       "frameCount": 80,
       "durationMs": 10000,
-      "generationRuntimeMs": 32547,
+      "zipEntryTimestampMs": 315532800000,
+      "generationRuntimeMs": 29739,
       "format": "ZIP JPEG frame sequence with manifest.json",
       "playbackCommand": "ffmpeg -framerate 8 -i frame_%04d.jpg -c:v libx264 -pix_fmt yuv420p evidence.mp4",
       "visualEncoding": "source RGB with full-cadence EMA-smoothed >=0.5 mask tinted green and boundary red"
@@ -2653,11 +2681,12 @@
       "workingSize": 256,
       "maskFps": 8,
       "fileName": "video-segmentation-playback-two_people_crossing_occluding-256-8fps.zip",
-      "sha256": "572c7a30dd755557f5cf7dd1f004f0ddb45502b511835f5f03d27ece6a7de1fd",
-      "bytes": 630217,
+      "sha256": "3ac2fd4a8ce68e7b7bb5a6624de4a6ea6f4673e5372076d6724f714159288c4a",
+      "bytes": 631675,
       "frameCount": 80,
       "durationMs": 10000,
-      "generationRuntimeMs": 32162,
+      "zipEntryTimestampMs": 315532800000,
+      "generationRuntimeMs": 30091,
       "format": "ZIP JPEG frame sequence with manifest.json",
       "playbackCommand": "ffmpeg -framerate 8 -i frame_%04d.jpg -c:v libx264 -pix_fmt yuv420p evidence.mp4",
       "visualEncoding": "source RGB with full-cadence EMA-smoothed >=0.5 mask tinted green and boundary red"
@@ -2667,11 +2696,12 @@
       "workingSize": 256,
       "maskFps": 8,
       "fileName": "video-segmentation-playback-fast_motion-256-8fps.zip",
-      "sha256": "cd965801ecce9b4d6365f3419b4931d6ccb9b5cedd2e4192882981faadb7f0ce",
-      "bytes": 635407,
+      "sha256": "5d8448b88f1618ffb14b664325f5ba5249273e6d035435cd74167458b62fab22",
+      "bytes": 636865,
       "frameCount": 80,
       "durationMs": 10000,
-      "generationRuntimeMs": 32556,
+      "zipEntryTimestampMs": 315532800000,
+      "generationRuntimeMs": 31194,
       "format": "ZIP JPEG frame sequence with manifest.json",
       "playbackCommand": "ffmpeg -framerate 8 -i frame_%04d.jpg -c:v libx264 -pix_fmt yuv420p evidence.mp4",
       "visualEncoding": "source RGB with full-cadence EMA-smoothed >=0.5 mask tinted green and boundary red"
@@ -2681,11 +2711,12 @@
       "workingSize": 512,
       "maskFps": 15,
       "fileName": "video-segmentation-playback-one_person-512-15fps.zip",
-      "sha256": "09c01f430ac46cf1f6a7e62003fb398093aa68454fcec520f4e3b46c01d21694",
-      "bytes": 1573747,
+      "sha256": "eb10640ad7c9dcb6a448cb81c3d9809a44e3bc4e8a52bd7f349c9cbc82ee92cc",
+      "bytes": 1576465,
       "frameCount": 150,
       "durationMs": 10000,
-      "generationRuntimeMs": 123162,
+      "zipEntryTimestampMs": 315532800000,
+      "generationRuntimeMs": 121756,
       "format": "ZIP JPEG frame sequence with manifest.json",
       "playbackCommand": "ffmpeg -framerate 15 -i frame_%04d.jpg -c:v libx264 -pix_fmt yuv420p evidence.mp4",
       "visualEncoding": "source RGB with full-cadence EMA-smoothed >=0.5 mask tinted green and boundary red"
@@ -2695,11 +2726,12 @@
       "workingSize": 512,
       "maskFps": 15,
       "fileName": "video-segmentation-playback-two_people_crossing_occluding-512-15fps.zip",
-      "sha256": "6f37fd4d4bac5b3b06a0c542355f970a858431649c66a068d2e46cabf85d2ab6",
-      "bytes": 3393294,
+      "sha256": "84fd6d640bc31fc9078557fd557a1a2d71285c76230d478b4c972e35c94bfa21",
+      "bytes": 3396012,
       "frameCount": 150,
       "durationMs": 10000,
-      "generationRuntimeMs": 123834,
+      "zipEntryTimestampMs": 315532800000,
+      "generationRuntimeMs": 122372,
       "format": "ZIP JPEG frame sequence with manifest.json",
       "playbackCommand": "ffmpeg -framerate 15 -i frame_%04d.jpg -c:v libx264 -pix_fmt yuv420p evidence.mp4",
       "visualEncoding": "source RGB with full-cadence EMA-smoothed >=0.5 mask tinted green and boundary red"
@@ -2709,23 +2741,142 @@
       "workingSize": 512,
       "maskFps": 15,
       "fileName": "video-segmentation-playback-fast_motion-512-15fps.zip",
-      "sha256": "694b7d361bb7f226489e73cd3116c222161df70ed164ccf1f2eedf0f4d08a46b",
-      "bytes": 3412798,
+      "sha256": "9d2384e4f93618dcf570326bc237d55c5eea46870990e80870d4223522b66217",
+      "bytes": 3415516,
       "frameCount": 150,
       "durationMs": 10000,
-      "generationRuntimeMs": 122878,
+      "zipEntryTimestampMs": 315532800000,
+      "generationRuntimeMs": 120666,
       "format": "ZIP JPEG frame sequence with manifest.json",
       "playbackCommand": "ffmpeg -framerate 15 -i frame_%04d.jpg -c:v libx264 -pix_fmt yuv420p evidence.mp4",
       "visualEncoding": "source RGB with full-cadence EMA-smoothed >=0.5 mask tinted green and boundary red"
     }
   ],
+  "playbackReviews": {
+    "schemaVersion": 1,
+    "reviewedAtUtc": "2026-08-02T06:53:49Z",
+    "reviewMethod": "Vision review of full-cadence chronological strips containing every JPEG frame, arranged one row per second and assessed for normal-playback continuity, coverage, pumping, and false positives.",
+    "personalMedia": false,
+    "reviewedFileCount": 6,
+    "duplicateReviewFiles": 0,
+    "exactCurrentEvidenceSet": true,
+    "allRecordsComplete": true,
+    "allReviewsPass": false,
+    "records": [
+      {
+        "fileName": "video-segmentation-playback-one_person-256-8fps.zip",
+        "fixtureId": "one_person",
+        "workingSize": 256,
+        "maskFps": 8,
+        "evidenceSha256": "2e730fae867aa51a89599edca1923cd4496c626a324021b3beebb6c6ebc1c6f8",
+        "reviewedEvidenceSha256": "02068583091ade36f8878ac29dedc9f8f5549f103ae050a60d87f02d63a4e0da",
+        "hashBound": false,
+        "verdict": "FAIL",
+        "observedDefects": [
+          "Frequent person-mask dropouts and adjacent-frame on\/off flicker.",
+          "Abrupt area and boundary pumping from absent or partial coverage to large blobs.",
+          "False-positive mask regions on curb, grass, and landscaping separate from the person."
+        ],
+        "recordComplete": true,
+        "reviewPass": false
+      },
+      {
+        "fileName": "video-segmentation-playback-two_people_crossing_occluding-256-8fps.zip",
+        "fixtureId": "two_people_crossing_occluding",
+        "workingSize": 256,
+        "maskFps": 8,
+        "evidenceSha256": "3ac2fd4a8ce68e7b7bb5a6624de4a6ea6f4673e5372076d6724f714159288c4a",
+        "reviewedEvidenceSha256": "4867e23ff54a1c74d480c02e847c90e6103922257eb1e1c5a156d89d768b9091",
+        "hashBound": false,
+        "verdict": "FAIL",
+        "observedDefects": [
+          "Most visible pedestrians remain unmasked or only partially covered through crossings.",
+          "Mask fragments appear and disappear between adjacent frames instead of maintaining coverage through occlusion.",
+          "Large false-positive regions occur on the ground, path, grass, and right image edge."
+        ],
+        "recordComplete": true,
+        "reviewPass": false
+      },
+      {
+        "fileName": "video-segmentation-playback-fast_motion-256-8fps.zip",
+        "fixtureId": "fast_motion",
+        "workingSize": 256,
+        "maskFps": 8,
+        "evidenceSha256": "5d8448b88f1618ffb14b664325f5ba5249273e6d035435cd74167458b62fab22",
+        "reviewedEvidenceSha256": "9a80c106cf5db239cdb4ceb1ee6b54c52aee3377630b62e83bcbb2c89e3ea0e9",
+        "hashBound": false,
+        "verdict": "FAIL",
+        "observedDefects": [
+          "Most visible pedestrians are unmasked or receive sparse, misaligned partial coverage.",
+          "Large right and lower-edge blobs repeatedly grow, shrink, and disappear between adjacent frames.",
+          "Persistent false-positive masks occur on the dark border, grass, pavement, and background objects."
+        ],
+        "recordComplete": true,
+        "reviewPass": false
+      },
+      {
+        "fileName": "video-segmentation-playback-one_person-512-15fps.zip",
+        "fixtureId": "one_person",
+        "workingSize": 512,
+        "maskFps": 15,
+        "evidenceSha256": "eb10640ad7c9dcb6a448cb81c3d9809a44e3bc4e8a52bd7f349c9cbc82ee92cc",
+        "reviewedEvidenceSha256": "b88b00d5c8e2ad2c30762807271c59ce13fba83ba3ccbefd111eae378b5581a3",
+        "hashBound": false,
+        "verdict": "FAIL",
+        "observedDefects": [
+          "Frequent person-mask dropouts and frame-to-frame flicker remain at the larger working size.",
+          "Person coverage is partial and pumps in size and shape across adjacent frames.",
+          "Large false-positive regions recur at the grass and sidewalk boundary."
+        ],
+        "recordComplete": true,
+        "reviewPass": false
+      },
+      {
+        "fileName": "video-segmentation-playback-two_people_crossing_occluding-512-15fps.zip",
+        "fixtureId": "two_people_crossing_occluding",
+        "workingSize": 512,
+        "maskFps": 15,
+        "evidenceSha256": "84fd6d640bc31fc9078557fd557a1a2d71285c76230d478b4c972e35c94bfa21",
+        "reviewedEvidenceSha256": "b6295ab26729599e22aefc795a19347de24c222f8ec7045d8e64b57b5a160338",
+        "hashBound": false,
+        "verdict": "FAIL",
+        "observedDefects": [
+          "Several visible pedestrians remain unmasked during crossings and clustered occlusion.",
+          "Adjacent frames show dropouts and short merged blobs rather than stable subject-shaped coverage.",
+          "Mask size pumps and false-positive patches appear on pavement and adjacent non-person areas."
+        ],
+        "recordComplete": true,
+        "reviewPass": false
+      },
+      {
+        "fileName": "video-segmentation-playback-fast_motion-512-15fps.zip",
+        "fixtureId": "fast_motion",
+        "workingSize": 512,
+        "maskFps": 15,
+        "evidenceSha256": "9d2384e4f93618dcf570326bc237d55c5eea46870990e80870d4223522b66217",
+        "reviewedEvidenceSha256": "25827716fd35fcdd1dd6a3f41b705479668b2c96c7ee25cdd79d6d2dbca9a139",
+        "hashBound": false,
+        "verdict": "FAIL",
+        "observedDefects": [
+          "Many pedestrians remain entirely unmasked; detected coverage is tiny, partial, or misaligned.",
+          "Frequent adjacent-frame dropouts and border-area pumping remain visible at 15 FPS.",
+          "False-positive blobs and strips recur on grass, paths, and image borders."
+        ],
+        "recordComplete": true,
+        "reviewPass": false
+      }
+    ]
+  },
   "cancellationCleanup": {
     "status": "PASS",
     "activeBeforeCancel": true,
     "cancelIssued": true,
+    "cancellationObserved": true,
+    "scheduledFrameCount": 150,
     "framesProcessedBeforeCancel": 1,
-    "cancelLatencyMs": 65,
+    "cancelLatencyMs": 66,
     "workerStopped": true,
+    "workerErrorAbsent": true,
     "segmenterClosed": true,
     "sequentialDecoderClosed": true,
     "partialEvidenceDeleted": true,
@@ -2797,7 +2948,7 @@
   },
   "criteria": {
     "provenance": {
-      "status": "PASS",
+      "status": "FAIL",
       "criterion": "Every pinned dependency\/model\/fixture\/generator\/license boundary and packaged SHA-256 digest matches"
     },
     "matrixComplete": {
@@ -2815,6 +2966,10 @@
     "videoIsolation": {
       "status": "FAIL",
       "criterion": "A selected 10 s 720p configuration is <=3x realtime, under the 128 MiB peak-PSS-delta budget, and motion-aware quality-acceptable on every fixture"
+    },
+    "playbackReview": {
+      "status": "PASS",
+      "criterion": "Every current playback evidence archive has exactly one complete review record bound to its SHA-256"
     }
   }
 }
