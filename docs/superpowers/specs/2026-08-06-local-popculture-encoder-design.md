@@ -1,7 +1,7 @@
 # Local pop-culture identification: A → B → C design
 
 **Date:** 2026-08-06  
-**Status:** Draft for review  
+**Status:** Draft — post-review interfaces filled; pending human approval
 **Scope:** Speed + insanely good local pop-culture / celeb / personality ID + end manual-per-meme tagging, via continuous corpus growth.
 
 ## Summary
@@ -154,25 +154,134 @@ Cadence: ingest anytime; `mine` + `eval` on demand or weekly; train only when mi
 
 ## Track A — Knowledge plane (first ship value)
 
-### A1. Entity / reference retrieval at index time
+### A0. Type and merge contracts (app)
 
-After primary image embed (and OCR):
+Extend `Tag.source` in `src/types.ts`:
 
-1. Query an on-device **entity index** (brute-force cosine until N forces HNSW/sqlite-vec).  
-2. Candidates = pack exemplars + (optional) logo/text hits from OCR.  
-3. Score with margin vs negative anchors (reuse recognition calibration ideas).  
-4. Emit tags with `source: 'entity_pack' | 'exemplar'` and confidence.  
-5. Feed top hits into `formatGrounding` **with the same tier honesty** as zero-shot (`recognized` / `weak` / `unknown`).
+```ts
+source?:
+  | 'prompt'      // zero-shot CLIP label
+  | 'exemplar'    // learnCore / user teach / imported pack head
+  | 'entity_pack' // first-party entity retrieval hit (this track)
+  | 'ocr'
+  | 'vision'
+  | 'manual'
+  | 'propagated';
+```
 
-No template registry. Open-ended naming + graceful unknown — per composite-meme doc.
+**Merge precedence** when the same normalized label appears from multiple sources (keep highest rank; if tied, keep higher `score`):
+
+`manual > propagated > ocr > entity_pack > exemplar > prompt > vision`
+
+Rationale: user intent wins; OCR is literal text; entity_pack is offline-curated multi-view retrieval; user/pack exemplars next; zero-shot prompts are weakest visual guesses; VLM open-vocab last for identity (strong for situation words once present).
+
+**Tie-break across packs:** one global exemplar table after import (existing pack import already flattens). Duplicate labels from two packs → same label head; more positives win via `learnCore` training, not runtime pack IDs. Export packs may still carry distinct `name` for provenance in Settings → Imported packs.
+
+### A1. `entityRetrieve` module (new, pure)
+
+File: `src/entityRetrieve.ts` (React-free, unit-tested).
+
+```ts
+export type EntityKind =
+  | 'person' | 'character' | 'brand' | 'show' | 'event' | 'format' | 'other';
+
+export interface EntityExemplar {
+  label: string;
+  category: EntityKind | string;
+  vector: Float32Array | number[]; // L2-normalized, primary space
+  associations: string[];          // aliases folded into search_text
+  positive: boolean;               // negatives supported for hard vetoes
+}
+
+export interface EntityHit {
+  label: string;
+  category: string;
+  score: number;       // calibrated P(correct)-style 0..1 when possible
+  margin: number;      // raw retrieval margin before calibration
+  associations: string[];
+  source: 'entity_pack';
+}
+
+export interface RetrieveParams {
+  imageVec: Float32Array | number[];
+  exemplars: readonly EntityExemplar[]; // positives only for ranking
+  /** Optional per-image bias, e.g. max cos to NEGATIVE_ANCHORS (same as recognition). */
+  anchorSim?: number;
+  /** Max labels emitted. Default 5. */
+  topK?: number;
+  /** Min margin after anchor correction. Calibrate on entity golden slice. */
+  minMargin?: number;
+}
+
+/** Best positive exemplar per label, margin = cos - ANCHOR_BIAS * anchorSim. */
+export function retrieveEntities(p: RetrieveParams): EntityHit[];
+
+/** Map hits → Tag[] for indexer merge. */
+export function entityHitsToTags(hits: EntityHit[]): Tag[];
+```
+
+- Default `minMargin` starts from recognition’s `MIN_LABEL_MARGIN` (0.13) and is **re-tuned** on an entity holdout; do not assume meme-format calibration transfers to faces.
+- Brute-force matmul until exemplar count exceeds ~10k, then revisit ANN (`sqlite-vec` / HNSW) — open decision #1.
+- Negatives (`positive: false`) are **not** ranked as labels; they feed `learnCore` veto paths when imported as pack exemplars (existing behavior).
+
+### A1b. OCR → entity path
+
+- Keep high-precision `OCR_RULES` as today (`source: 'ocr'`).
+- Additional path: if OCR token/phrase **exact-matches** an entity label or alias (casefold), emit `source: 'ocr'` tag with score 1.0 — no visual required.
+- Do **not** double-count: merge precedence collapses ocr + entity_pack on same label to `ocr`.
+- Fuzzy OCR↔entity is out of scope for v1 (too many false friends).
+
+### A1c. Indexer integration
+
+After embed + OCR + zero-shot + exemplar heads:
+
+1. `hits = retrieveEntities({ imageVec, exemplars: entityPositives, anchorSim })`
+2. Merge `entityHitsToTags(hits)` with other tags via precedence above.
+3. Build grounding for VLM from **both** zero-shot labels and entity hits (see A1d).
+4. Apply VLM skip policy (A4) before `runVision`.
+
+### A1d. Grounding channel
+
+Extend `formatGrounding` (or a thin wrapper `formatGroundingWithEntities`) so the prompt can include:
+
+```
+entities: Keanu Reeves (person), Brand X (brand)
+```
+
+Rules:
+
+- Entity lines only for hits above the entity `recognized`-equivalent threshold.
+- On full miss (no entity hits and zero-shot `unknown`): keep existing `NO_FORMAT_GROUNDING` open-ended ask.
+- Never present weak entity guesses as facts — same honesty contract as `recognitionTier`.
+
+Suggested signature evolution:
+
+```ts
+formatGrounding(
+  labels: GroundingLabel[],
+  related?: string[],
+  tier?: RecognitionTier,
+  entities?: GroundingLabel[], // NEW — already-thresholded entity names
+): string
+```
 
 ### A2. Teaching / entity packs as the scale path
 
-Reuse `src/teachingPack.ts` (`memeget-teaching-pack` v2):
+**Format:** reuse `TeachingPack` / `PackExemplar` v2 unchanged. `Exemplar.associations` **already exists** in `src/types.ts` — entity aliases go there. Offline pack builder fills:
 
-- Build packs offline: for each entity, embed K representative images with the **shipping** primary encoder; store vectors + aliases as `associations`.  
-- First-launch or Settings: import first-party packs (or seed DB from bundled pack JSON).  
-- On primary `MODEL_ID` change: regenerate packs (vectors invalid); app already rejects mismatched stamps.
+| Field | Entity pack content |
+|---|---|
+| `label` | Canonical display name (`Keanu Reeves`) |
+| `category` | `person` / `brand` / … |
+| `vector` | primary-encoder image embedding of one still |
+| `associations` | aliases, handle, franchise terms |
+| `positive` | true (false only for curated hard-neg stills) |
+
+Build rule: emit a label only if **≥ N distinct source images** survive dedupe (default **N=5**, K≤16 positives packed per entity to match `MAX_MANUAL_POSITIVES` spirit). Pack export **fails** the entity (skip, log) if N not met — this is an exporter gate, not an `npm run eval` metric.
+
+- Embed with the **shipping** primary encoder only.
+- First-party distribution: **Settings import** and/or optional bundled asset; default recommendation = ship a modest bundled seed pack in APK for zero-network identity core, larger packs via explicit import (open decision #2).
+- On `MODEL_ID` change: exporter rebuilds all first-party packs; app rejects stale stamps (`isTeachingPackCompatible`) — **B.3 accept criterion** includes “old pack import fails closed; new pack import + re-tag succeeds.”
 
 **Do not** grow zero-shot `MEME_LABELS` to tens of thousands. Packs + heads scale; giant label matrices do not (Twetch lesson).
 
@@ -187,17 +296,35 @@ Reuse `src/teachingPack.ts` (`memeget-teaching-pack` v2):
 
 Curated core stays hand-authored. Machines propose; humans merge.
 
-### A4. Speed wins tied to A
+### A4. VLM skip policy
 
-- When tier is `recognized` **or** entity pack hit ≥ calibrated threshold: **skip or defer VLM** (user setting: always / on-uncertain / never skip).  
-- Identity searchable immediately from pack tags + associations even before caption.  
-- Keep VLM for joke/situation language — not for “who is this.”
+New setting key (name TBD in plan), default **`on-uncertain`**:
+
+| Mode | Behavior |
+|---|---|
+| `never` | Current behavior: every pending meme may be described |
+| `on-uncertain` | Skip auto VLM when identity is strong (below) |
+| `always` | Skip auto VLM whenever vision enabled would have run; user can still “Describe” one-shot |
+
+**Strong identity** (skip auto VLM under `on-uncertain`) when **either**:
+
+1. `recognitionTier(tags) === 'recognized'`, **or**
+2. ≥1 `entity_pack` hit with `score ≥ ENTITY_VLM_SKIP_CONF` (calibrate; start 0.56 to mirror `RECOGNIZED_CONFIDENCE`)
+
+Skipped memes:
+
+- Remain searchable via tags/OCR/associations immediately.
+- Stay `vision_state = pending` **or** gain a distinct `skipped_identity` state only if implementation needs retry semantics — prefer keeping `pending` and a separate `vision_skip_reason` setting bit so “Describe library” can still force captions later. Final field choice is an implementation detail; product rule is: **skip is not failure, and forced describe still works.**
+
+Identity is not the VLM’s job once A works; VLM remains for joke/situation language.
 
 ### A5. Accept gates (A)
 
-- New **entity/person slice** in tagging eval: `mustFind` celeb/brand names on held-out images.  
-- `npm run recognition` must not regress format precision when packs add parallel paths.  
-- Pack import + re-tag wall time budget on a 2k library (document target on device).
+- New **entity/person slice** in tagging eval: `mustFind` celeb/brand names on held-out images (vectors + expected names only in repo).
+- `npm run recognition` must not regress format precision when entity path is enabled.
+- Pack exporter enforces N≥5; unit test on exporter.
+- Pack import + re-tag on a ~2k library completes without UI deadlock; record wall time on device in plan verification.
+- Grounding unit tests: entity hits appear; weak hits do not assert; unknown path unchanged.
 
 ---
 
@@ -214,21 +341,40 @@ Accept: ↑ retrieval Recall@k / MRR / aspect MAP; no generic-probe collapse.
 
 ### B2. Entity-aware training views
 
-Extend pair construction:
+Extend `tools/finetune/textviews.py` (and dataset records that carry `entities[]`):
 
-- `"a photo of {person}"`, `"{name} meme"`, alias lists, brand wordmarks as text.  
-- Multi-positive entity batches; hard negatives (lookalikes, same-template different subject).  
-- Still freeze image tower until B2 plateaus.
+```python
+def entity_views(name: str, aliases: list[str], kind: str) -> list[str]:
+    # examples — exact templates tuned offline against val R@1
+    # "a photo of {name}"
+    # "{name} meme"
+    # "a meme featuring {name}"
+    # alias each as additional views
+    ...
 
-### B3. Optional image LoRA
+def training_views(record) -> list[str]:
+    views = tag_and_title_views(record)  # existing
+    for ent in record.entities:
+        views.extend(entity_views(ent.name, ent.aliases, ent.type))
+    return dedupe(views)
+```
 
-Only if visual confusions remain (twins, heavy crops). Merge adapters → dense weights → `tools/model-export` contract. Triggers full re-index + pack rebuild (app model-stamp guards already exist).
+Batching:
 
-### B4. Ship
+- **Multi-positive:** sampler may include ≥2 images of the same entity in a batch so text towers see within-identity variance.
+- **Hard negatives:** optional second phase — mine batches where image cos(stock) is high but entity id differs (lookalikes). Not required for first B2 run; add if person-slice plateaus.
+- Image tower remains frozen through B2.
+
+### B3. Ship encoder
 
 - New `MODEL_ID` (e.g. `mobileclip-s2-memeft-v2`).  
 - APK env / release assets via existing workflows.  
-- Rebuild `label-vectors.json`, golden text queries, and **all entity packs** in the new space.
+- Rebuild `label-vectors.json`, golden text queries, and **all entity packs** in the new space.  
+- Accept criterion: stale packs fail `isTeachingPackCompatible`; new packs import + re-tag succeed.
+
+### B4. Optional image LoRA
+
+Only if visual confusions remain after B3 (twins, heavy crops). Merge adapters → dense weights → `tools/model-export` contract. Triggers another full re-index + pack rebuild.
 
 ### B accept gates
 
@@ -239,6 +385,7 @@ Only if visual confusions remain (twins, heavy crops). Merge adapters → dense 
 | Entity slice | person/brand Recall↑ vs stock |
 | Generic probes | dog/car/screenshot/social-UI queries do not collapse |
 | Latency | embed P50 not worse than stock S2 by >15% on Pixel-class device |
+| Stale pack rejection | After MODEL_ID bump, old packs fail closed |
 
 ---
 
@@ -248,21 +395,30 @@ Only if visual confusions remain (twins, heavy crops). Merge adapters → dense 
 
 - Prefill-dominated; fights “instant.”  
 - Finetune is easy; **ExecuTorch multimodal 8da4w re-export matching RNE catalog contract is not** (`docs/vlm-model-decision.md`).  
-- A+B already supply names via retrieval; C’s job shrinks to **situation/analogy language** (Stages 4–5), not identity.
+- A+B already supply names via retrieval; C’s job shrinks to **situation/analogy language** (composite Stages 4–5), not identity.
 
-### C0. Go/no-go spike (timeboxed)
+### Stage 4 (analogy) without a cloud tier
+
+`composite-meme-understanding.md` once suggested cloud for Stage 4. **This design does not add a cloud describe path** (conflicts with product contract and `vlm-model-decision.md`). Analogy handling:
+
+1. **Near term (A+B):** two-layer *searchability* via entity hits on both domains when present + VLM tags/captions; no guaranteed one-line analogy synthesis.  
+2. **Track C:** teacher models (operator machine, offline) may write analogy lines into distill targets; student VLM learns to emit them on-device.  
+3. If C0 is **no-go**, Stage 4 stays best-effort on Gemma with entity grounding — accept residual miss rate; do not stand up a server.
+
+### C0. Go/no-go spike (timeboxed ~1–2 days)
 
 Before any product commitment:
 
 1. Export candidate small VLM (e.g. SmolVLM2-class) or prove Gemma LoRA re-export path.  
 2. Measure Vulkan delegate blob count / CPU fallback (appendix in vlm-model-decision).  
 3. Micro-bench vs current Gemma E2B on device.  
-4. **No-go** if no latency win or graph shatters; record and stop.
+4. **No-go** if no latency-or-quality win or graph shatters; record and stop.
 
 ### C1. If go: distillation data from corpus
 
-- Frontier (or large local) teacher captions on train split only: two-layer tags, entity names from corpus ground truth, analogy line when applicable.  
-- SFT/LoRA student; reward options later (CLIP-similarity to our tower, schema adherence, OCR match).  
+- Teacher (frontier API or large local) runs **offline on train split only**.  
+- Targets: two-layer tags, entity names from corpus ground truth, optional analogy line.  
+- SFT/LoRA student; later rewards optional (CLIP sim to our tower, schema adherence, OCR match).  
 - Accept on `tagtest` / facet coverage / agreement — not vibes.
 
 ### C2. Runtime
@@ -306,36 +462,39 @@ Exact numbers locked in implementation plan via on-device telemetry already logg
 
 ## Build order
 
-| Phase | Deliverable | Exit criteria |
-|---|---|---|
-| **0.1** | Corpus hub unifying basedmemes+KYM+memedepot | one `load_records`, status counts, eval split |
-| **0.2** | B0 score existing memeft text `.pte` | keep/drop decision written in eval notes |
-| **A.1** | Entity ingest v1 (people/brands) + pack exporter | packs stamp-compatible; import works |
-| **A.2** | Runtime entity retrieve + grounding + VLM skip policy | entity eval slice ↑; no recognition regression |
-| **A.3** | Continuous mine → candidate PR workflow | labels/associations/packs from `corpus mine` |
-| **B.1** | Text FT on full corpus | gates green vs stock |
-| **B.2** | Entity-aware pairs | person/brand slice ↑ again |
-| **B.3** | Export + APK model id + pack rebuild | on-device load + re-index path verified |
-| **B.4** | Image LoRA only if needed | gates + latency |
-| **C.0** | Export/Vulkan spike | go/no-go |
-| **C.1+** | Distill + ship only on go | tagtest/coverage/latency |
+| Phase | Deliverable | Exit criteria | Depends on |
+|---|---|---|---|
+| **0.1** | `tools/corpus/` hub: basedmemes+KYM+memedepot → unified records | `load_records`, status counts, eval split | — |
+| **0.2** | B0 score existing memeft text `.pte` | keep/drop note in eval notes | golden vectors tooling |
+| **A.1** | Entity ingest v1 + pack exporter (N≥5) | pack parses; stamp matches primary | 0.1 for scale; can prototype on tiny hand set |
+| **A.2** | `entityRetrieve` + `Tag.source` + grounding + VLM skip | entity slice ↑; recognition non-regress; unit tests | A.1 packs |
+| **A.3** | Continuous mine → candidate PR workflow | labels/associations/packs from `corpus mine` | 0.1 |
+| **B.1** | Text FT on full corpus | gates green vs stock | 0.1, B0 decision |
+| **B.2** | Entity-aware `textviews` | person/brand slice ↑ | B.1, entity fields in corpus |
+| **B.3** | Export + MODEL_ID + **rebuild all packs** + APK | load + re-index; stale packs fail closed | B.1/B.2 accept |
+| **B.4** | Image LoRA only if needed | gates + latency | B.3 |
+| **C.0** | Export/Vulkan spike | go/no-go written | A.2 helpful not required |
+| **C.1+** | Distill + ship only on go | tagtest/coverage/latency | C.0 go, preferably A.2 |
 
-Parallelism: 0.1 and 0.2 start immediately; A.1 can proceed while B0 runs; B.1 needs 0.1; C never blocks A/B.
+**Parallelism DAG:** 0.1 ∥ 0.2; A.1 after minimal corpus or hand seed; A.2 after A.1; B.1 after 0.1+B0; B.2 after B.1+entities; C never blocks A/B. Single primary `MODEL_ID` at a time in the app — do not run B.3 while A.2 device testing expects stock vectors without a restamp plan.
 
 ---
 
-## Component boundaries (implementation sketch)
+## Component boundaries
 
 | Component | Responsibility |
 |---|---|
-| `tools/corpus/` (new) | ingest adapters, sqlite/jsonl, mine, pack export, train orchestration |
-| `tools/finetune/` | extend pair builders for entities; keep freeze-image default |
-| `tools/model-export/` | memeft export + MODEL_ID; pack rebuild hook |
-| `src/entityRetrieve.ts` (new) | pure: query vectors × pack exemplars → scored hits |
-| `src/indexer.ts` | call retrieve; merge tags; VLM skip policy |
-| `src/visionCore.ts` | grounding consumes entity hits; tier honesty preserved |
-| `src/baselineLabels.ts` / packs | breadth vs exemplar scale policy |
-| `tools/eval/` | entity slice + generic probes + pack-aware recognition |
+| `tools/corpus/` (new) | ingest adapters, store, mine, pack export, train/eval orchestration CLI |
+| `tools/finetune/` | `textviews.entity_views`, dataset `entities[]`, freeze-image default |
+| `tools/model-export/` | memeft `.pte` + pack rebuild hook on MODEL_ID bump |
+| `src/types.ts` | `Tag.source` includes `entity_pack` |
+| `src/entityRetrieve.ts` (new) | pure retrieve + hit→tag |
+| `src/indexer.ts` | call retrieve; merge precedence; VLM skip policy |
+| `src/visionCore.ts` | grounding accepts entity labels; tier honesty |
+| `src/teachingPack.ts` | unchanged format; first-party packs are normal packs |
+| `src/learnCore.ts` | heads train on imported pack exemplars (existing) |
+| `src/recognition.ts` | zero-shot tiers unchanged; entity path has its own margin constants |
+| `tools/eval/` | entity slice, generic probes, exporter N-gate tests |
 
 React-free cores stay unit-testable; native only at embed/VLM edges.
 
@@ -380,13 +539,13 @@ React-free cores stay unit-testable; native only at embed/VLM edges.
 
 ---
 
-## Open decisions (resolve in implementation plan, not blockers for this spec)
+## Open decisions (implementation plan may pick defaults below)
 
-1. Entity index: brute force vs `sqlite-vec` / HNSW at what N.  
-2. First-party packs: bundled in APK vs first-run download vs Settings import only (download contradicts zero-network-from-install unless optional).  
-3. Default VLM skip policy.  
-4. Public release of memeft weights vs personal builds only.  
-5. Minimum images N per entity (start 5).  
+1. Entity index: brute force until ~10k exemplars; then `sqlite-vec` / HNSW.  
+2. First-party packs: **default = small bundled seed + Settings import for large packs** (preserves optional zero-network core).  
+3. Default VLM skip policy: **`on-uncertain`**.  
+4. Public release of memeft weights vs personal builds only — **human/legal gate before any public weight upload**.  
+5. Minimum images N per entity: **5** (exporter-enforced).
 
 ---
 
