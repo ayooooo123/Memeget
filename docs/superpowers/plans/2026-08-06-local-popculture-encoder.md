@@ -184,11 +184,15 @@ git commit -m "feat(corpus): unified local meme corpus loader and status CLI"
 
 `eval_memeft.py` should:
 1. Load stock MobileCLIP-S2 via existing `clipmodel.py`.
-2. Load candidate text weights if a torch `ckpt` is provided; **if only a `.pte` exists** (current `dist-memeft`), document that ExecuTorch comparison must run on-device OR find the matching torch checkpoint under `memeget-datasets/tools/finetune` — search the machine for `*.pt` / `state_dict` next to memeft. Prefer torch ckpt for offline parity with golden.
-3. Rebuild or reuse `tools/eval/golden.json` query embeddings: for each query text, embed with stock vs candidate text tower; rank images (image tower **stock/frozen**); print Recall@1/5 and MRR.
-4. Exit 0 always; write markdown table to stdout + `B0_NOTES.md`.
+2. Confirm golden usability: `tools/eval/golden.json` has `queries[]` (each with `query` and/or `queryVec`) and `memes[]` with `imageVec`. If `queryVec` is missing, embed `query` text inside the script for stock vs candidate.
+3. Load candidate text weights if a torch `ckpt` is provided. Search:
+   ```bash
+   find /Users/jd/projects/memeget-datasets /Users/jd/projects/memeget \( -name '*.pt' -o -name '*memeft*' \) 2>/dev/null | head -50
+   ```
+   **If only `.pte` exists** (current `dist-memeft`): write `B0_NOTES.md` with **BLOCKED — no torch ckpt; on-device or recover ckpt required** and exit 0. Do not invent metrics. Chunk 1 still completes.
+4. When ckpt exists: rank images (image tower frozen/stock) per query under stock vs candidate text; print Recall@1/5 and MRR; write table to `B0_NOTES.md`.
 
-If no torch memeft ckpt exists, B0_NOTES must say **BLOCKED: need torch checkpoint or on-device harness** and list next action — do not invent numbers.
+Chunk 1 verification: `B0_NOTES.md` exists with either metrics **or** explicit BLOCKED reason.
 
 - [ ] **Step 2: Run B0**
 
@@ -218,7 +222,17 @@ git commit -m "chore(finetune): B0 baseline script for memeft text tower"
 - Modify: `src/tagMerge.test.ts` (or create if missing)
 - Grep callers that exhaustiveness-check `source`
 
-- [ ] **Step 1: Write failing merge tests**
+**Rank migration (breaking vs current code):** today `tagMerge` is
+`manual(6) > exemplar(5) > propagated(4) > ocr(3) > vision(2) > prompt(1)`.
+Spec requires `manual > propagated > ocr > entity_pack > exemplar > prompt > vision`
+and durable OCR/entity_pack. Audit before editing:
+
+```bash
+rg "TAG_RANK|tagRank|DURABLE_SOURCE|'exemplar'|'propagated'" src --glob '*.ts'
+rg "source\\?:" src --glob '*.ts' | head -80
+```
+
+- [ ] **Step 1: Write failing merge tests (include rank migration)**
 
 ```ts
 import { mergeDurableTags, tagRank } from './tagMerge';
@@ -252,6 +266,13 @@ describe('entity_pack merge', () => {
     ];
     const out = mergeDurableTags(tags, 4);
     expect(out.some((t) => t.label === 'person a' && t.source === 'entity_pack')).toBe(true);
+  });
+
+  it('rank migration: propagated beats exemplar; ocr beats exemplar', () => {
+    expect(tagRank({ label: 'a', category: 'x', score: 1, source: 'propagated' }))
+      .toBeGreaterThan(tagRank({ label: 'a', category: 'x', score: 1, source: 'exemplar' }));
+    expect(tagRank({ label: 'a', category: 'x', score: 1, source: 'ocr' }))
+      .toBeGreaterThan(tagRank({ label: 'a', category: 'x', score: 1, source: 'exemplar' }));
   });
 });
 ```
@@ -522,7 +543,22 @@ git commit -m "feat(indexer): entity retrieval and conditional VLM skip"
 - Create: `tools/corpus/export_packs.py`
 - Create: `tools/corpus/test_export_packs.py`
 
-- [ ] **Step 1: Exporter tests (no real encoder)**
+- [ ] **Step 1: Scaffold seed + exporter tests (no real encoder)**
+
+Create `tools/corpus/seed_entities.json`:
+
+```json
+[
+  {
+    "name": "Keanu Reeves",
+    "type": "person",
+    "aliases": ["Neo", "John Wick"],
+    "match_tags": ["keanu", "reeves", "john wick", "neo"]
+  }
+]
+```
+
+Document in `tools/corpus/README.md`: seed is hand-maintained; mine only proposes additions.
 
 Test pure selection logic:
 - Group images by entity name.
@@ -643,7 +679,8 @@ git commit -m "feat(finetune): entity-aware contrastive text views"
 - `src/embeddingModels.ts` only if default model id changes in-tree
 
 - [ ] Follow `docs/memedepot-finetune.md` export contract.
-- [ ] Verify stale pack rejected; new pack imports.
+- [ ] **Unit test before ship:** extend `src/embeddingModels.test.ts` / teaching-pack tests so `isTeachingPackCompatible` rejects the previous MODEL_ID and accepts the new one after bump.
+- [ ] Verify stale pack rejected on import path; new pack imports + re-tag.
 - [ ] On-device: load towers, re-index smoke.
 - [ ] Commit wiring + docs; release weights via existing GitHub release flow if approved legally.
 
