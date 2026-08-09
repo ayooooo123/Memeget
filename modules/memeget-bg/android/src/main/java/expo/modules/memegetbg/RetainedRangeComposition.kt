@@ -1,6 +1,7 @@
 package expo.modules.memegetbg
 
 import android.content.Context
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.media.MediaCodecList
 import android.media.MediaExtractor
@@ -13,13 +14,18 @@ import androidx.media3.common.Effect
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.audio.AudioProcessor
+import androidx.media3.common.audio.DefaultGainProvider
+import androidx.media3.common.audio.GainProcessor
 import androidx.media3.common.audio.SpeedChangingAudioProcessor
 import androidx.media3.common.audio.SpeedProvider
 import androidx.media3.common.util.SpeedProviderUtil
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.effect.BitmapOverlay
 import androidx.media3.effect.GlEffect
 import androidx.media3.effect.GlShaderProgram
+import androidx.media3.effect.OverlayEffect
 import androidx.media3.effect.Presentation
+import androidx.media3.effect.StaticOverlaySettings
 import androidx.media3.effect.TimestampAdjustment
 import androidx.media3.effect.TimestampAdjustmentShaderProgram
 import androidx.media3.transformer.Composition
@@ -262,6 +268,19 @@ object RetainedRangeComposition {
    *   flips and crop - applied to [Range] items only, before the shared [Presentation]. A [Card]
    *   is authored for the output frame the plan already chose, so cropping it would cut away part
    *   of an image the user positioned deliberately.
+   * @param overlay A transparent bitmap composited over EVERY output frame, scaled to fill the
+   *   output frame - the burn-in path for text, covers, cutouts and drawings on an exported clip.
+   *   Appended to the composition video effect chain so it runs on the composited output; `null`
+   *   leaves that chain exactly as it was, so a clip with no annotations is byte-identical. The
+   *   caller owns the bitmap and must keep it alive until the export releases its texture.
+   * @param musicUri An added audio track mixed onto the single video output as a SECOND sequence,
+   *   or `null` for none. The source audio (sequence one) is untouched by this: a muted source
+   *   plus music is a clean replace, an unmuted source plus music is both mixed. The music sequence
+   *   carries no video and is looped to fill the output duration. `null` leaves the sequence list
+   *   and [Composition] exactly as before, so a music-free export is byte-identical.
+   * @param musicVolume Linear gain applied to [musicUri] on the music item itself, never on the
+   *   composition audio processors, so the source's own gain is unaffected. Ignored when
+   *   [musicUri] is `null`.
    */
   fun buildTimeline(
     uri: String,
@@ -272,7 +291,11 @@ object RetainedRangeComposition {
     outputSize: Size? = null,
     sourceVideoEffects: List<Effect> = emptyList(),
     audioProcessors: List<AudioProcessor> = emptyList(),
-    videoEffects: List<Effect> = emptyList()
+    videoEffects: List<Effect> = emptyList(),
+    overlay: Bitmap? = null,
+    musicUri: String? = null,
+    musicVolume: Float = 1f,
+    musicStartUs: Long = 0
   ): Composition {
     require(segments.isNotEmpty()) { "At least one segment is required" }
     require(segments.size <= MAX_SEGMENTS) {
@@ -312,6 +335,17 @@ object RetainedRangeComposition {
     val presentation = outputSize?.let {
       Presentation.createForWidthAndHeight(it.width, it.height, Presentation.LAYOUT_SCALE_TO_FIT)
     }
+    // Where the source gain ([audioProcessors]) is applied depends on whether music is mixed in.
+    // media3 runs a Composition's audio processors ONCE on the mixer output - the combined audio
+    // of every sequence (AudioSampleExporter builds one AudioGraph over all inputs). With music as
+    // a second sequence, a composition-level source gain would therefore also scale the music, so
+    // a muted source (gain 0) would silence the music too instead of the "music only" clean
+    // replace the plan promises. When music is present the source gain moves onto the source items
+    // themselves, before the mix; with no music it stays a composition processor, exactly as
+    // before, so a music-free export is byte-identical. A constant gain commutes with the
+    // concatenation and the speed change, so this move is inaudible for the source itself.
+    val mixMusic = musicUri != null
+    val sourceItemAudioProcessors = if (mixMusic) audioProcessors else emptyList()
     val items = segments.map { segment ->
       val itemEffects = buildList(2 + sourceVideoEffects.size) {
         if (speedProcessor != null) {
@@ -325,7 +359,7 @@ object RetainedRangeComposition {
       when (segment) {
         is Range -> EditedMediaItem.Builder(clip(uri, segment))
           .setDurationUs(sourceDurationUs)
-          .setEffects(Effects(emptyList(), itemEffects))
+          .setEffects(Effects(sourceItemAudioProcessors, itemEffects))
           .build()
         is Card -> EditedMediaItem.Builder(cardItem(segment))
           .setDurationUs(segment.durationUs)
@@ -345,15 +379,90 @@ object RetainedRangeComposition {
       sequenceBuilder.experimentalSetForceAudioTrack(true)
     }
     val sequence = sequenceBuilder.build()
-    val compositionAudioProcessors = if (speedProcessor == null) audioProcessors else {
-      buildList(audioProcessors.size + 1) {
+    // The added music, mixed in as a SECOND sequence so media3's audio mixer lays it over the
+    // single video output. Its gain rides the music item itself so it is set before the mix,
+    // independent of the source gain (which for a music mix has moved onto the source items for the
+    // same reason). The sequence loops to fill the output: a looping sequence plays until the
+    // longest non-looping sequence - the video - ends (EditedMediaItemSequence.Builder.setIsLooping,
+    // media3 1.9.0). The item removes any video the music file might carry so it contributes audio
+    // only.
+    val musicSequence = musicUri?.let { source ->
+      val gain = GainProcessor(DefaultGainProvider.Builder(musicVolume).build())
+      // Start the track at the chosen in-point, then loop on from there.
+      val mediaItem = if (musicStartUs > 0L) {
+        MediaItem.Builder()
+          .setUri(source)
+          .setClippingConfiguration(
+            MediaItem.ClippingConfiguration.Builder().setStartPositionMs(musicStartUs / 1000L).build()
+          )
+          .build()
+      } else {
+        MediaItem.fromUri(source)
+      }
+      val musicItem = EditedMediaItem.Builder(mediaItem)
+        .setRemoveVideo(true)
+        .setEffects(Effects(listOf(gain), emptyList()))
+        .build()
+      @Suppress("DEPRECATION")
+      EditedMediaItemSequence.Builder(musicItem)
+        .setIsLooping(true)
+        .build()
+    }
+    // Composition audio processors run post-mix. The speed change belongs here (it maps the whole
+    // concatenated timeline; see the class comment). The source gain is here too UNLESS music is
+    // mixed in, in which case it has moved onto the source items so it does not also scale the
+    // music. With no music this is the pre-existing list, so the audio is byte-identical.
+    val compositionSourceProcessors = if (mixMusic) emptyList() else audioProcessors
+    val compositionAudioProcessors = if (speedProcessor == null) compositionSourceProcessors else {
+      buildList(compositionSourceProcessors.size + 1) {
         add(speedProcessor)
-        addAll(audioProcessors)
+        addAll(compositionSourceProcessors)
       }
     }
-    return Composition.Builder(sequence)
-      .setEffects(Effects(compositionAudioProcessors, videoEffects))
-      .build()
+    // A null overlay leaves the video effect chain untouched, so an annotation-free export is
+    // byte-identical to before. When present it runs LAST on the composited output frame, over
+    // the source (or card) the Presentation already pinned to `outputSize`.
+    val compositionVideoEffects = if (overlay == null) videoEffects else {
+      buildList(videoEffects.size + 1) {
+        addAll(videoEffects)
+        add(overlayEffect(overlay, outputSize))
+      }
+    }
+    // A null music sequence leaves the composition a single video sequence, exactly as before.
+    val builder = if (musicSequence == null) {
+      Composition.Builder(sequence)
+    } else {
+      Composition.Builder(sequence, musicSequence)
+    }.setEffects(Effects(compositionAudioProcessors, compositionVideoEffects))
+    // An SDR bitmap overlay's shader cannot run over an HDR frame, so when an
+    // overlay is present ask media3 to tone-map an HDR input down to SDR first;
+    // without an overlay the input's dynamic range is left untouched.
+    if (overlay != null) builder.setHdrMode(Composition.HDR_MODE_TONE_MAP_HDR_TO_SDR_USING_OPEN_GL)
+    return builder.build()
+  }
+
+  /**
+   * A [BitmapOverlay] scaled to fill the output frame.
+   *
+   * media3 maps an overlay's own pixels 1:1 onto the frame and centres it, so filling a frame of
+   * [outputSize] is a scale of frame/bitmap on each axis. The overlay is rendered at the output
+   * size, so the two scales match and nothing is stretched; deriving them from the DECODE's real
+   * size rather than the plan's stated size keeps the fill exact even if the bitmap came back
+   * downsampled. With no [outputSize] the overlay keeps its native 1:1 mapping.
+   */
+  private fun overlayEffect(bitmap: Bitmap, outputSize: Size?): OverlayEffect {
+    val overlay = if (outputSize == null) {
+      BitmapOverlay.createStaticBitmapOverlay(bitmap)
+    } else {
+      val settings = StaticOverlaySettings.Builder()
+        .setScale(
+          outputSize.width.toFloat() / bitmap.width.toFloat(),
+          outputSize.height.toFloat() / bitmap.height.toFloat()
+        )
+        .build()
+      BitmapOverlay.createStaticBitmapOverlay(bitmap, settings)
+    }
+    return OverlayEffect(listOf(overlay))
   }
 
   private fun clip(uri: String, range: Range): MediaItem =

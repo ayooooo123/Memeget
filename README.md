@@ -246,6 +246,19 @@ weights — editable and on-device:
   (✕) without touching your own teaching.
 - **Re-tag library** (Settings) — re-applies all current knowledge to everything
   already indexed, reusing stored embeddings (no re-scanning/re-embedding).
+- **Entity packs + retrieval** — first-party pop-culture identity rides the same
+  teaching-pack format: multi-view exemplars mined offline (`tools/corpus/` →
+  seed entities, mine, `export_packs`) import like any pack, then
+  `retrieveEntities` scores the image against pack heads and emits durable
+  `entity_pack` tags (ranked under OCR, above user exemplars). When recognition
+  is already strong or an entity hit is high-confidence, auto-describe **skips
+  the VLM** so identity stays on the fast embed path; forced re-caption still
+  runs the model. Design:
+  `docs/superpowers/specs/2026-08-06-local-popculture-encoder-design.md`.
+- **Encoder baseline (B0)** — the existing memeft text-tower checkpoint already
+  beats stock MobileCLIP-S2 on golden text→image retrieval (R@1 +4.5pp, R@5
+  +7.1pp, MRR +0.057); further train/export is gated separately. See
+  `tools/finetune/B0_NOTES.md`.
 
 ## Next steps / roadmap
 

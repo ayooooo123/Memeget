@@ -157,7 +157,7 @@ export const MemeVideoMotionTool = React.memo(function MemeVideoMotionTool({
   }
 
   const movable = project.layers.flatMap((candidate) =>
-    candidate.kind === 'cover' ? [] : [candidate]
+    candidate.kind === 'cover' || candidate.kind === 'draw' ? [] : [candidate]
   );
   const range = layer ? motionActiveRange(layer, durationUs) : null;
   const atKeyframeIndex = layer ? keyframeIndexAt(layer.keyframes, playheadUs) : -1;

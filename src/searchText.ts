@@ -108,3 +108,41 @@ export function assembleSearchText(fields: {
     labelContext
   ).toLowerCase();
 }
+
+// ---- phrase matching -----------------------------------------------------------
+//
+// The term tokenizer drops words of 1-2 chars and never matches across word
+// boundaries, so a spoken phrase like "I'm so old" is unfindable by typing
+// "im so old": "im"/"so" are dropped and the apostrophe in the transcript
+// breaks a literal compare. These helpers add a punctuation-insensitive,
+// whole-phrase signal on top — a clip that literally SAYS what you typed should
+// win regardless of apostrophes or short words.
+
+// Collapse a string to a phrase key: lowercase, DROP apostrophes so a
+// contraction becomes one token ("I'm" -> "im", "don't" -> "dont"), then turn
+// every other non-alphanumeric run into a single space and trim. "I'm so old."
+// -> "im so old". Dropping (not spacing) the apostrophe is the whole point: it
+// lets a query typed without one ("im so old") match a transcript that has one
+// ("I'm so old"). Applied to both query and stored haystack.
+export function phraseKey(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/['\u2019]/g, '')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+// Whitespace-token count of a phrase key. Callers gate the phrase boost to
+// multi-token queries; a single word already ranks fine through the term path.
+export function phraseTokenCount(key: string): number {
+  return key ? key.split(' ').length : 0;
+}
+
+// Does `haystackKey` (a phraseKey) contain `queryKey` (a phraseKey) as a
+// contiguous run of WHOLE tokens? Space-padding both ends enforces token
+// boundaries so "old" can't hit inside "golden" and "so old" only matches those
+// two words in sequence.
+export function containsPhrase(haystackKey: string, queryKey: string): boolean {
+  if (!queryKey) return false;
+  return (' ' + haystackKey + ' ').includes(' ' + queryKey + ' ');
+}

@@ -5,29 +5,28 @@
 // intent to a cold-started process twice). Both land as visible duplicates in
 // the grid; matching on content is what actually stops them.
 //
-// The input is the file's base64 — exactly what the save path already reads into
-// memory — so hashing adds no extra I/O. We combine the exact byte length with
-// an FNV-1a over the content: length alone separates almost all distinct files,
-// and the hash guards the rare same-length case. For very large payloads (a
-// multi-minute video is tens of MB of base64) we stride-sample so the share
-// path stays responsive — identical files still sample identically, and the
-// exact-length prefix keeps an accidental merge of two *distinct* files
-// vanishingly unlikely.
-export function hashBase64(base64: string): string {
-  const len = base64.length;
-  // Cap the scan at ~1M character reads: a full pass over a long video's base64
-  // would block the JS thread for a noticeable beat mid-share.
-  const step = len > 1_000_000 ? Math.ceil(len / 1_000_000) : 1;
+// The share path streams a shared file straight to disk with a native copy
+// rather than reading it into JS — a multi-hundred-MB video turned into a
+// base64 string on the JS heap OOM'd/froze the app. So instead of the whole
+// payload we get the exact byte length plus a few small base64 `windows` read
+// (with positioned reads) from the head, middle, and tail. Length is the
+// primary key — two files of different size can NEVER collide — and the FNV-1a
+// over the windows guards the rare same-length case while still moving if a
+// re-encode changes the start, middle, or end. Not cryptographic: it only has
+// to change when the bytes do.
+export function hashFileSample(byteLength: number, windows: readonly string[]): string {
   let h = 0x811c9dc5; // FNV-1a offset basis
-  for (let i = 0; i < len; i += step) {
-    h ^= base64.charCodeAt(i);
-    h = Math.imul(h, 0x01000193); // FNV-1a prime
+  for (const w of windows) {
+    for (let i = 0; i < w.length; i++) {
+      h ^= w.charCodeAt(i);
+      h = Math.imul(h, 0x01000193); // FNV-1a prime
+    }
   }
   // length.hash, both base-36 for a compact key.
-  return `${len.toString(36)}.${(h >>> 0).toString(36)}`;
+  return `${byteLength.toString(36)}.${(h >>> 0).toString(36)}`;
 }
 
-// FNV-1a over a whole string, base36. The same primitive `hashBase64` uses,
+// FNV-1a over a whole string, base36. The same primitive `hashFileSample` uses,
 // exposed for the places that fingerprint short text rather than file bytes:
 // a label prompt (so an edit invalidates its cached vector) or the set of
 // hand-applied tags (so the trained heads notice a rename). Not cryptographic —

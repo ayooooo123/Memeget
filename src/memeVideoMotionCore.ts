@@ -81,7 +81,7 @@ function refuse(refusal: Exclude<MotionRefusal, 'accepted'>): MotionCommand {
 export function motionLayerFor(project: MemeEditProject, layerId: string | null): KeyframedLayer | null {
   if (layerId === null) return null;
   const layer = project.layers.find((candidate) => candidate.id === layerId);
-  if (layer === undefined || layer.kind === 'cover') return null;
+  if (layer === undefined || layer.kind === 'cover' || layer.kind === 'draw') return null;
   return layer;
 }
 

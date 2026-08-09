@@ -147,6 +147,7 @@ internal object MemeImageRenderer {
           "text" -> drawText(context, canvas, layer)
           "media" -> drawMedia(context, canvas, layer)
           "subject" -> drawSubject(context, canvas, layer)
+          "draw" -> drawDraw(canvas, layer)
         }
       }
       return writePng(context, bitmap, plan.optString("id", "meme"))
@@ -902,6 +903,79 @@ internal object MemeImageRenderer {
     } finally {
       silhouette.recycle()
     }
+  }
+
+  /**
+   * Freehand and shape annotations, drawn straight onto the output canvas.
+   *
+   * The plan already resolved every point and stroke width into OUTPUT pixels
+   * (drawPlan in src/memeImageRenderCore.ts), so this only picks the Paint and
+   * the primitive - it never re-derives geometry. The still export and the
+   * video overlay reach it through the same `"draw"` case, which is what keeps
+   * an annotation identical whether it is burned into a PNG or composited over
+   * every frame of an exported clip.
+   *
+   * Layer opacity multiplies each element's own alpha, so a translucent layer
+   * dims a semi-transparent stroke rather than replacing its alpha. Counts are
+   * bounded before anything is allocated and every coordinate is finiteness-
+   * checked, so a malformed plan drops its excess or fails as the IOException
+   * the bridge advertises instead of building an unbounded Path.
+   */
+  private fun drawDraw(canvas: Canvas, layer: JSONObject) {
+    val elements = layer.optJSONArray("elements") ?: return
+    val layerAlpha = (finiteDouble(layer, "opacity", 1.0).coerceIn(0.0, 1.0) * 255)
+      .roundToInt()
+      .coerceIn(0, 255)
+    if (layerAlpha == 0) return
+    // One Paint, restyled per element by the shared primitives.
+    val paint = MemeDrawPrimitives.newPaint()
+    val elementCount = min(elements.length(), MemeDrawPrimitives.MAX_DRAW_ELEMENTS)
+    var pointBudget = MemeDrawPrimitives.MAX_DRAW_POINTS_PER_LAYER
+    for (index in 0 until elementCount) {
+      if (pointBudget <= 0) break
+      val element = elements.optJSONObject(index) ?: continue
+      pointBudget -= drawElement(canvas, element, paint, layerAlpha, pointBudget)
+    }
+  }
+
+  /**
+   * One drawn element. Returns how many points it consumed of the layer's
+   * budget, so a hand-built plan cannot spend more than the per-layer point
+   * ceiling across the whole layer however it splits them between elements.
+   */
+  private fun drawElement(
+    canvas: Canvas,
+    element: JSONObject,
+    paint: Paint,
+    layerAlpha: Int,
+    pointBudget: Int
+  ): Int {
+    val rawPoints = element.optJSONArray("points") ?: return 0
+    val count = minOf(rawPoints.length(), MemeDrawPrimitives.MAX_DRAW_POINTS_PER_ELEMENT, pointBudget)
+    if (count <= 0) return 0
+    val xs = FloatArray(count)
+    val ys = FloatArray(count)
+    for (i in 0 until count) {
+      val point = rawPoints.optJSONObject(i) ?: return count
+      xs[i] = finiteFloat(point, "x", 0.0)
+      ys[i] = finiteFloat(point, "y", 0.0)
+    }
+
+    val color = parseColor(element.optString("color"), Color.BLACK)
+    val alpha = Color.alpha(color) * layerAlpha / 255
+    if (alpha == 0) return count
+    paint.color = color
+    paint.alpha = alpha
+    MemeDrawPrimitives.drawShape(
+      canvas,
+      paint,
+      element.optString("shape"),
+      max(0f, finiteFloat(element, "strokeWidthPx", 1.0)),
+      element.optBoolean("filled"),
+      xs,
+      ys
+    )
+    return count
   }
 
   // --- io -------------------------------------------------------------------

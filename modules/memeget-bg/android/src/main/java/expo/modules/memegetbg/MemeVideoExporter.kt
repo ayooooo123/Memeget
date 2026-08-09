@@ -1,6 +1,7 @@
 package expo.modules.memegetbg
 
 import android.content.Context
+import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
@@ -141,6 +142,10 @@ object MemeVideoExporter {
     private var transformer: Transformer? = null
     private var output: File? = null
     private var plan: VideoExportPlan? = null
+    // Held so it can be recycled once the export releases its GL texture: media3 uploads the
+    // overlay lazily on the first frame and keeps the reference until then, so recycling it any
+    // earlier corrupts the frames it is meant to annotate.
+    private var overlayBitmap: Bitmap? = null
     private var expectsAudio = false
     private var polling = false
     private var lastProgress: Progress? = null
@@ -159,7 +164,9 @@ object MemeVideoExporter {
         plan = parsed
         val sourceHasAudio = VideoExportPlan.sourceHasAudioTrack(context, parsed.sourceUri)
         expectsAudio = parsed.expectsAudio(sourceHasAudio)
-        val composition = parsed.buildComposition(sourceHasAudio)
+        val overlay = parsed.decodeOverlayBitmap(context)
+        overlayBitmap = overlay
+        val composition = parsed.buildComposition(sourceHasAudio, overlay, parsed.music)
         val file = createOutputFile(parsed.id)
         output = file
         // The transformer owns the file from here on; before that, this is the only reference to
@@ -283,6 +290,9 @@ object MemeVideoExporter {
       runs.remove(exportId, this)
       transformer?.removeListener(this)
       transformer = null
+      // Settled means media3 has released its codecs and, with them, the overlay texture.
+      overlayBitmap?.recycle()
+      overlayBitmap = null
       if (keepAlive) {
         keepAlive = false
         KeepAliveLease.release(context)

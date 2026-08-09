@@ -29,3 +29,4 @@ __pycache__/
 # Real-library exports for the eval loops — a personal collection, never committed
 tools/eval/described.json
 tools/eval/collection-manifest.json
+.worktrees/

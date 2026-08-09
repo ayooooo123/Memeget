@@ -3,12 +3,13 @@
 // native modules (CLIP, OCR, thumbnailer) get a stable file:// path to work
 // with. Uses the stable legacy FileSystem API for SAF + copy operations.
 import * as FileSystem from 'expo-file-system/legacy';
-import { File } from 'expo-file-system';
+import { File, FileMode } from 'expo-file-system';
 import * as VideoThumbnails from 'expo-video-thumbnails';
 
 import { getFileModifiedTime } from '../modules/memeget-bg';
-import { extOf, kindOf, mimeForName, videoMimeFor } from './mediaFormats';
+import { extForMime, extOf, kindOf, mimeForName, videoMimeFor } from './mediaFormats';
 import { utf8Length } from './zipWriter';
+import { hashFileSample } from './contentHash';
 
 // Re-exported so existing importers (MemeGrid, the zip importer) can keep
 // pulling these off the SAF module; the definitions now live in the pure,
@@ -134,7 +135,7 @@ export async function writeSidecarFile(
   const uri = await findChild(dirUri, fileName);
   if (!uri) {
     // createFileAsync appends the extension implied by the mime type, so it gets
-    // the basename — the same dance saveToFolder does. A brand-new document has
+    // the basename — the same dance writeBase64ToFolder does. A brand-new document has
     // no stale tail, so it needs no padding.
     const dot = fileName.lastIndexOf('.');
     const created = await SAF.createFileAsync(
@@ -307,41 +308,95 @@ export async function readVideoFrameBase64(uri: string, name: string): Promise<s
   }
 }
 
-// Read a shared source (a file:// cache copy or a content:// provider uri) as
-// base64, staging through the OS cache first because content:// can't always be
-// read directly. This is the robust read that works for every provider/codec —
-// callers that need the bytes' content identity (dedup) hash this string, then
-// hand it to writeBase64ToFolder to persist, so the file is read only once.
-export async function readSourceBase64(src: string): Promise<string> {
+let importSeq = 0;
+
+// Stage a shared source (a content:// provider uri or a file:// cache copy)
+// into the OS cache as a plain file:// path, WITHOUT ever reading it into JS.
+// copyAsync streams the bytes natively, so a multi-hundred-MB video never
+// becomes a base64 string on the JS heap — which is what OOM'd and froze the
+// app when a video was shared in. The caller deletes the returned path when done.
+export async function stageSourceToCache(src: string): Promise<string> {
   const norm = src.startsWith('file://') || src.startsWith('content://') ? src : `file://${src}`;
-  const tmp = `${FileSystem.cacheDirectory}import_${Date.now()}`;
+  const tmp = `${FileSystem.cacheDirectory}import_${Date.now()}_${++importSeq}`;
   await FileSystem.copyAsync({ from: norm, to: tmp });
-  try {
-    return await FileSystem.readAsStringAsync(tmp, { encoding: FileSystem.EncodingType.Base64 });
-  } finally {
-    await FileSystem.deleteAsync(tmp, { idempotent: true });
-  }
+  return tmp;
 }
 
-// Create a new file inside a linked folder (the SAF tree the user granted) and
-// copy `src` — a shared image/video, given as a content:// or file:// uri / path
-// — into it. Returns the new content:// uri + sanitized name so the importer can
-// index it as a normal library item. The user granted read+write when linking
-// the folder, so createFileAsync is permitted.
-export async function saveToFolder(
-  src: string,
+// Bytes read per positioned window when fingerprinting a staged file.
+const HASH_WINDOW_BYTES = 64 * 1024;
+
+// Fingerprint a staged file for the dedup check WITHOUT loading it whole: its
+// exact byte length plus up to three small base64 windows (head / middle /
+// tail), read with positioned reads so even a large video only touches a few
+// hundred KB of JS memory. See contentHash.hashFileSample for why length +
+// windows separates distinct memes.
+export async function hashStagedFile(path: string): Promise<string> {
+  const info = await FileSystem.getInfoAsync(path);
+  const size = info.exists && typeof info.size === 'number' ? info.size : 0;
+  const windows: string[] = [];
+  if (size <= HASH_WINDOW_BYTES * 3) {
+    // Small enough that windowed reads would just re-read the whole thing.
+    windows.push(await FileSystem.readAsStringAsync(path, { encoding: FileSystem.EncodingType.Base64 }));
+  } else {
+    for (const position of [0, Math.floor(size / 2), size - HASH_WINDOW_BYTES]) {
+      windows.push(
+        await FileSystem.readAsStringAsync(path, {
+          encoding: FileSystem.EncodingType.Base64,
+          position,
+          length: HASH_WINDOW_BYTES,
+        })
+      );
+    }
+  }
+  return hashFileSample(size, windows);
+}
+
+// Bytes moved per read/write when streaming a staged file into a linked folder.
+const COPY_CHUNK_BYTES = 4 * 1024 * 1024;
+
+// Copy a staged cache file into a linked folder as a NEW SAF document, streaming
+// the bytes in bounded chunks. createFileAsync mints the document (and returns
+// its uri, preserving the folder's collision handling — "name (1)" and so on);
+// then a pair of file handles moves the bytes across COPY_CHUNK_BYTES at a time,
+// so peak JS memory is one chunk, never the whole file. A yield between chunks
+// keeps the event loop live so the UI stays responsive while a large video
+// streams in — the whole-file base64 round-trip this replaces froze the app
+// outright. Returns the new content:// uri + its on-disk display name.
+export async function streamStagedToFolder(
+  stagedPath: string,
   fileName: string,
   mimeType: string,
   folderUri: string
 ): Promise<{ uri: string; name: string }> {
-  const data = await readSourceBase64(src);
-  return await writeBase64ToFolder(data, fileName, mimeType, folderUri);
+  const type = mimeType || mimeForName(fileName || '');
+  const safeFull = (fileName || `meme_${Date.now()}.${extForMime(type)}`).replace(/[^a-zA-Z0-9._-]/g, '_');
+  const dot = safeFull.lastIndexOf('.');
+  // createFileAsync derives the extension from the mime type, so pass the base.
+  const base = dot > 0 ? safeFull.slice(0, dot) : safeFull;
+  const uri = await SAF.createFileAsync(folderUri, base, type || 'image/jpeg');
+  const src = new File(stagedPath).open(FileMode.ReadOnly);
+  const dst = new File(uri).open(FileMode.WriteOnly);
+  try {
+    for (;;) {
+      const chunk = src.readBytes(COPY_CHUNK_BYTES);
+      if (chunk.length === 0) break;
+      dst.writeBytes(chunk);
+      // Give RN a beat to process touches/renders so a big stream can't starve
+      // the JS thread for its whole duration.
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    }
+  } finally {
+    src.close();
+    dst.close();
+  }
+  return { uri, name: nameFromContentUri(uri) || `${base}.${extForMime(type)}` };
 }
 
 // Create a new SAF document in a linked folder and write raw base64 bytes into
-// it. The direct-bytes counterpart to saveToFolder, used by the zip importer:
-// jszip already hands us each entry's bytes as base64, so there's no source file
-// to copy from — we skip straight to createFileAsync + write. Returns the new
+// it. Used by the zip importer: jszip hands us each entry's bytes as base64
+// already, so there's no source file to stream from — we skip straight to
+// createFileAsync + write. (Shared image/video files take streamStagedToFolder
+// instead, which never holds the whole payload in memory.) Returns the new
 // content:// uri + the sanitized display name.
 export async function writeBase64ToFolder(
   base64: string,

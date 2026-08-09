@@ -99,7 +99,7 @@ describe('containedMediaRect', () => {
 
 describe('source-specific editor tools', () => {
   test('exposes image transform, text replacement and cutouts only for image projects', () => {
-    expect(memeEditToolsForSource('image')).toEqual(['layers', 'text', 'transform', 'replace-text', 'subject']);
+    expect(memeEditToolsForSource('image')).toEqual(['layers', 'text', 'draw', 'transform', 'replace-text', 'subject']);
     expect(memeEditToolsForSource('video')).toContain('audio');
     expect(memeEditToolsForSource('video')).not.toContain('transform');
     expect(memeEditToolsForSource('video')).not.toContain('replace-text');
@@ -112,6 +112,11 @@ describe('source-specific editor tools', () => {
   test('offers frame stepping only where there are frames to step', () => {
     expect(memeEditToolsForSource('video')).toContain('frames');
     expect(memeEditToolsForSource('image')).not.toContain('frames');
+  });
+
+  test('offers the draw tool on both image and video sources', () => {
+    expect(memeEditToolsForSource('image')).toContain('draw');
+    expect(memeEditToolsForSource('video')).toContain('draw');
   });
 });
 

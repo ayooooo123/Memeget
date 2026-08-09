@@ -88,7 +88,7 @@ describe('search index cache', () => {
     expect(entries).toHaveLength(1);
   });
 
-  it('rebuilds against newer data when invalidated mid-build', async () => {
+  it('never resolves an in-flight build to data a mid-build write superseded', async () => {
     let calls = 0;
     let release!: () => void;
     const gate = new Promise<void>((r) => (release = r));
@@ -101,9 +101,15 @@ describe('search index cache', () => {
     const first = ensureSearchIndex(load);
     invalidateSearchIndex(); // lands while the first build is in flight
     release();
-    await first;
+    const result = await first;
 
-    // The mid-build invalidation must force the next call to rebuild.
+    // The in-flight build reloads before resolving, so the awaiting caller gets
+    // the post-invalidation data — not the pre-write snapshot that would leave a
+    // just-written transcript looking unsearchable.
+    expect(calls).toBe(2);
+    expect(result.map((e) => e.id)).toEqual([2]);
+
+    // …and the index is clean afterwards: no redundant rebuild.
     await ensureSearchIndex(load);
     expect(calls).toBe(2);
   });

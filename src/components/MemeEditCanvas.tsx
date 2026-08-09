@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Animated, PanResponder, Platform, StyleSheet, Text, View, type ImageStyle, type LayoutChangeEvent, type ViewStyle } from 'react-native';
+import { Animated, PanResponder, Platform, Pressable, StyleSheet, Text, View, type ImageStyle, type LayoutChangeEvent, type ViewStyle } from 'react-native';
 import { Image } from 'expo-image';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import { requireNativeViewManager } from 'expo-modules-core';
@@ -46,6 +46,8 @@ import {
   evaluateMaskTrackRect,
   interpolateTransformKeyframes,
   type CoverLayer,
+  type DrawElement,
+  type DrawLayer,
   type KeyframedLayer,
   type MediaOverlayLayer,
   type MemeEditLayer,
@@ -61,6 +63,7 @@ import {
   MEME_MEDIA_LAYER_BASE_WIDTH,
   resolveCutoutPlacement,
 } from '../memeImageRenderCore';
+import { appendFreehandPoint, buildDrawElement, type DrawSettings } from '../memeDrawToolCore';
 import { videoAudioPreview } from '../memeVideoAudioCore';
 import { buildMemeTextLayoutSpec, compareNativeMemeTextLayoutResults, memeTextBackingRadiusForPreview, memeTextMeasureKey, nativeMemeTextLayoutInputFromSpec, type MemeTextLayoutSpec, type NativeMemeTextLayoutResult } from '../memeTextLayoutCore';
 import { colors, radius, space, type } from '../theme';
@@ -114,6 +117,25 @@ function resolveNativeMemeTextPreviewView() {
 
 const NativeMemeTextPreviewView = resolveNativeMemeTextPreviewView();
 
+interface NativeMemeDrawPreviewProps {
+  // A JSON array of DrawElement in normalized [0,1] coords — DrawLayer.elements
+  // serialize as-is, and the native view resolves them against its own bounds.
+  elementsJson: string;
+  opacity: number;
+  style?: unknown;
+}
+
+function resolveNativeMemeDrawPreviewView() {
+  if (Platform.OS !== 'android') return null;
+  try {
+    return requireNativeViewManager<NativeMemeDrawPreviewProps>('MemegetBg', 'MemeDrawPreviewView');
+  } catch {
+    return null;
+  }
+}
+
+const NativeMemeDrawPreviewView = resolveNativeMemeDrawPreviewView();
+
 type CanvasLayerProps = {
   project: MemeEditProject;
   layer: MemeEditLayer;
@@ -158,6 +180,7 @@ const SourceVideo = React.memo(function SourceVideo({
   muted,
   volume,
   speed,
+  paused,
   seekRequest,
   onTimeUs,
 }: {
@@ -166,6 +189,7 @@ const SourceVideo = React.memo(function SourceVideo({
   muted: boolean;
   volume: number;
   speed: number;
+  paused: boolean;
   seekRequest: VideoSeekRequest | null;
   onTimeUs: (timeUs: number) => void;
 }) {
@@ -183,6 +207,13 @@ const SourceVideo = React.memo(function SourceVideo({
   useEffect(() => {
     player.playbackRate = speed;
   }, [player, speed]);
+  // Reconciles play/pause with the studio's paused state on mount and on every
+  // toggle — the init callback only runs once, so this is what actually holds a
+  // still frame while you edit or resumes the loop when you press play.
+  useEffect(() => {
+    if (paused) player.pause();
+    else player.play();
+  }, [paused, player]);
   useEffect(() => {
     const timer = setInterval(() => {
       onTimeUs(Math.max(0, Math.round((player.currentTime ?? 0) * 1_000_000)));
@@ -203,6 +234,7 @@ const SourceMedia = React.memo(function SourceMedia({
   project,
   uri,
   mediaRect,
+  paused,
   previewAudio,
   seekRequest,
   onTimeUs,
@@ -211,6 +243,7 @@ const SourceMedia = React.memo(function SourceMedia({
   uri: string;
   mediaRect: ViewRect;
   previewAudio: { muted: boolean; volume: number } | null;
+  paused: boolean;
   seekRequest: VideoSeekRequest | null;
   onTimeUs: (timeUs: number) => void;
 }) {
@@ -261,6 +294,7 @@ const SourceMedia = React.memo(function SourceMedia({
             speed={project.video?.speed ?? 1}
             seekRequest={seekRequest}
             onTimeUs={onTimeUs}
+            paused={paused}
           />
         ) : (
           <Image
@@ -384,6 +418,258 @@ const CoverLayerView = React.memo(function CoverLayerView({ project, layer, medi
   );
 });
 
+// One drawn element rendered with plain Views inside a `width`x`height` box:
+// rectangles/ellipses are a single bordered View, and freehand/line/arrow are
+// rotated segment Views (round-capped via borderRadius). This is a preview
+// approximation of MemeImageRenderer's Path drawing — close enough for an
+// annotation, and it needs no vector library or native view to work.
+function segmentView(
+  a: ViewPoint,
+  b: ViewPoint,
+  strokePx: number,
+  color: string,
+  key: string
+): React.ReactNode {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const length = Math.hypot(dx, dy);
+  if (length < 0.01) return null;
+  return (
+    <View
+      key={key}
+      pointerEvents="none"
+      style={{
+        position: 'absolute',
+        left: (a.x + b.x) / 2 - length / 2,
+        top: (a.y + b.y) / 2 - strokePx / 2,
+        width: length,
+        height: strokePx,
+        borderRadius: strokePx / 2,
+        backgroundColor: color,
+        transform: [{ rotate: `${Math.atan2(dy, dx)}rad` }],
+      }}
+    />
+  );
+}
+
+function DrawElementView({ element, width, height }: { element: DrawElement; width: number; height: number }) {
+  const strokePx = Math.max(1, element.strokeScale * Math.min(width, height));
+  const points = element.points.map((point) => ({ x: point.x * width, y: point.y * height }));
+  if (element.shape === 'rectangle' || element.shape === 'ellipse') {
+    const a = points[0];
+    const b = points[points.length - 1];
+    if (!a || !b) return null;
+    const left = Math.min(a.x, b.x);
+    const top = Math.min(a.y, b.y);
+    const boxWidth = Math.abs(b.x - a.x);
+    const boxHeight = Math.abs(b.y - a.y);
+    return (
+      <View
+        pointerEvents="none"
+        style={{
+          position: 'absolute',
+          left,
+          top,
+          width: boxWidth,
+          height: boxHeight,
+          // A View can only do circular corner radii, so this is a rounded box
+          // approximating the exporter's true oval; min/2 rounds the short axis
+          // fully and reads closest to an ellipse. The export draws a real oval.
+          borderRadius: element.shape === 'ellipse' ? Math.min(boxWidth, boxHeight) / 2 : 0,
+          ...(element.filled
+            ? { backgroundColor: element.color }
+            : { borderWidth: strokePx, borderColor: element.color }),
+        }}
+      />
+    );
+  }
+  const line = element.shape === 'free' ? points : [points[0], points[points.length - 1]].filter(Boolean);
+  if (line.length === 1) {
+    const dot = line[0];
+    return (
+      <View
+        pointerEvents="none"
+        style={{ position: 'absolute', left: dot.x - strokePx / 2, top: dot.y - strokePx / 2, width: strokePx, height: strokePx, borderRadius: strokePx / 2, backgroundColor: element.color }}
+      />
+    );
+  }
+  const nodes: React.ReactNode[] = [];
+  for (let index = 1; index < line.length; index += 1) {
+    nodes.push(segmentView(line[index - 1], line[index], strokePx, element.color, `s${index}`));
+  }
+  if (element.shape === 'arrow' && line.length >= 2) {
+    const tip = line[line.length - 1];
+    const from = line[0];
+    const angle = Math.atan2(tip.y - from.y, tip.x - from.x);
+    const legLength = Math.max(strokePx * 3.5, 12);
+    const spread = (28 * Math.PI) / 180;
+    nodes.push(segmentView(tip, { x: tip.x - legLength * Math.cos(angle - spread), y: tip.y - legLength * Math.sin(angle - spread) }, strokePx, element.color, 'ah1'));
+    nodes.push(segmentView(tip, { x: tip.x - legLength * Math.cos(angle + spread), y: tip.y - legLength * Math.sin(angle + spread) }, strokePx, element.color, 'ah2'));
+  }
+  return <>{nodes}</>;
+}
+
+function DrawElementsView({
+  elements,
+  width,
+  height,
+  opacity,
+}: {
+  elements: readonly DrawElement[];
+  width: number;
+  height: number;
+  opacity: number;
+}) {
+  return (
+    <View pointerEvents="none" style={{ position: 'absolute', left: 0, top: 0, width, height, opacity }}>
+      {elements.map((element, index) => (
+        <DrawElementView key={index} element={element} width={width} height={height} />
+      ))}
+    </View>
+  );
+}
+
+// A missing native view (new JS on an older native binary) throws when React
+// Native tries to mount it. This boundary turns that into a silent switch to
+// the plain-View renderer instead of a red screen, so the preview degrades
+// gracefully exactly where the export would also fall back.
+class NativeDrawPreviewBoundary extends React.Component<
+  { fallback: React.ReactNode; children: React.ReactNode },
+  { failed: boolean }
+> {
+  state = { failed: false };
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+  render() {
+    return this.state.failed ? this.props.fallback : this.props.children;
+  }
+}
+
+// Draw marks rendered into a `width`x`height` box: prefers the native view
+// (one Canvas Path through the same MemeDrawPrimitives as the exporter — so the
+// preview matches the export AND a long freehand stroke is one draw, not
+// hundreds of reconciled Views), and falls back to the plain-View renderer
+// where the native view is unavailable. Callers position the box.
+function DrawMarks({
+  elements,
+  width,
+  height,
+  opacity,
+}: {
+  elements: readonly DrawElement[];
+  width: number;
+  height: number;
+  opacity: number;
+}) {
+  const fallback = <DrawElementsView elements={elements} width={width} height={height} opacity={opacity} />;
+  if (!NativeMemeDrawPreviewView) return fallback;
+  return (
+    <NativeDrawPreviewBoundary fallback={fallback}>
+      <NativeMemeDrawPreviewView elementsJson={JSON.stringify(elements)} opacity={opacity} style={StyleSheet.absoluteFill} />
+    </NativeDrawPreviewBoundary>
+  );
+}
+
+const DrawLayerView = React.memo(function DrawLayerView({
+  layer,
+  mediaRect,
+  hidden,
+}: {
+  layer: DrawLayer;
+  mediaRect: ViewRect;
+  hidden: boolean;
+}) {
+  if (hidden) return null;
+  return (
+    <View pointerEvents="none" style={viewRectToAbsoluteStyle(mediaRect)}>
+      <DrawMarks elements={layer.elements} width={mediaRect.width} height={mediaRect.height} opacity={layer.opacity} />
+    </View>
+  );
+});
+
+// The active drawing surface: captures a gesture into normalized points, shows
+// the in-progress mark live, and commits a finished element on release.
+const DrawSurface = React.memo(function DrawSurface({
+  mediaRect,
+  settings,
+  disabled,
+  onCommit,
+}: {
+  mediaRect: ViewRect;
+  settings: DrawSettings;
+  disabled: boolean;
+  onCommit: (element: DrawElement) => void;
+}) {
+  const [current, setCurrent] = useState<NormalizedPoint[]>([]);
+  const currentRef = useRef<NormalizedPoint[]>([]);
+  const setPoints = useCallback((points: NormalizedPoint[]) => {
+    currentRef.current = points;
+    setCurrent(points);
+  }, []);
+  const normalize = useCallback(
+    (locationX: number, locationY: number): NormalizedPoint => ({
+      x: Math.max(0, Math.min(1, locationX / mediaRect.width)),
+      y: Math.max(0, Math.min(1, locationY / mediaRect.height)),
+    }),
+    [mediaRect.height, mediaRect.width]
+  );
+  const pan = useMemo(
+    () =>
+      PanResponder.create({
+        onStartShouldSetPanResponder: () => !disabled,
+        onMoveShouldSetPanResponder: () => !disabled,
+        onPanResponderGrant: (event) => {
+          const point = normalize(event.nativeEvent.locationX, event.nativeEvent.locationY);
+          setPoints([point]);
+        },
+        onPanResponderMove: (event) => {
+          const point = normalize(event.nativeEvent.locationX, event.nativeEvent.locationY);
+          if (settings.shape === 'free') {
+            const next = appendFreehandPoint(currentRef.current, point);
+            if (next !== currentRef.current) setPoints(next);
+          } else {
+            setPoints([currentRef.current[0] ?? point, point]);
+          }
+        },
+        onPanResponderRelease: () => {
+          const element = buildDrawElement(settings, currentRef.current);
+          setPoints([]);
+          if (element) {
+            tap();
+            onCommit(element);
+          }
+        },
+        onPanResponderTerminate: () => setPoints([]),
+      }),
+    [disabled, normalize, onCommit, setPoints, settings]
+  );
+  const draft = current.length > 0 ? buildDrawElement(settings, current) : null;
+  return (
+    <View
+      {...pan.panHandlers}
+      style={[styles.drawSurface, viewRectToAbsoluteStyle(mediaRect)]}
+      accessible
+      accessibilityRole="button"
+      accessibilityLabel="Drawing surface"
+      accessibilityHint="Drag to draw. Activate to add a cross-out line through the middle."
+      accessibilityState={{ disabled }}
+      accessibilityActions={[{ name: 'activate', label: 'Add a cross-out line' }]}
+      onAccessibilityAction={(event) => {
+        if (disabled || event.nativeEvent.actionName !== 'activate') return;
+        // The label promises a cross-out line, so commit a line regardless of
+        // the currently selected shape.
+        const element = buildDrawElement({ ...settings, shape: 'line', filled: false }, [
+          { x: 0.15, y: 0.5 },
+          { x: 0.85, y: 0.5 },
+        ]);
+        if (element) onCommit(element);
+      }}
+    >
+      {draft && <DrawMarks elements={[draft]} width={mediaRect.width} height={mediaRect.height} opacity={1} />}
+    </View>
+  );
+});
 const TransformableLayerView = React.memo(function TransformableLayerView({
   project,
   layer,
@@ -1085,6 +1371,10 @@ export const MemeEditCanvas = React.memo(function MemeEditCanvas({
   previewAudio = null,
   seekRequest = null,
   onPlaybackTimeUs,
+  drawSettings = null,
+  paused = false,
+  onTogglePlayback,
+  onCommitDrawElement,
 }: {
   project: MemeEditProject;
   selectedLayerId: string | null;
@@ -1102,6 +1392,13 @@ export const MemeEditCanvas = React.memo(function MemeEditCanvas({
   seekRequest?: VideoSeekRequest | null;
   /** Attach only while something outside needs the playhead; it fires ~30×/s. */
   onPlaybackTimeUs?: (timeUs: number) => void;
+  /** Non-null puts the canvas in draw mode: the drawing surface is live. */
+  drawSettings?: DrawSettings | null;
+  /** Holds the source video on a still frame while true. */
+  paused?: boolean;
+  /** Toggles source video play/pause from the on-canvas control. */
+  onTogglePlayback?: () => void;
+  onCommitDrawElement?: (element: DrawElement) => void;
 }) {
   const [viewSize, setViewSize] = React.useState<ViewSize | null>(null);
   const [activeTimeUs, setActiveTimeUs] = React.useState(0);
@@ -1207,7 +1504,7 @@ export const MemeEditCanvas = React.memo(function MemeEditCanvas({
     <View style={styles.root} onLayout={onLayout} {...selectPan.panHandlers} accessibilityLabel="Meme editing canvas">
       <View style={styles.checker} pointerEvents="none" />
       {mediaRect ? (
-        <SourceMedia project={project} uri={sourceUri} mediaRect={mediaRect} previewAudio={previewAudio} seekRequest={seekRequest} onTimeUs={onVideoTime} />
+        <SourceMedia project={project} uri={sourceUri} mediaRect={mediaRect} previewAudio={previewAudio} seekRequest={seekRequest} onTimeUs={onVideoTime} paused={paused} />
       ) : (
         <View style={styles.loadingBox}><Text style={styles.unavailableText}>Measuring canvas…</Text></View>
       )}
@@ -1215,6 +1512,9 @@ export const MemeEditCanvas = React.memo(function MemeEditCanvas({
         const hidden = canvasLayerHidden(layer, activeTimeUs, before);
         if (layer.kind === 'cover') {
           return <CoverLayerView key={layer.id} project={project} layer={layer} mediaRect={mediaRect} selected={selectedLayerId === layer.id} hidden={hidden} activeTimeUs={activeTimeUs} disabled={disabled} onSelectLayer={onSelectLayer} onCommitLayerKeyframes={onCommitLayerKeyframes} />;
+        }
+        if (layer.kind === 'draw') {
+          return <DrawLayerView key={layer.id} layer={layer} mediaRect={mediaRect} hidden={hidden} />;
         }
         return <TransformableLayerView key={layer.id} project={project} layer={layer} mediaRect={mediaRect} selected={selectedLayerId === layer.id} hidden={hidden} activeTimeUs={activeTimeUs} disabled={disabled} onSelectLayer={onSelectLayer} onCommitLayerKeyframes={onCommitLayerKeyframes} onSnapChange={setActiveSnap} />;
       })}
@@ -1271,6 +1571,24 @@ export const MemeEditCanvas = React.memo(function MemeEditCanvas({
             }
           }}
         />
+      )}
+      {mediaRect && drawSettings && onCommitDrawElement && (
+        <DrawSurface mediaRect={mediaRect} settings={drawSettings} disabled={!!disabled} onCommit={onCommitDrawElement} />
+      )}
+      {mediaRect && !drawSettings && project.source.kind === 'video' && onTogglePlayback && (
+        <Pressable
+          onPress={onTogglePlayback}
+          hitSlop={16}
+          accessibilityRole="button"
+          accessibilityLabel={paused ? 'Play preview' : 'Pause preview'}
+          style={[
+            styles.playToggle,
+            !paused && styles.playTogglePlaying,
+            { left: mediaRect.x + mediaRect.width / 2 - 32, top: mediaRect.y + mediaRect.height / 2 - 32 },
+          ]}
+        >
+          <Text style={styles.playToggleGlyph}>{paused ? '\u25B6' : '\u23F8'}</Text>
+        </Pressable>
       )}
       <View style={styles.bounds} pointerEvents="none">
         {mediaRect && <View style={[styles.mediaBounds, viewRectToAbsoluteStyle(mediaRect)]} />}
@@ -1373,6 +1691,24 @@ const styles = StyleSheet.create({
     borderColor: colors.volt,
     backgroundColor: colors.surface,
   },
+  drawSurface: {
+    position: 'absolute',
+    zIndex: 24,
+  },
+  playToggle: {
+    position: 'absolute',
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(4,5,8,0.55)',
+    borderWidth: 1,
+    borderColor: colors.borderLight,
+    zIndex: 20,
+  },
+  playTogglePlaying: { opacity: 0.35 },
+  playToggleGlyph: { color: colors.text, fontSize: 26, marginLeft: 2 },
   manualRegionSurface: {
     position: 'absolute',
     zIndex: 22,

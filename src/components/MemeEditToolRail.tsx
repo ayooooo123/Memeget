@@ -24,6 +24,7 @@ interface ToolSpec {
 const TOOLS: readonly ToolSpec[] = [
   { id: 'layers', label: 'Layers', hint: 'Show layer order and layer actions', mark: '▤' },
   { id: 'text', label: 'Text', hint: 'Add and style meme text layers', mark: 'A' },
+  { id: 'draw', label: 'Draw', hint: 'Draw freehand, cross things out, and add lines, arrows, boxes, and circles', mark: '✎' },
   { id: 'transform', label: 'Transform', hint: 'Crop, rotate, or flip this image', mark: '⌗' },
   { id: 'replace-text', label: 'Replace', hint: 'Detect text or draw a box, then Cover, Pixelate, or Replace', mark: '▨' },
   { id: 'subject', label: 'Cut out', hint: 'Isolate the subject and replace or remove the background', mark: '✂' },

@@ -4,11 +4,13 @@ import { Alert, FlatList, StyleSheet, Text, View } from 'react-native';
 import { colors, radius, space, type } from '../theme';
 import { PROJECT_LIMITS, type MemeEditLayer, type MemeEditProject } from '../memeEditProjectCore';
 import { PressableScale } from './ui';
+import { drawLayerSummary } from '../memeDrawToolCore';
 
 function layerTitle(layer: MemeEditLayer): string {
   if (layer.kind === 'text') return layer.text.trim() || 'Text layer';
   if (layer.kind === 'cover') return `${layer.mode === 'pixelate' ? 'Pixelate' : 'Cover'} region`;
   if (layer.kind === 'subject') return layer.subjectIndex == null ? 'Subject cutout' : `Subject ${layer.subjectIndex + 1}`;
+  if (layer.kind === 'draw') return 'Drawing';
   return layer.assetKind === 'video' ? 'Video overlay' : 'Image overlay';
 }
 
@@ -16,6 +18,7 @@ function layerMeta(layer: MemeEditLayer): string {
   if (layer.kind === 'text') return `${layer.style.preset} · width ${(layer.width * 100).toFixed(0)}% · size ${(layer.fontSize * 100).toFixed(0)}%`;
   if (layer.kind === 'cover') return `Correction · ${(layer.rect.width * 100).toFixed(0)} × ${(layer.rect.height * 100).toFixed(0)}%`;
   if (layer.kind === 'subject') return layer.maskTrackId ? `Mask ${layer.maskTrackId}` : 'Mask unavailable';
+  if (layer.kind === 'draw') return drawLayerSummary(layer);
   return `${layer.assetKind} · ${layer.fit}`;
 }
 

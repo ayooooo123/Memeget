@@ -174,8 +174,29 @@ describe('default projects', () => {
       speed: 1,
       audio: { muted: false, volume: 1 },
       insertedCards: [],
+      music: null,
     });
     expect(validateMemeEditProject(project)).toEqual({ ok: true, value: project });
+  });
+});
+describe('video music track', () => {
+  const base = createDefaultVideoProject(videoSource);
+  test('adds and clamps a music track', () => {
+    const next = reduceMemeEditProject(base, { type: 'set-video-music', music: { uri: 'file:///m.mp3', volume: 5, startUs: 3_000_000 } });
+    expect(next.video?.music).toEqual({ uri: 'file:///m.mp3', volume: 2, startUs: 3_000_000 });
+  });
+  test('clamps a negative music start to zero', () => {
+    const next = reduceMemeEditProject(base, { type: 'set-video-music', music: { uri: 'file:///m.mp3', volume: 1, startUs: -5 } });
+    expect(next.video?.music?.startUs).toBe(0);
+  });
+  test('removes the music track', () => {
+    const withMusic = reduceMemeEditProject(base, { type: 'set-video-music', music: { uri: 'file:///m.mp3', volume: 1, startUs: 0 } });
+    expect(reduceMemeEditProject(withMusic, { type: 'set-video-music', music: null }).video?.music).toBeNull();
+  });
+  test('rejects an out-of-range music volume in validation', () => {
+    const bad = JSON.parse(JSON.stringify(base)) as { video: { music: unknown } };
+    bad.video.music = { uri: 'file:///m.mp3', volume: 9 };
+    expectInvalid(bad, 'video.music.volume', 'out_of_bounds');
   });
 });
 
