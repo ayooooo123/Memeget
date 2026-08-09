@@ -174,14 +174,27 @@ express Phase B animation; Phase B only adds a **preset → keyframes** generato
 ### Audio on image projects
 
 - Add `'audio'` to the image tool list. Reuse `MemeVideoAudioTool`'s music
-  controls (`onSetMusic`): for an image project, setting music writes
-  `project.imageVideo.music` and defaults `imageVideo.durationUs` to the track's
+  controls (`onSetMusic`): for an image project, setting music **upserts**
+  `imageVideo` (creating it if `null`) and writes its `music`, defaulting
+  `imageVideo.durationUs` to the track's
   measured duration (via `probeMedia`). **This is a real refactor, not just
   hiding UI:** the tool currently assumes a non-null `project.video` (`const video
   = project.video`, `:52`) and unconditionally reads `video.retainedRanges` /
   `outputDurationUs` (`:144-145`). Split the video-only body (source mute/volume,
   retained-range duration) from the shared music controls so the music section
   works with `imageVideo`, and show the source-audio section only for video.
+
+### Motion presets (Phase B UI)
+
+- The 'motion' tool already exists for video projects (`memeEditCanvasCore.ts:97-100`).
+  Phase B adds a **preset picker** entry point for image projects, operating on
+  the currently selected artifact (`MediaOverlayLayer`): choosing a preset
+  ("slide in", "pop", "float/bob", "fade") runs the preset→keyframes generator,
+  writes the layer's `keyframes`, and upserts `imageVideo` (so the project now
+  exports as video). This is the only new Phase-B UI surface; the generator,
+  plan descriptors, and native rendering are specified below. Whether it reuses
+  the existing 'motion' tool shell or a dedicated artifact-motion sheet is an
+  implementation-planning detail for Phase B.
 
 ## Image→video export path
 
