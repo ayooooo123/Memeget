@@ -143,12 +143,35 @@ export interface VideoCompositionRejection {
   message: string;
 }
 
+// A pre-rendered transparent PNG carrying every burn-in layer (text, covers,
+// cutouts, drawings). The exporter composites it over every output frame; null
+// when the project has nothing to burn in. Produced by
+// `buildVideoOverlayRenderPlan` + the native still renderer, so the same pixels
+// the still export would draw land on the video.
+export interface VideoCompositionOverlay {
+  uri: string;
+  widthPx: number;
+  heightPx: number;
+}
+
+// An added audio track mixed into the export. Source audio is still governed by
+// `audio` (mute/volume); mute the source and add music for a straight replace.
+export interface VideoCompositionMusic {
+  uri: string;
+  volume: number;
+  // Offset into the audio file where playback begins; the track loops on from
+  // here to fill the output.
+  startUs: number;
+}
+
 export interface VideoCompositionPlan {
   version: typeof VIDEO_COMPOSITION_PLAN_VERSION;
   id: string;
   source: VideoCompositionPlanSource;
   output: VideoCompositionPlanOutput;
   audio: { muted: boolean; volume: number };
+  music: VideoCompositionMusic | null;
+  overlay: VideoCompositionOverlay | null;
   // Composition order. Empty whenever `rejections` is non-empty: a partial
   // segment list would invite a partial export.
   segments: VideoCompositionSegment[];
@@ -159,6 +182,10 @@ export interface VideoCompositionPlanOptions {
   // Caller-supplied so the plan stays deterministic (no clock, no randomness).
   planId: string;
   maxSegments?: number;
+  // File path of a pre-rendered overlay PNG to burn over every output frame.
+  // The studio renders it from `buildVideoOverlayRenderPlan`; omitted leaves
+  // the composition overlay-free (the pre-existing trim/speed/cards behaviour).
+  overlayUri?: string | null;
 }
 
 // The MIME type media3 must be told explicitly — it only sniffs `content://`
@@ -221,7 +248,7 @@ export function buildVideoCompositionPlan(
   );
   const speed = project.video.speed;
   const sourceDurationUs = Math.max(0, Math.round(project.source.durationUs ?? 0));
-  const base: Omit<VideoCompositionPlan, 'output' | 'segments' | 'rejections'> = {
+  const base: Omit<VideoCompositionPlan, 'output' | 'overlay' | 'segments' | 'rejections'> = {
     version: VIDEO_COMPOSITION_PLAN_VERSION,
     id: options.planId,
     source: {
@@ -235,6 +262,9 @@ export function buildVideoCompositionPlan(
       crop: normalizeFreeCrop(project.base.crop),
     },
     audio: { muted: project.video.audio.muted, volume: project.video.audio.volume },
+    music: project.video.music
+      ? { uri: project.video.music.uri, volume: project.video.music.volume, startUs: project.video.music.startUs ?? 0 }
+      : null,
   };
   const output: VideoCompositionPlanOutput = {
     widthPx: Math.max(1, Math.round(visible.width)),
@@ -244,9 +274,13 @@ export function buildVideoCompositionPlan(
     retainedDurationUs: 0,
     cardDurationUs: 0,
   };
+  const overlay: VideoCompositionOverlay | null = options.overlayUri
+    ? { uri: options.overlayUri, widthPx: output.widthPx, heightPx: output.heightPx }
+    : null;
   const refuse = (rejections: VideoCompositionRejection[]): VideoCompositionPlan => ({
     ...base,
     output,
+    overlay: null,
     segments: [],
     rejections,
   });
@@ -402,7 +436,7 @@ export function buildVideoCompositionPlan(
   output.retainedDurationUs = retainedTimelineUs;
   output.cardDurationUs = timelineUs - retainedTimelineUs;
   output.durationUs = Math.round(timelineUs / speed);
-  return { ...base, output, segments, rejections: [] };
+  return { ...base, output, overlay, segments, rejections: [] };
 }
 
 // Where a card lands on the retained range list. A card whose output time falls

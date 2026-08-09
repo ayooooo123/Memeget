@@ -95,7 +95,38 @@ export interface MediaOverlayLayer {
   keyframes: TransformKeyframe[];
 }
 
-export type MemeEditLayer = TextLayer | CoverLayer | SubjectLayer | MediaOverlayLayer;
+// A freehand/shape annotation layer: cross-outs, boxes, arrows, scribbles over
+// the media. Unlike text/cover it holds MANY elements (one drawing session),
+// each carrying the colour and width it was drawn with. It is deliberately
+// static — no keyframes, no per-element motion — because its whole job is
+// annotating the frame, and a static overlay is exactly what the video burn-in
+// path (one transparent bitmap over the clip) can honour.
+export type DrawShape = 'free' | 'line' | 'arrow' | 'rectangle' | 'ellipse';
+
+export interface DrawElement {
+  shape: DrawShape;
+  color: string;
+  // Stroke width as a fraction of the working canvas' short edge, so a drawing
+  // scales with the export resolution instead of being pinned to preview px.
+  strokeScale: number;
+  // Normalized [0,1] points in the working (post base-transform) canvas — the
+  // same space cover.rect lives in. `free`: the captured polyline (>= 1 point;
+  // a lone point renders as a dot). `line`/`arrow`: [start, end].
+  // `rectangle`/`ellipse`: [corner, oppositeCorner].
+  points: NormalizedPoint[];
+  // rectangle/ellipse only: fill the interior with `color` instead of stroking.
+  filled: boolean;
+}
+
+export interface DrawLayer {
+  id: string;
+  kind: 'draw';
+  elements: DrawElement[];
+  opacity: number;
+  active: TimeRangeUs | null;
+}
+
+export type MemeEditLayer = TextLayer | CoverLayer | SubjectLayer | MediaOverlayLayer | DrawLayer;
 export type KeyframedLayer = TextLayer | SubjectLayer | MediaOverlayLayer;
 
 export interface MaskTrackSpec {
@@ -125,6 +156,9 @@ export interface VideoEditSpec {
   speed: number;
   audio: { muted: boolean; volume: number };
   insertedCards: InsertedCard[];
+  // An added audio track (music) burned over the output — the remix companion
+  // to muting the source. null keeps the source audio alone.
+  music: { uri: string; volume: number; startUs: number } | null;
 }
 
 export interface MemeEditSource {
@@ -177,6 +211,9 @@ export const PROJECT_LIMITS = Object.freeze({
   maxCorrectionsPerMaskTrack: 256,
   maxExternalAssets: 32,
   maxAssetUriLength: 4_096,
+  maxDrawElements: 512,
+  maxPointsPerDrawElement: 1_024,
+  maxDrawPointsPerLayer: 8_192,
 });
 
 export const MAX_HISTORY_STATES = 30;
@@ -188,6 +225,7 @@ const MAX_TRANSFORM_SCALE = 16;
 const MIN_TRANSFORM_SCALE = 0.01;
 const MAX_ROTATION_DEGREES = 36_000;
 const MAX_PIXEL_SIZE = 256;
+export const MAX_DRAW_STROKE_SCALE = 0.5;
 const MIN_BASE_CROP_EDGE = 0.05;
 const MAX_MEDIA_DURATION_US = 24 * 60 * 60 * 1_000_000;
 const OUTPUT_ASPECTS: Record<BaseTransform['outputAspect'], true> = {
@@ -218,6 +256,13 @@ const BACKGROUND_MODES: Record<BackgroundSpec['mode'], true> = {
   image: true,
   video: true,
   transparent: true,
+};
+const DRAW_SHAPES: Record<DrawShape, true> = {
+  free: true,
+  line: true,
+  arrow: true,
+  rectangle: true,
+  ellipse: true,
 };
 
 export type ProjectValidationErrorCode =
@@ -642,6 +687,7 @@ export function createDefaultVideoProject(source: VideoSourceMetadata): MemeEdit
       speed: 1,
       audio: { muted: false, volume: 1 },
       insertedCards: [],
+      music: null,
     },
     layers: [],
     maskTracks: [],
@@ -1228,6 +1274,61 @@ function validateMaskTracks(
   return ids;
 }
 
+function validateDrawElement(
+  value: unknown,
+  path: string,
+  errors: ProjectValidationError[]
+): void {
+  if (!validateRecord(value, path, errors)) return;
+  rejectUnknownFields(value, ['shape', 'color', 'strokeScale', 'points', 'filled'], path, errors);
+  const validShape = validateEnum(value.shape, `${path}.shape`, DRAW_SHAPES, errors);
+  validateString(value.color, `${path}.color`, MAX_COLOR_LENGTH, errors);
+  const strokeScale = value.strokeScale;
+  const validStroke = validateFiniteNumber(strokeScale, `${path}.strokeScale`, errors);
+  if (validStroke && (strokeScale <= 0 || strokeScale > MAX_DRAW_STROKE_SCALE)) {
+    addError(
+      errors,
+      `${path}.strokeScale`,
+      'out_of_bounds',
+      `${path}.strokeScale must be greater than 0 and at most ${MAX_DRAW_STROKE_SCALE}.`
+    );
+  }
+  if (typeof value.filled !== 'boolean') {
+    addError(errors, `${path}.filled`, 'invalid_type', `${path}.filled must be a boolean.`);
+  } else if (value.filled && validShape && value.shape !== 'rectangle' && value.shape !== 'ellipse') {
+    // Only rectangles and ellipses have an interior to fill; accepting fill on
+    // a stroke shape would disagree with normalization, which clears it.
+    addError(errors, `${path}.filled`, 'invalid_value', `${path}.filled is only valid for a rectangle or ellipse.`);
+  }
+  const points = value.points;
+  if (!Array.isArray(points)) {
+    addError(errors, `${path}.points`, 'invalid_type', `${path}.points must be an array.`);
+    return;
+  }
+  if (points.length > PROJECT_LIMITS.maxPointsPerDrawElement) {
+    addError(
+      errors,
+      `${path}.points`,
+      'limit_exceeded',
+      `${path}.points exceeds the ${PROJECT_LIMITS.maxPointsPerDrawElement}-point limit.`
+    );
+  }
+  points.forEach((point, pointIndex) =>
+    validateNormalizedPoint(point, `${path}.points[${pointIndex}]`, errors)
+  );
+  // Per-shape point-count contract: `free` needs at least one point; the fixed
+  // shapes need exactly two so their geometry is unambiguous.
+  if (validShape) {
+    if (value.shape === 'free') {
+      if (points.length < 1) {
+        addError(errors, `${path}.points`, 'out_of_bounds', `${path}.points must have at least one point for a free stroke.`);
+      }
+    } else if (points.length !== 2) {
+      addError(errors, `${path}.points`, 'out_of_bounds', `${path}.points must have exactly two points for a ${value.shape}.`);
+    }
+  }
+}
+
 function validateLayer(
   value: unknown,
   index: number,
@@ -1401,11 +1502,33 @@ function validateLayer(
     validateKeyframes(value.keyframes, `${path}.keyframes`, sourceKind, active, errors);
     return;
   }
+  if (value.kind === 'draw') {
+    rejectUnknownFields(value, ['id', 'kind', 'elements', 'opacity', 'active'], path, errors);
+    validateUnitNumber(value.opacity, `${path}.opacity`, errors);
+    readValidActiveRange(value.active, `${path}.active`, sourceKind, durationUs, errors);
+    const elements = value.elements;
+    if (!Array.isArray(elements)) {
+      addError(errors, `${path}.elements`, 'invalid_type', `${path}.elements must be an array.`);
+      return;
+    }
+    if (elements.length > PROJECT_LIMITS.maxDrawElements) {
+      addError(errors, `${path}.elements`, 'limit_exceeded', `${path}.elements exceeds the ${PROJECT_LIMITS.maxDrawElements}-element limit.`);
+    }
+    let totalPoints = 0;
+    elements.forEach((element, elementIndex) => {
+      validateDrawElement(element, `${path}.elements[${elementIndex}]`, errors);
+      if (isRecord(element) && Array.isArray(element.points)) totalPoints += element.points.length;
+    });
+    if (totalPoints > PROJECT_LIMITS.maxDrawPointsPerLayer) {
+      addError(errors, `${path}.elements`, 'limit_exceeded', `${path}.elements has ${totalPoints} points, past the ${PROJECT_LIMITS.maxDrawPointsPerLayer}-point layer limit.`);
+    }
+    return;
+  }
   addError(
     errors,
     `${path}.kind`,
     'invalid_value',
-    `${path}.kind must be text, cover, subject, or media.`
+    `${path}.kind must be text, cover, subject, media, or draw.`
   );
 }
 
@@ -1421,7 +1544,7 @@ function validateVideo(
   }
   if (sourceKind !== 'video') return;
   if (!validateRecord(value, 'video', errors)) return;
-  rejectUnknownFields(value, ['retainedRanges', 'speed', 'audio', 'insertedCards'], 'video', errors);
+  rejectUnknownFields(value, ['retainedRanges', 'speed', 'audio', 'insertedCards', 'music'], 'video', errors);
   if (!Array.isArray(value.retainedRanges)) {
     addError(errors, 'video.retainedRanges', 'invalid_type', 'video.retainedRanges must be an array.');
   } else {
@@ -1480,6 +1603,23 @@ function validateVideo(
     const validVolume = validateFiniteNumber(volume, 'video.audio.volume', errors);
     if (validVolume && (volume < 0 || volume > 2)) {
       addError(errors, 'video.audio.volume', 'out_of_bounds', 'video.audio.volume must be between 0 and 2.');
+    }
+  }
+  // Music is optional and additive: absent or null means "source audio only".
+  if (value.music !== null && value.music !== undefined && validateRecord(value.music, 'video.music', errors)) {
+    rejectUnknownFields(value.music, ['uri', 'volume', 'startUs'], 'video.music', errors);
+    validateString(value.music.uri, 'video.music.uri', PROJECT_LIMITS.maxAssetUriLength, errors);
+    const musicVolume = value.music.volume;
+    const validMusicVolume = validateFiniteNumber(musicVolume, 'video.music.volume', errors);
+    if (validMusicVolume && (musicVolume < 0 || musicVolume > 2)) {
+      addError(errors, 'video.music.volume', 'out_of_bounds', 'video.music.volume must be between 0 and 2.');
+    }
+    const musicStart = value.music.startUs;
+    if (musicStart !== undefined) {
+      const validMusicStart = validateIntegerTime(musicStart, 'video.music.startUs', errors);
+      if (validMusicStart && (musicStart < 0 || musicStart > MAX_MEDIA_DURATION_US)) {
+        addError(errors, 'video.music.startUs', 'out_of_bounds', 'video.music.startUs must be a bounded non-negative time.');
+      }
     }
   }
   if (!Array.isArray(value.insertedCards)) {
@@ -1818,6 +1958,16 @@ function cloneLayer(layer: MemeEditLayer): MemeEditLayer {
       })),
     };
   }
+  if (layer.kind === 'draw') {
+    return {
+      ...layer,
+      active: layer.active ? { ...layer.active } : null,
+      elements: layer.elements.map((element) => ({
+        ...element,
+        points: element.points.map((point) => ({ ...point })),
+      })),
+    };
+  }
   const keyframes = layer.keyframes.map((frame) => ({ ...frame, center: { ...frame.center } }));
   if (layer.kind === 'text') {
     return {
@@ -1867,6 +2017,10 @@ function assertLayerStringsAreBounded(layer: MemeEditLayer): void {
     assertBoundedString(layer.maskTrackId, MAX_ID_LENGTH, 'Mask track ID');
     if (layer.outlineColor !== null) {
       assertBoundedString(layer.outlineColor, MAX_COLOR_LENGTH, 'Subject outline color');
+    }
+  } else if (layer.kind === 'draw') {
+    for (const element of layer.elements) {
+      assertBoundedString(element.color, MAX_COLOR_LENGTH, 'Draw color');
     }
   } else {
     assertBoundedString(
@@ -1956,6 +2110,49 @@ function normalizeMaskTrack(
   return { id: track.id, active, corrections };
 }
 
+function normalizeDrawElement(element: DrawElement): DrawElement {
+  const shape: DrawShape = DRAW_SHAPES[element.shape] ? element.shape : 'free';
+  // Select the points that matter BEFORE clamping, so an untrusted oversized
+  // array is never fully materialized: a fixed shape needs only its first and
+  // last point, and a free stroke is capped at the per-element limit. A lone
+  // point renders as a dot, so a free stroke never collapses to empty.
+  const raw = element.points;
+  let points: NormalizedPoint[];
+  if (shape === 'free') {
+    const kept = raw.length > PROJECT_LIMITS.maxPointsPerDrawElement
+      ? raw.slice(0, PROJECT_LIMITS.maxPointsPerDrawElement)
+      : raw;
+    points = kept.length === 0 ? [{ x: 0.5, y: 0.5 }] : kept.map(clampNormalizedPoint);
+  } else {
+    const first = raw[0] ? clampNormalizedPoint(raw[0]) : { x: 0.5, y: 0.5 };
+    const last = raw.length > 0 ? clampNormalizedPoint(raw[raw.length - 1]) : first;
+    points = [first, last];
+  }
+  return {
+    shape,
+    color: element.color,
+    strokeScale: roundGeometry(clampNumber(element.strokeScale, 1e-4, MAX_DRAW_STROKE_SCALE, 0.01)),
+    filled: shape === 'rectangle' || shape === 'ellipse' ? Boolean(element.filled) : false,
+    points,
+  };
+}
+
+function normalizeDrawElements(elements: readonly DrawElement[]): DrawElement[] {
+  if (elements.length > PROJECT_LIMITS.maxDrawElements) {
+    throw new RangeError(
+      `Draw elements exceed the ${PROJECT_LIMITS.maxDrawElements}-element limit after normalization.`
+    );
+  }
+  const normalized = elements.map(normalizeDrawElement);
+  const totalPoints = normalized.reduce((sum, element) => sum + element.points.length, 0);
+  if (totalPoints > PROJECT_LIMITS.maxDrawPointsPerLayer) {
+    throw new RangeError(
+      `Draw elements exceed the ${PROJECT_LIMITS.maxDrawPointsPerLayer}-point layer limit after normalization.`
+    );
+  }
+  return normalized;
+}
+
 function normalizeLayer(layer: MemeEditLayer, project: MemeEditProject): MemeEditLayer {
   assertLayerStringsAreBounded(layer);
   const durationUs = project.source.durationUs ?? 0;
@@ -1976,6 +2173,14 @@ function normalizeLayer(layer: MemeEditLayer, project: MemeEditProject): MemeEdi
         minimumTimeUs,
         maximumTimeUs
       ),
+    };
+  }
+  if (layer.kind === 'draw') {
+    return {
+      ...layer,
+      opacity: clampUnit(layer.opacity),
+      active,
+      elements: normalizeDrawElements(layer.elements),
     };
   }
   if (
@@ -2057,6 +2262,7 @@ function externalAssetCount(project: MemeEditProject): number {
     if (layer.kind === 'media') assets.add(layer.assetUri);
   }
   for (const card of project.video?.insertedCards ?? []) assets.add(card.uri);
+  if (project.video?.music) assets.add(project.video.music.uri);
   return assets.size;
 }
 
@@ -2078,6 +2284,7 @@ export type MemeEditProjectAction =
   | { type: 'set-video-retained-ranges'; retainedRanges: TimeRangeUs[] }
   | { type: 'set-video-speed'; speed: number }
   | { type: 'set-video-audio'; audio: VideoEditSpec['audio'] }
+  | { type: 'set-video-music'; music: { uri: string; volume: number; startUs: number } | null }
   | { type: 'add-layer'; layer: MemeEditLayer; index?: number }
   | { type: 'add-layers'; layers: MemeEditLayer[]; index?: number }
   | { type: 'update-layer'; layer: MemeEditLayer }
@@ -2174,6 +2381,19 @@ export function reduceMemeEditProject(
           },
         },
       };
+    case 'set-video-music': {
+      if (project.video === null) return project;
+      if (action.music === null) {
+        return { ...project, video: { ...project.video, music: null } };
+      }
+      assertBoundedString(action.music.uri, PROJECT_LIMITS.maxAssetUriLength, 'Music URI');
+      const music = {
+        uri: action.music.uri,
+        volume: roundGeometry(clampNumber(action.music.volume, 0, 2, 1)),
+        startUs: Math.max(0, Math.round(clampNumber(action.music.startUs, 0, MAX_MEDIA_DURATION_US, 0))),
+      };
+      return enforceProjectBounds({ ...project, video: { ...project.video, music } });
+    }
     case 'add-layer': {
       if (action.index !== undefined && !Number.isSafeInteger(action.index)) return project;
       if (project.layers.length >= PROJECT_LIMITS.maxLayers) {
@@ -2269,6 +2489,8 @@ export function reduceMemeEditProject(
           maximumTimeUs
         );
         layers[index] = { ...original, active, corrections };
+      } else if (original.kind === 'draw') {
+        layers[index] = { ...original, active };
       } else {
         const keyframes = normalizeTransformKeyframes(
           original.keyframes,
@@ -2282,7 +2504,7 @@ export function reduceMemeEditProject(
     case 'set-layer-keyframes': {
       const index = project.layers.findIndex((layer) => layer.id === action.id);
       const candidate = project.layers[index];
-      if (candidate === undefined || candidate.kind === 'cover') return project;
+      if (candidate === undefined || candidate.kind === 'cover' || candidate.kind === 'draw') return project;
       const original = candidate;
       const minimumTimeUs = original.active?.startUs ?? 0;
       const maximumTimeUs = original.active?.endUs ?? 0;

@@ -85,6 +85,7 @@ export type ProjectHistoryCommand = 'undo' | 'redo';
 export type MemeEditToolId =
   | 'layers'
   | 'text'
+  | 'draw'
   | 'transform'
   | 'replace-text'
   | 'subject'
@@ -95,8 +96,8 @@ export type MemeEditToolId =
 
 export function memeEditToolsForSource(kind: MemeEditProject['source']['kind']): MemeEditToolId[] {
   return kind === 'image'
-    ? ['layers', 'text', 'transform', 'replace-text', 'subject']
-    : ['layers', 'text', 'timeline', 'frames', 'motion', 'audio'];
+    ? ['layers', 'text', 'draw', 'transform', 'replace-text', 'subject']
+    : ['layers', 'text', 'draw', 'timeline', 'frames', 'motion', 'audio'];
 }
 
 /**
@@ -780,6 +781,7 @@ export function describeCanvasLayers(project: MemeEditProject): CanvasLayerDescr
       const unavailable = !project.transient.maskTracks[layer.maskTrackId];
       return { id: layer.id, kind: layer.kind, unavailable, label: unavailable ? 'Subject mask unavailable' : 'Subject mask' };
     }
+    if (layer.kind === 'draw') return { id: layer.id, kind: layer.kind, unavailable: false, label: 'Drawing' };
     return { id: layer.id, kind: layer.kind, unavailable: false, label: layer.assetKind === 'video' ? 'Video overlay' : 'Image overlay' };
   });
 }

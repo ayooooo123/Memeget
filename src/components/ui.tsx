@@ -1,6 +1,6 @@
 // Shared UI primitives. Everything here is presentation-only and animation is
 // kept on the native driver so the grid/scroll never competes with JS work.
-import React, { useRef } from 'react';
+import React, { useRef, useState } from 'react';
 import {
   Animated,
   PanResponder,
@@ -171,6 +171,7 @@ export function Slider({
   tint?: string;
 }) {
   const widthRef = useRef(0);
+  const [active, setActive] = useState(false);
   const onChangeRef = useRef(onChange);
   const onCompleteRef = useRef(onComplete);
   const gestureRef = useRef(initialSliderGestureState(value));
@@ -196,6 +197,7 @@ export function Slider({
       onStartShouldSetPanResponder: () => true,
       onMoveShouldSetPanResponder: () => true,
       onPanResponderGrant: (event) => {
+        setActive(true);
         const next = valueFromX(event.nativeEvent.locationX);
         if (next !== null) transition({ type: 'grant', value: next });
       },
@@ -204,10 +206,14 @@ export function Slider({
         if (next !== null) transition({ type: 'move', value: next });
       },
       onPanResponderRelease: (event) => {
+        setActive(false);
         const next = valueFromX(event.nativeEvent.locationX);
         if (next !== null) transition({ type: 'release', value: next });
       },
-      onPanResponderTerminate: () => transition({ type: 'terminate' }),
+      onPanResponderTerminate: () => {
+        setActive(false);
+        transition({ type: 'terminate' });
+      },
     })
   );
 
@@ -231,10 +237,10 @@ export function Slider({
         onCompleteRef.current?.(next);
       }}
     >
-      <View style={styles.sliderTrack}>
+      <View style={styles.sliderTrack} pointerEvents="none">
         <View style={[styles.sliderFill, { width: pct, backgroundColor: tint }]} />
       </View>
-      <View style={[styles.sliderThumb, { left: pct, borderColor: tint }]} />
+      <View style={[styles.sliderThumb, active && styles.sliderThumbActive, { left: pct, borderColor: tint }]} pointerEvents="none" />
     </View>
   );
 }
@@ -306,6 +312,7 @@ const styles = StyleSheet.create({
     backgroundColor: colors.text,
     borderWidth: 2,
   },
+  sliderThumbActive: { transform: [{ scale: 1.35 }] },
   statusRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   dot: { width: 7, height: 7, borderRadius: 4 },
   statusText: { color: colors.muted, fontSize: 12, fontWeight: '600' },

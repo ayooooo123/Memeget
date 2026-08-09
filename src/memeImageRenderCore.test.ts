@@ -16,6 +16,8 @@ import {
   buildImageRenderPlan,
   imageRenderPlanUnavailableLayers,
   mosaicCellFloorPx,
+  buildVideoOverlayRenderPlan,
+  type ImageRenderDrawLayerPlan,
   type ImageRenderPlan,
   type ImageRenderTextLayerPlan,
 } from './memeImageRenderCore';
@@ -709,5 +711,107 @@ describe('device instrumentation fixtures', () => {
     );
 
     expect(JSON.parse(readFileSync(join(fixtureDir, 'render_plan_transparent.json'), 'utf8'))).toEqual(plan);
+  });
+});
+
+const videoSource = { uri: 'file:///clip.mp4', name: 'clip.mp4', width: 1920, height: 1080, durationUs: 8_000_000 };
+
+function drawLayer(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 'draw-1',
+    kind: 'draw' as const,
+    opacity: 1,
+    active: null,
+    elements: [
+      { shape: 'free' as const, color: '#ff2d55', strokeScale: 0.02, filled: false, points: [{ x: 0.1, y: 0.1 }, { x: 0.5, y: 0.5 }, { x: 0.9, y: 0.2 }] },
+      { shape: 'rectangle' as const, color: '#00ff00', strokeScale: 0.01, filled: true, points: [{ x: 0.2, y: 0.6 }, { x: 0.7, y: 0.9 }] },
+    ],
+    ...overrides,
+  };
+}
+
+function drawPlanOf(plan: ImageRenderPlan): ImageRenderDrawLayerPlan {
+  const layer = plan.layers.find((candidate) => candidate.kind === 'draw');
+  if (!layer || layer.kind !== 'draw') throw new Error('Expected a draw layer plan.');
+  return layer;
+}
+
+describe('draw layer render plan', () => {
+  test('resolves normalized points and stroke width into output pixels', () => {
+    const project = reduceMemeEditProject(createDefaultImageProject(imageSource), {
+      type: 'add-layer',
+      layer: drawLayer(),
+    });
+    const plan = buildImageRenderPlan(project, { planId: 'draw' });
+    const draw = drawPlanOf(plan);
+
+    expect(draw.opacity).toBe(1);
+    expect(draw.elements).toHaveLength(2);
+    // 1200x800 output, short edge 800 → strokeScale 0.02 = 16px.
+    expect(draw.elements[0].strokeWidthPx).toBeCloseTo(16, 6);
+    expect(draw.elements[0].points[1]).toEqual({ x: 600, y: 400 });
+    expect(draw.elements[1].shape).toBe('rectangle');
+    expect(draw.elements[1].filled).toBe(true);
+    expect(draw.elements[1].points).toEqual([{ x: 240, y: 480 }, { x: 840, y: 720 }]);
+  });
+
+  test('is deterministic and JSON round-trips', () => {
+    const project = reduceMemeEditProject(createDefaultImageProject(imageSource), {
+      type: 'add-layer',
+      layer: drawLayer(),
+    });
+    const first = buildImageRenderPlan(project, { planId: 'draw' });
+    const second = buildImageRenderPlan(project, { planId: 'draw' });
+    expect(JSON.stringify(first)).toBe(JSON.stringify(second));
+    expect(JSON.parse(JSON.stringify(first)) as ImageRenderPlan).toEqual(first);
+  });
+
+  test('omits an empty (cleared) draw layer from the plan', () => {
+    const project = reduceMemeEditProject(createDefaultImageProject(imageSource), {
+      type: 'add-layer',
+      layer: { id: 'empty', kind: 'draw', opacity: 1, active: null, elements: [] },
+    });
+    const plan = buildImageRenderPlan(project, { planId: 'draw' });
+    expect(plan.layers.some((layer) => layer.kind === 'draw')).toBe(false);
+  });
+});
+
+describe('buildVideoOverlayRenderPlan', () => {
+  function videoProjectWith(...layers: unknown[]): MemeEditProject {
+    return reduceMemeEditProject(createDefaultVideoProject(videoSource), {
+      type: 'add-layers',
+      layers: layers as never,
+    });
+  }
+
+  test('renders burn-in layers over a transparent canvas at the composition output size', () => {
+    const project = videoProjectWith(drawLayer(), { ...textLayer, active: null });
+    const plan = buildVideoOverlayRenderPlan(project, { planId: 'overlay' });
+    const visible = visibleImageDimensions({ width: videoSource.width, height: videoSource.height }, project.base);
+
+    expect(plan.background.mode).toBe('transparent');
+    expect(plan.output.widthPx).toBe(Math.round(visible.width));
+    expect(plan.layers.map((layer) => layer.kind)).toEqual(['draw', 'text']);
+  });
+
+  test('marks a pixelate cover unavailable because a static overlay has no frames to sample', () => {
+    const project = videoProjectWith({ ...coverLayer, mode: 'pixelate', active: null, corrections: [] });
+    const plan = buildVideoOverlayRenderPlan(project, { planId: 'overlay' });
+    const unavailable = imageRenderPlanUnavailableLayers(plan);
+    expect(unavailable).toEqual([
+      expect.objectContaining({ kind: 'unavailable', layerKind: 'cover', reason: 'pixelate-video-overlay-unsupported' }),
+    ]);
+  });
+
+  test('keeps a solid cover, which needs no frames underneath', () => {
+    const project = videoProjectWith({ ...coverLayer, mode: 'solid', active: null, corrections: [] });
+    const plan = buildVideoOverlayRenderPlan(project, { planId: 'overlay' });
+    expect(plan.layers.map((layer) => layer.kind)).toEqual(['cover']);
+  });
+
+  test('refuses an image project', () => {
+    expect(() =>
+      buildVideoOverlayRenderPlan(createDefaultImageProject(imageSource), { planId: 'overlay' })
+    ).toThrow(TypeError);
   });
 });

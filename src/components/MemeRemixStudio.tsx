@@ -40,6 +40,7 @@ import {
   createProjectHistory,
   type BaseTransform,
   type MemeEditLayer,
+  type DrawElement,
   type MemeEditProject,
   type MemeEditProjectAction,
   type ProjectHistory,
@@ -59,7 +60,7 @@ import {
 import { tap, warn } from '../haptics';
 import { colors, radius, space, type } from '../theme';
 import type { MemeRecord } from '../types';
-import { PressableScale } from './ui';
+import { PressableScale, Slider } from './ui';
 import { MemeEditCanvas, type VideoSeekRequest } from './MemeEditCanvas';
 import { MemeEditToolRail, type MemeEditTool } from './MemeEditToolRail';
 import { MemeFrameStrip } from './MemeFrameStrip';
@@ -71,6 +72,18 @@ import { MemeTimeline } from './MemeTimeline';
 import { MemeTransformInspector } from './MemeTransformInspector';
 import { MemeVideoAudioTool } from './MemeVideoAudioTool';
 import { MemeVideoMotionTool } from './MemeVideoMotionTool';
+import { MemeDrawTool } from './MemeDrawTool';
+import {
+  DEFAULT_DRAW_SETTINGS,
+  activeDrawLayer,
+  createDrawLayer,
+  canAppendElement,
+  isDrawLayerFull,
+  withAppendedElement,
+  withClearedElements,
+  withoutLastElement,
+  type DrawSettings,
+} from '../memeDrawToolCore';
 
 type StudioItem = Pick<MemeRecord, 'id' | 'kind' | 'name' | 'uri' | 'modifiedAt'>;
 
@@ -95,6 +108,7 @@ function selectedLayerSummary(project: MemeEditProject, selectedLayerId: string 
   }
   if (layer.kind === 'cover') return `${layer.mode} cover · ${(layer.rect.width * 100).toFixed(0)}% wide`;
   if (layer.kind === 'subject') return 'Subject layer · mask required';
+  if (layer.kind === 'draw') return `Drawing · ${layer.elements.length} mark${layer.elements.length === 1 ? '' : 's'}`;
   return `${layer.assetKind} overlay · ${layer.fit}`;
 }
 
@@ -213,6 +227,7 @@ export function MemeRemixStudio({
   const [cleanupPending, setCleanupPending] = useState(false);
   const [selectedLayerId, setSelectedLayerId] = useState<string | null>(null);
   const [before, setBefore] = useState(false);
+  const [drawSettings, setDrawSettings] = useState<DrawSettings>(DEFAULT_DRAW_SETTINGS);
   const [inlineError, setInlineError] = useState('');
   const [externalTextRevision, setExternalTextRevision] = useState(0);
   const [discarding, setDiscarding] = useState(false);
@@ -224,6 +239,9 @@ export function MemeRemixStudio({
   const [playbackUs, setPlaybackUs] = useState(0);
   const [scrubUs, setScrubUs] = useState<number | null>(null);
   const [seekRequest, setSeekRequest] = useState<VideoSeekRequest | null>(null);
+  // The source preview holds a still frame by default — an editor positions
+  // marks against a frame, not a moving picture — and plays only when asked.
+  const [paused, setPaused] = useState(true);
   // Container frame rate from the media probe. Only the frame strip needs it,
   // and only to size its cells; null makes it assume 30fps.
   const [sourceFrameRate, setSourceFrameRate] = useState<number | null>(null);
@@ -449,6 +467,7 @@ export function MemeRemixStudio({
   const parkPlayheadAt = useCallback((timeUs: number) => {
     setScrubUs(null);
     setPlaybackUs(timeUs);
+    setPaused(true);
     seekThrottleRef.current = createSeekThrottle();
     requestSeek(timeUs);
   }, [requestSeek]);
@@ -456,6 +475,7 @@ export function MemeRemixStudio({
   // of that the decoder actually sees.
   const scrubPlayhead = useCallback((sourceTimeUs: number) => {
     setScrubUs(sourceTimeUs);
+    setPaused(true);
     const step = nextSeekThrottleState(seekThrottleRef.current, sourceTimeUs, Date.now(), SCRUB_SEEK_INTERVAL_MS);
     seekThrottleRef.current = step.state;
     if (step.seekUs !== null) requestSeek(step.seekUs);
@@ -467,6 +487,17 @@ export function MemeRemixStudio({
     setPlaybackUs(sourceTimeUs);
     setScrubUs(null);
   }, [requestSeek]);
+  // Manual play/pause. Resuming from a parked frame just lets the loop run on
+  // from where the playhead sits.
+  const togglePlayback = useCallback(() => setPaused((current) => !current), []);
+  // Frame-precise tools hold a still so the chosen frame is what you edit; the
+  // audio tool plays so a volume drag is audible. Other tools keep whatever the
+  // user last chose. Fires only when the tool changes, so a manual toggle
+  // inside a tool is never overridden.
+  useEffect(() => {
+    if (activeTool === 'timeline' || activeTool === 'frames' || activeTool === 'motion') setPaused(true);
+    else if (activeTool === 'audio') setPaused(false);
+  }, [activeTool]);
   // Selecting a layer parks the playhead where that layer is actually visible,
   // so direct manipulation never happens against a frame the layer is absent from.
   const selectLayer = useCallback((id: string | null) => {
@@ -521,6 +552,10 @@ export function MemeRemixStudio({
     if (discarding) return;
     setHistory((history) => commitGestureTransaction(history, videoAudioActions(history.present, change)));
   }, [discarding, setHistory]);
+  const commitMusic = useCallback((music: { uri: string; volume: number; startUs: number } | null) => {
+    if (discarding) return;
+    setHistory((history) => commitGestureTransaction(history, [{ type: 'set-video-music', music }]));
+  }, [discarding, setHistory]);
 
   const beginTextTransaction = useCallback(() => {
     if (!discarding) setHistory(beginProjectTransaction);
@@ -564,6 +599,47 @@ export function MemeRemixStudio({
     setSelectedLayerId((current) => selectedLayerIdAfterDelete(orderedIds, id, current));
     warn();
   }, [applyAction, project?.layers]);
+  // One committed mark = one history step, so undo peels marks off one at a
+  // time. A mark lands on the active drawing (the selected one, else the
+  // top-most), or opens a fresh draw layer when there is none.
+  const commitDrawElement = useCallback((element: DrawElement) => {
+    if (!project || discarding) return;
+    const existing = activeDrawLayer(project.layers, selectedLayerId);
+    if (existing) {
+      if (!canAppendElement(existing, element)) {
+        setInlineError('This drawing is full. Add a new draw layer for more marks.');
+        return;
+      }
+      applyAction({ type: 'update-layer', layer: withAppendedElement(existing, element) });
+      return;
+    }
+    if (project.layers.length >= PROJECT_LIMITS.maxLayers) {
+      setInlineError(`Project already has the ${PROJECT_LIMITS.maxLayers} layer maximum.`);
+      return;
+    }
+    const id = nextDuplicateLayerId(`studio-${item?.id ?? 'session'}-draw`, project.layers.map((layer) => layer.id));
+    applyAction({ type: 'add-layer', layer: withAppendedElement(createDrawLayer(id), element) });
+    setSelectedLayerId(id);
+  }, [applyAction, discarding, item?.id, project, selectedLayerId]);
+  const clearDrawing = useCallback(() => {
+    if (!project || discarding) return;
+    const layer = activeDrawLayer(project.layers, selectedLayerId);
+    if (layer && layer.elements.length > 0) {
+      applyAction({ type: 'update-layer', layer: withClearedElements(layer) });
+    }
+  }, [applyAction, discarding, project, selectedLayerId]);
+  const removeLastMark = useCallback(() => {
+    if (!project || discarding) return;
+    const layer = activeDrawLayer(project.layers, selectedLayerId);
+    if (layer && layer.elements.length > 0) {
+      applyAction({ type: 'update-layer', layer: withoutLastElement(layer) });
+    }
+  }, [applyAction, discarding, project, selectedLayerId]);
+  const setDrawOpacity = useCallback((opacity: number) => {
+    if (!project || discarding) return;
+    const layer = activeDrawLayer(project.layers, selectedLayerId);
+    if (layer) applyAction({ type: 'update-layer', layer: { ...layer, opacity } });
+  }, [applyAction, discarding, project, selectedLayerId]);
 
   const cancel = useCallback(() => {
     flushPendingTextSnapshot();
@@ -666,6 +742,8 @@ export function MemeRemixStudio({
       ? 'Layer tray'
       : activeTool === 'text'
         ? 'Text'
+        : activeTool === 'draw'
+          ? 'Draw'
         : activeTool === 'transform'
           ? 'Image transform'
           : activeTool === 'timeline'
@@ -679,6 +757,7 @@ export function MemeRemixStudio({
                   : activeTool === 'subject'
                     ? 'Cut out subject'
                     : 'Replace text';
+  const activeDrawing = project ? activeDrawLayer(project.layers, selectedLayerId) : null;
 
   const status = project
     ? `${project.source.kind.toUpperCase()} · ${project.source.width}×${project.source.height}${project.source.durationUs ? ` · ${(project.source.durationUs / 1_000_000).toFixed(1)}s` : ''}`
@@ -730,6 +809,7 @@ export function MemeRemixStudio({
               </View>
               <View style={[styles.topBarRow, styles.commandRow]}>
                 <HeaderButton label="Before" glyph="◑" showLabel={headerLayout.showCommandLabels} hint="Hold to hide all edit layers without resetting video playback. Screen reader activate toggles before and after." disabled={!ready} selected={before} onPressIn={showBefore} onPressOut={hideBefore} accessibilityActions={[{ name: 'activate', label: before ? 'Show edited layers' : 'Show original media' }]} onAccessibilityAction={toggleBeforeForAccessibility} />
+                {project?.source.kind === 'video' && <HeaderButton label={paused ? 'Play' : 'Pause'} glyph={paused ? '▶' : '⏸'} showLabel={headerLayout.showCommandLabels} hint="Play or pause the source video preview" onPress={togglePlayback} disabled={!ready} selected={!paused} />}
                 <HeaderButton label="Undo" glyph="↶" showLabel={headerLayout.showCommandLabels} hint="Undo the last edit transaction" onPress={undo} disabled={!canUndo || disabled} />
                 <HeaderButton label="Redo" glyph="↷" showLabel={headerLayout.showCommandLabels} hint="Redo the next edit transaction" onPress={redo} disabled={!canRedo || disabled} />
                 <View style={styles.commandSpacer} />
@@ -744,6 +824,7 @@ export function MemeRemixStudio({
                 <Text style={styles.status} numberOfLines={1}>{headerStatus}</Text>
               </View>
               <HeaderButton label="Before" hint="Hold to hide all edit layers without resetting video playback. Screen reader activate toggles before and after." disabled={!ready} selected={before} onPressIn={showBefore} onPressOut={hideBefore} accessibilityActions={[{ name: 'activate', label: before ? 'Show edited layers' : 'Show original media' }]} onAccessibilityAction={toggleBeforeForAccessibility} />
+              {project?.source.kind === 'video' && <HeaderButton label={paused ? 'Play' : 'Pause'} hint="Play or pause the source video preview" onPress={togglePlayback} disabled={!ready} selected={!paused} />}
               <HeaderButton label="Undo" hint="Undo the last edit transaction" onPress={undo} disabled={!canUndo || disabled} />
               <HeaderButton label="Redo" hint="Redo the next edit transaction" onPress={redo} disabled={!canRedo || disabled} />
               <HeaderButton label={exportControl.label} hint="Render this project at full resolution and save it as a new meme" onPress={exportProject} disabled={exportControl.disabled} primary={!!onExport} />
@@ -769,15 +850,28 @@ export function MemeRemixStudio({
                 onManualTextRegionComplete={() => setManualTextRegionMode(false)}
                 previewAudio={previewAudio}
                 seekRequest={seekRequest}
-                // Deliberately NOT the frames tool: the preview loops at 30fps and a
-                // frame decode costs ~1-3s, so feeding it live playback time makes the
-                // strip chase a playhead it can never catch. It parks on the frame you
-                // chose instead.
-                onPlaybackTimeUs={activeTool === 'timeline' || activeTool === 'motion' ? setPlaybackUs : undefined}
+                // A video keeps the playhead live so the scrub bar under the
+                // canvas tracks playback; still images have no timeline.
+                onPlaybackTimeUs={project.source.kind === 'video' ? setPlaybackUs : undefined}
+                drawSettings={activeTool === 'draw' ? drawSettings : null}
+                onCommitDrawElement={commitDrawElement}
+                paused={paused}
+                onTogglePlayback={togglePlayback}
               />
               <View style={styles.readout} pointerEvents="none">
                 <Text style={styles.readoutText}>{selectedLayerSummary(project, selectedLayerId)}</Text>
               </View>
+              {project.source.kind === 'video' && (project.source.durationUs ?? 0) > 0 && (
+                <View style={styles.scrubBar}>
+                  <Slider
+                    value={playheadUs / (project.source.durationUs || 1)}
+                    onChange={(fraction) => scrubPlayhead(fraction * (project.source.durationUs || 0))}
+                    onComplete={(fraction) => endScrub(fraction * (project.source.durationUs || 0))}
+                    accessibilityLabel="Scrub video position"
+                    accessibilityDisabled={disabled}
+                  />
+                </View>
+              )}
             </View>
             <View style={[styles.sidePane, compact && { height: sidePaneHeight, width: '100%' }]}>
               <PressableScale
@@ -822,6 +916,19 @@ export function MemeRemixStudio({
                   onRegisterPendingTextFlush={registerPendingTextFlush}
                   onBeginTextTransaction={beginTextTransaction}
                   onCommitTextTransaction={commitTextTransaction}
+                />
+              ) : activeTool === 'draw' ? (
+                <MemeDrawTool
+                  settings={drawSettings}
+                  onChangeSettings={setDrawSettings}
+                  markCount={activeDrawing?.elements.length ?? 0}
+                  full={activeDrawing ? isDrawLayerFull(activeDrawing) : false}
+                  onClear={clearDrawing}
+                  onRemoveLast={removeLastMark}
+                  opacity={activeDrawing?.opacity ?? 1}
+                  onChangeOpacity={setDrawOpacity}
+                  sourceKind={project.source.kind}
+                  disabled={disabled}
                 />
               ) : activeTool === 'transform' ? (
                 // The panel has a bounded height, so anything taller than it
@@ -876,6 +983,7 @@ export function MemeRemixStudio({
                   disabled={disabled}
                   onChange={commitVideoAudio}
                   onPreviewAudio={setPreviewAudio}
+                  onSetMusic={commitMusic}
                 />
               ) : activeTool === 'subject' ? (
                 <MemeSubjectTool
@@ -992,6 +1100,11 @@ const styles = StyleSheet.create({
     borderRadius: radius.xl,
     borderWidth: 1,
     borderColor: colors.border,
+    backgroundColor: colors.bg,
+  },
+  scrubBar: {
+    paddingHorizontal: space.md,
+    paddingVertical: space.xs,
     backgroundColor: colors.bg,
   },
   sidePane: {

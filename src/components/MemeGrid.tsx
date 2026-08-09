@@ -60,7 +60,7 @@ import {
   videoExporterNativeAvailable,
 } from '../../modules/memeget-bg';
 import type { MemeEditProject } from '../memeEditProjectCore';
-import { buildImageRenderPlan, imageRenderPlanUnavailableLayers } from '../memeImageRenderCore';
+import { buildImageRenderPlan, buildVideoOverlayRenderPlan, imageRenderPlanUnavailableLayers } from '../memeImageRenderCore';
 import {
   buildVideoCompositionPlan,
   videoCompositionPlanAssetRequirements,
@@ -790,7 +790,24 @@ export const MemeGrid = React.memo(function MemeGrid({
 
   const runVideoExport = useCallback(
     async (project: MemeEditProject, item: MemeRecord, destination: ExportDestination) => {
-      const plan = buildVideoCompositionPlan(project, { planId: `meme-remix-${item.id}` });
+      const planId = `meme-remix-${item.id}`;
+      // Every burn-in layer (text, covers, cutouts, drawings) becomes one
+      // transparent PNG the size of the output frame; media3 composites it over
+      // every frame. Empty/cleared draw layers drop out in the plan, so an
+      // all-empty project yields no overlay and the composition is unchanged.
+      const overlayPlan = buildVideoOverlayRenderPlan(project, { planId });
+      const overlayUnavailable = imageRenderPlanUnavailableLayers(overlayPlan);
+      const overlayHasContent = overlayPlan.layers.some((layer) => layer.kind !== 'unavailable');
+      const willBurnOverlay = imageRendererNativeAvailable && overlayHasContent;
+      // A layer the overlay cannot draw is skipped; with no native renderer,
+      // nothing burns in, so every burn-in layer is skipped.
+      const skippedCount =
+        !willBurnOverlay && overlayHasContent ? overlayPlan.layers.length : overlayUnavailable.length;
+
+      // Validate + asset-guard the OVERLAY-FREE plan: the overlay never changes
+      // segments, buildability or requirements, and keeping its temp-file uri
+      // out of the plan here is what lets the revision below stay stable.
+      const plan = buildVideoCompositionPlan(project, { planId });
       if (!videoCompositionPlanIsBuildable(plan)) {
         // The plan already carries a sentence per refusal; showing the first is
         // more useful than "export failed".
@@ -804,7 +821,11 @@ export const MemeGrid = React.memo(function MemeGrid({
         if (rejected && rejected.length > 0) throw new Error(rejected[0].reason);
       }
 
-      const planJson = JSON.stringify(plan);
+      // Cache key: deterministic from the project. The overlay PNG's uri (a
+      // random temp path) is deliberately NOT in it, so re-exporting the same
+      // project to a second destination reuses the finished clip instead of
+      // re-encoding. The overlay bytes still gate reuse via the overlay plan.
+      const revision = willBurnOverlay ? `${JSON.stringify(plan)}|${JSON.stringify(overlayPlan)}` : JSON.stringify(plan);
       const spec = exportOutputSpec(item.name, 'video');
       const exportId = `${plan.id}-${Date.now()}`;
       exportCancelledRef.current = false;
@@ -817,22 +838,34 @@ export const MemeGrid = React.memo(function MemeGrid({
       try {
         exportStateRef.current = await runExport(
           exportStateRef.current,
-          { destination, revision: planJson },
+          { destination, revision },
           {
+            // The overlay PNG is rendered here — only on a genuine render miss —
+            // and deleted in the same scope whatever the outcome, so a reused
+            // clip never pays for it and a failed one never leaks it.
             render: () =>
               renderUnlessCancelled({
                 render: async () => {
-                  const rendered = await exportVideoProject(planJson, exportId, (event) =>
-                    setExportProgress((current) =>
-                      foldNativeExportProgress(
-                        current ?? { stage: 'preparing', progress: null, detail: '' },
-                        event
+                  let overlayPath: string | null = null;
+                  try {
+                    if (willBurnOverlay) overlayPath = await renderImageProject(JSON.stringify(overlayPlan));
+                    const composed = overlayPath
+                      ? buildVideoCompositionPlan(project, { planId, overlayUri: overlayPath })
+                      : plan;
+                    const rendered = await exportVideoProject(JSON.stringify(composed), exportId, (event) =>
+                      setExportProgress((current) =>
+                        foldNativeExportProgress(
+                          current ?? { stage: 'preparing', progress: null, detail: '' },
+                          event
+                        )
                       )
-                    )
-                  );
-                  if (!rendered) return null;
-                  nativeWarnings = rendered.warnings;
-                  return rendered.path;
+                    );
+                    if (!rendered) return null;
+                    nativeWarnings = rendered.warnings;
+                    return rendered.path;
+                  } finally {
+                    if (overlayPath) void deleteCache(overlayPath).catch(() => {});
+                  }
                 },
                 cancelled: () => exportCancelledRef.current,
                 discard: (path) => deleteCache(path).catch(() => {}),
@@ -841,10 +874,9 @@ export const MemeGrid = React.memo(function MemeGrid({
               path,
               name: spec.name,
               mimeType: spec.mimeType,
-              // Layers are not part of a composition plan yet, so a project that
-              // has them exports without them. Saying so is the difference
-              // between a known limitation and a silent truncation.
-              warnings: [...nativeWarnings, ...skippedLayerWarning(project.layers.length)],
+              // A pixelate cover or video overlay the static bitmap cannot draw
+              // is skipped and surfaced; everything else is burned into the clip.
+              warnings: [...nativeWarnings, ...skippedLayerWarning(skippedCount)],
             }),
             deliver: (result) => {
               setExportProgress({ stage: 'saving', progress: null, detail: 'Saving the result' });

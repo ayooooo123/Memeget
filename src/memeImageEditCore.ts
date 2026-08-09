@@ -8,6 +8,8 @@ import type {
   BaseTransform,
   CoverCorrectionKeyframe,
   CoverLayer,
+  DrawElement,
+  DrawLayer,
   MaskTrackSpec,
   MediaOverlayLayer,
   MemeEditLayer,
@@ -477,6 +479,44 @@ function remapCover(
   return rect ? { ...layer, rect, corrections } : null;
 }
 
+// Remap a drawing across a base-transform change: every point moves through the
+// same crop/rotate/flip map cover rects use. Points clipped out of the new frame
+// are dropped; a fixed shape whose endpoint leaves the frame is dropped whole,
+// and the layer disappears once nothing survives — the same rule remapCover
+// follows for a rect that maps away entirely.
+function remapDrawLayer(
+  layer: DrawLayer,
+  oldBase: BaseTransform,
+  newBase: BaseTransform
+): DrawLayer | null {
+  const elements: DrawElement[] = [];
+  for (const element of layer.elements) {
+    if (element.shape === 'free') {
+      // Split into contiguous runs at every dropped point: a stroke that leaves
+      // the new crop and re-enters must NOT be bridged by a straight segment
+      // across the frame — that would be a mark the user never drew.
+      let run: NormalizedPoint[] = [];
+      const flush = () => {
+        if (run.length >= 1) elements.push({ ...element, points: run });
+        run = [];
+      };
+      for (const point of element.points) {
+        const mapped = remapNormalizedPoint(point, oldBase, newBase);
+        if (mapped) run.push(mapped);
+        else flush();
+      }
+      flush();
+    } else {
+      // A fixed shape is defined by two corners; if either leaves the frame the
+      // shape is largely outside it, so drop it whole (as remapCover does).
+      const first = remapNormalizedPoint(element.points[0], oldBase, newBase);
+      const last = remapNormalizedPoint(element.points[element.points.length - 1], oldBase, newBase);
+      if (first && last) elements.push({ ...element, points: [first, last] });
+    }
+  }
+  return elements.length > 0 ? { ...layer, elements } : null;
+}
+
 function remapTextLayer(
   layer: TextLayer,
   oldBase: BaseTransform,
@@ -554,6 +594,9 @@ export function remapImageProject(project: MemeEditProject, requestedBase: BaseT
         const remapped = remapSubjectLayer(layer, project.base, newBase, oldDisplay, newDisplay);
         if (remapped) layers.push(remapped);
       }
+    } else if (layer.kind === 'draw') {
+      const remapped = remapDrawLayer(layer, project.base, newBase);
+      if (remapped) layers.push(remapped);
     } else {
       const remapped = remapMediaLayer(layer, project.base, newBase, oldDisplay, newDisplay, maskIds);
       if (remapped) layers.push(remapped);

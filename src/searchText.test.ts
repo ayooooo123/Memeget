@@ -6,7 +6,15 @@
 // — that Gemma actually emits these words — is a separate on-device check.)
 
 import { parseVision, formatGrounding, userTurn, type GroundingLabel } from './visionCore';
-import { assembleSearchText, captionSearchText, classificationContextTerms, memeExtraTerms } from './searchText';
+import {
+  assembleSearchText,
+  captionSearchText,
+  classificationContextTerms,
+  containsPhrase,
+  memeExtraTerms,
+  phraseKey,
+  phraseTokenCount,
+} from './searchText';
 
 // A representative reply in the exact shape the enriched USER_PROMPT requests,
 // covering every facet the taxonomy added.
@@ -120,5 +128,44 @@ describe('captionSearchText (the caption-vector text) carries the tags too', () 
     expect(text).toContain('burning room');
     expect(text).toContain('denial');
     expect(text).toContain('extra term');
+  });
+});
+
+describe('phrase matching (find the clip that SAYS the query)', () => {
+  // The exact on-device failure: a video transcribed as "I'm so old..." was
+  // unfindable by typing "im so old" — the term path drops "im"/"so" and the
+  // apostrophe blocked a literal compare.
+  const haystack = assembleSearchText({
+    ocr: 'me alone in my room once it turns 8pm',
+    name: 'tweet_2078262789844668506.mp4',
+    caption: '',
+    transcript: "I'm so old. I'm just getting older all the time. And then I'm gonna die.",
+    tagLabels: ['surprise'],
+    extraTerms: '',
+  });
+
+  it('normalizes apostrophes and case into a phrase key', () => {
+    expect(phraseKey("I'm so OLD.")).toBe('im so old');
+    expect(phraseKey('  multiple   spaces\t& punctuation!! ')).toBe('multiple spaces punctuation');
+  });
+
+  it('counts phrase tokens, with empty string as zero', () => {
+    expect(phraseTokenCount(phraseKey('im so old'))).toBe(3);
+    expect(phraseTokenCount(phraseKey('  '))).toBe(0);
+  });
+
+  it('matches the spoken phrase despite apostrophes and dropped short words', () => {
+    expect(containsPhrase(phraseKey(haystack), phraseKey('im so old'))).toBe(true);
+    expect(containsPhrase(phraseKey(haystack), phraseKey('gonna die'))).toBe(true);
+  });
+
+  it('respects whole-token boundaries (no substring hits)', () => {
+    expect(containsPhrase(phraseKey('a golden retriever'), phraseKey('old'))).toBe(false);
+    expect(containsPhrase(phraseKey('so young at heart'), phraseKey('so old'))).toBe(false);
+  });
+
+  it('does not match a phrase whose words are present but not contiguous', () => {
+    // "so ... old" appears, but not as the run "so old".
+    expect(containsPhrase(phraseKey('so tired and very old'), phraseKey('so old'))).toBe(false);
   });
 });

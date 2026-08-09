@@ -87,12 +87,12 @@ import {
   getModifiedTime,
   listMedia,
   persistThumb,
-  readSourceBase64,
-  writeBase64ToFolder,
+  hashStagedFile,
+  stageSourceToCache,
+  streamStagedToFolder,
   sweepOrphanThumbs,
   type SafFile,
 } from './saf';
-import { hashBase64 } from './contentHash';
 import { syncAllSidecars } from './sidecarSync';
 import { formatGrounding, type GroundingLabel, type VisionResult } from './visionCore';
 import { captionSearchText, classificationContextTerms, memeExtraTerms } from './searchText';
@@ -108,6 +108,13 @@ import {
   MAX_VLM_FRAMES,
 } from './videoFrames';
 import { mergeDurableTags } from './tagMerge';
+import {
+  entityHitsToTags,
+  retrieveEntities,
+  type EntityExemplar,
+  type EntityHit,
+} from './entityRetrieve';
+import { DEFAULT_VISION_SKIP_MODE, shouldSkipAutoVision } from './visionSkip';
 import type { Tag } from './types';
 
 
@@ -115,6 +122,57 @@ import type { Tag } from './types';
 // because the slower VLM pass adds richer tags later.
 function mergeTags(visual: Tag[], fromOcr: Tag[]): Tag[] {
   return mergeDurableTags([...visual, ...fromOcr], 4);
+}
+
+// Max cosine of imageVec against negative anchors (photo/screenshot bias).
+// Same signal classifyPrompts uses for margin correction.
+function maxAnchorSim(imageVec: number[], negativeVecs: Float32Array[]): number | undefined {
+  if (!negativeVecs.length) return undefined;
+  let best = -Infinity;
+  for (const n of negativeVecs) {
+    const c = dot(imageVec, n);
+    if (c > best) best = c;
+  }
+  return Number.isFinite(best) ? best : undefined;
+}
+
+// Fold entity-pack retrieval hits into the tag set and their associations into
+// the world-knowledge map used by extraTermsFor.
+function applyEntityTags(
+  imageVec: number[],
+  tags: Tag[],
+  exemplars: readonly EntityExemplar[],
+  assoc: Map<string, string[]>,
+  negativeAnchorSim?: number,
+  cap = 4
+): { tags: Tag[]; hits: EntityHit[] } {
+  if (!exemplars.length) return { tags, hits: [] };
+  const hits = retrieveEntities({
+    imageVec,
+    exemplars,
+    ...(negativeAnchorSim !== undefined ? { anchorSim: negativeAnchorSim } : {}),
+  });
+  if (!hits.length) return { tags, hits };
+  for (const h of hits) {
+    if (!h.associations.length) continue;
+    // entityHitsToTags lower-cases labels; keep assoc keys aligned.
+    const key = h.label.toLowerCase();
+    const prev = assoc.get(key) ?? assoc.get(h.label) ?? [];
+    assoc.set(key, [...prev, ...h.associations]);
+    if (h.label !== key && !assoc.has(h.label)) assoc.set(h.label, [...prev, ...h.associations]);
+  }
+  return { tags: mergeDurableTags([...tags, ...entityHitsToTags(hits)], cap), hits };
+}
+
+// Ids auto-describe already decided to skip (strong identity). Stay vision_state
+// pending so a forced burst can still caption them, but don't re-serve the same
+// meme every background tick.
+const autoVisionSkipIds = new Set<number>();
+
+/** Drop a meme from the auto-skip set (e.g. after the user re-queues describe). */
+export function clearAutoVisionSkip(id?: number): void {
+  if (id === undefined) autoVisionSkipIds.clear();
+  else autoVisionSkipIds.delete(id);
 }
 
 // On-device OCR (Google ML Kit on Android). Imported lazily/defensively so a
@@ -252,7 +310,18 @@ async function analyzeFrames(
   const perFrame = reps.map((r) =>
     classifyImage(r.embedding, know.labelVecs, know.exemplarHeads, know.mean, know.negativeVecs)
   );
-  const tags = mergeTags(flattenFrameTags(perFrame), ocrTags(ocrText));
+  const base = mergeTags(flattenFrameTags(perFrame), ocrTags(ocrText));
+  // Entity-pack retrieval (image↔exemplar) runs on the pooled embedding so a
+  // multi-frame clip still gets one identity vote; associations fold into
+  // search terms via know.assoc without a separate path.
+  const { tags } = applyEntityTags(
+    embedding,
+    base,
+    know.entityExemplars,
+    know.assoc,
+    maxAnchorSim(embedding, know.negativeVecs),
+    4
+  );
   return { embedding, ocrText, tags };
 }
 
@@ -325,12 +394,15 @@ export interface IndexResult {
 }
 
 // Everything needed to tag an image: zero-shot text labels, taught exemplars,
-// negative anchors, and the world-knowledge association lookup.
+// negative anchors, raw positive exemplars for entity-pack retrieval, and the
+// world-knowledge association lookup.
 interface Knowledge {
   labelVecs: LabelVec[];
   exemplarHeads: LabelHead[];
   mean: Float32Array | null;
   negativeVecs: Float32Array[];
+  /** Positive exemplars only (user teaches + imported packs) for entity retrieve. */
+  entityExemplars: EntityExemplar[];
   assoc: Map<string, string[]>;
 }
 
@@ -538,10 +610,27 @@ export async function buildKnowledge(
   for (const e of exemplars) {
     if (e.associations.length) {
       assoc.set(e.label, [...(assoc.get(e.label) ?? []), ...e.associations]);
+      // entityHitsToTags lower-cases labels; mirror keys so extraTermsFor hits.
+      const low = e.label.toLowerCase();
+      if (low !== e.label) {
+        assoc.set(low, [...(assoc.get(low) ?? []), ...e.associations]);
+      }
     }
   }
 
-  return { labelVecs, exemplarHeads, mean, negativeVecs, assoc };
+  // Raw positive vectors for entity-pack retrieval. Heads compress per-label
+  // evidence for teach-by-example classify; retrieve needs the multi-view stills.
+  const entityExemplars: EntityExemplar[] = exemplars
+    .filter((e) => e.positive)
+    .map((e) => ({
+      label: e.label,
+      category: e.category,
+      vector: e.vector,
+      associations: e.associations,
+      positive: true,
+    }));
+
+  return { labelVecs, exemplarHeads, mean, negativeVecs, entityExemplars, assoc };
 }
 
 // Build the searchable world-knowledge string for a set of tags: the label
@@ -861,20 +950,25 @@ export async function saveSharedFiles(
     opts.onProgress?.(i, files.length);
     const src = files[i];
     const kind: 'image' | 'video' = src.mimeType.startsWith('video') ? 'video' : 'image';
+    let staged: string | null = null;
     try {
-      // Read the bytes once, fingerprint them, and skip the save entirely if
-      // this exact meme is already in the library. This is what stops a re-share
-      // (or an OS that redelivers the same share intent to a cold-started
-      // process) from writing a second copy — every save mints a new file/URI,
-      // so URI-uniqueness alone never catches it. writeBase64ToFolder then reuses
-      // the bytes we already read, so a duplicate costs no extra write.
-      const data = await readSourceBase64(src.path);
-      const hash = hashBase64(data);
+      // Stage the shared file to cache with a native copy — never reading it
+      // into JS. A shared video can be hundreds of MB; the old path read the
+      // whole thing into a base64 string and wrote it back the same way, which
+      // OOM'd/froze the app (the "app becomes unusable" report). Fingerprint the
+      // staged copy from a bounded sample and skip the save entirely if this
+      // exact meme is already in the library — a re-share, or an OS that
+      // redelivers the same share intent to a cold-started process, mints a new
+      // URI every time, so URI-uniqueness alone never catches it.
+      staged = await stageSourceToCache(src.path);
+      const hash = await hashStagedFile(staged);
       if (await findContentHashUri(hash).catch(() => null)) {
         duplicates++;
         continue;
       }
-      const { uri, name } = await writeBase64ToFolder(data, src.fileName, src.mimeType, folder.uri);
+      // Stream the staged bytes into the folder in bounded chunks, so peak
+      // memory stays flat regardless of the video's size.
+      const { uri, name } = await streamStagedToFolder(staged, src.fileName, src.mimeType, folder.uri);
       await recordContentHash(hash, uri).catch(() => {});
       // Record a pending placeholder right away so the meme appears in the
       // library list the instant it's saved — before the (model-dependent,
@@ -883,6 +977,8 @@ export async function saveSharedFiles(
       saved.push({ uri, name, kind });
     } catch {
       errors++;
+    } finally {
+      if (staged) await deleteCache(staged).catch(() => {});
     }
   }
   opts.onProgress?.(files.length, files.length);
@@ -993,14 +1089,25 @@ async function retagWithKnowledge(
     }
     const visual = mergeClassified(prompts.tags, classifyExemplars(vec, know.exemplarHeads, know.mean));
     const base = mergeTags(visual, ocrTags(row.ocrText));
+    // Re-score entity packs on every re-tag so a newly imported pack lands
+    // without waiting for a full re-index. Prior entity_pack tags are dropped
+    // from `kept` and replaced by this pass.
+    const { tags: withEntities } = applyEntityTags(
+      vec,
+      base,
+      know.entityExemplars,
+      know.assoc,
+      maxAnchorSim(vec, know.negativeVecs),
+      6
+    );
 
     // Preserve VLM tags and every user-owned tag. Re-tagging applies new taught
     // knowledge; it must not erase a tag the user assigned, taught, or accepted
-    // through look-alike propagation.
+    // through look-alike propagation. entity_pack is recomputed above.
     const kept = row.tags.filter(
       (t) => t.source === 'vision' || t.source === 'manual' || t.source === 'exemplar' || t.source === 'propagated'
     );
-    const merged = mergeDurableTags([...base, ...kept], 6);
+    const merged = mergeDurableTags([...withEntities, ...kept], 6);
     // Likewise keep the vision search terms (subjects/text/caption keywords)
     // that already live in extra_terms — union them with the fresh assoc terms.
     const extraTerms = unionTerms(extraTermsFor(merged, know.assoc), row.extraTerms);
@@ -1058,6 +1165,8 @@ export interface EnrichResult {
   described: number; // ran the model
   deduped: number; // skipped — copied an identical meme's result
   failed: number;
+  /** Auto-describe skipped (strong identity); vision_state left pending. */
+  skipped: number;
 }
 
 // Minimal surface of the vision API the enricher needs — keeps indexer.ts free
@@ -1139,8 +1248,7 @@ function findTwin(m: MemeNeedingVisionRow, twins: TwinRec[]): TwinRec | null {
   return best;
 }
 
-// ---- telemetry (per-stage timing, for tuning) -------------------------------
-const telem = { described: 0, deduped: 0, failed: 0, durations: [] as number[] };
+const telem = { described: 0, deduped: 0, failed: 0, skipped: 0, durations: [] as number[] };
 function recordDuration(ms: number) {
   telem.durations.push(ms);
   if (telem.durations.length > 30) telem.durations.shift();
@@ -1150,12 +1258,19 @@ export interface VisionTelemetry {
   described: number;
   deduped: number;
   failed: number;
+  skipped: number;
   avgMs: number; // mean model time over the last ~30 described memes
 }
 export function getVisionTelemetry(): VisionTelemetry {
   const d = telem.durations;
   const avgMs = d.length ? d.reduce((a, b) => a + b, 0) / d.length : 0;
-  return { described: telem.described, deduped: telem.deduped, failed: telem.failed, avgMs };
+  return {
+    described: telem.described,
+    deduped: telem.deduped,
+    failed: telem.failed,
+    skipped: telem.skipped,
+    avgMs,
+  };
 }
 
 // Build searchable terms from merged tags + the model's free text.
@@ -1170,26 +1285,51 @@ async function describeAndSave(
   vision: VisionEnricher,
   m: MemeNeedingVisionRow,
   assoc: Map<string, string[]>,
-  idx: number
-): Promise<{ status: 'done'; payload: VisionPayload } | { status: 'failed' | 'unready' }> {
+  idx: number,
+  opts: { force?: boolean } = {}
+): Promise<
+  | { status: 'done'; payload: VisionPayload }
+  | { status: 'failed' | 'unready' | 'skipped' }
+> {
   const temp: string[] = [];
   const started = Date.now();
   try {
+    // Retrieval-augmented grounding + skip decision need only stored tags — do
+    // them before materializing frames so a strong-identity skip pays nothing.
+    const tier = recognitionTier(m.tags);
+    const entityTags = m.tags.filter((t) => t.source === 'entity_pack');
+    const entityLabels: GroundingLabel[] = entityTags.map((t) => ({
+      label: t.label,
+      category: t.category,
+    }));
+
+    // Auto-describe may skip when identity is already strong (recognized tier
+    // or a high-confidence entity_pack hit). Leave vision_state pending so a
+    // forced burst / re-caption can still run the VLM later. force:true bypasses.
+    if (
+      !opts.force &&
+      shouldSkipAutoVision({
+        mode: DEFAULT_VISION_SKIP_MODE,
+        recognitionTier: tier,
+        entityHits: entityTags.map((t) => ({ score: t.score })),
+      })
+    ) {
+      autoVisionSkipIds.add(m.id);
+      return { status: 'skipped' };
+    }
+
     const frames = await materializeFrames({ uri: m.uri, name: m.name, kind: m.kind }, idx, MAX_VLM_FRAMES);
     temp.push(...frames.temp);
 
-    // Retrieval-augmented grounding: the fast CLIP pass already tagged this meme
-    // (m.tags) from the harvested label vocabulary — knowledge the small VLM
-    // often lacks. Hand it the top format/character guesses (+ their association
-    // terms) so it can NAME templates/characters it couldn't recognize alone —
-    // but only as strongly as the recognizer's own confidence warrants, which
-    // for a non-standard meme means telling it we matched nothing at all.
-    const tier = recognitionTier(m.tags);
+    // Hand the VLM top format/character guesses (+ association terms) and any
+    // entity-pack hits so it can NAME templates/people it couldn't alone —
+    // only as strongly as the recognizer's own confidence warrants.
     const groundLabels: GroundingLabel[] = [...m.tags]
+      .filter((t) => t.source !== 'entity_pack')
       .sort((a, b) => b.score - a.score)
       .map((t) => ({ label: t.label, category: t.category }));
-    const related = m.tags.flatMap((t) => assoc.get(t.label) ?? []);
-    const grounding = formatGrounding(groundLabels, related, tier);
+    const related = m.tags.flatMap((t) => assoc.get(t.label) ?? assoc.get(t.label.toLowerCase()) ?? []);
+    const grounding = formatGrounding(groundLabels, related, tier, entityLabels);
 
     // Describe each distinct frame, stopping as soon as a frame says essentially
     // the same thing as the previous one — a static clip pays for one generation,
@@ -1224,6 +1364,7 @@ async function describeAndSave(
       : null;
 
     await setMemeVision(m.id, { caption: res.caption, captionEmbedding, tags: merged, extraTerms });
+    autoVisionSkipIds.delete(m.id);
     recordDuration(Date.now() - started);
     return { status: 'done', payload: { caption: res.caption, captionEmbedding, tags: merged, extraTerms } };
   } catch {
@@ -1240,8 +1381,9 @@ async function enrichOne(
   vision: VisionEnricher,
   m: MemeNeedingVisionRow,
   assoc: Map<string, string[]>,
-  twins: TwinRec[]
-): Promise<'done' | 'deduped' | 'failed' | 'unready'> {
+  twins: TwinRec[],
+  opts: { force?: boolean } = {}
+): Promise<'done' | 'deduped' | 'failed' | 'unready' | 'skipped'> {
   const twin = findTwin(m, twins);
   if (twin) {
     // Copy the twin's caption; re-rank tags so this meme keeps its own
@@ -1267,11 +1409,12 @@ async function enrichOne(
       tags: merged,
       extraTerms,
     });
+    autoVisionSkipIds.delete(m.id);
     telem.deduped += 1;
     return 'deduped';
   }
 
-  const r = await describeAndSave(vision, m, assoc, 0);
+  const r = await describeAndSave(vision, m, assoc, 0, opts);
   if (r.status === 'done') {
     telem.described += 1;
     pushTwin({
@@ -1290,6 +1433,10 @@ async function enrichOne(
     telem.failed += 1;
     return 'failed';
   }
+  if (r.status === 'skipped') {
+    telem.skipped += 1;
+    return 'skipped';
+  }
   return 'unready';
 }
 
@@ -1306,10 +1453,16 @@ const ENRICH_CHUNK = 24;
 
 export async function enrichLibrary(
   vision: VisionEnricher,
-  opts: { onProgress?: (p: EnrichProgress) => void; shouldCancel?: () => boolean } = {}
+  opts: {
+    onProgress?: (p: EnrichProgress) => void;
+    shouldCancel?: () => boolean;
+    /** When true (default), bypass identity skip — Settings "Describe N now". */
+    force?: boolean;
+  } = {}
 ): Promise<EnrichResult> {
   if (!vision.ready) throw new Error('Vision model is still loading — try again shortly.');
 
+  const force = opts.force !== false; // manual burst defaults to forced describe
   const assoc = await buildAssociations();
   const twins = await getTwinIndex();
   let total = 0;
@@ -1318,6 +1471,7 @@ export async function enrichLibrary(
   let described = 0;
   let deduped = 0;
   let failed = 0;
+  let skipped = 0;
   let stopped = false;
   while (!stopped) {
     if (opts.shouldCancel?.()) break;
@@ -1329,15 +1483,18 @@ export async function enrichLibrary(
     total = done + remaining;
     // Every processed row leaves the queue (done/deduped/failed all move
     // vision_state off 'pending'), so re-reading from the top never re-serves
-    // the same meme — no OFFSET to drift under the mutations.
+    // the same meme — no OFFSET to drift under the mutations. Skipped rows stay
+    // pending; when !force we filter them via autoVisionSkipIds below.
     const queue = await getMemesNeedingVision(ENRICH_CHUNK);
     if (queue.length === 0) break;
 
+    let progressed = false;
     for (const m of queue) {
       if (opts.shouldCancel?.()) {
         stopped = true;
         break;
       }
+      if (!force && autoVisionSkipIds.has(m.id)) continue;
       // Let a live search through: this burst runs generations back-to-back, and
       // without a break between them the query's text embed never reaches the
       // accelerator until the whole queue drains. Stand down while the user is
@@ -1348,37 +1505,46 @@ export async function enrichLibrary(
         break;
       }
       opts.onProgress?.({ done, total, current: m.name });
-      const r = await enrichOne(vision, m, assoc, twins);
+      const r = await enrichOne(vision, m, assoc, twins, { force });
       if (r === 'unready') {
         // The model went away mid-pass; the row is still 'pending', so looping
         // would spin on it forever.
         stopped = true;
         break;
       }
+      progressed = true;
       done++;
       if (r === 'done') described++;
       else if (r === 'deduped') deduped++;
+      else if (r === 'skipped') skipped++;
       else failed++;
     }
+    // Entire chunk was already identity-skipped — nothing left this pass can do
+    // without force. Stop rather than spin.
+    if (!progressed && !stopped) break;
   }
 
   // Report what actually happened. Snapping to done === total on cancel drew a
   // full bar for a pass the user just stopped.
   opts.onProgress?.({ done, total: Math.max(total, done), current: '' });
-  return { described, deduped, failed };
+  return { described, deduped, failed, skipped };
 }
 
 // Process exactly ONE pending meme — the unit of work for the paced background
 // loop. Returns 'empty' when nothing is left to do (caller can back off).
+// Auto path: force=false so strong-identity memes are skipped (stay pending).
 export async function enrichNextMeme(
   vision: VisionEnricher
-): Promise<'done' | 'deduped' | 'failed' | 'empty'> {
+): Promise<'done' | 'deduped' | 'failed' | 'empty' | 'skipped'> {
   if (!vision.ready) return 'empty';
-  const queue = await getMemesNeedingVision(1);
-  if (queue.length === 0) return 'empty';
+  // Fetch a small window so we can walk past memes already identity-skipped
+  // this session without re-describing them every tick.
+  const queue = await getMemesNeedingVision(Math.max(ENRICH_CHUNK, autoVisionSkipIds.size + 1));
+  const m = queue.find((row) => !autoVisionSkipIds.has(row.id));
+  if (!m) return 'empty';
   const assoc = await buildAssociations();
   const twins = await getTwinIndex();
-  const r = await enrichOne(vision, queue[0], assoc, twins);
+  const r = await enrichOne(vision, m, assoc, twins, { force: false });
   return r === 'unready' ? 'empty' : r;
 }
 
@@ -1760,7 +1926,7 @@ export async function runBackgroundSession(
   vision: VisionEnricher,
   opts: { maxItems?: number; shouldStop?: () => boolean } = {}
 ): Promise<EnrichResult> {
-  const result: EnrichResult = { described: 0, deduped: 0, failed: 0 };
+  const result: EnrichResult = { described: 0, deduped: 0, failed: 0, skipped: 0 };
   if (!vision.ready) return result;
 
   const assoc = await buildAssociations();
@@ -1770,12 +1936,15 @@ export async function runBackgroundSession(
   let n = 0;
   while (n < max) {
     if (opts.shouldStop?.()) break;
-    const queue = await getMemesNeedingVision(1);
-    if (queue.length === 0) break;
-    const r = await enrichOne(vision, queue[0], assoc, twins);
+    const queue = await getMemesNeedingVision(Math.max(8, autoVisionSkipIds.size + 1));
+    const m = queue.find((row) => !autoVisionSkipIds.has(row.id));
+    if (!m) break;
+    // Background / OS session never forces — identity skip stays active.
+    const r = await enrichOne(vision, m, assoc, twins, { force: false });
     if (r === 'unready') break;
     if (r === 'done') result.described++;
     else if (r === 'deduped') result.deduped++;
+    else if (r === 'skipped') result.skipped++;
     else result.failed++;
     n++;
   }

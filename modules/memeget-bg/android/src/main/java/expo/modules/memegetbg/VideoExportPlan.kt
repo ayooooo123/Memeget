@@ -1,6 +1,8 @@
 package expo.modules.memegetbg
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.net.Uri
@@ -44,26 +46,105 @@ internal data class VideoExportPlan(
    * common case and keeps the shader chain to the presentation alone.
    */
   val geometry: List<Effect>,
-  val hasCards: Boolean
+  val hasCards: Boolean,
+  /**
+   * A pre-rendered transparent PNG (text, covers, cutouts and drawings resolved once over a
+   * transparent canvas at the output size) to composite over every output frame, or `null` for a
+   * clip with no annotations. Built by `buildVideoOverlayRenderPlan` in
+   * `src/memeVideoCompositionCore.ts`; `null` keeps the trim/speed/card behaviour byte-identical.
+   */
+  val overlay: Overlay?,
+  /**
+   * An added audio track ("music") mixed into the output, or `null` for no change. When present its
+   * track is mixed onto the single video output alongside the source audio, which stays governed by
+   * [muted]/[volume]: a muted source plus music is a clean replace, an unmuted source plus music is
+   * both mixed. Parsed from the optional plan `music` object by [parseMusic]; `null` keeps the
+   * audio behaviour byte-identical to a plan that never carried the field.
+   */
+  val music: Music?
 ) {
-  /** Whether the export is expected to carry audio, given the source and the user's mute. */
-  fun expectsAudio(sourceHasAudio: Boolean): Boolean = !muted && sourceHasAudio
+  /**
+   * Whether the export is expected to carry audio, given the source, the user's mute, and any
+   * added [music]. Music alone forces the expectation: a muted, silent source plus a music track
+   * must still come back with audio, so a music-only export that lost its track is caught.
+   */
+  fun expectsAudio(sourceHasAudio: Boolean): Boolean = (!muted && sourceHasAudio) || music != null
 
   /**
    * @param sourceHasAudio Read off the file by [sourceHasAudioTrack], not taken from the plan:
    *   `forceAudioTrack` exists to fill a card with silence, and forcing it for a genuinely silent
    *   source would invent an audio track the user never had.
+   * @param overlayBitmap The decoded [overlay] PNG, or `null`. Decoded by the caller so the caller
+   *   also owns recycling it once the export releases its texture ([decodeOverlayBitmap]).
+   * @param music The added audio track to mix in, or `null` for none. Passed by the caller (as
+   *   [MemeVideoExporter] does with [VideoExportPlan.music]) so a test can build a music-carrying
+   *   composition without a full plan; `null` keeps the audio and sequence list byte-identical.
    */
-  fun buildComposition(sourceHasAudio: Boolean): Composition = RetainedRangeComposition.buildTimeline(
-    uri = sourceUri,
-    sourceDurationUs = sourceDurationUs,
-    segments = segments,
-    speed = speed,
-    sourceHasAudio = sourceHasAudio,
-    outputSize = outputSize,
-    audioProcessors = audioProcessors(),
-    sourceVideoEffects = geometry
-  )
+  fun buildComposition(
+    sourceHasAudio: Boolean,
+    overlayBitmap: Bitmap? = null,
+    music: Music? = null
+  ): Composition =
+    RetainedRangeComposition.buildTimeline(
+      uri = sourceUri,
+      sourceDurationUs = sourceDurationUs,
+      segments = segments,
+      speed = speed,
+      sourceHasAudio = sourceHasAudio,
+      outputSize = outputSize,
+      audioProcessors = audioProcessors(),
+      sourceVideoEffects = geometry,
+      overlay = overlayBitmap,
+      musicUri = music?.uri,
+      musicVolume = music?.volume ?: 1f,
+      musicStartUs = music?.startUs ?: 0L
+    )
+
+  /**
+   * Decode the [overlay] PNG, or `null` when the plan carries none.
+   *
+   * Opened through the ContentResolver, the same way [RetainedRangeComposition] opens a title
+   * card, so a `file://` app render and a `content://` grant both work and nothing else can be
+   * read. A card that will not decode is an [IOException] rather than a silently overlay-free
+   * export - the annotations are the whole point of the overlay.
+   */
+  fun decodeOverlayBitmap(context: Context): Bitmap? {
+    val overlay = overlay ?: return null
+    val uri = Uri.parse(overlay.uri)
+    // Bounds-only pass FIRST: reject an oversized image by its header before
+    // BitmapFactory allocates the full bitmap, so a hand-built plan pointing at
+    // a highly compressed huge PNG fails as an IOException instead of an OOM.
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    try {
+      context.contentResolver.openInputStream(uri).use { input ->
+        if (input == null) throw IOException("The overlay ${overlay.uri} could not be opened")
+        BitmapFactory.decodeStream(input, null, bounds)
+      }
+    } catch (error: Exception) {
+      throw IOException("The overlay could not be read: ${error.message.orEmpty().take(200)}")
+    }
+    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+      throw IOException("The overlay ${overlay.uri} could not be decoded as an image")
+    }
+    if (bounds.outWidth.toLong() * bounds.outHeight.toLong() > MAX_OVERLAY_PIXELS) {
+      throw IOException(
+        "The overlay is ${bounds.outWidth}x${bounds.outHeight}, past the " +
+          "${MAX_OVERLAY_PIXELS / 1_000_000}MP the frame processor will upload."
+      )
+    }
+    return try {
+      context.contentResolver.openInputStream(uri).use { input ->
+        if (input == null) throw IOException("The overlay ${overlay.uri} could not be opened")
+        BitmapFactory.decodeStream(
+          input,
+          null,
+          BitmapFactory.Options().apply { inPreferredConfig = Bitmap.Config.ARGB_8888 }
+        )
+      }
+    } catch (error: Exception) {
+      throw IOException("The overlay could not be decoded: ${error.message.orEmpty().take(200)}")
+    } ?: throw IOException("The overlay ${overlay.uri} could not be decoded as an image")
+  }
 
   /**
    * Mute is a gain of zero, not a removed track.
@@ -77,6 +158,20 @@ internal data class VideoExportPlan(
     if (gain == 1f) return emptyList()
     return listOf(GainProcessor(DefaultGainProvider.Builder(gain).build()))
   }
+
+  /**
+   * A transparent overlay PNG and the frame size it was rendered against. The dimensions come from
+   * the plan; the decode's real dimensions drive the fill scale so a downsampled decode still
+   * covers the frame.
+   */
+  data class Overlay(val uri: String, val widthPx: Int, val heightPx: Int)
+
+  /**
+   * An added audio track and the linear gain to play it at. The gain is applied on the music item
+   * itself (not the composition audio processors, which govern the source), so mixing it in leaves
+   * the source's mute/volume untouched.
+   */
+  data class Music(val uri: String, val volume: Float, val startUs: Long)
 
   companion object {
     const val SUPPORTED_VERSION = 1
@@ -167,7 +262,9 @@ internal data class VideoExportPlan(
         muted = audio?.optBoolean("muted") ?: false,
         volume = volume,
         geometry = geometryEffects(source),
-        hasCards = hasCards
+        hasCards = hasCards,
+        overlay = parseOverlay(plan),
+        music = parseMusic(plan)
       )
     }
 
@@ -175,6 +272,48 @@ internal data class VideoExportPlan(
     const val MIN_SPEED = 0.5f
     const val MAX_SPEED = 2f
     const val MAX_VOLUME = 2f
+
+    /**
+     * The overlay is uploaded to a GL texture whole, so it is screened against the same ceiling a
+     * title card is (`GlUtil.MAX_BITMAP_DECODING_SIZE`) rather than left to OOM the frame
+     * processor mid-export. In practice the overlay is rendered at the output frame size, which is
+     * already far below this.
+     */
+    const val MAX_OVERLAY_PIXELS = RetainedRangeComposition.MAX_CARD_PIXELS
+
+    /**
+     * The optional `overlay` object: a pre-rendered transparent PNG the exporter burns over every
+     * frame. Absent or `null` leaves the composition overlay-free, which is the pre-existing
+     * trim/speed/card behaviour. The dimensions are stated by the plan (the size it was rendered
+     * at) but not trusted for scaling - the decode's real dimensions drive the fill.
+     */
+    private fun parseOverlay(plan: JSONObject): Overlay? {
+      val overlay = plan.optJSONObject("overlay") ?: return null
+      val uri = overlay.optString("uri")
+      if (uri.isBlank()) throw IOException("The composition plan overlay has no uri")
+      val width = finiteLong(overlay, "widthPx").toInt()
+      val height = finiteLong(overlay, "heightPx").toInt()
+      if (width <= 0 || height <= 0) {
+        throw IOException("The composition plan overlay is ${width}x$height")
+      }
+      return Overlay(uri = uri, widthPx = width, heightPx = height)
+    }
+
+    /**
+     * The optional `music` object: an added audio track mixed into the output. Absent or `null`
+     * leaves the audio to the source alone, which is the pre-existing behaviour. A blank uri is an
+     * [IOException] rather than a silently music-free export - the added track is the whole point.
+     * The gain is coerced into the same `0..MAX_VOLUME` window the source volume uses, so a
+     * hand-written plan cannot ask for a level the exporter will not express.
+     */
+    private fun parseMusic(plan: JSONObject): Music? {
+      val music = plan.optJSONObject("music") ?: return null
+      val uri = music.optString("uri")
+      if (uri.isBlank()) throw IOException("The composition plan music has no uri")
+      val volume = finiteDouble(music, "volume", 1.0).toFloat()
+      val startUs = music.optLong("startUs", 0L).coerceAtLeast(0L)
+      return Music(uri = uri, volume = volume.coerceIn(0f, MAX_VOLUME), startUs = startUs)
+    }
 
     /**
      * Rotation, then flips on the oriented box, then the crop window - the same order and the same

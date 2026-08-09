@@ -65,8 +65,8 @@ export function chunkFor(name: string): string {
 
 // Change stamp for a serialized chunk, so a sync can skip rewriting files whose
 // content is byte-identical to what is already in the folder. Full pass, never
-// sampled: contentHash.hashBase64 strides over long inputs (it fingerprints
-// multi-MB media base64 where a full scan would stall the share path), and a
+// sampled: the share path's contentHash.hashFileSample only samples windows of
+// long media (a full scan of a multi-MB video would stall the share), but a
 // sampled digest can miss an edit that lands between samples — which here would
 // mean silently declining to back up changed knowledge.
 export function digest(payload: string): string {

@@ -36,7 +36,7 @@ import {
   yieldToSearch,
   type IndexProgress,
 } from '../indexer';
-import { emitLibraryChanged, onLibraryChanged, onThumbsUpdated } from '../events';
+import { emitLibraryChanged, onKnowledgeChanged, onLibraryChanged, onThumbsUpdated } from '../events';
 import { appendPage, mergeRecords, patchThumbs } from '../libraryCore';
 import { success, tap, thud } from '../haptics';
 import { pickFolder, type SafFile } from '../saf';
@@ -241,6 +241,31 @@ export function LibraryScreen({ tagSearchRequest }: { tagSearchRequest?: TagSear
     };
   }, [refresh, scheduleRefresh]);
 
+  // A transcript, caption or tag landing changes what an active query should
+  // match — e.g. a video the user searched for by a spoken word only becomes a
+  // hit once its transcription lands. Re-run the active search (debounced, and
+  // never mid-scroll) so it appears without the user retyping. Browse mode
+  // ignores this; onLibraryChanged already refreshes the grid. Debounced long
+  // enough that a bulk transcription pass firing per-clip collapses to one
+  // re-search per settle.
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const unsub = onKnowledgeChanged(() => {
+      if (!queryRef.current.trim()) return;
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        timer = undefined;
+        if (scrollingRef.current) return; // don't reorder results under a scroll
+        const q = queryRef.current.trim();
+        if (q) void runSearchRef.current(q, { background: true });
+      }, 800);
+    });
+    return () => {
+      unsub();
+      clearTimeout(timer);
+    };
+  }, []);
+
   // Video posters arriving from the background drain patch only the affected
   // tiles in place (by id) — no full re-fetch, no re-merge, no reorder — so a
   // poster landing can't re-render unrelated cells or hitch an in-progress
@@ -309,21 +334,27 @@ export function LibraryScreen({ tagSearchRequest }: { tagSearchRequest?: TagSear
   }, [serialize]);
 
   // Run a search for the given text. Empty text drops back to browse mode.
+  // `background` runs a re-search triggered by content landing (a transcript,
+  // caption or tag) rather than by the user: it refreshes ranking in place and
+  // must NOT scroll to top or reset pagination, or the grid would jump under
+  // someone reading results while a transcription pass drains.
   const runSearch = useCallback(
-    async (text: string) => {
+    async (text: string, opts: { background?: boolean } = {}) => {
       const q = text.trim();
       if (!q) {
         setResults(null);
         setSearching(false);
         return;
       }
-      // Tell the idle loops (DINO backfill, paced describes) to stand down —
-      // they were starving the text embed this search needs.
-      noteInteractive();
+      if (!opts.background) {
+        // Tell the idle loops (DINO backfill, paced describes) to stand down —
+        // they were starving the text embed this search needs.
+        noteInteractive();
+        setScrollToTopSignal((n) => n + 1);
+        // Fresh ranking → back to the first page of it.
+        setVisibleResults(PAGE);
+      }
       setSearching(true);
-      setScrollToTopSignal((n) => n + 1);
-      // Fresh ranking → back to the first page of it.
-      setVisibleResults(PAGE);
       // The scan aborts itself the moment a newer keystroke supersedes this
       // query (returns null), so stale full scans don't pile up on the JS
       // thread behind the latest one.

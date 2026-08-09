@@ -1,43 +1,37 @@
-import { hashBase64 } from './contentHash';
+import { hashFileSample } from './contentHash';
 
-describe('hashBase64', () => {
-  it('is stable: identical bytes hash identically', () => {
-    const b64 = 'aGVsbG8gd29ybGQ='; // "hello world"
-    expect(hashBase64(b64)).toBe(hashBase64(b64));
+describe('hashFileSample', () => {
+  it('is stable: identical (length, windows) hash identically', () => {
+    expect(hashFileSample(1024, ['aGVsbG8='])).toBe(hashFileSample(1024, ['aGVsbG8=']));
   });
 
-  it('separates content that differs at the same length', () => {
-    expect(hashBase64('AAAAAAAA')).not.toBe(hashBase64('AAAAAAAB'));
+  it('separates content that differs within the same length', () => {
+    expect(hashFileSample(8, ['AAAAAAAA'])).not.toBe(hashFileSample(8, ['AAAAAAAB']));
   });
 
-  it('separates content of different lengths (length is part of the key)', () => {
-    expect(hashBase64('AAAA')).not.toBe(hashBase64('AAAAAAAA'));
-    // The length prefix means a short string can never collide with a long one.
-    expect(hashBase64('AAAA').split('.')[0]).not.toBe(hashBase64('AAAAAAAA').split('.')[0]);
+  it('separates files of different byte length (length is part of the key)', () => {
+    expect(hashFileSample(4, ['AAAA'])).not.toBe(hashFileSample(8, ['AAAA']));
+    // The length prefix means two files of different size can never collide,
+    // even when their sampled windows are byte-for-byte identical.
+    expect(hashFileSample(4, ['AAAA']).split('.')[0]).not.toBe(
+      hashFileSample(8, ['AAAA']).split('.')[0]
+    );
   });
 
-  it('handles the empty string without NaN or throwing', () => {
-    const h = hashBase64('');
+  it('folds every window in, so an edit to any region moves the hash', () => {
+    const head = hashFileSample(1000, ['HEAD', 'MID', 'TAIL']);
+    expect(hashFileSample(1000, ['HEADx', 'MID', 'TAIL'])).not.toBe(head);
+    expect(hashFileSample(1000, ['HEAD', 'MIDx', 'TAIL'])).not.toBe(head);
+    expect(hashFileSample(1000, ['HEAD', 'MID', 'TAILx'])).not.toBe(head);
+  });
+
+  it('handles a zero-length file with no windows without NaN or throwing', () => {
+    const h = hashFileSample(0, []);
     expect(typeof h).toBe('string');
     expect(h).not.toMatch(/NaN/);
   });
 
-  it('stays stable on a large payload (stride-sampled path) and stays fast', () => {
-    // ~4MB of base64 exercises the len > 1_000_000 stride sampling.
-    const big = 'QUJDRA'.repeat(700_000);
-    const started = Date.now();
-    const h1 = hashBase64(big);
-    const elapsed = Date.now() - started;
-    expect(h1).toBe(hashBase64(big)); // deterministic
-    expect(elapsed).toBeLessThan(1000); // sampled, not a full O(n) pass
-
-    // A single flipped byte deep inside a large payload changes the hash when it
-    // lands on a sampled position; length always changes when a byte is added.
-    const grown = big + 'X';
-    expect(hashBase64(grown)).not.toBe(h1);
-  });
-
   it('produces a compact "length.hash" shape', () => {
-    expect(hashBase64('AAAA')).toMatch(/^[0-9a-z]+\.[0-9a-z]+$/);
+    expect(hashFileSample(4, ['AAAA'])).toMatch(/^[0-9a-z]+\.[0-9a-z]+$/);
   });
 });

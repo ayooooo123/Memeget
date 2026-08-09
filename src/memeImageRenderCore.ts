@@ -16,6 +16,8 @@ import {
   isLayerActiveAt,
   type BackgroundSpec,
   type CoverLayer,
+  type DrawLayer,
+  type DrawShape,
   type MediaOverlayLayer,
   type MemeEditLayer,
   type MemeEditProject,
@@ -163,6 +165,23 @@ export interface ImageRenderSubjectLayerPlan {
   shadowOffsetPx: number;
 }
 
+export interface ImageRenderDrawElementPlan {
+  shape: DrawShape;
+  color: string;
+  // Stroke width already resolved to OUTPUT pixels off the canvas short edge.
+  strokeWidthPx: number;
+  filled: boolean;
+  // Polyline / endpoints / corners, in OUTPUT pixels.
+  points: { x: number; y: number }[];
+}
+
+export interface ImageRenderDrawLayerPlan {
+  kind: 'draw';
+  id: string;
+  opacity: number;
+  elements: ImageRenderDrawElementPlan[];
+}
+
 export type ImageRenderUnavailableReason =
   // The subject layer's mask track has no materialized cutout to draw. Nothing
   // else about a subject layer is unsupported any more: a resolved mask IS
@@ -171,7 +190,10 @@ export type ImageRenderUnavailableReason =
   | 'subject-mask-missing'
   // Video overlays would need a decoded frame at a chosen timestamp; the still
   // exporter does not pick one silently.
-  | 'video-overlay-unsupported';
+  | 'video-overlay-unsupported'
+  // A pixelate cover reads the pixels underneath it, which a static video
+  // overlay bitmap does not have — the frames live only on the native encoder.
+  | 'pixelate-video-overlay-unsupported';
 
 export interface ImageRenderUnavailableLayerPlan {
   kind: 'unavailable';
@@ -185,6 +207,7 @@ export type ImageRenderLayerPlan =
   | ImageRenderTextLayerPlan
   | ImageRenderMediaLayerPlan
   | ImageRenderSubjectLayerPlan
+  | ImageRenderDrawLayerPlan
   | ImageRenderUnavailableLayerPlan;
 
 export interface ImageRenderPlan {
@@ -279,6 +302,71 @@ function coverPlan(layer: CoverLayer, output: ImageRenderPlanOutput): ImageRende
     mode: correction?.mode ?? layer.mode,
     color: layer.color,
     pixelSizePx: Math.max(requested, mosaicCellFloorPx(rect)),
+  };
+}
+
+function drawPlan(layer: DrawLayer, output: ImageRenderPlanOutput): ImageRenderDrawLayerPlan {
+  // Stroke width tracks the canvas short edge, so a line drawn in the preview
+  // keeps its visual weight at full export resolution.
+  const shortEdgePx = Math.min(output.widthPx, output.heightPx);
+  return {
+    kind: 'draw',
+    id: layer.id,
+    opacity: layer.opacity,
+    elements: layer.elements.map((element) => ({
+      shape: element.shape,
+      color: element.color,
+      filled: element.filled,
+      strokeWidthPx: round(Math.max(1, element.strokeScale * shortEdgePx)),
+      points: element.points.map((point) => ({
+        x: round(point.x * output.widthPx),
+        y: round(point.y * output.heightPx),
+      })),
+    })),
+  };
+}
+
+// Resolve one project layer into its render plan, or null when it contributes
+// nothing (a keyframed layer with no keyframe). `context` distinguishes the
+// still exporter — which draws the source and can pixelate against it — from
+// the video overlay, a transparent bitmap with no frames beneath it.
+function planLayer(
+  layer: MemeEditLayer,
+  project: MemeEditProject,
+  output: ImageRenderPlanOutput,
+  context: 'image' | 'video-overlay'
+): ImageRenderLayerPlan | null {
+  if (layer.kind === 'draw') return layer.elements.length === 0 ? null : drawPlan(layer, output);
+  if (layer.kind === 'cover') {
+    const mode = interpolateCoverCorrections(layer.corrections, IMAGE_RENDER_TIME_US)?.mode ?? layer.mode;
+    if (context === 'video-overlay' && mode === 'pixelate') {
+      return { kind: 'unavailable', id: layer.id, layerKind: 'cover', reason: 'pixelate-video-overlay-unsupported' };
+    }
+    return coverPlan(layer, output);
+  }
+  const keyframe = resolvedKeyframe(layer.keyframes);
+  if (!keyframe) return null;
+  if (layer.kind === 'subject') return subjectPlan(layer, keyframe, project, output);
+  if (layer.kind === 'media') return mediaPlan(layer, keyframe, output);
+  return {
+    kind: 'text',
+    id: layer.id,
+    spec: buildMemeTextLayoutSpec(layer, keyframe, {
+      canvasWidthDip: output.widthPx,
+      canvasHeightDip: output.heightPx,
+    }),
+  };
+}
+
+function planSource(project: MemeEditProject): ImageRenderPlanSource {
+  return {
+    uri: project.transient.materializedSourceUri ?? project.source.uri,
+    widthPx: project.source.width,
+    heightPx: project.source.height,
+    rotation: project.base.rotation,
+    flipX: project.base.flipX,
+    flipY: project.base.flipY,
+    crop: normalizeFreeCrop(project.base.crop),
   };
 }
 
@@ -427,42 +515,14 @@ export function buildImageRenderPlan(
   const layers: ImageRenderLayerPlan[] = [];
   for (const layer of project.layers) {
     if (!isLayerActiveAt(layer, IMAGE_RENDER_TIME_US)) continue;
-    if (layer.kind === 'cover') {
-      layers.push(coverPlan(layer, output));
-      continue;
-    }
-    const keyframe = resolvedKeyframe(layer.keyframes);
-    if (!keyframe) continue;
-    if (layer.kind === 'subject') {
-      layers.push(subjectPlan(layer, keyframe, project, output));
-      continue;
-    }
-    if (layer.kind === 'media') {
-      layers.push(mediaPlan(layer, keyframe, output));
-      continue;
-    }
-    layers.push({
-      kind: 'text',
-      id: layer.id,
-      spec: buildMemeTextLayoutSpec(layer, keyframe, {
-        canvasWidthDip: output.widthPx,
-        canvasHeightDip: output.heightPx,
-      }),
-    });
+    const plan = planLayer(layer, project, output, 'image');
+    if (plan) layers.push(plan);
   }
   return {
     version: IMAGE_RENDER_PLAN_VERSION,
     id: options.planId,
     timeUs: IMAGE_RENDER_TIME_US,
-    source: {
-      uri: project.transient.materializedSourceUri ?? project.source.uri,
-      widthPx: project.source.width,
-      heightPx: project.source.height,
-      rotation: project.base.rotation,
-      flipX: project.base.flipX,
-      flipY: project.base.flipY,
-      crop: normalizeFreeCrop(project.base.crop),
-    },
+    source: planSource(project),
     output,
     background: {
       mode: project.background.mode,
@@ -470,6 +530,37 @@ export function buildImageRenderPlan(
       assetUri: project.background.assetUri,
       blurScale: project.background.blurScale,
     },
+    layers,
+  };
+}
+
+// Build the transparent overlay-bitmap plan for a VIDEO export: every burn-in
+// layer resolved once over a transparent canvas at the composition's output
+// size. The native still renderer draws this PNG, and the video exporter
+// composites it over every frame via a media3 overlay — the one path that makes
+// text, covers, cutouts and drawings appear on an exported clip. Time ranges
+// are intentionally flattened: a static overlay shows for the whole clip, which
+// is what an annotation wants.
+export function buildVideoOverlayRenderPlan(
+  project: MemeEditProject,
+  options: ImageRenderPlanOptions
+): ImageRenderPlan {
+  if (project.source.kind !== 'video') {
+    throw new TypeError('buildVideoOverlayRenderPlan requires a video source project.');
+  }
+  const output = planOutput(project, options.maxOutputPixels ?? MAX_IMAGE_RENDER_PIXELS);
+  const layers: ImageRenderLayerPlan[] = [];
+  for (const layer of project.layers) {
+    const plan = planLayer(layer, project, output, 'video-overlay');
+    if (plan) layers.push(plan);
+  }
+  return {
+    version: IMAGE_RENDER_PLAN_VERSION,
+    id: options.planId,
+    timeUs: IMAGE_RENDER_TIME_US,
+    source: planSource(project),
+    output,
+    background: { mode: 'transparent', color: project.background.color, assetUri: null, blurScale: 0 },
     layers,
   };
 }

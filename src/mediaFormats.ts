@@ -57,3 +57,14 @@ export function mimeForName(name: string): string {
   const ext = extOf(name);
   return IMAGE_MIME[ext] ?? VIDEO_MIME[ext] ?? (kindOf(name) === 'video' ? 'video/mp4' : 'image/jpeg');
 }
+
+// Reverse of the MIME maps: the canonical file extension for a MIME type. The
+// share importer names the SAF document it streams a shared file into off this
+// so the file's type stays recoverable from its extension even when the source
+// arrived without a usable one. Falls back per top-level type.
+export function extForMime(mime: string): string {
+  const m = mime.toLowerCase().split(';')[0].trim();
+  for (const [ext, mt] of Object.entries(VIDEO_MIME)) if (mt === m) return ext;
+  for (const [ext, mt] of Object.entries(IMAGE_MIME)) if (mt === m) return ext;
+  return m.startsWith('video/') ? 'mp4' : 'jpg';
+}

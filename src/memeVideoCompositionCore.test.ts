@@ -503,3 +503,45 @@ describe('plans built from real projects', () => {
     expect(videoCompositionPlanIsBuildable(built)).toBe(true);
   });
 });
+
+describe('overlay burn-in wiring', () => {
+  it('carries the overlay uri sized to the output frame', () => {
+    const built = buildVideoCompositionPlan(project(), {
+      planId: 'plan-overlay',
+      overlayUri: 'file:///cache/overlay.png',
+    });
+    expect(built.overlay).toEqual({
+      uri: 'file:///cache/overlay.png',
+      widthPx: built.output.widthPx,
+      heightPx: built.output.heightPx,
+    });
+  });
+
+  it('leaves the overlay null when no overlay uri is supplied', () => {
+    expect(plan().overlay).toBeNull();
+  });
+
+  it('drops the overlay on a refused plan so a rejected export cannot half-render', () => {
+    const built = buildVideoCompositionPlan(
+      project((draft) => {
+        draft.video!.speed = 5;
+      }),
+      { planId: 'plan-refused', overlayUri: 'file:///cache/overlay.png' }
+    );
+    expect(built.rejections.length).toBeGreaterThan(0);
+    expect(built.overlay).toBeNull();
+  });
+});
+
+describe('added music track', () => {
+  it('carries the project music into the plan', () => {
+    const built = plan((draft) => {
+      draft.video!.music = { uri: 'file:///cache/song.mp3', volume: 0.8, startUs: 5_000_000 };
+    });
+    expect(built.music).toEqual({ uri: 'file:///cache/song.mp3', volume: 0.8, startUs: 5_000_000 });
+  });
+
+  it('is null when no music is added', () => {
+    expect(plan().music).toBeNull();
+  });
+});

@@ -53,6 +53,16 @@ class MemegetBgModule : Module() {
       OnViewDidUpdateProps { view: MemeTextPreviewView -> view.commitPendingProps() }
     }
 
+    // Live preview of a draw layer, rendered through the same MemeDrawPrimitives
+    // as the export so a stroke lands identically in the editor and the PNG/clip.
+    // Elements arrive in NORMALIZED coordinates with a strokeScale; the view
+    // resolves them against its own bounds at draw time.
+    View(MemeDrawPreviewView::class) {
+      Prop("elementsJson") { view: MemeDrawPreviewView, value: String -> view.setElementsJson(value) }
+      Prop("opacity") { view: MemeDrawPreviewView, value: Double -> view.setOpacity(value.toFloat()) }
+      OnViewDidUpdateProps { view: MemeDrawPreviewView -> view.commitPendingProps() }
+    }
+
     // Put an actual file — in practice a video, which expo-clipboard can't
     // handle — on the system clipboard as a content:// uri. The file is staged
     // into a dedicated cache subdir (cleared on each copy, so it holds at most

@@ -4,9 +4,16 @@ import { AUDIO_MODEL_INFO } from './audioCore';
 
 import { modelStamp, PRIMARY_EMBEDDING_MODEL, VISUAL_EMBEDDING_MODEL } from './embeddingModels';
 import { scoreEntry } from './searchCore';
-import { assembleSearchText, classificationContextTerms } from './searchText';
+import {
+  assembleSearchText,
+  classificationContextTerms,
+  containsPhrase,
+  phraseKey,
+  phraseTokenCount,
+} from './searchText';
 import { guessFacet } from './facetCoverage';
 import { INSERT_MEME_SQL, MEMES_TABLE_SQL, RESTORE_SIDECAR_MEME_SQL } from './memeSql';
+import { MEME_SEARCH_FTS_DDL, MEME_SEARCH_FTS_INSERT, MEME_SEARCH_FTS_QUERY } from './memeFtsSql';
 import { hashText } from './contentHash';
 // Knowledge mutations announce themselves here so the `.memeget` sidecar backup
 // picks them up. Emitting from the write helpers rather than the screens means
@@ -45,11 +52,17 @@ export function sqliteVecReady(): boolean {
 }
 
 let ftsAvailable: boolean | null = null;
-let ftsDirty = true;
+// Content version: bumped on every searchable-content change. The FTS index
+// records the version it was last built at (`ftsBuiltVersion`); it is usable
+// ONLY when the two match. This is what keeps a rebuild that raced a write from
+// ever being trusted — see ensureFtsSearchIndex / scheduleFtsRebuild.
+let contentVersion = 0;
+let ftsBuiltVersion = -1;
+let ftsRebuilding = false;
 
 function invalidateSearchIndex(): void {
   invalidateResidentSearchIndex();
-  ftsDirty = true;
+  contentVersion++;
 }
 
 function getDb(): Promise<SQLite.SQLiteDatabase> {
@@ -689,7 +702,7 @@ export async function updateMemeTags(id: number, tags: Tag[], extraTerms: string
     id
   );
   if (!patchTagSearchCache([{ id, tags: normalized, extraTerms }])) invalidateResidentSearchIndex();
-  ftsDirty = true;
+  contentVersion++; // resident cache patched in place; FTS must still rebuild
   emitKnowledgeChanged();
 }
 
@@ -714,7 +727,7 @@ export async function bulkUpdateMemeTags(
     await stmt.finalizeAsync();
   }
   if (!patchTagSearchCache(normalized)) invalidateResidentSearchIndex();
-  ftsDirty = true;
+  contentVersion++; // resident cache patched in place; FTS must still rebuild
   emitKnowledgeChanged();
 }
 
@@ -1599,55 +1612,83 @@ async function loadSearchIndex(): Promise<SearchCacheEntry[]> {
   });
 }
 
-async function ensureFtsSearchIndex(
-  db: SQLite.SQLiteDatabase,
-  entries: readonly SearchCacheEntry[]
-): Promise<boolean> {
+// Ensure the FTS5 virtual table exists. Separated from population so the
+// keystroke path can cheaply check availability without touching rows. Sets
+// `ftsAvailable=false` permanently if this SQLite build lacks FTS5, so we stop
+// trying and fall back to the in-memory scan for good.
+async function ensureFtsTable(db: SQLite.SQLiteDatabase): Promise<boolean> {
   if (ftsAvailable === false) return false;
   try {
-    await db.execAsync(`
-      CREATE VIRTUAL TABLE IF NOT EXISTS meme_search_fts USING fts5(
-        name,
-        ocr,
-        caption,
-        transcript,
-        tags,
-        extra_terms,
-        tokenize='unicode61'
-      );
-    `);
+    await db.execAsync(`${MEME_SEARCH_FTS_DDL};`);
     ftsAvailable = true;
-    if (!ftsDirty) return true;
-
-    await db.withTransactionAsync(async () => {
-      await db.execAsync('DELETE FROM meme_search_fts;');
-      const stmt = await db.prepareAsync(
-        `INSERT INTO meme_search_fts(rowid, name, ocr, caption, transcript, tags, extra_terms)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`
-      );
-      try {
-        for (const entry of entries) {
-          const r = entry.record;
-          await stmt.executeAsync(
-            entry.id,
-            r.name,
-            r.ocrText,
-            r.caption,
-            r.transcript,
-            r.tags.map((t) => t.label).join(' '),
-            `${r.extraTerms} ${classificationContextTerms({ tags: r.tags.map((t) => t.label) })}`.trim()
-          );
-        }
-      } finally {
-        await stmt.finalizeAsync();
-      }
-    });
-    ftsDirty = false;
     return true;
   } catch {
     ftsAvailable = false;
     return false;
   }
+}
+
+// Repopulate the FTS index from `entries` (a snapshot taken at content version
+// `version`). Tags the index current ONLY if no write landed across the whole
+// rebuild: if `contentVersion` advanced, `entries` is already stale and
+// `ftsBuiltVersion` is deliberately left behind so the next query reschedules
+// and keeps serving from the always-fresh in-memory scan. This is the invariant
+// that makes `ftsBuiltVersion === contentVersion` a guarantee the index reflects
+// exactly the current content — never stale-but-clean.
+async function buildFtsIndex(
+  db: SQLite.SQLiteDatabase,
+  entries: readonly SearchCacheEntry[],
+  version: number
+): Promise<void> {
+  await db.withTransactionAsync(async () => {
+    await db.execAsync('DELETE FROM meme_search_fts;');
+    const stmt = await db.prepareAsync(MEME_SEARCH_FTS_INSERT);
+    try {
+      for (const entry of entries) {
+        const r = entry.record;
+        await stmt.executeAsync(
+          entry.id,
+          r.name,
+          r.ocrText,
+          r.caption,
+          r.transcript,
+          r.tags.map((t) => t.label).join(' '),
+          `${r.extraTerms} ${classificationContextTerms({ tags: r.tags.map((t) => t.label) })}`.trim()
+        );
+      }
+    } finally {
+      await stmt.finalizeAsync();
+    }
+  });
+  if (contentVersion === version) ftsBuiltVersion = version;
+}
+
+// Rebuild the FTS index off the keystroke critical path. Rebuilding every row is
+// far slower than the in-memory scan, so it must never run inline for a query;
+// instead the current query serves from the scan and this repopulates the index
+// so the NEXT query gets BM25 ranking. Guarded so overlapping searches schedule
+// at most one rebuild at a time.
+function scheduleFtsRebuild(db: SQLite.SQLiteDatabase): void {
+  if (ftsRebuilding || ftsAvailable === false) return;
+  ftsRebuilding = true;
+  setTimeout(() => {
+    void (async () => {
+      try {
+        if (!(await ensureFtsTable(db))) return;
+        // Snapshot the version BEFORE reading entries: any write between here
+        // and the build completing advances contentVersion and prevents us from
+        // tagging a stale build as current.
+        const version = contentVersion;
+        const entries = await ensureSearchIndex(loadSearchIndex);
+        if (contentVersion !== version) return; // superseded; a later query reschedules
+        await buildFtsIndex(db, entries, version);
+      } catch {
+        // Leave the index un-current; the in-memory scan stays correct.
+      } finally {
+        ftsRebuilding = false;
+      }
+    })();
+  }, 0);
 }
 
 async function ftsRankedIds(
@@ -1658,17 +1699,18 @@ async function ftsRankedIds(
   shouldAbort?: () => boolean
 ): Promise<number[]> {
   const match = ftsMatchQuery(lexicalQuery);
-  // Rebuilding every FTS row is much slower than the in-memory lexical scan.
-  // Never put that rebuild in the keystroke path; dirty indexes simply fall
-  // back to scoreEntry until an idle rebuild path is available.
-  if (!match || ftsDirty || !(await ensureFtsSearchIndex(db, allEntries)) || shouldAbort?.()) return [];
+  if (!match || shouldAbort?.()) return [];
+  // BM25 ranking is an upgrade over the in-memory scan, kept off the keystroke
+  // path. When the index isn't current (initial state, or a write landed since
+  // the last build) serve this query from the scan and rebuild in the
+  // background — never inline — so the next query gets BM25.
+  if (ftsBuiltVersion !== contentVersion) {
+    scheduleFtsRebuild(db);
+    return [];
+  }
   const eligible = new Set(eligibleEntries.map((e) => e.id));
   const rows = await db.getAllAsync<{ id: number }>(
-    `SELECT rowid AS id
-     FROM meme_search_fts
-     WHERE meme_search_fts MATCH ?
-     ORDER BY bm25(meme_search_fts, 1.0, 1.2, 2.0, 1.8, 5.0, 4.0)
-     LIMIT ?`,
+    MEME_SEARCH_FTS_QUERY,
     match,
     allEntries.length
   );
@@ -1771,16 +1813,39 @@ export async function searchByVector(
     lexicalIds
   );
   const byId = new Map(scored.map((s) => [s.entry.id, s.entry]));
-  const ranked = fused
+  let ranked = fused
     .map(({ id, score }) => {
       const entry = byId.get(id);
       return entry ? ({ ...entry.record, score } as SearchHit) : null;
     })
     .filter((h): h is SearchHit => h !== null);
+  // Exact-phrase boost: a clip whose stored text literally contains the typed
+  // phrase (apostrophes and 1-2 char words included — see phraseKey) is a far
+  // stronger signal than the term or dense channels, which drop short words and
+  // never match across word boundaries. That's exactly the "find the clip that
+  // SAYS this" case: typing "im so old" must surface a transcript of "I'm so
+  // old". Float such hits to the top, keeping their fused order among
+  // themselves. Gated to multi-token queries; a single word already ranks fine
+  // through the term path.
+  const queryKey = phraseKey(queryText);
+  let phraseCount = 0;
+  if (phraseTokenCount(queryKey) >= 2) {
+    const phraseIds = new Set<number>();
+    for (const e of entries) {
+      if (containsPhrase(phraseKey(e.searchText), queryKey)) phraseIds.add(e.id);
+    }
+    if (phraseIds.size) {
+      phraseCount = phraseIds.size;
+      ranked = [
+        ...ranked.filter((h) => phraseIds.has(h.id)),
+        ...ranked.filter((h) => !phraseIds.has(h.id)),
+      ];
+    }
+  }
   const hits = Number.isFinite(limit) ? ranked.slice(0, limit) : ranked;
   if (queryText.trim().length > 0) {
     console.log(
-      `[memeget/search] query="${queryText.trim()}" candidates=${entries.length} lexical=${lexicalIds.length} hits=${hits.length} top=${hits
+      `[memeget/search] query="${queryText.trim()}" candidates=${entries.length} lexical=${lexicalIds.length} phrase=${phraseCount} hits=${hits.length} top=${hits
         .slice(0, 5)
         .map((hit) => {
           const labels = hit.tags

@@ -50,7 +50,7 @@ The existing `useSpeechToText` API returns plain text without exposing segment t
 - Automatically separating an actor from a fictional character profile.
 - Training model weights on-device. Self-learning means adding confirmed embedding examples and updating profile centroids.
 - Exporting voice profiles in existing visual teaching packs in the first version.
-- Reliably identifying simultaneous speakers. Overlap is represented as uncertain and excluded from learning by default.
+- Reliably identifying simultaneous speakers. The first version has no automatic overlap detector; the user may mark a turn as overlap/ambiguous, which excludes it from learning.
 
 ## Chosen approach
 
@@ -106,9 +106,9 @@ The UI uses language that preserves this distinction: `Unknown speaker`, `Likely
 ### `VoiceActivityRunner`
 
 **Input:** normalized 16 kHz mono waveform.  
-**Output:** time-ordered speech regions with start/end sample offsets and confidence.
+**Output:** time-ordered speech regions with start/end sample offsets.
 
-It detects speech, not speaker identity. Post-processing joins tiny gaps and rejects regions too short or low-confidence for embedding.
+It detects speech, not speaker identity. Post-processing joins tiny gaps and marks regions below the speaker model's minimum duration as short. The supported FSMN VAD API does not expose per-region confidence or overlap, so the first version does not fabricate either signal.
 
 ### `SpeakerEmbeddingRunner`
 
@@ -119,10 +119,10 @@ It has no database or clustering responsibility. All comparisons require matchin
 
 ### `DiarizationCore`
 
-**Input:** speech windows, their embeddings, timing, and quality metadata.  
-**Output:** local speakers, ordered turns, overlap/quality flags, and aggregate speaker embeddings.
+**Input:** speech windows, their embeddings, timing, and quality metadata.
+**Output:** local speakers, ordered turns, quality flags, and aggregate speaker embeddings.
 
-This is a React-free pure module. It owns clustering, adjacent-window merging, duration totals, and ordinal assignment. Clustering thresholds are part of the selected model's stamped configuration and are calibrated against the app's evaluation clips.
+This is a React-free pure module. It owns clustering, adjacent-window merging, duration totals, and ordinal assignment. Initial analysis derives `short` from duration; `overlap` and `noisy` are explicit user correction flags in the first version. Clustering thresholds are part of the selected model's stamped configuration and are calibrated against the app's evaluation clips.
 
 ### `VoiceProfileMatcher`
 
@@ -146,6 +146,7 @@ The audio provider owns one shared coordinator for transcription and voice work.
 ```ts
 runExclusive<T>(
   kind: 'transcription' | 'voice-analysis',
+  options: { label: string; shouldCancel: () => boolean },
   work: (signal: AudioWorkSignal) => Promise<T>
 ): Promise<T | 'busy'>
 ```
@@ -225,7 +226,7 @@ Profile names need not be globally unique. Selection UI disambiguates duplicate 
 - `quality TEXT NOT NULL` constrained to `clean | short | overlap | noisy`
 - `learning_eligible INTEGER NOT NULL DEFAULT 1`
 
-A nullable speaker allows an overlap/ambiguous turn to remain on the timeline without contaminating a cluster. Per-turn embeddings allow merge, move, reassignment, and aggregate rebuilding without decoding the video again. Splitting inside an existing turn is the exception: it requires waveform access and fresh embeddings for the two new time ranges.
+A nullable speaker allows a user-marked overlap/ambiguous turn to remain on the timeline without contaminating a cluster. Per-turn embeddings allow merge, move, reassignment, and aggregate rebuilding without decoding the video again. Splitting inside an existing turn is the exception: it requires waveform access and fresh embeddings for the two new time ranges.
 
 ### `voice_samples`
 
@@ -255,7 +256,7 @@ A rejection vetoes that exact observation/profile suggestion. It is not a global
 1. A video with no prior successful result enters persisted `voice_state = pending` when queued. Reanalysis of a `done` video keeps the durable state and rows at `done`; running/refreshing is in-memory coordinator state until the replacement commits. Both paths update `voice_last_attempted_at`.
 2. `VoiceAnalysisService` materializes the video and extracts the waveform through the existing native decoder.
 3. VAD returns speech regions. No valid regions is a successful `done` result with no speakers.
-4. Valid regions are windowed for the speaker encoder. Windows that are too short, overlap, or fail quality checks remain representable but are not learning eligible.
+4. Valid regions are windowed for the speaker encoder. Regions below the minimum speaker duration remain visible as `short` but are not learning eligible. Automatic analysis does not claim overlap/noise labels that the available runners cannot produce.
 5. `DiarizationCore` clusters clean embeddings, merges adjacent same-speaker windows, computes aggregate embeddings, and assigns ordinals.
 6. If Whisper STT is enabled and ready, it transcribes each sufficiently long merged turn independently. A short turn or unavailable transcription model keeps `transcript = ''` and `transcript_state = not_requested`. A failed turn call keeps the diarization result, stores `transcript_state = failed` for that turn, and continues with later turns. The existing whole-video transcription continues to populate `memes.transcript`; its success or failure does not determine `voice_state`. A later transcription pass may fill `speech_turns` whose state is `not_requested` or `failed` without rerunning diarization.
 7. The service prepares new speaker aggregates without profile assignments.
@@ -297,7 +298,7 @@ Example:
     Third voice heard · 2 turns · 4.8s total
 ```
 
-A color-coded timeline uses the same speaker colors as the rows. Selecting a segment seeks the video to that turn. Ambiguous overlap uses a neutral pattern rather than either speaker's color.
+A color-coded timeline uses the same speaker colors as the rows. Selecting a segment seeks the video to that turn. A turn the user marks as overlap/ambiguous uses a neutral pattern rather than either speaker's color.
 
 ### Structured transcript
 
@@ -388,8 +389,8 @@ Voice embeddings are biometric-like identifiers and receive the same local-only 
 - **No speech:** successful analysis with no speaker rows; viewer may state `No speech detected` in maintenance details.
 - **One speaker:** show `#1`; do not add multi-speaker ceremony.
 - **Short utterance:** show timing, mark it short, and exclude it from recognition/training when below model eligibility.
-- **Overlap:** show an ambiguous turn and exclude it from learning by default.
-- **Music, singing, effects, impressions, or phone audio:** lower quality or leave unknown rather than force a profile.
+- **Overlap:** automatic overlap detection is out of scope; the correction editor lets the user mark an ambiguous/overlap turn and excludes it from learning.
+- **Music, singing, effects, impressions, or phone audio:** matching remains conservative; the user can mark a turn noisy/excluded rather than force a profile.
 - **Ambiguous profile match:** remain unknown when acceptance or margin checks fail.
 - **Model mismatch:** do not compare; queue reanalysis when the compatible model is available.
 - **Failed first analysis:** mark failed and expose retry through the existing audio-analysis controls.
@@ -417,7 +418,7 @@ Voice and transcription may share one combined per-video pass after the pipeline
 2. Ordinals follow earliest valid turn, not cluster identifier or total duration.
 3. Total spoken duration equals the sum of a speaker's turns.
 4. Adjacent same-speaker windows merge without changing total duration.
-5. Ambiguous and overlap windows are excluded from aggregate embeddings.
+5. Short and user-marked ambiguous/overlap/noisy windows are excluded from aggregate embeddings.
 6. Profile matching enforces acceptance threshold, runner-up margin, rejection veto, model stamp, and dimension.
 7. Profile centroids use only confirmed compatible samples.
 8. Suggestions do not change centroids.
