@@ -34,7 +34,7 @@ source scout):
   It is part of the layer union
   (`TextLayer | CoverLayer | SubjectLayer | MediaOverlayLayer | DrawLayer`,
   `memeEditProjectCore.ts:129`) and is `KeyframedLayer`. `TransformKeyframe`
-  (`:34-40`) is `{ timeUs, center:NormalizedPoint, scale:number, rotationDegrees:number, opacity:number, easing:'linear'|'hold' }`.
+  (`:34-41`) is `{ timeUs, center:NormalizedPoint, scale:number, rotationDegrees:number, opacity:number, easing:'linear'|'hold' }`.
 - **Artifact rendering + list already exist.** `MemeEditCanvas.tsx`
   (`MediaLayerContent`, ~`:1177`) renders an image or video overlay from
   `assetUri`/`fit`; `MemeLayerList.tsx` (`:9-16`) labels it "Image overlay" /
@@ -49,13 +49,15 @@ source scout):
   `MediaItem.Builder#setImageDurationMs`. Music-only export forces an audio
   track onto silent content. Overlays burn in via
   `OverlayEffect(BitmapOverlay.createStaticBitmapOverlay(...))`
-  (`RetainedRangeComposition.kt:577-594`) — **static PNG over every frame, no
+  (`RetainedRangeComposition.kt:454-466`) — **static PNG over every frame, no
   timing/keyframes.**
 - **Export routing** (`src/components/MemeGrid.tsx`): `onStudioExport` (`:939`)
-  picks a destination and routes by `project.source.kind` to `runVideoExport`
-  (`:791`, builds overlay PNG via `buildVideoOverlayRenderPlan` → optional
-  `renderImageProject`, then `buildVideoCompositionPlan` → `exportVideoProject`)
-  or `runImageExport` (`:899`, `buildImageRenderPlan` → `renderImageProject`).
+  picks the destination, then `runStudioExport` (`:896`) branches on
+  `project.source.kind` — video ⇒ `runVideoExport` (`:791`, builds overlay PNG via
+  `buildVideoOverlayRenderPlan` → optional `renderImageProject`, then
+  `buildVideoCompositionPlan` → `exportVideoProject`); otherwise the image branch
+  is **inlined** in `runStudioExport` (`:896-923`): `buildImageRenderPlan` →
+  `renderImageProject`. There is no standalone `runImageExport` function.
 - **Pickers.** `expo-document-picker` is installed and used for `image/*`
   (`MemeSubjectTool.tsx:198`) and `audio/*` (`MemeVideoAudioTool.tsx:93`). There
   is **no** `expo-image-picker` and **no** reusable "pick a library item as
@@ -113,15 +115,18 @@ Rejected alternatives:
 
 ## Data model changes
 
-`MemeEditProject` (`memeEditProjectCore.ts:163-180`) gains an **image-video
+`MemeEditProject` (`memeEditProjectCore.ts:173-185`) gains an **image-video
 intent** so an image project can carry export-as-video settings:
 
 - Add an optional `imageVideo` spec on the project, present only for
   `source.kind === 'image'`:
   `imageVideo: { durationUs: number; music: { uri, volume, startUs } | null } | null`.
-  `null` (or absent) ⇒ export stays a still image. Non-null ⇒ export as video.
-  `music` reuses the exact shape `VideoCompositionMusic` already uses
-  (`memeVideoCompositionCore.ts:113-122`).
+  **`imageVideo != null` is the single source of truth for video output:**
+  `null`/absent ⇒ still-image export; non-null ⇒ export as video. Adding music,
+  applying a motion preset to an artifact, or toggling "Export as video" all set
+  `imageVideo` (see Trigger); clearing all of them reverts it to `null`. `music`
+  reuses the exact shape `VideoCompositionMusic` already uses
+  (`memeVideoCompositionCore.ts:159-166`).
 - The existing video path keeps its `video: VideoEditSpec | null`; the two specs
   are mutually exclusive by `source.kind`. Validation rejects `imageVideo` on a
   video source and `video` on an image source.
@@ -138,8 +143,9 @@ express Phase B animation; Phase B only adds a **preset → keyframes** generato
 ### Add-artifact tool
 
 - Add an `'artifact'` tool to `memeEditToolsForSource` (`memeEditCanvasCore.ts:97-100`)
-  for **image** projects (and reuse for video projects, which already support
-  media overlays). Add its spec (glyph, label) to `MemeEditToolRail.tsx:17-30`.
+  for **image** projects. Intentionally also add it to **video** projects, which
+  support media overlays in the model but likewise have no add-media tool today.
+  Add its spec (glyph, label) to the `TOOLS` array (`MemeEditToolRail.tsx:24-35`).
 - The tool opens a **source chooser**: "From library" or "From files".
   - *From files:* `DocumentPicker.getDocumentAsync({ type:['image/*'], copyToCacheDirectory:true, multiple:false })` (identical to `MemeSubjectTool.tsx:198`). The
     returned cache uri is the `assetUri`.
@@ -148,7 +154,7 @@ express Phase B animation; Phase B only adds a **preset → keyframes** generato
     selectable as artifacts (video artifacts are a non-goal here).
 - On selection, dispatch `add-layer` with a new `MediaOverlayLayer` built by a
   factory `createMediaOverlayLayer(id, { assetUri, assetKind:'image' })` (mirrors
-  `createDrawLayer`, `memeDrawToolCore.ts:79`): `fit:'contain'`,
+  `createDrawLayer`, `memeDrawToolCore.ts:81`): `fit:'contain'`,
   `targetMaskTrackId:null`, `active:null`, `keyframes:[]`, centered at default
   transform. The layer is then movable/scalable/rotatable with the existing
   canvas gestures and appears in `MemeLayerList`.
@@ -167,12 +173,15 @@ express Phase B animation; Phase B only adds a **preset → keyframes** generato
 
 ### Audio on image projects
 
-- Add `'audio'` to the image tool list. The existing `MemeVideoAudioTool` music
-  controls (`onSetMusic`) are reused; for an image project, setting music writes
-  `project.imageVideo.music` and ensures `imageVideo.durationUs` defaults to the
-  track's measured duration (via `probeMedia`). The source-mute/volume controls
-  (which act on a video's own audio) are hidden for image projects (an image has
-  no source audio).
+- Add `'audio'` to the image tool list. Reuse `MemeVideoAudioTool`'s music
+  controls (`onSetMusic`): for an image project, setting music writes
+  `project.imageVideo.music` and defaults `imageVideo.durationUs` to the track's
+  measured duration (via `probeMedia`). **This is a real refactor, not just
+  hiding UI:** the tool currently assumes a non-null `project.video` (`const video
+  = project.video`, `:52`) and unconditionally reads `video.retainedRanges` /
+  `outputDurationUs` (`:144-145`). Split the video-only body (source mute/volume,
+  retained-range duration) from the shared music controls so the music section
+  works with `imageVideo`, and show the source-audio section only for video.
 
 ## Image→video export path
 
@@ -182,12 +191,13 @@ express Phase B animation; Phase B only adds a **preset → keyframes** generato
   `durationUs = musicDurationUs`; else the user-set slider value
   (default 3 s). When any artifact is animated ⇒
   `durationUs = max(resolved, lastKeyframeTimeUs)`.
-- **Trigger:** an image project exports as **video** when `imageVideo != null`
-  (i.e. it has music) **or** any `MediaOverlayLayer` has a non-empty `keyframes`
-  (animation). Otherwise it exports as a still image (unchanged). The studio also
-  exposes an explicit **"Export as video"** toggle that sets/clears `imageVideo`
-  (defaulting duration to the slider) so a user can force a still→video with no
-  audio and no animation.
+- **Trigger:** `imageVideo != null` is authoritative — an image project exports
+  as **video** iff `imageVideo` is set. Setting music, applying a motion preset
+  to any artifact, or the explicit **"Export as video"** toggle all set
+  `imageVideo` (defaulting `durationUs` to the resolved duration above), so
+  animation and audio can never disagree with the export decision or leave the
+  duration without an owner. With `imageVideo == null` the project exports as a
+  still image (unchanged).
 
 ### Plan builder
 
@@ -207,9 +217,9 @@ express Phase B animation; Phase B only adds a **preset → keyframes** generato
 - `buildVideoCompositionPlan` is left unchanged for video sources. A thin
   `buildCompositionPlan(project)` dispatcher routes by `source.kind` so callers
   have one entry point.
-- `MemeGrid.onStudioExport` routing: for an image project, if it triggers video
-  (above) route to a new `runImageVideoExport` (mirrors `runVideoExport`);
-  otherwise keep `runImageExport`.
+- Export routing (`runStudioExport`, `MemeGrid.tsx:896`): for an image project
+  with `imageVideo != null`, route to a new `runImageVideoExport` (mirrors
+  `runVideoExport`); otherwise keep the existing inlined image-render branch.
 
 ### Phase A native rendering (still + music)
 
@@ -239,8 +249,11 @@ express Phase B animation; Phase B only adds a **preset → keyframes** generato
   `OverlaySettings` transformation matrix (or a matrix-capable overlay); if a
   device/media3 version cannot honor per-frame rotation, the exporter falls back
   to the nearest static rotation and records a warning (never a silent drop).
-- Overlay pixel bounds keep the existing `MAX_OVERLAY_PIXELS` guard; the number
-  of animated overlays is capped by `PROJECT_LIMITS.maxLayers`.
+- Overlay pixel bounds keep the existing `MAX_OVERLAY_PIXELS` guard
+  (`VideoExportPlan.kt:129,282`), which today bounds the single burn-in overlay
+  PNG against the frame size; applying it **per animated overlay** is a
+  deliberate semantic extension for Phase B. The number of animated overlays is
+  capped by `PROJECT_LIMITS.maxLayers`.
 
 ## Error handling and edge cases
 
