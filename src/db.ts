@@ -12,7 +12,12 @@ import {
   phraseTokenCount,
 } from './searchText';
 import { guessFacet } from './facetCoverage';
-import { INSERT_MEME_SQL, MEMES_TABLE_SQL, RESTORE_SIDECAR_MEME_SQL } from './memeSql';
+import {
+  INSERT_MEME_SQL,
+  MEMES_BEFORE_WHERE,
+  MEMES_TABLE_SQL,
+  RESTORE_SIDECAR_MEME_SQL,
+} from './memeSql';
 import { MEME_SEARCH_FTS_DDL, MEME_SEARCH_FTS_INSERT, MEME_SEARCH_FTS_QUERY } from './memeFtsSql';
 import { hashText } from './contentHash';
 // Knowledge mutations announce themselves here so the `.memeget` sidecar backup
@@ -1493,7 +1498,7 @@ export async function getMemesBefore(
 ): Promise<MemeRecord[]> {
   const db = await getDb();
   const cols = `id, uri, name, kind, ocr_text, caption, transcript, tags, extra_terms, vision_state, audio_state, indexed_at, modified_at, pending, thumb_uri`;
-  const after = `(modified_at < ? OR (modified_at = ? AND id < ?))`;
+  const after = MEMES_BEFORE_WHERE;
   const rows = kind
     ? await db.getAllAsync<Omit<MemeRow, 'embedding' | 'visual_embedding' | 'caption_embedding'>>(
         `SELECT ${cols} FROM memes WHERE ${after} AND kind = ?

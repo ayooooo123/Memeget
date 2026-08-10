@@ -7,7 +7,12 @@
 // across a busy db.ts is exactly the sort of thing that silently reverts it.
 import { DatabaseSync } from 'node:sqlite';
 
-import { INSERT_MEME_SQL, MEMES_TABLE_SQL, RESTORE_SIDECAR_MEME_SQL } from './memeSql';
+import {
+  INSERT_MEME_SQL,
+  MEMES_BEFORE_WHERE,
+  MEMES_TABLE_SQL,
+  RESTORE_SIDECAR_MEME_SQL,
+} from './memeSql';
 
 type Row = Record<string, unknown>;
 
@@ -224,5 +229,25 @@ describe('sidecar restore upsert', () => {
     indexPass(db, { embedding: new Uint8Array([1, 1, 1, 1]) });
     restore(db);
     expect(Array.from(read(db).embedding as Uint8Array)).toEqual([1, 1, 1, 1]);
+  });
+});
+describe('filtered recent pagination', () => {
+  it('keeps the media-kind filter applied to both keyset branches', () => {
+    const db = freshDb();
+    indexPass(db, { uri: 'content://doc/image-new.jpg', kind: 'image', modifiedAt: 100 });
+    indexPass(db, { uri: 'content://doc/video-cursor.mp4', kind: 'video', modifiedAt: 100 });
+    indexPass(db, { uri: 'content://doc/image-old.jpg', kind: 'image', modifiedAt: 90 });
+    indexPass(db, { uri: 'content://doc/video-old.mp4', kind: 'video', modifiedAt: 80 });
+
+    const rows = db
+      .prepare(
+        `SELECT id, kind FROM memes
+         WHERE ${MEMES_BEFORE_WHERE} AND kind = ?
+         ORDER BY modified_at DESC, id DESC`
+      )
+      .all(100, 100, 2, 'video') as { id: number; kind: string }[];
+
+    expect(rows.map((row) => row.kind)).toEqual(['video']);
+    expect(rows.map((row) => row.id)).toEqual([4]);
   });
 });
