@@ -29,6 +29,7 @@ import {
 import {
   ftsMatchQuery,
   fuseDenseAndLexicalRanks,
+  lexicalRankQuery,
   searchTermsForText,
   searchScopeEntries,
   tagTermScore,
@@ -1770,11 +1771,17 @@ export async function searchByVector(
   const lexicalQuery = expandedQuery ?? { exactTerms: terms };
 
   const db = await getDb();
-  const lexicalIds = await ftsRankedIds(db, all, entries, lexicalQuery, shouldAbort);
+  // Semantic expansions are a relevance hint, not literal evidence. Keep BM25/RRF
+  // anchored to the words the user typed so a nearby label cannot outrank an
+  // exact query match; expanded terms still contribute through scoreEntry/tag scoring.
+  const lexicalRankForFts = lexicalRankQuery(lexicalQuery);
+  const lexicalIds = await ftsRankedIds(db, all, entries, lexicalRankForFts, shouldAbort);
   if (shouldAbort?.()) return null;
   // If FTS5 is available, lexical ranking is handled as its own BM25/RRF signal;
   // otherwise scoreEntry falls back to the historical JS lexical boost.
-  const scoreTerms = lexicalIds.length ? { exactTerms: [] } : lexicalQuery;
+  const scoreTerms = lexicalIds.length
+    ? { exactTerms: [], expandedTerms: lexicalQuery.expandedTerms }
+    : lexicalQuery;
 
   const yielding = entries.length > SEARCH_YIELD_THRESHOLD;
   const scored: { entry: SearchCacheEntry; score: number }[] = [];
