@@ -90,3 +90,7 @@ export const RESTORE_SIDECAR_MEME_SQL = `INSERT INTO memes (uri, name, kind, emb
          -- meme now; leaving pending = 1 would hide it from search and keep the
          -- indexer treating it as unfinished work.
          pending = CASE WHEN length(memes.embedding) > 0 OR length(excluded.embedding) > 0 THEN 0 ELSE memes.pending END`;
+
+// Keyset predicate for browse pages. Keep the OR branches grouped so an
+// optional media-kind condition applies to the entire cursor boundary.
+export const MEMES_BEFORE_WHERE = `(modified_at < ? OR (modified_at = ? AND id < ?))`;
