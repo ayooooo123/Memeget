@@ -7,6 +7,7 @@ import {
   searchScopeEntries,
   searchLabelPrompt,
   tagTermScore,
+  lexicalRankQuery,
   searchTermsForText,
   type LabelExpansionCandidate,
 } from './searchExpansion';
@@ -54,6 +55,16 @@ describe('buildExpandedLexicalQuery', () => {
 
     expect(query.exactTerms).toEqual(['mad']);
     expect(query.expandedTerms).toEqual(['angry', 'rage']);
+  });
+
+  it('keeps semantic expansions out of lexical rank fusion when exact terms exist', () => {
+    expect(
+      lexicalRankQuery({ exactTerms: ['mad'], expandedTerms: ['angry', 'rage'] })
+    ).toEqual({ exactTerms: ['mad'] });
+    expect(lexicalRankQuery({ exactTerms: [], expandedTerms: ['angry'] })).toEqual({
+      exactTerms: [],
+      expandedTerms: ['angry'],
+    });
   });
 });
 

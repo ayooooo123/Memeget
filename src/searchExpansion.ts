@@ -38,7 +38,6 @@ export function searchTermsForText(queryText: string, keepShort = false): string
     .split(/\s+/)
     .filter((t) => (keepShort ? t.length > 0 : t.length > 2));
 }
-
 export function searchScopeEntries<T extends { kind: string }>(
   entries: readonly T[],
   kind: string | undefined,
@@ -138,6 +137,10 @@ export function buildExpandedLexicalQuery(
   }
 
   return expanded.length ? { exactTerms: exact, expandedTerms: expanded } : { exactTerms: exact };
+}
+
+export function lexicalRankQuery(query: LexicalQuery): LexicalQuery {
+  return query.exactTerms.length ? { exactTerms: [...query.exactTerms] } : query;
 }
 
 const TAG_EXACT_WEIGHT = 2.5;
