@@ -520,6 +520,25 @@ export function formatTimelineTimeUs(timeUs: number): string {
   return `${minutes}:${seconds}.${centis}`;
 }
 
+// Inverse of `formatTimelineTimeUs`, tolerant of what a thumb actually types:
+// `12`, `12.5`, `1:02`, `1:02.75`, `1:02:03.5`. Fractions are accepted to any
+// depth and rounded to whole microseconds. Returns null for anything
+// unparseable, out of range, or negative — callers keep the old value and warn
+// rather than silently committing a guess.
+export function parseTimelineTimeUs(text: string, durationUs: number): number | null {
+  const trimmed = text.trim();
+  if (!/^\d+(:[0-5]?\d){0,2}(\.\d+)?$/.test(trimmed)) return null;
+  const [whole, fraction = ''] = trimmed.split('.');
+  const parts = whole.split(':').map(Number);
+  let seconds = 0;
+  for (const part of parts) seconds = seconds * 60 + part;
+  const fractionUs = fraction ? Math.round(Number(`0.${fraction}`) * 1_000_000) : 0;
+  const totalUs = seconds * 1_000_000 + fractionUs;
+  const boundedDurationUs = Math.max(0, Math.round(finiteOr(durationUs, 0)));
+  if (totalUs > boundedDurationUs) return null;
+  return totalUs;
+}
+
 // Nearest retained source time by distance — what a scrub that lands in a
 // removed gap should snap to.
 export function nearestRetainedSourceTimeUs(

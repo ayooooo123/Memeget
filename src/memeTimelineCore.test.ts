@@ -10,6 +10,7 @@ import {
   createSeekThrottle,
   flushSeekThrottle,
   formatTimelineTimeUs,
+  parseTimelineTimeUs,
   insertSplitPointUs,
   nearestRetainedSourceTimeUs,
   nextSeekThrottleState,
@@ -558,6 +559,25 @@ describe('readout', () => {
     expect(formatTimelineTimeUs(-5)).toBe('0:00.00');
     expect(formatTimelineTimeUs(Number.NaN)).toBe('0:00.00');
     expect(formatTimelineTimeUs(3_600 * SECOND)).toBe('60:00.00');
+  });
+
+  test('parses typed timecodes back to microseconds', () => {
+    const duration = 7_200 * SECOND;
+    expect(parseTimelineTimeUs('0:00.00', duration)).toBe(0);
+    expect(parseTimelineTimeUs('1:15', duration)).toBe(75 * SECOND);
+    expect(parseTimelineTimeUs('1:15.25', duration)).toBe(75 * SECOND + 250_000);
+    expect(parseTimelineTimeUs('12.5', duration)).toBe(12 * SECOND + 500_000);
+    expect(parseTimelineTimeUs('1:02:03', duration)).toBe(3_723 * SECOND);
+    expect(parseTimelineTimeUs('  9  ', duration)).toBe(9 * SECOND);
+    expect(parseTimelineTimeUs('0.123456', duration)).toBe(123_456);
+  });
+
+  test('rejects junk, negatives, out-of-range minutes and times past the source', () => {
+    const duration = 10 * SECOND;
+    for (const bad of ['', 'abc', '-1', '1:2:3:4', '1:75', '1:15', '.5', '1.']) {
+      expect(parseTimelineTimeUs(bad, duration)).toBeNull();
+    }
+    expect(parseTimelineTimeUs('10', duration)).toBe(duration);
   });
 
   test('the readout reports OUTPUT time and OUTPUT duration, not source time', () => {
