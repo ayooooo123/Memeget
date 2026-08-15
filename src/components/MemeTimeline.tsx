@@ -4,6 +4,7 @@ import {
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   View,
   type LayoutChangeEvent,
   type NativeScrollEvent,
@@ -22,6 +23,7 @@ import {
   applyTrimHandle,
   clampTimelineZoom,
   formatTimelineTimeUs,
+  parseTimelineTimeUs,
   insertSplitPointUs,
   pendingThumbnailRequests,
   pixelsToTimeUs,
@@ -338,6 +340,64 @@ export const MemeTimeline = React.memo(function MemeTimeline({
     [committedRanges, durationUs, onCommitRetainedRanges]
   );
 
+  // Which clip the typed timecodes address: the selected clip's range when one
+  // is selected, otherwise the range under the playhead (falling back to the
+  // nearest earlier range, so a playhead parked in a removed gap still edits
+  // something predictable).
+  const activeRangeIndex = useMemo(() => {
+    if (selectedSegment !== null) {
+      const segment = segments[selectedSegment];
+      if (segment) return segment.rangeIndex;
+    }
+    let best = 0;
+    for (let index = 0; index < committedRanges.length; index += 1) {
+      const range = committedRanges[index];
+      if (playheadUs >= range.startUs && playheadUs <= range.endUs) return index;
+      if (range.startUs <= playheadUs) best = index;
+    }
+    return best;
+  }, [committedRanges, playheadUs, segments, selectedSegment]);
+  const activeRange = committedRanges[activeRangeIndex];
+
+  // Null means "show the committed value"; a string is what the user is
+  // mid-typing. Cleared on commit or blur so the field snaps back to the
+  // clamped truth rather than keeping an unapplied number on screen.
+  const [draftStartText, setDraftStartText] = useState<string | null>(null);
+  const [draftEndText, setDraftEndText] = useState<string | null>(null);
+
+  // The fields address whatever range is active NOW. Scrubbing or selecting a
+  // different clip must not leave half-typed text from the old one on screen,
+  // where a blur would commit it against the new range. Bounds are in the key
+  // too, so an undo or a drag that moves this range also drops the draft.
+  useEffect(() => {
+    setDraftStartText(null);
+    setDraftEndText(null);
+  }, [activeRangeIndex, activeRange?.startUs, activeRange?.endUs]);
+
+  const commitTypedEdge = useCallback(
+    (edge: TimelineTrimEdge, text: string) => {
+      const setDraft = edge === 'start' ? setDraftStartText : setDraftEndText;
+      setDraft(null);
+      const range = committedRanges[activeRangeIndex];
+      const proposedUs = parseTimelineTimeUs(text, durationUs);
+      if (proposedUs === null || range === undefined) {
+        warn();
+        return;
+      }
+      // Blur fires even when nothing was typed; an unchanged edge must not cost
+      // an undo entry.
+      const currentUs = edge === 'start' ? range.startUs : range.endUs;
+      if (proposedUs === currentUs) return;
+      const next = applyTrimHandle(committedRanges, activeRangeIndex, edge, proposedUs, durationUs);
+      tap();
+      // A typed edge can merge or renumber ranges exactly like a drag can.
+      setSelectedSegment(null);
+      onCommitRetainedRanges(next);
+      onScrubEnd(proposedUs);
+    },
+    [activeRangeIndex, committedRanges, durationUs, onCommitRetainedRanges, onScrubEnd]
+  );
+
   const splitAtPlayhead = useCallback(() => {
     const next = insertSplitPointUs(splitPoints, playheadUs, ranges);
     if (next === null) {
@@ -557,6 +617,29 @@ export const MemeTimeline = React.memo(function MemeTimeline({
         <Text style={styles.overflowNote}>{`+${layerRows.length - shownLayerRows.length} more layers not shown`}</Text>
       )}
 
+      {activeRange !== undefined && (
+        <View style={styles.timecodeRow}>
+          <Text style={styles.timecodeLabel}>{`Clip ${activeRangeIndex + 1}`}</Text>
+          <TimecodeField
+            value={draftStartText ?? formatTimelineTimeUs(activeRange.startUs)}
+            dirty={draftStartText !== null}
+            disabled={disabled}
+            label={`Clip ${activeRangeIndex + 1} start time`}
+            onChangeText={setDraftStartText}
+            onCommit={(text) => commitTypedEdge('start', text)}
+          />
+          <Text style={styles.timecodeSeparator}>→</Text>
+          <TimecodeField
+            value={draftEndText ?? formatTimelineTimeUs(activeRange.endUs)}
+            dirty={draftEndText !== null}
+            disabled={disabled}
+            label={`Clip ${activeRangeIndex + 1} end time`}
+            onChangeText={setDraftEndText}
+            onCommit={(text) => commitTypedEdge('end', text)}
+          />
+        </View>
+      )}
+
       <View style={styles.actionRow}>
         <PressableScale
           scaleTo={0.96}
@@ -586,6 +669,59 @@ export const MemeTimeline = React.memo(function MemeTimeline({
     </View>
   );
 });
+
+// Typed trim entry. Commits on submit AND on blur, because a phone keyboard is
+// as often dismissed as it is submitted; the parent then clears the draft so the
+// field re-renders the clamped, committed value. An untouched field never
+// commits: its displayed value is rounded to centiseconds and would otherwise
+// nudge a finer edge on every blur. Submit also latches the text it sent, so the
+// blur that follows dismissal cannot commit it a second time.
+function TimecodeField({
+  value,
+  dirty,
+  label,
+  disabled,
+  onChangeText,
+  onCommit,
+}: {
+  value: string;
+  dirty: boolean;
+  label: string;
+  disabled: boolean;
+  onChangeText: (text: string) => void;
+  onCommit: (text: string) => void;
+}) {
+  const sentRef = useRef<string | null>(null);
+  const commit = (text: string) => {
+    if (sentRef.current === text) return;
+    sentRef.current = text;
+    onCommit(text);
+  };
+  return (
+    <TextInput
+      style={[styles.timecodeInput, disabled && styles.timecodeInputDisabled]}
+      value={value}
+      editable={!disabled}
+      keyboardType="numbers-and-punctuation"
+      returnKeyType="done"
+      selectTextOnFocus
+      autoCorrect={false}
+      placeholder="0:00.00"
+      placeholderTextColor={colors.muted}
+      onFocus={() => {
+        sentRef.current = null;
+      }}
+      onChangeText={onChangeText}
+      onSubmitEditing={(event) => commit(event.nativeEvent.text)}
+      onBlur={() => {
+        if (dirty) commit(value);
+      }}
+      accessibilityLabel={label}
+      accessibilityHint="Type a timecode like 1:02.50 to trim this clip exactly"
+      accessibilityState={{ disabled }}
+    />
+  );
+}
 
 // Each handle owns its gesture. Claiming the responder on touch START is what
 // stops the enclosing horizontal ScrollView from panning instead; the parent
@@ -718,6 +854,22 @@ const styles = StyleSheet.create({
   },
   layerBarUntimed: { backgroundColor: colors.muted },
   layerBarSelected: { opacity: 1, borderWidth: 1, borderColor: colors.text },
+  timecodeRow: { flexDirection: 'row', alignItems: 'center', gap: space.sm },
+  timecodeLabel: { ...type.label, color: colors.textDim, minWidth: 52 },
+  timecodeSeparator: { ...type.label, color: colors.muted },
+  timecodeInput: {
+    flex: 1,
+    minHeight: 44,
+    paddingHorizontal: space.sm,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.borderLight,
+    backgroundColor: colors.surface3,
+    color: colors.text,
+    fontVariant: ['tabular-nums'],
+    textAlign: 'center',
+  },
+  timecodeInputDisabled: { opacity: 0.5 },
   handleHit: { position: 'absolute', top: 0, width: HANDLE_HIT_WIDTH, alignItems: 'center', justifyContent: 'center' },
   handle: { width: 4, height: '100%', backgroundColor: colors.volt, borderRadius: 2 },
   handleStart: { borderTopLeftRadius: radius.sm, borderBottomLeftRadius: radius.sm },
