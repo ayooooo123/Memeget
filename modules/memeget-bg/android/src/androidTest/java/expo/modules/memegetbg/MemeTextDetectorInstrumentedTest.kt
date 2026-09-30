@@ -1,6 +1,7 @@
 package expo.modules.memegetbg
 
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
@@ -11,7 +12,6 @@ import java.io.File
 import java.io.FileOutputStream
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
-import org.junit.Assume.assumeNoException
 import org.junit.Test
 import org.junit.runner.RunWith
 
@@ -99,73 +99,47 @@ class MemeTextDetectorInstrumentedTest {
   }
 
   @Test
-  fun generatedTextProducesRealNestedOcrWhenModelIsAvailableAndRepeatsSafely() {
+  fun preparedImageIsAReadableUprightJpegAndLeaksNoDescriptors() {
     val context = ApplicationProvider.getApplicationContext<android.content.Context>()
     val bitmap = Bitmap.createBitmap(720, 320, Bitmap.Config.ARGB_8888)
     bitmap.eraseColor(Color.WHITE)
-    Canvas(bitmap).drawText(
-      "HELLO",
-      70f,
-      210f,
-      Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.BLACK
-        textSize = 150f
-        typeface = android.graphics.Typeface.DEFAULT_BOLD
-      }
-    )
     val file = File(context.cacheDir, "meme_text_detector_generated.png")
     FileOutputStream(file).use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
     bitmap.recycle()
 
     try {
-      // Warm up the Play Services process/model before counting descriptors;
-      // its long-lived model mappings are runtime state, not per-call leaks.
-      MemeTextDetector.detect(context, file.toURI().toString())
       val descriptorCountBefore = File("/proc/self/fd").list()?.size ?: 0
       repeat(8) {
-        val result = MemeTextDetector.detect(context, file.toURI().toString())
-        assertEquals(720, result.sourceWidth)
-        assertEquals(320, result.sourceHeight)
-        assertTrue(result.blocks.any { block ->
-          block.text.contains("HELLO", ignoreCase = true) &&
-            block.lines.isNotEmpty() &&
-            block.lines.any { line -> line.elements.isNotEmpty() }
-        })
+        val prepared = MemeTextDetector.prepareForTextDetection(context, file.toURI().toString())
+        val out = File(android.net.Uri.parse(prepared.uri).path!!)
+        try {
+          assertTrue(prepared.uri.startsWith("file://"))
+          assertEquals(720, prepared.width)
+          assertEquals(320, prepared.height)
+          assertEquals(720, prepared.sourceWidth)
+          assertEquals(320, prepared.sourceHeight)
+          val decoded = BitmapFactory.decodeFile(out.absolutePath)
+          assertEquals(720, decoded.width)
+          decoded.recycle()
+        } finally {
+          out.delete()
+        }
       }
       val descriptorCountAfter = File("/proc/self/fd").list()?.size ?: 0
       assertTrue(
-        "OCR leaked descriptors: before=$descriptorCountBefore after=$descriptorCountAfter",
+        "prepare leaked descriptors: before=$descriptorCountBefore after=$descriptorCountAfter",
         descriptorCountAfter <= descriptorCountBefore + 2
       )
-    } catch (error: Throwable) {
-      if (error.message.orEmpty().contains("recognize text", ignoreCase = true)) {
-        // The Play Services OCR model may not be provisioned on a fresh/offline
-        // emulator. Skip rather than fabricating OCR output; connected-run
-        // output reports this assumption explicitly.
-        assumeNoException("ML Kit OCR model unavailable on this device", error)
-      } else {
-        throw error
-      }
     } finally {
       file.delete()
     }
   }
 
   @Test
-  fun honorsExifRotationBeforeRecognitionAndReportsOrientedSourceDimensions() {
+  fun preparedImageHonorsExifRotationAndReportsOrientedDimensions() {
     val context = ApplicationProvider.getApplicationContext<android.content.Context>()
     val bitmap = Bitmap.createBitmap(160, 80, Bitmap.Config.ARGB_8888)
     bitmap.eraseColor(Color.WHITE)
-    Canvas(bitmap).drawText(
-      "UP",
-      20f,
-      58f,
-      Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.BLACK
-        textSize = 52f
-        typeface = android.graphics.Typeface.DEFAULT_BOLD
-      }
-    )
     val file = File(context.cacheDir, "meme_text_detector_exif.jpg")
     FileOutputStream(file).use { bitmap.compress(Bitmap.CompressFormat.JPEG, 95, it) }
     bitmap.recycle()
@@ -175,11 +149,22 @@ class MemeTextDetectorInstrumentedTest {
     }
 
     try {
-      val result = MemeTextDetector.detect(context, file.toURI().toString())
-      assertEquals(80, result.sourceWidth)
-      assertEquals(160, result.sourceHeight)
-      assertEquals(90, result.rotation)
-      assertTrue(result.blocks.isNotEmpty())
+      val prepared = MemeTextDetector.prepareForTextDetection(context, file.toURI().toString())
+      val out = File(android.net.Uri.parse(prepared.uri).path!!)
+      try {
+        assertEquals(80, prepared.sourceWidth)
+        assertEquals(160, prepared.sourceHeight)
+        assertEquals(80, prepared.width)
+        assertEquals(160, prepared.height)
+        assertEquals(90, prepared.rotation)
+        // The written copy is already upright: no EXIF left for a reader to miss.
+        val decoded = BitmapFactory.decodeFile(out.absolutePath)
+        assertEquals(80, decoded.width)
+        assertEquals(160, decoded.height)
+        decoded.recycle()
+      } finally {
+        out.delete()
+      }
     } finally {
       file.delete()
     }

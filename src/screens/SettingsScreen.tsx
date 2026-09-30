@@ -127,7 +127,7 @@ export function SettingsScreen({
   const [enriching, setEnriching] = useState<{ done: number; total: number; current: string } | null>(
     null
   );
-  const [tele, setTele] = useState<VisionTelemetry>({ described: 0, deduped: 0, failed: 0, avgMs: 0 });
+  const [tele, setTele] = useState<VisionTelemetry>({ described: 0, deduped: 0, failed: 0, skipped: 0, avgMs: 0 });
   const enrichCancel = useRef(false);
   const [audioPending, setAudioPending] = useState(0);
   const [audioStats, setAudioStats] = useState({ analyzed: 0, withSpeech: 0 });
@@ -255,6 +255,9 @@ export function SettingsScreen({
       setBackupStatus(
         `Restored ${added} new meme${added === 1 ? '' : 's'}, filled in ${enriched} existing, ${taught} taught example${taught === 1 ? '' : 's'}` +
           (found.some((r) => r.vectorsDropped) ? ' · vectors were from another model — run Index to re-embed' : '') +
+          (found.some((r) => r.teachingsForeignModel)
+            ? ' · taught examples were made with another model and were not restored (kept in the folder)'
+            : '') +
           // Loud on purpose: this is the backup failing to be a backup.
           (unreadable > 0 ? ` · ⚠ ${unreadable} record${unreadable === 1 ? '' : 's'} could not be read — back up again to rewrite them` : '')
       );
@@ -692,7 +695,8 @@ export function SettingsScreen({
       emitLibraryChanged(); // captions/tags changed under the Library's feet
       const dupNote = res.deduped > 0 ? ` · ${res.deduped} dup${res.deduped === 1 ? '' : 's'} skipped` : '';
       const failNote = res.failed > 0 ? ` · ${res.failed} failed` : '';
-      const body = `${res.described} meme${res.described === 1 ? '' : 's'}${dupNote}${failNote}`;
+      const skipNote = res.skipped > 0 ? ` · ${res.skipped} already known` : '';
+      const body = `${res.described} meme${res.described === 1 ? '' : 's'}${dupNote}${failNote}${skipNote}`;
       if (enrichCancel.current) {
         showToast(`Stopped — described ${body}`, 'info');
         return;

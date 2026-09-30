@@ -5,41 +5,23 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.media.ExifInterface
 import android.net.Uri
-import com.google.android.gms.common.api.ApiException
-import com.google.android.gms.common.api.CommonStatusCodes
-import com.google.android.gms.common.moduleinstall.InstallStatusListener
-import com.google.android.gms.common.moduleinstall.ModuleInstall
-import com.google.android.gms.common.moduleinstall.ModuleInstallRequest
-import com.google.android.gms.common.moduleinstall.ModuleInstallStatusUpdate
-import com.google.android.gms.common.moduleinstall.ModuleInstallStatusUpdate.InstallState
-import com.google.android.gms.tasks.Task
-import com.google.mlkit.common.MlKitException
-import com.google.mlkit.vision.common.InputImage
-import com.google.mlkit.vision.segmentation.subject.SubjectSegmentation
-import com.google.mlkit.vision.segmentation.subject.SubjectSegmenter
-import com.google.mlkit.vision.segmentation.subject.SubjectSegmenterOptions
+import android.util.Base64
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.IOException
 import java.io.InputStream
-import java.nio.FloatBuffer
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.max
 import kotlin.math.min
-import kotlin.math.roundToInt
 
 /**
  * The reason a cutout attempt produced nothing, as a code the JS side maps to a
- * remedy. These three are NOT interchangeable: offline means "connect and retry",
- * unavailable means "this device/Play services build cannot do it at all", and
- * failed means "that image did not work". A single generic error would send the
- * user looking in the wrong place, so the classification happens here — where the
- * actual exception is — and crosses the bridge verbatim.
+ * remedy. These are NOT interchangeable: offline means "connect and retry" (the
+ * model downloads on first use), unavailable means "this build cannot do it at
+ * all", and failed means "that image did not work". The JS orchestrator raises
+ * OFFLINE/MODULE_UNAVAILABLE itself; the native steps below raise the rest.
  *
  * "No subject found" is deliberately absent: an image with no subject is a
  * successful segmentation with an empty result, not a failure.
@@ -58,8 +40,8 @@ internal class SubjectCutoutException(
 ) : IOException(message, cause)
 
 /**
- * One materialized cutout: source pixels multiplied by the subject's alpha,
- * cropped to the subject's own bounds and written to disk as a PNG.
+ * One materialized cutout: source pixels with the subject's alpha, cropped to
+ * the subject's own bounds and written to disk as a PNG.
  *
  * The bitmap never crosses the bridge. JS holds this reference plus normalized
  * geometry, which is all the renderer needs to place it, and is what keeps a
@@ -74,7 +56,7 @@ internal data class SubjectCutout(
   val bounds: NormalizedImageRect,
   val widthPx: Int,
   val heightPx: Int,
-  /** Fraction of the oriented frame the subject's alpha actually covers. */
+  /** Fraction of the oriented frame the subject's mask actually covers. */
   val coverage: Double,
   val bytes: Long
 ) {
@@ -122,139 +104,108 @@ internal data class SubjectCutoutResult(
   )
 }
 
+/** The working image a request segments, handed to the JS model by file uri. */
+internal data class PreparedSubjectImage(
+  val requestId: String,
+  val workingUri: String,
+  val sourceWidth: Int,
+  val sourceHeight: Int,
+  val workingWidth: Int,
+  val workingHeight: Int,
+  val sampleSize: Int,
+  val estimatedPeakBytes: Long,
+  val ceilingBytes: Long
+) {
+  fun toMap(): Map<String, Any> = mapOf(
+    "requestId" to requestId,
+    "workingUri" to workingUri,
+    "sourceWidth" to sourceWidth,
+    "sourceHeight" to sourceHeight,
+    "workingWidth" to workingWidth,
+    "workingHeight" to workingHeight,
+    "sampleSize" to sampleSize,
+    "estimatedPeakBytes" to estimatedPeakBytes,
+    "ceilingBytes" to ceilingBytes
+  )
+}
+
 /**
- * Still-image subject cutouts through ML Kit Subject Segmentation (pinned
- * 16.0.0-beta1, unbundled via Google Play services).
+ * The pixel half of still-image subject cutouts. Segmentation itself runs in JS
+ * on react-native-executorch (FastSAM) — no Google Play services — and a request
+ * is two native steps around it:
  *
- * Three things make this more than a `process()` call:
+ * 1. [prepare] decodes the source upright at a size the memory ceiling allows,
+ *    keeps that working bitmap, and writes a JPEG copy the model can read.
+ * 2. [writeCutouts] takes the subject masks JS chose (bit-packed, one per
+ *    subject, each cropped to its box) and materializes one PNG per subject plus
+ *    a combined one from the kept working bitmap — lossless, alpha feathered by
+ *    one pixel so edges aren't stair-stepped.
  *
- * 1. The model is NOT in the APK. On a sideloaded build Play Store never
- *    prefetches it, so the first attempt has to install the optional module
- *    itself — with progress, because it is a user-visible wait, and with a way
- *    out, because a metered connection is the user's business.
- * 2. Every failure mode needs a different remedy (see [SubjectCutoutFailure]).
- * 3. Memory. A confidence mask is one float per source pixel — 4 bytes, the
- *    same as the decoded ARGB pixel it describes. Segmenting a 32 MP photo at
- *    full size would ask for 128 MB of bitmap plus 128 MB of mask plus the
- *    cutout, which is the allocation that OOM'd this app before. So the working
- *    size is derived FROM the ceiling ([MEMORY_CEILING_BYTES]) rather than from
- *    the source, and the estimate is reported so the caller can show it.
+ * Memory is why the working size is derived FROM [MEMORY_CEILING_BYTES] rather
+ * than from the source: a 32 MP photo at full size is the allocation that
+ * OOM'd this app before.
  */
 internal object MemeStillSubjectSegmenter {
   /** Cache subdirectory holding one directory per segmentation request. */
   const val WORK_DIR = "meme_work_cutout"
 
   /**
-   * Peak transient bytes one cutout request may allocate.
-   *
-   * 96 MB sits under the renderer's own working budget so a cutout taken while
-   * an export is warm cannot push the process over, and it is comfortably above
-   * what the working size below actually needs.
+   * Peak transient bytes one cutout request may allocate natively. 96 MB sits
+   * under the renderer's own working budget so a cutout taken while an export is
+   * warm cannot push the process over.
    */
   const val MEMORY_CEILING_BYTES = 96L * 1024L * 1024L
 
   /**
-   * Longest working edge. ML Kit's own segmentation runs at a fixed internal
-   * resolution, so mask detail stops improving well before this; going higher
-   * would buy resampling artifacts and a second full-resolution allocation
-   * instead of a better edge. Masks are resampled at export from here.
+   * Longest working edge. The model resizes to its fixed input anyway, so mask
+   * detail stops improving well before this; masks come back at working size.
    */
   const val MAX_WORKING_EDGE = 2048
 
-  /**
-   * ML Kit documents 512x512 as the smallest input it segments accurately. We
-   * do not upscale to reach it — that invents detail — but the caller is told,
-   * so a poor cutout on a thumbnail reads as "small source" instead of "broken".
-   */
+  /** Below this short edge the caller is told the cutout may be rough. */
   const val RECOMMENDED_MIN_EDGE = 512
 
   /** Per-request subject cap; the studio cannot show more than a few anyway. */
   const val MAX_SUBJECTS = 8
 
-  /** Alpha at or above this counts as subject when measuring bounds/coverage. */
-  private const val MASK_THRESHOLD = 0.5f
-
   /**
-   * Below this the "subject" is a handful of speckled pixels — every one of
-   * those we have looked at was noise, and offering it as a cutout wastes the
-   * user's tap. Treated as "no subject found", which is not an error.
+   * Below this the "subject" is a handful of speckled pixels. Treated as "no
+   * subject found", which is not an error.
    */
   private const val MIN_SUBJECT_COVERAGE = 0.001
 
-  /** Decoded ARGB + confidence float + cutout ARGB, per working pixel. */
+  /**
+   * Decoded ARGB working bitmap + one cutout ARGB + the combined byte mask and
+   * model copy, per working pixel, rounded up.
+   */
   private const val BYTES_PER_WORKING_PIXEL = 4L + 4L + 4L
+
+  private const val WORKING_JPEG_QUALITY = 95
 
   /** A finished request's files outlive the studio session by at most this. */
   private const val STALE_REQUEST_MS = 60L * 60L * 1000L
 
-  /** How long a single ML Kit call may run before it counts as hung. */
-  private const val PROCESS_TIMEOUT_MS = 120_000L
-
-  /** How long the optional-module install may run before it counts as stalled. */
-  private const val INSTALL_TIMEOUT_MS = 300_000L
-
-  /**
-   * How long the "is it already installed" probe may run. Short on purpose: it
-   * gates a UI state, and a stalled probe should show the download state rather
-   * than a spinner that outlives the user's patience.
-   */
-  private const val AVAILABILITY_TIMEOUT_MS = 15_000L
-
-  /** Cancellation poll interval while blocked on a Play services task. */
-  private const val WAIT_SLICE_MS = 100L
-
-  private val cancellations = ConcurrentHashMap<String, AtomicBoolean>()
-
-  /** Progress payloads for the JS download state; see index.ts. */
-  internal fun interface ProgressSink {
-    fun send(payload: Map<String, Any?>)
+  private class ActiveRequest(val working: WorkingBitmap, val directory: File) {
+    val cancelled = AtomicBoolean(false)
   }
 
-  /**
-   * Ask Play services whether the segmentation module is already on the device,
-   * without triggering an install. Used to decide whether the UI needs to show
-   * a download state at all.
-   */
-  fun moduleInstalled(context: Context): Boolean {
-    segmenter(context).use { held ->
-      return try {
-        awaitTask(
-          ModuleInstall.getClient(context).areModulesAvailable(held.segmenter),
-          AVAILABILITY_TIMEOUT_MS
-        ) { false }.areModulesAvailable()
-      } catch (error: Throwable) {
-        // An availability probe that cannot run is not a failure to report to
-        // the user: the segment call will classify it properly if they ask for
-        // a cutout. Report "not installed" so the UI shows the download state.
-        false
-      }
-    }
-  }
+  private val active = ConcurrentHashMap<String, ActiveRequest>()
 
   fun requestCancel(requestId: String) {
-    cancellations[requestId]?.set(true)
+    active[requestId]?.cancelled?.set(true)
   }
 
   /**
-   * Segment [source] and materialize one cutout per subject plus a combined one.
-   *
-   * Blocking on purpose: the bridge calls it from an AsyncFunction, so the JS
-   * thread is never held, and a linear body is the only readable way to express
-   * "install the module, then infer, cancellable at every step".
+   * Step 1. Blocking on purpose: the bridge calls it from an AsyncFunction, so
+   * the JS thread is never held.
    */
-  fun segment(
-    context: Context,
-    source: String,
-    requestId: String,
-    progress: ProgressSink
-  ): SubjectCutoutResult {
+  fun prepare(context: Context, source: String, requestId: String): PreparedSubjectImage {
     require(requestId.isNotBlank()) { "A cutout request needs an id" }
     require(requestId.all { it.isLetterOrDigit() || it == '-' || it == '_' }) {
       "Cutout request id must be a filesystem-safe token, got \"$requestId\""
     }
-    val cancelled = AtomicBoolean(false)
-    cancellations[requestId] = cancelled
     val directory = File(File(context.cacheDir, WORK_DIR), requestId)
+    var working: WorkingBitmap? = null
     try {
       sweepStaleRequests(context, requestId)
       if (!directory.mkdirs() && !directory.isDirectory) {
@@ -263,28 +214,145 @@ internal object MemeStillSubjectSegmenter {
           "Could not create a working directory for cutout $requestId"
         )
       }
-      return runSegmentation(context, source, requestId, directory, cancelled, progress)
+      val decoded = decodeWorkingBitmap(context, source)
+      working = decoded
+      val modelCopy = File(directory, "$requestId-working.jpg")
+      FileOutputStream(modelCopy).use { out ->
+        if (!decoded.bitmap.compress(Bitmap.CompressFormat.JPEG, WORKING_JPEG_QUALITY, out)) {
+          throw SubjectCutoutException(SubjectCutoutFailure.FAILED, "Could not encode the cutout working image")
+        }
+      }
+      active.put(requestId, ActiveRequest(decoded, directory))?.working?.recycle()
+      return PreparedSubjectImage(
+        requestId = requestId,
+        workingUri = Uri.fromFile(modelCopy).toString(),
+        sourceWidth = decoded.sourceWidth,
+        sourceHeight = decoded.sourceHeight,
+        workingWidth = decoded.bitmap.width,
+        workingHeight = decoded.bitmap.height,
+        sampleSize = decoded.sampleSize,
+        estimatedPeakBytes = decoded.estimatedPeakBytes,
+        ceilingBytes = MEMORY_CEILING_BYTES
+      )
     } catch (error: Throwable) {
+      working?.recycle()
       directory.deleteRecursively()
       throw error
-    } finally {
-      cancellations.remove(requestId, cancelled)
     }
   }
 
-  /** Delete the files of one request. Called when a cutout stops being used. */
+  /**
+   * Step 2. [boxes] is `x, y, width, height` per subject in working pixels (the
+   * mask's top-left and size); [masks] is one base64 string per subject holding
+   * `width * height` bits, row-major, most significant bit first. Order is the
+   * caller's: it becomes each subject's index.
+   */
+  fun writeCutouts(
+    requestId: String,
+    boxes: List<Int>,
+    masks: List<String>,
+    droppedSubjects: Int
+  ): SubjectCutoutResult {
+    val request = active[requestId] ?: throw SubjectCutoutException(
+      SubjectCutoutFailure.FAILED,
+      "Cutout request $requestId was not prepared, or was already released"
+    )
+    try {
+      if (boxes.size != masks.size * 4) {
+        throw SubjectCutoutException(SubjectCutoutFailure.FAILED, "Each subject mask needs one box")
+      }
+      val frame = request.working.bitmap
+      val frameWidth = frame.width
+      val frameHeight = frame.height
+      val framePixels = frameWidth.toLong() * frameHeight.toLong()
+      val combined = ByteArray(frameWidth * frameHeight)
+      val subjects = ArrayList<SubjectCutout>()
+      for (index in 0 until min(masks.size, MAX_SUBJECTS)) {
+        throwIfCancelled(request.cancelled)
+        val originX = boxes[index * 4]
+        val originY = boxes[index * 4 + 1]
+        val width = boxes[index * 4 + 2]
+        val height = boxes[index * 4 + 3]
+        if (width <= 0 || height <= 0) continue
+        val bits = Base64.decode(masks[index], Base64.DEFAULT)
+        if (bits.size.toLong() * 8L < width.toLong() * height.toLong()) {
+          throw SubjectCutoutException(SubjectCutoutFailure.FAILED, "Subject mask $index is truncated")
+        }
+        val isSet = { mx: Int, my: Int ->
+          val i = my * width + mx
+          (bits[i ushr 3].toInt() and (0x80 ushr (i and 7))) != 0
+        }
+        for (my in 0 until height) {
+          val fy = originY + my
+          if (fy < 0 || fy >= frameHeight) continue
+          for (mx in 0 until width) {
+            val fx = originX + mx
+            if (fx < 0 || fx >= frameWidth) continue
+            if (isSet(mx, my)) combined[fy * frameWidth + fx] = 1
+          }
+        }
+        materialize(
+          directory = request.directory,
+          id = "$requestId-subject-$index",
+          subjectIndex = index,
+          frame = frame,
+          originX = originX,
+          originY = originY,
+          width = width,
+          height = height,
+          framePixels = framePixels,
+          isSet = isSet
+        )?.let(subjects::add)
+      }
+      throwIfCancelled(request.cancelled)
+      val combinedCutout = if (subjects.isEmpty()) null else materialize(
+        directory = request.directory,
+        id = "$requestId-combined",
+        subjectIndex = null,
+        frame = frame,
+        originX = 0,
+        originY = 0,
+        width = frameWidth,
+        height = frameHeight,
+        framePixels = framePixels
+      ) { mx, my -> combined[my * frameWidth + mx].toInt() != 0 }
+      File(request.directory, "$requestId-working.jpg").delete()
+      return SubjectCutoutResult(
+        requestId = requestId,
+        sourceWidth = request.working.sourceWidth,
+        sourceHeight = request.working.sourceHeight,
+        workingWidth = frameWidth,
+        workingHeight = frameHeight,
+        sampleSize = request.working.sampleSize,
+        estimatedPeakBytes = request.working.estimatedPeakBytes,
+        ceilingBytes = MEMORY_CEILING_BYTES,
+        directory = Uri.fromFile(request.directory).toString(),
+        combined = combinedCutout,
+        subjects = subjects,
+        droppedSubjects = droppedSubjects + max(0, masks.size - MAX_SUBJECTS)
+      )
+    } catch (error: Throwable) {
+      request.directory.deleteRecursively()
+      throw error
+    } finally {
+      active.remove(requestId, request)
+      request.working.recycle()
+    }
+  }
+
+  /** Delete the files of one request (and drop it if still in flight). */
   fun release(context: Context, requestId: String): Boolean {
     if (requestId.isBlank() || requestId.contains('/') || requestId.contains("..")) return false
+    active.remove(requestId)?.working?.recycle()
     val directory = File(File(context.cacheDir, WORK_DIR), requestId)
     if (!directory.exists()) return false
     return directory.deleteRecursively()
   }
 
   /**
-   * Drop request directories nothing can be using any more.
-   *
-   * Cutouts are cache files a crash can orphan, and an orphaned 16 MP PNG is
-   * invisible until the cache is full, so every new request sweeps.
+   * Drop request directories nothing can be using any more. Cutouts are cache
+   * files a crash can orphan, and an orphaned 16 MP PNG is invisible until the
+   * cache is full, so every new request sweeps.
    */
   fun sweepStaleRequests(context: Context, keepRequestId: String? = null): Int {
     val root = File(context.cacheDir, WORK_DIR)
@@ -293,409 +361,116 @@ internal object MemeStillSubjectSegmenter {
     var removed = 0
     for (entry in entries) {
       if (entry.name == keepRequestId) continue
-      if (cancellations.containsKey(entry.name)) continue
+      if (active.containsKey(entry.name)) continue
       if (entry.lastModified() > cutoff) continue
       if (entry.deleteRecursively()) removed += 1
     }
     return removed
   }
 
-  // --- segmentation ---------------------------------------------------------
+  // --- cutout materialization -----------------------------------------------
 
-  private fun runSegmentation(
-    context: Context,
-    source: String,
-    requestId: String,
+  /**
+   * One cutout PNG from a binary mask whose (0,0) sits at ([originX],[originY])
+   * in the working frame. Alpha is the share of set pixels in each pixel's 3x3
+   * neighbourhood: 255 inside, a one-pixel ramp at the edge. Null when the mask
+   * covers too little of the frame to be a subject.
+   */
+  private inline fun materialize(
     directory: File,
-    cancelled: AtomicBoolean,
-    progress: ProgressSink
-  ): SubjectCutoutResult {
-    val working = decodeWorkingBitmap(context, source)
-    try {
-      throwIfCancelled(cancelled)
-      segmenter(context).use { held ->
-        val sink = ProgressSink { payload ->
-          progress.send(payload + ("requestId" to requestId))
-        }
-        ensureModuleInstalled(context, held.segmenter, cancelled, sink)
-        sink.send(mapOf("phase" to "segmenting"))
-        val result = awaitTask(
-          held.segmenter.process(InputImage.fromBitmap(working.bitmap, 0)),
-          PROCESS_TIMEOUT_MS
-        ) { cancelled.get() }
-        throwIfCancelled(cancelled)
-
-        val frameWidth = working.bitmap.width
-        val frameHeight = working.bitmap.height
-        val subjects = ArrayList<SubjectCutout>()
-        val available = result.subjects
-        for ((index, subject) in available.withIndex()) {
-          if (index >= MAX_SUBJECTS) break
-          throwIfCancelled(cancelled)
-          val subjectWidth = subject.width
-          val subjectHeight = subject.height
-          if (subjectWidth <= 0 || subjectHeight <= 0) continue
-          val measured = measure(
-            subject.confidenceMask,
-            subjectWidth,
-            subjectHeight,
-            frameWidth.toLong() * frameHeight.toLong()
-          )
-          if (measured == null || measured.coverage < MIN_SUBJECT_COVERAGE) continue
-          val bitmap = subject.bitmap ?: maskedCopy(
-            working.bitmap,
-            subject.confidenceMask,
-            subject.startX,
-            subject.startY,
-            subjectWidth,
-            subjectHeight
-          ) ?: continue
-          val bounds = MemeTextDetector.normalizePixelRect(
-            subject.startX + measured.left,
-            subject.startY + measured.top,
-            subject.startX + measured.right,
-            subject.startY + measured.bottom,
-            frameWidth,
-            frameHeight
-          ) ?: continue
-          subjects.add(
-            writeCutout(
-              directory = directory,
-              id = "$requestId-subject-$index",
-              subjectIndex = index,
-              bitmap = bitmap,
-              crop = PixelBounds(measured.left, measured.top, measured.right, measured.bottom),
-              bounds = bounds,
-              coverage = measured.coverage,
-              ownsBitmap = subject.bitmap == null
-            )
-          )
-        }
-
-        val combinedMeasured = measure(
-          result.foregroundConfidenceMask,
-          frameWidth,
-          frameHeight,
-          frameWidth.toLong() * frameHeight.toLong()
-        )
-        val combined = if (combinedMeasured == null || combinedMeasured.coverage < MIN_SUBJECT_COVERAGE) {
-          null
-        } else {
-          val foreground = result.foregroundBitmap ?: maskedCopy(
-            working.bitmap,
-            result.foregroundConfidenceMask,
-            0,
-            0,
-            frameWidth,
-            frameHeight
-          )
-          val bounds = MemeTextDetector.normalizePixelRect(
-            combinedMeasured.left,
-            combinedMeasured.top,
-            combinedMeasured.right,
-            combinedMeasured.bottom,
-            frameWidth,
-            frameHeight
-          )
-          if (foreground == null || bounds == null) {
-            null
-          } else {
-            writeCutout(
-              directory = directory,
-              id = "$requestId-combined",
-              subjectIndex = null,
-              bitmap = foreground,
-              crop = PixelBounds(
-                combinedMeasured.left,
-                combinedMeasured.top,
-                combinedMeasured.right,
-                combinedMeasured.bottom
-              ),
-              bounds = bounds,
-              coverage = combinedMeasured.coverage,
-              ownsBitmap = result.foregroundBitmap == null
-            )
-          }
-        }
-
-        return SubjectCutoutResult(
-          requestId = requestId,
-          sourceWidth = working.sourceWidth,
-          sourceHeight = working.sourceHeight,
-          workingWidth = frameWidth,
-          workingHeight = frameHeight,
-          sampleSize = working.sampleSize,
-          estimatedPeakBytes = working.estimatedPeakBytes,
-          ceilingBytes = MEMORY_CEILING_BYTES,
-          directory = Uri.fromFile(directory).toString(),
-          combined = combined,
-          subjects = subjects,
-          droppedSubjects = max(0, available.size - MAX_SUBJECTS)
-        )
-      }
-    } finally {
-      working.recycle()
-    }
-  }
-
-  private class HeldSegmenter(val segmenter: SubjectSegmenter) : AutoCloseable {
-    override fun close() = segmenter.close()
-  }
-
-  private fun segmenter(context: Context): HeldSegmenter {
-    // Requesting the bitmaps as well as the masks costs nothing extra to
-    // produce (ML Kit already has the alpha) and saves us compositing a second
-    // full-frame ARGB copy per subject in this process.
-    val subjectOptions = SubjectSegmenterOptions.SubjectResultOptions.Builder()
-      .enableConfidenceMask()
-      .enableSubjectBitmap()
-      .build()
-    val options = SubjectSegmenterOptions.Builder()
-      .enableForegroundConfidenceMask()
-      .enableForegroundBitmap()
-      .enableMultipleSubjects(subjectOptions)
-      .build()
-    return try {
-      HeldSegmenter(SubjectSegmentation.getClient(options))
-    } catch (error: Throwable) {
-      throw classify(error, "Subject cutouts are unavailable on this device")
-    }
-  }
-
-  /**
-   * Make sure the optional Play services module is on the device, downloading it
-   * with progress if it is not.
-   *
-   * A sideloaded build never gets the install-time prefetch the manifest
-   * declaration asks for, so this path is the normal one here, not a fallback.
-   */
-  private fun ensureModuleInstalled(
-    context: Context,
-    segmenter: SubjectSegmenter,
-    cancelled: AtomicBoolean,
-    progress: ProgressSink
-  ) {
-    val client = ModuleInstall.getClient(context)
-    val availability = try {
-      awaitTask(client.areModulesAvailable(segmenter), AVAILABILITY_TIMEOUT_MS) { cancelled.get() }
-    } catch (error: Throwable) {
-      throw classify(error, "Could not check whether the cutout model is installed")
-    }
-    if (availability.areModulesAvailable()) return
-
-    progress.send(mapOf("phase" to "downloading", "bytesDownloaded" to 0, "totalBytes" to 0))
-    val state = AtomicReference(InstallState.STATE_UNKNOWN)
-    val settled = CountDownLatch(1)
-    val listener = InstallStatusListener { update: ModuleInstallStatusUpdate ->
-      state.set(update.installState)
-      val info = update.progressInfo
-      if (info != null) {
-        progress.send(
-          mapOf(
-            "phase" to "downloading",
-            "bytesDownloaded" to info.bytesDownloaded,
-            "totalBytes" to info.totalBytesToDownload
-          )
-        )
-      }
-      when (update.installState) {
-        InstallState.STATE_COMPLETED,
-        InstallState.STATE_FAILED,
-        InstallState.STATE_CANCELED -> settled.countDown()
-        else -> Unit
-      }
-    }
-    val request = ModuleInstallRequest.newBuilder()
-      .addApi(segmenter)
-      .setListener(listener)
-      .build()
-    val response = try {
-      awaitTask(client.installModules(request), INSTALL_TIMEOUT_MS) { cancelled.get() }
-    } catch (error: Throwable) {
-      client.unregisterListener(listener)
-      throw classify(error, "Could not start the cutout model download")
-    }
-    if (response.areModulesAlreadyInstalled()) {
-      client.unregisterListener(listener)
-      return
-    }
-    try {
-      val deadline = System.currentTimeMillis() + INSTALL_TIMEOUT_MS
-      while (settled.count > 0L) {
-        if (cancelled.get()) {
-          // The documented way to stop a pending install. Only while it IS
-          // pending: after completion this would tell Play services to reclaim
-          // a model the user just paid for in bandwidth.
-          if (state.get() != InstallState.STATE_COMPLETED) {
-            runCatching { client.releaseModules(segmenter) }
-          }
-          throw SubjectCutoutException(
-            SubjectCutoutFailure.CANCELLED,
-            "Cutout model download cancelled"
-          )
-        }
-        if (System.currentTimeMillis() > deadline) {
-          throw SubjectCutoutException(
-            SubjectCutoutFailure.OFFLINE,
-            "The cutout model download did not finish. Check the connection and try again."
-          )
-        }
-        settled.await(WAIT_SLICE_MS, TimeUnit.MILLISECONDS)
-      }
-      when (state.get()) {
-        InstallState.STATE_COMPLETED -> Unit
-        InstallState.STATE_CANCELED -> throw SubjectCutoutException(
-          SubjectCutoutFailure.CANCELLED,
-          "Cutout model download cancelled"
-        )
-        else -> throw SubjectCutoutException(
-          SubjectCutoutFailure.OFFLINE,
-          "The cutout model could not be downloaded. Check the connection and try again."
-        )
-      }
-    } finally {
-      client.unregisterListener(listener)
-    }
-  }
-
-  // --- mask geometry --------------------------------------------------------
-
-  private class PixelBounds(val left: Int, val top: Int, val right: Int, val bottom: Int)
-
-  private class MaskMeasurement(
-    val left: Int,
-    val top: Int,
-    val right: Int,
-    val bottom: Int,
-    val coverage: Double
-  )
-
-  /**
-   * Tight bounds and coverage of a confidence mask.
-   *
-   * Coverage is measured against the FRAME, not the mask, so a subject box that
-   * happens to be small does not read as high coverage — the studio uses it to
-   * order subjects and to decide whether anything was found at all.
-   */
-  private fun measure(
-    mask: FloatBuffer?,
+    id: String,
+    subjectIndex: Int?,
+    frame: Bitmap,
+    originX: Int,
+    originY: Int,
     width: Int,
     height: Int,
-    framePixels: Long
-  ): MaskMeasurement? {
-    if (mask == null || width <= 0 || height <= 0 || framePixels <= 0L) return null
-    val available = mask.limit() - mask.position()
-    if (available < width * height) return null
-    val base = mask.position()
+    framePixels: Long,
+    isSet: (Int, Int) -> Boolean
+  ): SubjectCutout? {
+    val frameWidth = frame.width
+    val frameHeight = frame.height
+    // Tight bounds and coverage, in mask coordinates, of the part inside the frame.
     var left = width
     var top = height
     var right = -1
     var bottom = -1
     var covered = 0L
-    for (y in 0 until height) {
-      val row = base + y * width
-      for (x in 0 until width) {
-        if (mask.get(row + x) < MASK_THRESHOLD) continue
+    for (my in 0 until height) {
+      val fy = originY + my
+      if (fy < 0 || fy >= frameHeight) continue
+      for (mx in 0 until width) {
+        val fx = originX + mx
+        if (fx < 0 || fx >= frameWidth || !isSet(mx, my)) continue
         covered += 1
-        if (x < left) left = x
-        if (x > right) right = x
-        if (y < top) top = y
-        if (y > bottom) bottom = y
+        if (mx < left) left = mx
+        if (mx > right) right = mx
+        if (my < top) top = my
+        if (my > bottom) bottom = my
       }
     }
     if (right < left || bottom < top) return null
-    return MaskMeasurement(
-      left = left,
-      top = top,
-      right = right + 1,
-      bottom = bottom + 1,
-      coverage = covered.toDouble() / framePixels.toDouble()
-    )
-  }
+    val coverage = covered.toDouble() / framePixels.toDouble()
+    if (coverage < MIN_SUBJECT_COVERAGE) return null
 
-  /**
-   * Fallback cutout for the case ML Kit hands back a mask but no bitmap.
-   *
-   * Allocates one subject-sized ARGB bitmap — bounded by the subject box, not
-   * the frame — and multiplies the source pixels by the mask alpha.
-   */
-  private fun maskedCopy(
-    frame: Bitmap,
-    mask: FloatBuffer?,
-    startX: Int,
-    startY: Int,
-    width: Int,
-    height: Int
-  ): Bitmap? {
-    if (mask == null || width <= 0 || height <= 0) return null
-    val available = mask.limit() - mask.position()
-    if (available < width * height) return null
-    val base = mask.position()
-    val pixels = IntArray(width * height)
-    val sourceRow = IntArray(width)
-    for (y in 0 until height) {
-      val frameY = startY + y
-      if (frameY < 0 || frameY >= frame.height) continue
-      val readWidth = min(width, frame.width - startX)
-      if (readWidth <= 0) continue
-      frame.getPixels(sourceRow, 0, width, startX, frameY, readWidth, 1)
-      val row = base + y * width
-      for (x in 0 until readWidth) {
-        val confidence = mask.get(row + x)
-        if (confidence < MASK_THRESHOLD) continue
-        val pixel = sourceRow[x]
-        val alpha = (confidence.coerceIn(0f, 1f) * 255f).roundToInt()
-        pixels[y * width + x] = (pixel and 0x00FFFFFF) or (alpha shl 24)
+    // Region in frame pixels: the tight box grown by the one-pixel feather.
+    val regionLeft = max(0, originX + left - 1)
+    val regionTop = max(0, originY + top - 1)
+    val regionRight = min(frameWidth, originX + right + 2)
+    val regionBottom = min(frameHeight, originY + bottom + 2)
+    val regionWidth = regionRight - regionLeft
+    val regionHeight = regionBottom - regionTop
+    val pixels = IntArray(regionWidth * regionHeight)
+    val sourceRow = IntArray(regionWidth)
+    for (ry in 0 until regionHeight) {
+      val fy = regionTop + ry
+      frame.getPixels(sourceRow, 0, regionWidth, regionLeft, fy, regionWidth, 1)
+      for (rx in 0 until regionWidth) {
+        val fx = regionLeft + rx
+        var set = 0
+        for (dy in -1..1) {
+          val my = fy + dy - originY
+          if (my < 0 || my >= height || fy + dy < 0 || fy + dy >= frameHeight) continue
+          for (dx in -1..1) {
+            val mx = fx + dx - originX
+            if (mx < 0 || mx >= width || fx + dx < 0 || fx + dx >= frameWidth) continue
+            if (isSet(mx, my)) set += 1
+          }
+        }
+        if (set == 0) continue
+        val alpha = (set * 255 + 4) / 9
+        pixels[ry * regionWidth + rx] = (sourceRow[rx] and 0x00FFFFFF) or (alpha shl 24)
       }
     }
-    return Bitmap.createBitmap(pixels, width, height, Bitmap.Config.ARGB_8888)
-  }
-
-  private fun writeCutout(
-    directory: File,
-    id: String,
-    subjectIndex: Int?,
-    bitmap: Bitmap,
-    crop: PixelBounds,
-    bounds: NormalizedImageRect,
-    coverage: Double,
-    ownsBitmap: Boolean
-  ): SubjectCutout {
-    // ML Kit's own bitmaps are already the subject box, so the crop here only
-    // trims the transparent margin the mask bounds proved is empty.
-    val left = crop.left.coerceIn(0, max(0, bitmap.width - 1))
-    val top = crop.top.coerceIn(0, max(0, bitmap.height - 1))
-    val right = crop.right.coerceIn(left + 1, bitmap.width)
-    val bottom = crop.bottom.coerceIn(top + 1, bitmap.height)
-    val trimmed = if (left == 0 && top == 0 && right == bitmap.width && bottom == bitmap.height) {
-      bitmap
-    } else {
-      Bitmap.createBitmap(bitmap, left, top, right - left, bottom - top)
-    }
+    val bounds = MemeTextDetector.normalizePixelRect(
+      regionLeft,
+      regionTop,
+      regionRight,
+      regionBottom,
+      frameWidth,
+      frameHeight
+    ) ?: return null
+    val cutout = Bitmap.createBitmap(pixels, regionWidth, regionHeight, Bitmap.Config.ARGB_8888)
     val file = File(directory, "$id.png")
     try {
       FileOutputStream(file).use { out ->
-        if (!trimmed.compress(Bitmap.CompressFormat.PNG, 100, out)) {
-          throw SubjectCutoutException(
-            SubjectCutoutFailure.FAILED,
-            "Could not encode the cutout for $id"
-          )
+        if (!cutout.compress(Bitmap.CompressFormat.PNG, 100, out)) {
+          throw SubjectCutoutException(SubjectCutoutFailure.FAILED, "Could not encode the cutout for $id")
         }
       }
-      return SubjectCutout(
-        id = id,
-        subjectIndex = subjectIndex,
-        cutoutUri = Uri.fromFile(file).toString(),
-        bounds = bounds,
-        widthPx = trimmed.width,
-        heightPx = trimmed.height,
-        coverage = coverage,
-        bytes = file.length()
-      )
     } finally {
-      if (trimmed !== bitmap) trimmed.recycle()
-      if (ownsBitmap) bitmap.recycle()
+      cutout.recycle()
     }
+    return SubjectCutout(
+      id = id,
+      subjectIndex = subjectIndex,
+      cutoutUri = Uri.fromFile(file).toString(),
+      bounds = bounds,
+      widthPx = regionWidth,
+      heightPx = regionHeight,
+      coverage = coverage,
+      bytes = file.length()
+    )
   }
 
   // --- decode ---------------------------------------------------------------
@@ -713,12 +488,9 @@ internal object MemeStillSubjectSegmenter {
   }
 
   /**
-   * Decode [source] upright, at a size the memory ceiling allows.
-   *
-   * EXIF is applied for real here, unlike the renderer's matrix trick: ML Kit
-   * segments the pixels it is given, so a sideways photo would be segmented
-   * sideways. The oriented copy is why the sample size is chosen against
-   * [MEMORY_CEILING_BYTES] with the copy counted in.
+   * Decode [source] upright, at a size the memory ceiling allows. EXIF is
+   * applied for real: the model segments the pixels it is given, so a sideways
+   * photo would be segmented sideways.
    */
   private fun decodeWorkingBitmap(context: Context, source: String): WorkingBitmap {
     val uri = readableUri(source)
@@ -798,10 +570,7 @@ internal object MemeStillSubjectSegmenter {
     )
   }
 
-  /**
-   * Transient bytes one request needs at its peak: the oriented working bitmap,
-   * the confidence mask covering it, and one cutout of the same size.
-   */
+  /** Transient bytes one request needs at its peak (see [BYTES_PER_WORKING_PIXEL]). */
   fun estimatedPeak(width: Int, height: Int): Long =
     max(1L, width.toLong()) * max(1L, height.toLong()) * BYTES_PER_WORKING_PIXEL
 
@@ -811,85 +580,6 @@ internal object MemeStillSubjectSegmenter {
     if (cancelled.get()) {
       throw SubjectCutoutException(SubjectCutoutFailure.CANCELLED, "Cutout cancelled")
     }
-  }
-
-  /**
-   * Await a Play services task while staying responsive to cancellation.
-   *
-   * `Tasks.await` cannot be interrupted from another thread, and neither ML Kit
-   * inference nor a module install exposes a cancel — so the wait is sliced and
-   * the caller's cancel flag is checked between slices. Abandoning the wait is
-   * the honest amount of cancellation available: the segmenter is closed on the
-   * way out, which is what actually releases the work.
-   */
-  private fun <T> awaitTask(
-    task: Task<T>,
-    timeoutMs: Long,
-    cancelled: () -> Boolean
-  ): T {
-    val deadline = System.currentTimeMillis() + timeoutMs
-    while (!task.isComplete) {
-      if (cancelled()) {
-        throw SubjectCutoutException(SubjectCutoutFailure.CANCELLED, "Cutout cancelled")
-      }
-      if (System.currentTimeMillis() > deadline) {
-        throw SubjectCutoutException(
-          SubjectCutoutFailure.FAILED,
-          "The cutout model did not respond within ${timeoutMs / 1000} s"
-        )
-      }
-      Thread.sleep(WAIT_SLICE_MS)
-    }
-    val error = task.exception
-    if (error != null) throw classify(error, "Subject segmentation failed")
-    if (!task.isSuccessful) {
-      throw SubjectCutoutException(SubjectCutoutFailure.CANCELLED, "Cutout cancelled")
-    }
-    @Suppress("UNCHECKED_CAST")
-    return task.result as T
-  }
-
-  /**
-   * Map a Play services / ML Kit failure onto the three remedies.
-   *
-   * Codes, not message matching: ML Kit's strings are not API, and getting this
-   * wrong means telling an offline user their device is unsupported.
-   */
-  private fun classify(error: Throwable, context: String): SubjectCutoutException {
-    if (error is SubjectCutoutException) return error
-    val detail = error.message ?: error.javaClass.simpleName
-    if (error is MlKitException) {
-      val failure = when (error.errorCode) {
-        MlKitException.NETWORK_ISSUE -> SubjectCutoutFailure.OFFLINE
-        MlKitException.UNAVAILABLE,
-        MlKitException.UNIMPLEMENTED,
-        MlKitException.PERMISSION_DENIED -> SubjectCutoutFailure.MODULE_UNAVAILABLE
-        MlKitException.CANCELLED -> SubjectCutoutFailure.CANCELLED
-        else -> SubjectCutoutFailure.FAILED
-      }
-      return SubjectCutoutException(failure, "$context: $detail", error)
-    }
-    if (error is ApiException) {
-      val failure = when (error.statusCode) {
-        CommonStatusCodes.NETWORK_ERROR ->
-          SubjectCutoutFailure.OFFLINE
-        CommonStatusCodes.API_NOT_CONNECTED,
-        CommonStatusCodes.DEVELOPER_ERROR ->
-          SubjectCutoutFailure.MODULE_UNAVAILABLE
-        CommonStatusCodes.CANCELED ->
-          SubjectCutoutFailure.CANCELLED
-        else -> SubjectCutoutFailure.FAILED
-      }
-      return SubjectCutoutException(failure, "$context: $detail", error)
-    }
-    if (error is NoClassDefFoundError || error is UnsatisfiedLinkError) {
-      return SubjectCutoutException(
-        SubjectCutoutFailure.MODULE_UNAVAILABLE,
-        "$context: $detail",
-        error
-      )
-    }
-    return SubjectCutoutException(SubjectCutoutFailure.FAILED, "$context: $detail", error)
   }
 
   private fun readableUri(source: String): Uri =

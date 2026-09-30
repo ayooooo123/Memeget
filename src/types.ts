@@ -5,8 +5,16 @@ export interface Tag {
   category: string;
   score: number;
   // How the label was matched. 'manual' = user-applied (e.g. bulk-tagged);
-  // 'propagated' = spread from a manual tag to a visually-similar meme.
-  source?: 'prompt' | 'exemplar' | 'ocr' | 'vision' | 'manual' | 'propagated';
+  // 'propagated' = spread from a manual tag to a visually-similar meme;
+  // 'entity_pack' = first-party entity retrieval hit.
+  source?:
+    | 'prompt'
+    | 'exemplar'
+    | 'entity_pack'
+    | 'ocr'
+    | 'vision'
+    | 'manual'
+    | 'propagated';
 }
 
 // Lifecycle of the optional VLM enrichment pass for a meme.

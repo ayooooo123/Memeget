@@ -19,7 +19,9 @@ import {
   bulkUpdateMemeTags,
   clearIndexErrors,
   clearIndexErrorsFor,
+  clearVisionIndexErrorsFor,
   countMemes,
+  folderHasMemes,
   countMemesDescribed,
   countMemesNeedingVision,
   countMemesNeedingEmbeddings,
@@ -93,7 +95,8 @@ import {
   sweepOrphanThumbs,
   type SafFile,
 } from './saf';
-import { syncAllSidecars } from './sidecarSync';
+import { restoreFolderSidecar, syncAllSidecars } from './sidecarSync';
+import { extractImageText } from './ocrEngine';
 import { formatGrounding, type GroundingLabel, type VisionResult } from './visionCore';
 import { captionSearchText, classificationContextTerms, memeExtraTerms } from './searchText';
 import {
@@ -116,6 +119,12 @@ import {
 } from './entityRetrieve';
 import { DEFAULT_VISION_SKIP_MODE, shouldSkipAutoVision } from './visionSkip';
 import type { Tag } from './types';
+import { createPhaseLog } from './phaseTimer';
+
+// Per-file indexing phases, for the freeze hunt: a share that lands while the
+// app is open runs this path, and stallWatch measured 14.6s of blocked JS
+// thread without saying which step owned it.
+const indexPhases = createPhaseLog('index');
 
 
 // Fast-pass merge: CLIP/exemplar visual tags + OCR-derived tags. Kept tight (4)
@@ -175,8 +184,6 @@ export function clearAutoVisionSkip(id?: number): void {
   else autoVisionSkipIds.delete(id);
 }
 
-// On-device OCR (Google ML Kit on Android). Imported lazily/defensively so a
-// missing module never breaks the whole index run.
 // ExecuTorch's native image decoder rejects WebP/HEIC/animated formats
 // ("Read image error: invalid argument"). Transcode every frame to a plain
 // JPEG (downscaled — CLIP only needs 224px) so embed + OCR always get a format
@@ -189,22 +196,9 @@ async function toJpeg(uri: string, width = 768): Promise<string> {
   return r.uri;
 }
 
-async function ocr(uri: string): Promise<string> {
-  try {
-    const mod = require('expo-text-extractor');
-    const fn = mod.extractTextFromImage ?? mod.default?.extractTextFromImage;
-    if (!fn) return '';
-    const res = await fn(uri);
-    if (Array.isArray(res)) return res.join(' ').trim();
-    return typeof res === 'string' ? res.trim() : '';
-  } catch {
-    return '';
-  }
-}
-
 // Width fed to the VLM. Gemma resamples to its vision encoder's fixed square
 // anyway, so feeding more pixels only inflates decode/transcode cost. Capping at
-// 512 keeps that bounded (the ML Kit OCR hint covers any small text we'd lose).
+// 512 keeps that bounded (the OCR hint covers any small text we'd lose).
 // Overridable for on-device A/B: lowering it trims the per-meme prefill. Falls
 // back to 512.
 const VLM_FRAME_WIDTH_ENV = Number(process.env.EXPO_PUBLIC_MEMEGET_VLM_FRAME_WIDTH);
@@ -267,16 +261,23 @@ async function materializeFrames(
   maxFrames: number
 ): Promise<{ jpegs: string[]; temp: string[] }> {
   const temp: string[] = [];
-  const work = await copyToCache(file, idx);
-  temp.push(work);
-  const frames = file.kind === 'video' ? await sampleVideoFrames(work, temp, maxFrames) : [work];
-  const jpegs: string[] = [];
-  for (const frame of frames) {
-    const jpeg = await toJpeg(frame, VLM_FRAME_WIDTH);
-    temp.push(jpeg);
-    jpegs.push(jpeg);
+  try {
+    const work = await copyToCache(file, idx);
+    temp.push(work);
+    const frames = file.kind === 'video' ? await sampleVideoFrames(work, temp, maxFrames) : [work];
+    const jpegs: string[] = [];
+    for (const frame of frames) {
+      const jpeg = await toJpeg(frame, VLM_FRAME_WIDTH);
+      temp.push(jpeg);
+      jpegs.push(jpeg);
+    }
+    return { jpegs, temp };
+  } catch (e) {
+    // The caller only learns `temp` on success; an undecodable video would
+    // otherwise leave its full-size work copy in the cache for the session.
+    for (const t of temp) await deleteCache(t);
+    throw e;
   }
-  return { jpegs, temp };
 }
 
 // Embed → OCR → classify a set of already-transcoded frame JPEGs and fold them
@@ -297,11 +298,11 @@ async function analyzeFrames(
 ): Promise<{ embedding: number[]; ocrText: string; tags: Tag[] }> {
   const frames: { embedding: number[]; ocrText: string }[] = [];
   for (const jpeg of jpegs) {
-    // Primary embed (ExecuTorch) and OCR (ML Kit) are independent native calls
-    // on the same frame — run concurrently so the shorter hides behind the
-    // longer. Frames run sequentially so only one embed is ever in flight,
-    // keeping peak memory flat (matching the pipeline's one-per-stage design).
-    const [embedding, ocrText] = await Promise.all([api.embedImage(jpeg), ocr(jpeg)]);
+    // Primary embed and OCR are separate ExecuTorch models (separate native
+    // instances) on the same frame — run concurrently so the shorter hides
+    // behind the longer. Frames run sequentially so only one embed is ever in
+    // flight, keeping peak memory flat (matching the pipeline's one-per-stage design).
+    const [embedding, ocrText] = await Promise.all([api.embedImage(jpeg), extractImageText(jpeg)]);
     frames.push({ embedding, ocrText });
   }
   const reps = dedupeFrames(frames);
@@ -668,6 +669,19 @@ export async function runIndex(
       allFiles.push(...media);
     } catch {
       // folder permission may have been revoked; skip it
+      continue;
+    }
+    // A folder the library holds nothing for ("Clear index", or a link whose
+    // restore never ran) may still have its captions, transcripts and tags in
+    // the .memeget sidecar — and this pass ends by syncing that sidecar FROM the
+    // library, which would overwrite them with the bare rows the scan inserts.
+    // Fold the text back in first; it lands pending, the scan below re-embeds
+    // it, and insertMeme's upsert keeps the restored captions and transcripts.
+    // Vectors are left out: this pass embeds these files anyway, and a cleared
+    // index asked for fresh ones.
+    if (!(await folderHasMemes(folder.uri))) {
+      status('restoring knowledge from your folder…');
+      await restoreFolderSidecar(folder.uri, folder.name, { keepVectors: false }).catch(() => {});
     }
   }
 
@@ -842,7 +856,7 @@ async function finishFile(api: EmbeddingsApi, prep: Prepared, know: Knowledge): 
     // Embed + OCR + classify every sampled frame and fold them into one meme's
     // worth of signal (mean-pooled gist vector, unioned OCR, unioned tags) —
     // an image has one frame, a video several distinct moments. Per-frame the
-    // primary embed (ExecuTorch) and OCR (ML Kit) run concurrently so the
+    // primary embed and OCR (both ExecuTorch) run concurrently so the
     // shorter hides behind the longer.
     //
     // The DINO visual embed is deliberately NOT here: fp32 DINOv2-base costs a
@@ -851,19 +865,23 @@ async function finishFile(api: EmbeddingsApi, prep: Prepared, know: Knowledge): 
     // (backfillVisualEmbeddings) owns visual vectors instead — the library is
     // browsable/searchable immediately and "More like this" upgrades to DINO
     // as the backfill catches up.
-    const { embedding, ocrText, tags } = await analyzeFrames(api, prep.jpegs, know);
+    const { embedding, ocrText, tags } = await indexPhases.time('analyze-frames', () =>
+      analyzeFrames(api, prep.jpegs, know)
+    );
 
     stage = 'store';
-    await insertMeme({
-      uri: prep.file.uri,
-      name: prep.file.name,
-      kind: prep.file.kind,
-      embedding,
-      ocrText,
-      tags,
-      extraTerms: extraTermsFor(tags, know.assoc),
-      modifiedAt: prep.modifiedAt,
-    });
+    await indexPhases.time('store', () =>
+      insertMeme({
+        uri: prep.file.uri,
+        name: prep.file.name,
+        kind: prep.file.kind,
+        embedding,
+        ocrText,
+        tags,
+        extraTerms: extraTermsFor(tags, know.assoc),
+        modifiedAt: prep.modifiedAt,
+      })
+    );
     return 'added';
   } catch (e) {
     const reason = String((e as Error)?.message ?? e).slice(0, 300);
@@ -891,7 +909,7 @@ async function finishFile(api: EmbeddingsApi, prep: Prepared, know: Knowledge): 
 }
 
 // Pipelined core shared by the folder scan and the share importer: while file N
-// is being embedded/OCR'd (ExecuTorch + ML Kit), file N+1 is already being
+// is being embedded/OCR'd (ExecuTorch), file N+1 is already being
 // copied/thumbnailed/transcoded (I/O + codecs). The stages run in different
 // native pools, so overlapping them hides most of the prepare cost; JS only
 // coordinates. One file is in each stage at a time, so peak memory stays flat.
@@ -1170,7 +1188,7 @@ export interface EnrichResult {
 }
 
 // Minimal surface of the vision API the enricher needs — keeps indexer.ts free
-// of any React/provider coupling. `ocrHint` is the text ML Kit already pulled
+// of any React/provider coupling. `ocrHint` is the text OCR already pulled
 // from the image, passed so the model uses it verbatim instead of (poorly)
 // re-reading small text — which lets us downscale the frame aggressively.
 export interface VisionEnricher {
@@ -1293,6 +1311,11 @@ async function describeAndSave(
 > {
   const temp: string[] = [];
   const started = Date.now();
+  // Which step failed, for the Settings → "Indexing errors" list. A swallowed
+  // exception here used to leave vision_state='failed' with no reason anywhere
+  // (and no auto-retry), so a whole class of tagging failures — an OOM thrown
+  // mid-generation, a frame the transcoder rejects — was invisible.
+  let stage = 'frames';
   try {
     // Retrieval-augmented grounding + skip decision need only stored tags — do
     // them before materializing frames so a strong-identity skip pays nothing.
@@ -1336,6 +1359,7 @@ async function describeAndSave(
     // a multi-scene edit for a few. Their descriptions are then folded into one
     // (unioned subjects/tags/text, joined scene captions).
     const results: VisionResult[] = [];
+    stage = 'describe';
     for (const jpeg of frames.jpegs) {
       const r = await vision.describe(jpeg, m.ocrText, grounding);
       if (!r) break; // model went unready mid-way
@@ -1359,15 +1383,20 @@ async function describeAndSave(
     }));
     const merged = mergeDurableTags([...m.tags, ...visionTags], 6);
     const extraTerms = visionExtraTerms(merged, assoc, res);
+    stage = 'caption-embed';
     const captionEmbedding = vision.embedText
       ? await vision.embedText(captionSearchText(res.caption, merged, extraTerms))
       : null;
 
+    stage = 'store';
     await setMemeVision(m.id, { caption: res.caption, captionEmbedding, tags: merged, extraTerms });
     autoVisionSkipIds.delete(m.id);
+    await clearVisionIndexErrorsFor(m.name).catch(() => {});
     recordDuration(Date.now() - started);
     return { status: 'done', payload: { caption: res.caption, captionEmbedding, tags: merged, extraTerms } };
-  } catch {
+  } catch (e) {
+    const reason = String((e as Error)?.message ?? e).slice(0, 300);
+    await addIndexError({ name: m.name, kind: m.kind, stage: `vision:${stage}`, reason }).catch(() => {});
     await markVisionFailed(m.id).catch(() => {});
     return { status: 'failed' };
   } finally {
@@ -1478,14 +1507,19 @@ export async function enrichLibrary(
     // Re-count at each chunk boundary (~24 generations apart, so the cost is
     // noise): memes indexed while this pass runs extend the queue, and a
     // denominator frozen at the start pins the bar at 100% while work remains.
-    const remaining = await countMemesNeedingVision();
-    if (remaining === 0) break;
+    // Identity-skipped rows stay pending but this pass won't touch them unless
+    // forced, so they don't count toward the bar (the set can hold a stale id,
+    // so it only shapes the denominator — the loop exits on real emptiness).
+    const pendingCount = await countMemesNeedingVision();
+    if (pendingCount === 0) break;
+    const remaining = force ? pendingCount : Math.max(0, pendingCount - autoVisionSkipIds.size);
     total = done + remaining;
     // Every processed row leaves the queue (done/deduped/failed all move
     // vision_state off 'pending'), so re-reading from the top never re-serves
     // the same meme — no OFFSET to drift under the mutations. Skipped rows stay
-    // pending; when !force we filter them via autoVisionSkipIds below.
-    const queue = await getMemesNeedingVision(ENRICH_CHUNK);
+    // pending at the top, so a non-forced pass reads past them: a window of just
+    // ENRICH_CHUNK filled with skipped rows would end the pass with work left.
+    const queue = await getMemesNeedingVision(force ? ENRICH_CHUNK : ENRICH_CHUNK + autoVisionSkipIds.size);
     if (queue.length === 0) break;
 
     let progressed = false;

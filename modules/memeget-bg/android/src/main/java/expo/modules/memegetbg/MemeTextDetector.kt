@@ -5,18 +5,12 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.Matrix
-import android.graphics.Point
-import android.graphics.Rect
 import android.media.ExifInterface
 import android.net.Uri
-import com.google.android.gms.tasks.Tasks
-import com.google.mlkit.vision.common.InputImage
-import com.google.mlkit.vision.text.Text
-import com.google.mlkit.vision.text.TextRecognition
-import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import java.io.File
 import java.io.IOException
 import java.io.FileInputStream
+import java.io.FileOutputStream
 import java.io.InputStream
 import java.util.Locale
 import kotlin.math.ceil
@@ -24,10 +18,6 @@ import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sqrt
-
-internal data class NormalizedImagePoint(val x: Double, val y: Double) {
-  fun toMap(): Map<String, Double> = mapOf("x" to x, "y" to y)
-}
 
 internal data class NormalizedImageRect(
   val x: Double,
@@ -43,65 +33,24 @@ internal data class NormalizedImageRect(
   )
 }
 
-internal data class DetectedTextElement(
-  val text: String,
-  val box: NormalizedImageRect?,
-  val cornerPoints: List<NormalizedImagePoint>,
-  val languages: List<String>
-) {
-  fun toMap(): Map<String, Any?> = mapOf(
-    "text" to text,
-    "box" to box?.toMap(),
-    "cornerPoints" to cornerPoints.map(NormalizedImagePoint::toMap),
-    "languages" to languages
-  )
-}
-
-internal data class DetectedTextLine(
-  val text: String,
-  val box: NormalizedImageRect?,
-  val cornerPoints: List<NormalizedImagePoint>,
-  val languages: List<String>,
-  val elements: List<DetectedTextElement>
-) {
-  fun toMap(): Map<String, Any?> = mapOf(
-    "text" to text,
-    "box" to box?.toMap(),
-    "cornerPoints" to cornerPoints.map(NormalizedImagePoint::toMap),
-    "languages" to languages,
-    "elements" to elements.map(DetectedTextElement::toMap)
-  )
-}
-
-internal data class DetectedTextBlock(
-  val text: String,
-  val box: NormalizedImageRect?,
-  val cornerPoints: List<NormalizedImagePoint>,
-  val languages: List<String>,
-  val lines: List<DetectedTextLine>
-) {
-  fun toMap(): Map<String, Any?> = mapOf(
-    "text" to text,
-    "box" to box?.toMap(),
-    "cornerPoints" to cornerPoints.map(NormalizedImagePoint::toMap),
-    "languages" to languages,
-    "lines" to lines.map(DetectedTextLine::toMap)
-  )
-}
-
-internal data class DetectedTextResult(
+// An upright, size-capped copy of an image written for the JS OCR engine.
+// `width`/`height` are the copy's pixels (the frame OCR boxes are measured in);
+// `sourceWidth`/`sourceHeight` are the EXIF-upright original's.
+internal data class PreparedTextImage(
+  val uri: String,
+  val width: Int,
+  val height: Int,
   val sourceWidth: Int,
   val sourceHeight: Int,
-  val rotation: Int,
-  val languages: List<String>,
-  val blocks: List<DetectedTextBlock>
+  val rotation: Int
 ) {
   fun toMap(): Map<String, Any> = mapOf(
+    "uri" to uri,
+    "width" to width,
+    "height" to height,
     "sourceWidth" to sourceWidth,
     "sourceHeight" to sourceHeight,
-    "rotation" to rotation,
-    "languages" to languages,
-    "blocks" to blocks.map(DetectedTextBlock::toMap)
+    "rotation" to rotation
   )
 }
 
@@ -124,6 +73,7 @@ internal data class ImagePixelGrid(
 internal object MemeTextDetector {
   const val MAX_BORDER_SAMPLES = 4096
   private const val MAX_OCR_DECODE_DIMENSION = 2048
+  private const val OCR_JPEG_QUALITY = 95
   private const val MAX_SAMPLER_DECODE_DIMENSION = 1024
   private const val MIN_BORDER_RING_PIXELS = 2
   private const val MAX_BORDER_RING_PIXELS = 24
@@ -140,55 +90,32 @@ internal object MemeTextDetector {
     }
   }
 
-  fun detect(context: Context, source: String): DetectedTextResult {
+  // Decode `source` upright (EXIF applied) and at most MAX_OCR_DECODE_DIMENSION
+  // on its long edge, and write it as a JPEG the on-device OCR model can read
+  // by file:// path — it can't open content:// uris, and it doesn't apply EXIF.
+  // Recognition itself runs in JS (react-native-executorch); this keeps the
+  // decode, orientation and coordinate frame the editor has always used, so a
+  // box normalized against `width`/`height` lands on the same pixels.
+  fun prepareForTextDetection(context: Context, source: String): PreparedTextImage {
     decodeOrientedBitmap(context, source, MAX_OCR_DECODE_DIMENSION).use { decoded ->
-      val image = InputImage.fromBitmap(decoded.bitmap, 0)
-      val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
-      val recognized = try {
-        Tasks.await(recognizer.process(image))
-      } catch (error: Throwable) {
-        throw IOException("Could not recognize text in the local image: ${error.message ?: error.javaClass.simpleName}", error)
-      } finally {
-        recognizer.close()
-      }
-      val blocks = recognized.textBlocks.map { block ->
-        DetectedTextBlock(
-          text = block.text,
-          box = normalizeRect(block.boundingBox, decoded.bitmap.width, decoded.bitmap.height),
-          cornerPoints = normalizePoints(block.cornerPoints, decoded.bitmap.width, decoded.bitmap.height),
-          languages = languageList(block.recognizedLanguage),
-          lines = block.lines.map { line ->
-            DetectedTextLine(
-              text = line.text,
-              box = normalizeRect(line.boundingBox, decoded.bitmap.width, decoded.bitmap.height),
-              cornerPoints = normalizePoints(line.cornerPoints, decoded.bitmap.width, decoded.bitmap.height),
-              languages = languageList(line.recognizedLanguage),
-              elements = line.elements.map { element ->
-                DetectedTextElement(
-                  text = element.text,
-                  box = normalizeRect(element.boundingBox, decoded.bitmap.width, decoded.bitmap.height),
-                  cornerPoints = normalizePoints(element.cornerPoints, decoded.bitmap.width, decoded.bitmap.height),
-                  languages = languageList(element.recognizedLanguage)
-                )
-              }
-            )
-          }
-        )
-      }
-      val languages = blocks
-        .flatMap { block ->
-          block.languages + block.lines.flatMap { line ->
-            line.languages + line.elements.flatMap(DetectedTextElement::languages)
+      val file = File(context.cacheDir, "meme_work_ocr_${System.nanoTime()}.jpg")
+      try {
+        FileOutputStream(file).use { out ->
+          if (!decoded.bitmap.compress(Bitmap.CompressFormat.JPEG, OCR_JPEG_QUALITY, out)) {
+            throw IOException("Could not encode the image for text detection")
           }
         }
-        .filter(String::isNotBlank)
-        .distinct()
-      return DetectedTextResult(
+      } catch (error: Throwable) {
+        file.delete()
+        throw error
+      }
+      return PreparedTextImage(
+        uri = Uri.fromFile(file).toString(),
+        width = decoded.bitmap.width,
+        height = decoded.bitmap.height,
         sourceWidth = decoded.sourceWidth,
         sourceHeight = decoded.sourceHeight,
-        rotation = decoded.rotation,
-        languages = languages,
-        blocks = blocks
+        rotation = decoded.rotation
       )
     }
   }
@@ -319,26 +246,6 @@ internal object MemeTextDetector {
     sorted.sort()
     return if (count % 2 == 1) sorted[count / 2]
     else (sorted[count / 2 - 1] + sorted[count / 2]) / 2
-  }
-
-  private fun normalizeRect(rect: Rect?, width: Int, height: Int): NormalizedImageRect? {
-    if (rect == null) return null
-    return normalizePixelRect(rect.left, rect.top, rect.right, rect.bottom, width, height)
-  }
-
-  private fun normalizePoints(points: Array<Point>?, width: Int, height: Int): List<NormalizedImagePoint> {
-    if (points == null || width <= 0 || height <= 0) return emptyList()
-    return points.map { point ->
-      NormalizedImagePoint(
-        x = point.x.toDouble().div(width).coerceIn(0.0, 1.0),
-        y = point.y.toDouble().div(height).coerceIn(0.0, 1.0)
-      )
-    }
-  }
-
-  private fun languageList(language: String?): List<String> {
-    val normalized = language?.trim().orEmpty()
-    return if (normalized.isEmpty()) emptyList() else listOf(normalized)
   }
 
   internal fun orientBitmapForExif(source: Bitmap, orientation: Int): Bitmap {

@@ -31,6 +31,9 @@ import {
   orphanedMaskTrackIds,
   planSubjectSegmentation,
   selectedCutoutRef,
+  packMaskBits,
+  selectSubjectMasks,
+  type SegmentedMask,
 } from './memeCutoutCore';
 import {
   PROJECT_LIMITS,
@@ -41,6 +44,54 @@ import {
   type SubjectLayer,
 } from './memeEditProjectCore';
 import type { NativeSubjectCutout, NativeSubjectCutoutResult } from '../modules/memeget-bg';
+
+// A rectangular FastSAM-style instance: mask cropped to its box, fully set.
+function rectMask(x1: number, y1: number, x2: number, y2: number, score = 0.9): SegmentedMask {
+  const maskWidth = x2 - x1;
+  const maskHeight = y2 - y1;
+  return { bbox: { x1, y1, x2, y2 }, mask: new Uint8Array(maskWidth * maskHeight).fill(1), maskWidth, maskHeight, score };
+}
+
+describe('selectSubjectMasks', () => {
+  const frame = { width: 100, height: 100 };
+
+  it('keeps things in the scene and drops the backdrop, the whole frame and speckle', () => {
+    const person = rectMask(30, 20, 60, 90);
+    const sky = rectMask(0, 0, 100, 40); // hugs three edges, 40% of the frame
+    const whole = rectMask(0, 0, 100, 96);
+    const speck = rectMask(5, 5, 7, 7);
+    const { subjects, dropped } = selectSubjectMasks([sky, speck, whole, person], frame);
+    expect(subjects.map((s) => [s.x, s.y, s.width, s.height])).toEqual([[30, 20, 30, 70]]);
+    expect(subjects[0].coverage).toBeCloseTo(0.21);
+    expect(dropped).toBe(0);
+  });
+
+  it('drops a part that lies inside a subject already chosen, but keeps a separate one', () => {
+    const body = rectMask(10, 10, 50, 90);
+    const shirt = rectMask(15, 40, 45, 70);
+    const dog = rectMask(60, 50, 90, 90);
+    const { subjects } = selectSubjectMasks([shirt, dog, body], frame);
+    expect(subjects.map((s) => s.x)).toEqual([10, 60]); // largest first
+  });
+
+  it('caps the subjects and counts the rest instead of hiding them', () => {
+    const tiles = Array.from({ length: 5 }, (_, i) => rectMask(i * 20, 0, i * 20 + 10, 10));
+    const { subjects, dropped } = selectSubjectMasks(tiles, frame, 3);
+    expect(subjects).toHaveLength(3);
+    expect(dropped).toBe(2);
+  });
+
+  it('finds no subject in a frame that is all backdrop', () => {
+    expect(selectSubjectMasks([rectMask(0, 0, 100, 60), rectMask(0, 60, 100, 100)], frame).subjects).toEqual([]);
+  });
+});
+
+describe('packMaskBits', () => {
+  it('packs row-major, most significant bit first, padding the last byte', () => {
+    const mask = Uint8Array.from([1, 0, 0, 0, 0, 0, 0, 1, 1, 1]);
+    expect(Array.from(packMaskBits(mask))).toEqual([0b10000001, 0b11000000]);
+  });
+});
 
 function imageProject(): MemeEditProject {
   return createDefaultImageProject({
@@ -720,7 +771,7 @@ describe('request lifecycle', () => {
     expect(progressed.phase.progress.bytesDownloaded).toBe(1500);
   });
 
-  it('reports no fraction until Play services states a size', () => {
+  it('reports no fraction until the downloader states a size', () => {
     const { state, runId } = started();
     const progressed = run(state, {
       type: 'downloadProgress',

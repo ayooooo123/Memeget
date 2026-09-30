@@ -446,23 +446,41 @@ export async function deleteCache(uri: string): Promise<void> {
 // but the share path can't — Sharing.shareAsync hands the file to another app
 // and we never learn when it's done, so each Share leaks a full copy of the
 // meme into the cache dir forever. Sweeping on launch reclaims all of these:
-// nothing here is meant to survive a process restart, so any match is stale by
-// definition.
+// nothing here is meant to survive a process restart, so any match written by
+// an earlier process is stale by definition.
 const TEMP_CACHE_PREFIX = /^(share_|import_|meme_work_|audio_pcm_)/;
 
+// Module load ≈ process start. The sweep runs once initDb resolves, but a share
+// that cold-starts the app is already staging its import_* copy by then (the
+// share receiver mounts before the DB is ready) — deleting that mid-import is a
+// shared meme silently not saved. Only files that predate this process are stale.
+const PROCESS_STARTED_AT_S = Date.now() / 1000;
+
 // Delete the app's leaked temp files from the cache directory. Best-effort and
-// safe to run at any time — it only touches files this app created and never
-// keeps across launches. Returns how many it removed (for diagnostics/logging).
+// safe to run at any time — it only touches files this app created in an
+// earlier process. Returns how many it removed (for diagnostics/logging).
 export async function sweepStaleCache(): Promise<number> {
   try {
     const dir = FileSystem.cacheDirectory;
     if (!dir) return 0;
     const entries = await FileSystem.readDirectoryAsync(dir);
-    const stale = entries.filter((name) => TEMP_CACHE_PREFIX.test(name));
+    let removed = 0;
     await Promise.all(
-      stale.map((name) => FileSystem.deleteAsync(dir + name, { idempotent: true }).catch(() => {}))
+      entries
+        .filter((name) => TEMP_CACHE_PREFIX.test(name))
+        .map(async (name) => {
+          try {
+            const info = await FileSystem.getInfoAsync(dir + name);
+            // One second of slack: modificationTime is whole-second on some filesystems.
+            if (!info.exists || info.modificationTime >= PROCESS_STARTED_AT_S - 1) return;
+            await FileSystem.deleteAsync(dir + name, { idempotent: true });
+            removed++;
+          } catch {
+            // best-effort
+          }
+        })
     );
-    return stale.length;
+    return removed;
   } catch {
     // best-effort; a failed sweep should never block startup
     return 0;

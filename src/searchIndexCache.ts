@@ -35,17 +35,50 @@ export interface SearchCacheEntry {
 }
 
 let entries: SearchCacheEntry[] | null = null;
-let dirty = true;
+let fullDirty = true;
+// Rows whose searchable content changed while the rest of the index stayed
+// valid. Reloading three rows beats re-marshalling and re-decoding the whole
+// library, which is what an import (share a meme → insert → describe → caption
+// vector → transcript, every step a write) used to cost on the next keystroke.
+const dirtyIds = new Set<number>();
 let building: Promise<SearchCacheEntry[]> | null = null;
+// Bumped only when the resident array is rebuilt from a FULL load, never by a
+// row splice. Downstream structures derived from the corpus (the fuzzy search
+// vocabulary) use it to tell "a few rows changed, grow what you have" from
+// "the library was replaced, start over" — an array-identity check alone
+// cannot, because a splice also returns a new array.
+let generation = 0;
 
-// Mark the cache stale. Cheap and idempotent — the next `ensureSearchIndex`
+function isDirty(): boolean {
+  return fullDirty || dirtyIds.size > 0;
+}
+
+// Mark the whole cache stale. Cheap and idempotent — the next `ensureSearchIndex`
 // rebuilds. Call from every mutator that changes searchable content
 // (embedding, caption_embedding, ocr_text, name, caption, transcript, tags,
-// extra_terms) or membership (a row entering/leaving pending=0). Do NOT call it
-// for poster/DINO writes: those don't touch any field text search reads, and
-// busting the cache mid-drain would re-pay the rebuild for nothing.
+// extra_terms) or membership (a row entering/leaving pending=0) for an unknown
+// or library-wide set of rows. Do NOT call it for poster/DINO writes: those
+// don't touch any field text search reads, and busting the cache mid-drain
+// would re-pay the rebuild for nothing.
 export function invalidateSearchIndex(): void {
-  dirty = true;
+  fullDirty = true;
+  dirtyIds.clear();
+}
+
+// Same, for a known set of rows: the next `ensureSearchIndex` reloads only
+// these (via its `loadRows` thunk) and splices them into the resident array.
+// Covers insert, delete and pending→indexed transitions as well as content
+// edits — a row the reload doesn't return has left the searchable set and is
+// dropped. Row dirt is welcome mid-build — `ensureSearchIndex`'s loop picks it
+// up on the next iteration — but degrades to a full invalidation before the
+// first successful load, when there is no resident array to splice into.
+export function invalidateSearchIndexRows(ids: readonly number[]): void {
+  if (ids.length === 0) return;
+  if (!entries) {
+    invalidateSearchIndex();
+    return;
+  }
+  for (const id of ids) dirtyIds.add(id);
 }
 
 export interface SearchCachePatch {
@@ -58,7 +91,7 @@ export interface SearchCachePatch {
 // without throwing away every decoded embedding. Returns false when no stable
 // resident cache exists so the caller can fall back to full invalidation.
 export function patchSearchIndexEntries(patches: readonly SearchCachePatch[]): boolean {
-  if (dirty || building || !entries) return false;
+  if (isDirty() || building || !entries) return false;
   const byId = new Map(patches.map((patch) => [patch.id, patch]));
   let matched = 0;
   entries = entries.map((entry) => {
@@ -82,31 +115,44 @@ export function patchSearchIndexEntries(patches: readonly SearchCachePatch[]): b
 // write already committed, and a just-written transcript is searchable on the
 // first query after it lands.
 export async function ensureSearchIndex(
-  load: () => Promise<SearchCacheEntry[]>
+  load: () => Promise<SearchCacheEntry[]>,
+  loadRows?: (ids: readonly number[]) => Promise<SearchCacheEntry[]>
 ): Promise<SearchCacheEntry[]> {
   // A build already in flight is authoritative: return it rather than the
   // fast-path cache, so a caller can never receive an intermediate snapshot the
   // in-flight build is about to supersede.
   if (building) return building;
-  if (!dirty && entries) return entries;
+  if (!isDirty() && entries) return entries;
   building = (async () => {
     try {
       // Rebuild until we complete a load that no invalidation superseded. A
-      // write (e.g. a transcript) landing mid-load flips `dirty` back to true;
+      // write (e.g. a transcript) landing mid-load flips the cache dirty again;
       // without this loop the in-flight build — shared by every concurrent
       // caller — would resolve to data predating that write, and the stale
       // result would sit on screen until the query changed, making a
-      // just-written transcript look unsearchable.
+      // just-written transcript look unsearchable. Row-level dirt takes the
+      // incremental path, so the loop costs one small SELECT per iteration
+      // instead of re-reading the library once per write.
       let built: SearchCacheEntry[];
       do {
-        dirty = false;
-        built = await load();
+        const resident = entries;
+        if (!fullDirty && resident && loadRows && dirtyIds.size > 0) {
+          const ids = [...dirtyIds];
+          dirtyIds.clear();
+          built = spliceRows(resident, ids, await loadRows(ids));
+        } else {
+          fullDirty = false;
+          dirtyIds.clear();
+          built = await load();
+          generation++;
+        }
         entries = built;
-      } while (dirty);
+      } while (isDirty());
       return built;
     } catch (e) {
-      // A failed build must not leave a fresh flag — retry next time.
-      dirty = true;
+      // A failed build must not leave a fresh flag — and the ids it consumed are
+      // gone, so fall back to the safe superset: reload everything next time.
+      invalidateSearchIndex();
       throw e;
     } finally {
       building = null;
@@ -115,14 +161,46 @@ export async function ensureSearchIndex(
   return building;
 }
 
+// Fold reloaded rows into the resident array, preserving order. A requested id
+// the reload didn't return has left the searchable set (deleted, or back to
+// pending) and is dropped; an id that wasn't resident is appended. Returns a NEW
+// array so identity-keyed memos downstream (the fuzzy vocab) still see a change.
+function spliceRows(
+  resident: readonly SearchCacheEntry[],
+  requestedIds: readonly number[],
+  rows: readonly SearchCacheEntry[]
+): SearchCacheEntry[] {
+  const byId = new Map(rows.map((row) => [row.id, row]));
+  const requested = new Set(requestedIds);
+  const out: SearchCacheEntry[] = [];
+  for (const entry of resident) {
+    const reloaded = byId.get(entry.id);
+    if (reloaded) {
+      out.push(reloaded);
+      byId.delete(entry.id);
+      continue;
+    }
+    if (!requested.has(entry.id)) out.push(entry);
+  }
+  for (const row of byId.values()) out.push(row);
+  return out;
+}
+
 // Test/diagnostic hook: current resident entries without triggering a build.
 export function peekSearchIndex(): SearchCacheEntry[] | null {
   return entries;
 }
 
+// Which full rebuild the resident entries came from. See `generation`.
+export function searchIndexGeneration(): number {
+  return generation;
+}
+
 // Test hook: drop all state so each test starts cold.
 export function resetSearchIndexForTest(): void {
   entries = null;
-  dirty = true;
+  fullDirty = true;
+  dirtyIds.clear();
   building = null;
+  generation = 0;
 }

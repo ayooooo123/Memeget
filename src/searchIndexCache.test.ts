@@ -1,6 +1,7 @@
 import {
   ensureSearchIndex,
   invalidateSearchIndex,
+  invalidateSearchIndexRows,
   patchSearchIndexEntries,
   peekSearchIndex,
   resetSearchIndexForTest,
@@ -138,5 +139,110 @@ describe('search index cache', () => {
     expect(entries[0].searchText).toBe('meme 1');
     expect(entries[1].searchText).toBe('meme 2 pepe');
     expect(entries[1].record.tags[0].label).toBe('pepe');
+  });
+
+  it('reloads only the rows a write touched, in place', async () => {
+    const load = async () => [makeEntry(1), makeEntry(2), makeEntry(3)];
+    await ensureSearchIndex(load);
+
+    const asked: number[][] = [];
+    const loadRows = async (ids: readonly number[]) => {
+      asked.push([...ids]);
+      return ids.map((id) => ({ ...makeEntry(id), searchText: `described ${id}` }));
+    };
+
+    invalidateSearchIndexRows([2]);
+    const entries = await ensureSearchIndex(async () => {
+      throw new Error('must not reload the whole library');
+    }, loadRows);
+
+    expect(asked).toEqual([[2]]);
+    expect(entries.map((e) => e.searchText)).toEqual(['meme 1', 'described 2', 'meme 3']);
+  });
+
+  it('appends a newly indexed row and drops one that left the searchable set', async () => {
+    await ensureSearchIndex(async () => [makeEntry(1), makeEntry(2)]);
+
+    // 3 is a just-imported meme; 1 was deleted, so the reload can't return it.
+    invalidateSearchIndexRows([1, 3]);
+    const entries = await ensureSearchIndex(
+      async () => [],
+      async (ids) => ids.filter((id) => id === 3).map(makeEntry)
+    );
+
+    expect(entries.map((e) => e.id)).toEqual([2, 3]);
+  });
+
+  it('hands back a new array identity so identity-keyed memos rebuild', async () => {
+    const before = await ensureSearchIndex(async () => [makeEntry(1)]);
+    invalidateSearchIndexRows([1]);
+    const after = await ensureSearchIndex(
+      async () => [],
+      async (ids) => ids.map(makeEntry)
+    );
+
+    expect(after).not.toBe(before);
+  });
+
+  it('picks up a row invalidated mid-build without re-reading the library', async () => {
+    await ensureSearchIndex(async () => [makeEntry(1), makeEntry(2)]);
+
+    let release = () => {};
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const asked: number[][] = [];
+    const loadRows = async (ids: readonly number[]) => {
+      asked.push([...ids]);
+      if (asked.length === 1) await gate;
+      return ids.map((id) => ({ ...makeEntry(id), searchText: `v${asked.length} ${id}` }));
+    };
+
+    invalidateSearchIndexRows([1]);
+    const build = ensureSearchIndex(async () => {
+      throw new Error('must not reload the whole library');
+    }, loadRows);
+    invalidateSearchIndexRows([2]); // lands while the first reload is in flight
+    release();
+    const entries = await build;
+
+    expect(asked).toEqual([[1], [2]]);
+    expect(entries.map((e) => e.searchText)).toEqual(['v1 1', 'v2 2']);
+  });
+
+  it('falls back to a full reload when a row reload fails', async () => {
+    await ensureSearchIndex(async () => [makeEntry(1)]);
+
+    invalidateSearchIndexRows([1]);
+    await expect(
+      ensureSearchIndex(
+        async () => [makeEntry(1)],
+        async () => {
+          throw new Error('db busy');
+        }
+      )
+    ).rejects.toThrow('db busy');
+
+    let fullReloads = 0;
+    await ensureSearchIndex(async () => {
+      fullReloads++;
+      return [makeEntry(1)];
+    });
+    expect(fullReloads).toBe(1);
+  });
+
+  it('reloads everything when row dirt arrives before any resident cache exists', async () => {
+    invalidateSearchIndexRows([7]);
+    let fullReloads = 0;
+    await ensureSearchIndex(
+      async () => {
+        fullReloads++;
+        return [makeEntry(7)];
+      },
+      async () => {
+        throw new Error('nothing to splice into');
+      }
+    );
+    expect(fullReloads).toBe(1);
   });
 });

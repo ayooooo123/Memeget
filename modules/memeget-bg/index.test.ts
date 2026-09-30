@@ -10,7 +10,6 @@ let mockNative: {
     widthDip: number,
     align: string
   ): Promise<unknown>;
-  detectTextRegions?(source: string): Promise<unknown>;
   sampleImageBorderColor?(
     source: string,
     x: number,
@@ -118,9 +117,8 @@ describe('image text detector and border sampler bridge', () => {
   });
 
   test('returns null only when the optional native methods are absent', async () => {
-    const { detectTextRegions, sampleImageBorderColor, sampleImagePixelGrid } = await import('./index');
+    const { sampleImageBorderColor, sampleImagePixelGrid } = await import('./index');
 
-    await expect(detectTextRegions('file:///source.jpg')).resolves.toBeNull();
     await expect(
       sampleImageBorderColor('file:///source.jpg', { x: 0.1, y: 0.2, width: 0.3, height: 0.4 })
     ).resolves.toBeNull();
@@ -130,22 +128,13 @@ describe('image text detector and border sampler bridge', () => {
   });
 
   test('passes normalized inputs through and propagates real native failures', async () => {
-    const detection = {
-      sourceWidth: 120,
-      sourceHeight: 80,
-      rotation: 90,
-      languages: ['en'],
-      blocks: [],
-    };
     const sample = { hex: '#123456', sampleCount: 42 };
-    const detector = jest.fn().mockResolvedValue(detection);
     const sampler = jest.fn().mockResolvedValueOnce(sample).mockRejectedValueOnce(new Error('decode failed'));
     const pixelGrid = { rows: 1, columns: 2, colors: ['#FFFF0000', '#FF0000FF'] };
     const gridSampler = jest.fn().mockResolvedValue(pixelGrid);
-    mockNative = { detectTextRegions: detector, sampleImageBorderColor: sampler, sampleImagePixelGrid: gridSampler };
-    const { detectTextRegions, sampleImageBorderColor, sampleImagePixelGrid } = await import('./index');
+    mockNative = { sampleImageBorderColor: sampler, sampleImagePixelGrid: gridSampler };
+    const { sampleImageBorderColor, sampleImagePixelGrid } = await import('./index');
 
-    await expect(detectTextRegions('content://image')).resolves.toEqual(detection);
     await expect(
       sampleImageBorderColor('content://image', { x: 0.1, y: 0.2, width: 0.3, height: 0.4 })
     ).resolves.toEqual(sample);
@@ -155,7 +144,6 @@ describe('image text detector and border sampler bridge', () => {
     await expect(
       sampleImagePixelGrid('content://image', { x: 0.1, y: 0.2, width: 0.3, height: 0.4 }, 12)
     ).resolves.toEqual(pixelGrid);
-    expect(detector).toHaveBeenCalledWith('content://image');
     expect(sampler).toHaveBeenNthCalledWith(1, 'content://image', 0.1, 0.2, 0.3, 0.4);
     expect(gridSampler).toHaveBeenCalledWith('content://image', 0.1, 0.2, 0.3, 0.4, 12);
   });

@@ -18,7 +18,7 @@ import type { VisionResult } from './visionCore';
 // ---- tuning knobs -----------------------------------------------------------
 
 // Frames pulled for the fast CLIP-embed + OCR + zero-shot pass. Each is a
-// thumbnail decode + a CLIP forward + an ML Kit OCR, so this bounds the per-video
+// thumbnail decode + a CLIP forward + an OCR pass, so this bounds the per-video
 // cost of the fast path; visually-identical frames are collapsed before the
 // (slightly heavier) OCR step, so the real work is usually well under this.
 export const MAX_VIDEO_FRAMES = 8;

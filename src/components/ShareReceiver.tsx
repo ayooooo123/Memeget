@@ -9,6 +9,12 @@ import { extractUrl, resolveSharedLink } from '../linkResolver';
 import { colors, radius, shadow, TABBAR_CLEARANCE } from '../theme';
 import { deleteCache, type SafFile } from '../saf';
 import { importMemesFromZip } from '../zipImport';
+import { createPhaseLog } from '../phaseTimer';
+
+// Which step of a share is eating the seconds. Sharing a link while a meme is
+// open froze the whole app for 14.6s (measured by stallWatch); this says where
+// that time goes.
+const phases = createPhaseLog('share');
 
 // A shared .zip archive: matched by a zip content type, or an octet-stream/
 // unknown type whose filename still ends in .zip (file managers vary). We pull
@@ -113,17 +119,21 @@ export function ShareReceiver() {
         if (sharedUrl) {
           // Link path: fetch the page/endpoint → download the media → save it.
           setStatus({ kind: 'importing', msg: 'Reading link…' });
-          const media = await resolveSharedLink(sharedUrl, {
-            onProgress: (p) =>
-              setStatus({
-                kind: 'importing',
-                msg: p.stage === 'downloading' ? 'Downloading meme…' : 'Reading link…',
-              }),
-          });
+          const media = await phases.time('resolve-link', () =>
+            resolveSharedLink(sharedUrl, {
+              onProgress: (p) =>
+                setStatus({
+                  kind: 'importing',
+                  msg: p.stage === 'downloading' ? 'Downloading meme…' : 'Reading link…',
+                }),
+            })
+          );
           try {
-            const res = await saveSharedFiles([
-              { path: media.path, fileName: media.fileName, mimeType: media.mimeType },
-            ]);
+            const res = await phases.time('save-shared', () =>
+              saveSharedFiles([
+                { path: media.path, fileName: media.fileName, mimeType: media.mimeType },
+              ])
+            );
             acceptSaved(res);
           } finally {
             // The download was a throwaway cache copy; saveSharedFiles already

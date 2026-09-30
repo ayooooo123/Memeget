@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useFonts } from 'expo-font';
 import { StatusBar } from 'expo-status-bar';
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -14,6 +14,7 @@ import { initDb, getSetting, setSetting } from './src/db';
 import { sweepStaleCache } from './src/saf';
 import { flushSidecarSync, startSidecarAutoSync } from './src/sidecarSync';
 import { useConst } from './src/reactUtils';
+import { startStallWatch } from './src/stallWatch';
 import { LibraryScreen } from './src/screens/LibraryScreen';
 import { SettingsScreen } from './src/screens/SettingsScreen';
 import { ShareReceiver } from './src/components/ShareReceiver';
@@ -83,14 +84,49 @@ function Shell() {
     NotoSans: require('./assets/fonts/NotoSans.ttf'),
   });
 
+  // Timed: `initDb` runs migrations and the sqlite-vec probe before first paint,
+  // and the app is unusable until it resolves — so any second it spends is a
+  // second of the cold-start freeze the stall watcher reports.
   useEffect(() => {
+    const startedAt = Date.now();
     initDb()
       .then(() => {
+        console.log(`[memeget/boot] initDb in ${Date.now() - startedAt}ms`);
         setDbReady(true);
         // Fire-and-forget so cache housekeeping never delays first paint.
-        maintainCaches();
+        const sweepStartedAt = Date.now();
+        maintainCaches().finally(() =>
+          console.log(`[memeget/boot] maintainCaches in ${Date.now() - sweepStartedAt}ms`)
+        );
       })
       .catch((e) => console.warn('DB init failed', e));
+  }, []);
+
+  // Freeze detector. A blocked JS thread is silent in logcat — the only trace of
+  // the search bar's ✕ dying was the input system cancelling the gesture — so
+  // measure it directly and print how long the UI was unable to respond. Left on
+  // in release because it costs one timer and the freezes are sporadic: the
+  // report has to be there when it happens, not after we go looking.
+  //
+  // The detector is only worth having if it never cries wolf: React Native
+  // suspends JS timers with the activity, so it has to be told when the app
+  // actually owned the screen rather than asked whether it owns it NOW (by
+  // which time a resume has already flushed the suspended ticks).
+  const activeSinceRef = useRef<number | null>(
+    AppState.currentState === 'active' ? Date.now() : null
+  );
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (state) => {
+      activeSinceRef.current = state === 'active' ? Date.now() : null;
+    });
+    return () => sub.remove();
+  }, []);
+  useEffect(() => {
+    return startStallWatch({
+      activeSince: () => activeSinceRef.current,
+      onStall: (blockedMs) =>
+        console.log(`[memeget/stall] js thread blocked ${blockedMs}ms`),
+    });
   }, []);
 
   // Keep the `.memeget` sidecar in each linked folder current: a debounced

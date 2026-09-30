@@ -11,6 +11,7 @@
 import {
   getExemplars,
   getFolders,
+  getIndexModelMismatch,
   getSidecarRows,
   importExemplars,
   restoreSidecarMemes,
@@ -42,7 +43,7 @@ import {
   type ChunkStamp,
   type SidecarMeme,
 } from './sidecar';
-import { buildPack, parsePack, serializePack } from './teachingPack';
+import { PACK_MODEL, buildPack, parsePack, serializePack } from './teachingPack';
 import { createYielder } from './learnCore';
 import { utf8Length } from './zipWriter';
 
@@ -59,6 +60,10 @@ export interface SidecarRestoreResult {
   added: number;
   enriched: number;
   teachingsAdded: number;
+  // The folder's taught examples were made under another embedding model, so
+  // this build can't use them. They stay in the folder (see
+  // archiveForeignTeachings); the user should know they didn't come back.
+  teachingsForeignModel: boolean;
   vectorsDropped: boolean; // sidecar was written under a different model
   // Records the manifest promised that no longer read back — damaged files. A
   // backup silently losing entries is the one failure worth shouting about.
@@ -119,6 +124,12 @@ export async function syncFolderSidecar(
   // requested name would never match the file that actually exists — 25 memes
   // in a 2105-item library, silently unrestorable.
   const nameByUri = new Map(onDisk.map((f) => [f.uri, f.name]));
+  // The manifest is stamped with the running model, but after a model change
+  // the library keeps its old-space vectors until a re-index. Writing those
+  // under the new stamp would let a restore on a fresh install trust them as
+  // current and rank search against the wrong space forever. Leave them out
+  // instead: a record without vectors restores pending and gets re-embedded.
+  const vectorsCurrent = (await getIndexModelMismatch()) === null;
   const memes: SidecarMeme[] = rows
     .filter((r) => nameByUri.has(r.uri))
     .map((r) => ({
@@ -132,10 +143,10 @@ export async function syncFolderSidecar(
       visionState: r.visionState as SidecarMeme['visionState'],
       audioState: r.audioState as SidecarMeme['audioState'],
       modifiedAt: r.modifiedAt,
-      embedding: encodeVec(r.embedding),
+      embedding: vectorsCurrent ? encodeVec(r.embedding) : '',
       visualEmbedding: encodeVec(r.visualEmbedding),
       visualModel: r.visualModel,
-      captionEmbedding: encodeVec(r.captionEmbedding),
+      captionEmbedding: vectorsCurrent ? encodeVec(r.captionEmbedding) : '',
     }));
   result.memes = memes.length;
 
@@ -206,6 +217,13 @@ export async function syncFolderSidecar(
   const teachingsPresent = present.has(TEACHINGS_FILE);
   if (!trustDigests || previous?.teachings.digest !== teachings.digest || !teachingsPresent) {
     try {
+      // A pack from another embedding model is unreadable to this build (restore
+      // drops it) yet it's the only copy of what was taught under that model —
+      // the pack format carries no source images to re-embed from. Overwriting
+      // it with this install's pack (empty, on a fresh install) would delete it
+      // for good, so set it aside first. If it can't be set aside, the write
+      // below doesn't happen.
+      if (teachingsPresent) await archiveForeignTeachings(dir, present);
       await writeSidecarFile(
         dir,
         TEACHINGS_FILE,
@@ -215,11 +233,10 @@ export async function syncFolderSidecar(
       result.teachingsWritten = true;
     } catch {
       // Record what the folder still holds, so the digest mismatch makes the
-      // next sync try again.
-      if (previous?.teachings) {
-        teachings.digest = previous.teachings.digest;
-        teachings.bytes = previous.teachings.bytes;
-      }
+      // next sync try again. With no prior stamp, record no digest at all —
+      // stamping the unwritten pack's digest would mark it done forever.
+      teachings.digest = previous?.teachings.digest ?? '';
+      teachings.bytes = previous?.teachings.bytes ?? 0;
     }
   }
 
@@ -239,6 +256,32 @@ export async function syncFolderSidecar(
     /* stamps stay unpersisted; next sync redoes the work */
   }
   return result;
+}
+
+// Throws unless an exact copy of a foreign-model teachings.json is safely set
+// aside, so the caller skips the overwrite rather than risk the only copy.
+// "Exact" is checked, not assumed: SAF creates the document before writing it,
+// so an interrupted write leaves an empty or partial archive whose mere
+// presence must never license replacing the original.
+async function archiveForeignTeachings(dir: string, present: ReadonlySet<string>): Promise<void> {
+  const text = await readSidecarFile(dir, TEACHINGS_FILE);
+  if (text === null) throw new Error('teachings.json present but unreadable');
+  let pack: unknown;
+  try {
+    pack = JSON.parse(text);
+  } catch {
+    return; // not a pack we can attribute to a model; nothing to preserve
+  }
+  if (!pack || typeof pack !== 'object' || !('model' in pack)) return;
+  const model = pack.model;
+  if (typeof model !== 'string' || !model || model === PACK_MODEL) return;
+  const archiveName = `teachings-${model.replace(/[^A-Za-z0-9._-]+/g, '-')}.json`;
+  // writeSidecarFile pads a shorter rewrite with trailing spaces, so compare
+  // without them.
+  const archived = async () => (await readSidecarFile(dir, archiveName))?.trimEnd() === text.trimEnd();
+  if (present.has(archiveName) && (await archived())) return; // set aside by an earlier sync
+  await writeSidecarFile(dir, archiveName, text, present.has(archiveName) ? undefined : 0);
+  if (!(await archived())) throw new Error(`${archiveName} did not read back intact`);
 }
 
 // Mirror every linked folder. Errors are per-folder, so one bad grant can't
@@ -378,15 +421,19 @@ export async function peekFolderSidecar(
   };
 }
 
+// `keepVectors: false` restores the text knowledge only, leaving every row
+// pending for the indexer to re-embed even when the backup's vectors would fit.
 export async function restoreFolderSidecar(
   folderUri: string,
-  folderName: string
+  folderName: string,
+  opts: { keepVectors?: boolean } = {}
 ): Promise<SidecarRestoreResult> {
   const result: SidecarRestoreResult = {
     folder: folderName,
     added: 0,
     enriched: 0,
     teachingsAdded: 0,
+    teachingsForeignModel: false,
     vectorsDropped: false,
     unreadable: 0,
     orphaned: 0,
@@ -412,7 +459,7 @@ export async function restoreFolderSidecar(
   // Vectors only mean something in the space they were produced in. Without a
   // manifest we can't know that space, so we take the text and let the indexer
   // re-embed rather than restore vectors that might be from another model.
-  const keepVectors = manifest ? vectorsUsable(manifest) : false;
+  const keepVectors = manifest && opts.keepVectors !== false ? vectorsUsable(manifest) : false;
   result.vectorsDropped = !keepVectors;
 
   // Sidecar records are keyed by file name; the uri they map to is whatever
@@ -479,9 +526,11 @@ export async function restoreFolderSidecar(
         origin: 'self',
       });
       result.teachingsAdded = taught;
-    } catch {
-      // A pack from another primary model — the memes' text knowledge still
-      // restored above, which is the part that can't be recomputed.
+    } catch (e) {
+      // The memes' text knowledge still restored above, which is the part that
+      // can't be recomputed. A pack from another model is the one failure the
+      // user can act on (it stays in the folder for a build that can use it).
+      result.teachingsForeignModel = e instanceof Error && /different model/i.test(e.message);
     }
   }
   return result;
@@ -500,6 +549,7 @@ export async function restoreAllSidecars(): Promise<SidecarRestoreResult[]> {
         added: 0,
         enriched: 0,
         teachingsAdded: 0,
+        teachingsForeignModel: false,
         vectorsDropped: false,
         unreadable: 0,
         orphaned: 0,

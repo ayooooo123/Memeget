@@ -72,6 +72,44 @@ describe('formatGrounding', () => {
     expect(g).toContain('related: denial, chaos'); // deduped
     expect(g.toLowerCase()).toContain('match what you actually see');
   });
+
+  it('includes an entities line when entity labels are provided', () => {
+    const g = formatGrounding(
+      [{ label: 'drake', category: 'format' }],
+      [],
+      'recognized',
+      [
+        { label: 'Keanu Reeves', category: 'person' },
+        { label: 'Brand X', category: 'brand' },
+      ]
+    );
+    expect(g).toContain('entities:');
+    expect(g).toContain('Keanu Reeves (person)');
+    expect(g).toContain('Brand X (brand)');
+    expect(g).toContain('format: drake');
+  });
+
+  it('keeps NO_FORMAT_GROUNDING when tier is unknown and entities are empty/absent', () => {
+    const absent = formatGrounding([{ label: 'drake', category: 'format' }], [], 'unknown');
+    const empty = formatGrounding([{ label: 'drake', category: 'format' }], [], 'unknown', []);
+    expect(absent.toLowerCase()).toContain('matched none');
+    expect(empty.toLowerCase()).toContain('matched none');
+    expect(absent).not.toContain('entities:');
+    expect(empty).not.toContain('entities:');
+  });
+
+  it('includes entities even when tier is unknown (no format guess laundering)', () => {
+    const g = formatGrounding(
+      [{ label: 'drake', category: 'format' }],
+      [],
+      'unknown',
+      [{ label: 'Keanu Reeves', category: 'person' }]
+    );
+    expect(g).toContain('entities:');
+    expect(g).toContain('Keanu Reeves (person)');
+    // Unknown tier still must not present weak format guesses as facts.
+    expect(g).not.toContain('drake');
+  });
 });
 
 describe('userTurn', () => {
