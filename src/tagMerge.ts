@@ -7,6 +7,10 @@ const TAG_RANK: Record<NonNullable<Tag['source']>, number> = {
   ocr: 3,
   vision: 2,
   prompt: 1,
+  // Same rank the `?? 1` fallback already gave it on main; the spec's
+  // identity-aware reorder (docs/superpowers/specs/2026-08-06-local-popculture-
+  // encoder-design.md) lands with feature/local-popculture-id.
+  entity_pack: 1,
 };
 
 const DURABLE_SOURCE: Partial<Record<NonNullable<Tag['source']>, true>> = {

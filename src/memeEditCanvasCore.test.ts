@@ -103,7 +103,7 @@ describe('source-specific editor tools', () => {
     expect(memeEditToolsForSource('video')).toContain('audio');
     expect(memeEditToolsForSource('video')).not.toContain('transform');
     expect(memeEditToolsForSource('video')).not.toContain('replace-text');
-    // ML Kit Subject Segmentation is a still-image API; offering it on a video
+    // Subject cutouts are a still-image feature; offering them on a video
     // would be a button that cannot work. Video isolation is a separate,
     // gated feature that has not passed its gate.
     expect(memeEditToolsForSource('video')).not.toContain('subject');

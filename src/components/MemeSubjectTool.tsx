@@ -10,7 +10,7 @@ import {
   subjectSegmentationAvailable,
   subjectSegmentationModuleInstalled,
   sweepSubjectCutouts,
-} from '../../modules/memeget-bg';
+} from '../subjectSegmentation';
 import {
   CUTOUT_BACKGROUND_MODES,
   DEFAULT_CUTOUT_BACKGROUND_COLOR,
@@ -94,8 +94,8 @@ export const MemeSubjectTool = React.memo(function MemeSubjectTool({
     };
   }, []);
 
-  // Progress arrives on a native event, keyed by request id so a late event from
-  // a superseded run cannot move the current run's bar.
+  // Progress arrives as events keyed by request id so a late event from a
+  // superseded run cannot move the current run's bar.
   useEffect(() => {
     const subscription = addSubjectSegmentationProgressListener((payload) => {
       const phase = latest.current.phase;
@@ -278,7 +278,7 @@ export const MemeSubjectTool = React.memo(function MemeSubjectTool({
             <View style={styles.notice} accessibilityRole="text">
               <Text style={styles.noticeText}>
                 The cutout model has not been downloaded yet. The first cutout downloads it once
-                (a few MB), then works offline.
+                (about 47 MB), then works offline.
               </Text>
             </View>
           )}

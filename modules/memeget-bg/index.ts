@@ -57,11 +57,6 @@ export interface NativeMemeTextLayoutResult {
   lines: NativeMemeTextLayoutLine[];
 }
 
-export interface NativeNormalizedPoint {
-  x: number;
-  y: number;
-}
-
 export interface NativeNormalizedRect {
   x: number;
   y: number;
@@ -69,27 +64,17 @@ export interface NativeNormalizedRect {
   height: number;
 }
 
-export interface NativeDetectedTextElement {
-  text: string;
-  box: NativeNormalizedRect | null;
-  cornerPoints: NativeNormalizedPoint[];
-  languages: string[];
-}
-
-export interface NativeDetectedTextLine extends NativeDetectedTextElement {
-  elements: NativeDetectedTextElement[];
-}
-
-export interface NativeDetectedTextBlock extends NativeDetectedTextElement {
-  lines: NativeDetectedTextLine[];
-}
-
-export interface NativeDetectedTextResult {
+// An upright (EXIF-applied), size-capped JPEG copy of a local image, written
+// for the JS OCR engine. `width`/`height` are the copy's pixels — the frame
+// OCR boxes come back in; `sourceWidth`/`sourceHeight` are the upright
+// original's. The caller deletes `uri` when done.
+export interface NativePreparedTextImage {
+  uri: string;
+  width: number;
+  height: number;
   sourceWidth: number;
   sourceHeight: number;
   rotation: 0 | 90 | 180 | 270;
-  languages: string[];
-  blocks: NativeDetectedTextBlock[];
 }
 
 export interface NativeBorderColorSample {
@@ -160,11 +145,20 @@ export interface NativeSubjectCutoutResult {
   droppedSubjects: number;
 }
 
-export interface SubjectSegmentationProgressEvent {
+// The working image a cutout request segments: the source decoded upright at a
+// size the native memory ceiling allows, kept natively for step 2, with a JPEG
+// copy at `workingUri` for the JS segmentation model. Masks come back in its
+// pixel space.
+export interface NativePreparedSubjectImage {
   requestId: string;
-  phase: 'downloading' | 'segmenting';
-  bytesDownloaded?: number;
-  totalBytes?: number;
+  workingUri: string;
+  sourceWidth: number;
+  sourceHeight: number;
+  workingWidth: number;
+  workingHeight: number;
+  sampleSize: number;
+  estimatedPeakBytes: number;
+  ceilingBytes: number;
 }
 
 // One progress report from a running video export. `stage` is an
@@ -218,7 +212,7 @@ interface MemegetBgNative {
     widthDip: number,
     align: string
   ): Promise<NativeMemeTextLayoutResult>;
-  detectTextRegions(source: string): Promise<NativeDetectedTextResult>;
+  prepareTextDetectionImage(source: string): Promise<NativePreparedTextImage>;
   sampleImageBorderColor(
     source: string,
     x: number,
@@ -234,19 +228,20 @@ interface MemegetBgNative {
     height: number,
     pixelSize: number
   ): Promise<NativeImagePixelGrid>;
-  subjectSegmentationModuleInstalled(): Promise<boolean>;
-  segmentImageSubjects(source: string, requestId: string): Promise<NativeSubjectCutoutResult>;
+  prepareSubjectSegmentation(source: string, requestId: string): Promise<NativePreparedSubjectImage>;
+  writeSubjectCutouts(
+    requestId: string,
+    boxes: number[],
+    masks: string[],
+    droppedSubjects: number
+  ): Promise<NativeSubjectCutoutResult>;
   cancelSubjectSegmentation(requestId: string): void;
   releaseSubjectCutouts(requestId: string): Promise<boolean>;
   sweepSubjectCutouts(): Promise<number>;
   exportVideoProject(planJson: string, exportId: string): Promise<NativeVideoExportResult>;
   cancelVideoExport(exportId: string): boolean;
-  // Expo native modules are EventEmitters; the cutout download and the video
-  // export report through this rather than being polled.
-  addListener(
-    event: 'onSubjectSegmentationProgress',
-    listener: (payload: SubjectSegmentationProgressEvent) => void
-  ): { remove(): void };
+  // Expo native modules are EventEmitters; the video export reports through
+  // this rather than being polled.
   addListener(
     event: 'onVideoExportProgress',
     listener: (payload: NativeVideoExportProgressEvent) => void
@@ -313,13 +308,13 @@ export async function probeMedia(source: string): Promise<MediaProbeResult | nul
 }
 
 export const textDetectionNativeAvailable =
-  native != null && typeof native.detectTextRegions === 'function';
+  native != null && typeof native.prepareTextDetectionImage === 'function';
 export const borderColorSamplerNativeAvailable =
   native != null && typeof native.sampleImageBorderColor === 'function';
 
-export async function detectTextRegions(source: string): Promise<NativeDetectedTextResult | null> {
-  if (!native || typeof native.detectTextRegions !== 'function') return null;
-  return native.detectTextRegions(source);
+export async function prepareTextDetectionImage(source: string): Promise<NativePreparedTextImage | null> {
+  if (!native || typeof native.prepareTextDetectionImage !== 'function') return null;
+  return native.prepareTextDetectionImage(source);
 }
 
 export async function sampleImageBorderColor(
@@ -524,52 +519,45 @@ export const fileClipboardAvailable =
 
 export const downloadsAvailable = native != null && typeof native.saveToDownloads === 'function';
 
-// Whether still-image subject cutouts exist in this build at all.
-//
-// Same contract as the two flags above, for the same reason: `segmentImageSubjects`
-// resolves null without the native module, and a Cutout button that silently
-// does nothing is worse than one that is absent. Note what this does NOT say —
-// whether the ML Kit model is on the device. That is a separate, changeable
-// fact; ask `subjectSegmentationModuleInstalled()`.
+// Whether the native half of still-image subject cutouts exists in this build.
+// Segmentation itself runs in JS (src/subjectSegmentation.ts), which is where
+// the rest of the cutout API lives.
 export const subjectSegmentationAvailable =
-  native != null && typeof native.segmentImageSubjects === 'function';
+  native != null &&
+  typeof native.prepareSubjectSegmentation === 'function' &&
+  typeof native.writeSubjectCutouts === 'function';
 
-// Whether Play services already holds the segmentation model. False means the
-// first cutout will download it (~a few MB), which is a user-visible wait the
-// studio announces instead of hiding behind a spinner. Resolves false when the
-// native module is missing, and also when the probe itself cannot run — both
-// mean "assume a download", which is the safe thing to tell the user.
-export async function subjectSegmentationModuleInstalled(): Promise<boolean> {
-  if (!native || typeof native.subjectSegmentationModuleInstalled !== 'function') return false;
-  return native.subjectSegmentationModuleInstalled();
-}
-
-// Segment the subjects of a local still image, materializing one cutout PNG per
-// subject plus a combined one under a per-request cache directory the caller
-// releases with `releaseSubjectCutouts`.
-//
-// Resolves null ONLY when the native module is absent. A real failure REJECTS
-// with one of the E_CUTOUT_* codes so the caller can offer the right remedy
-// (see classifyCutoutFailure in src/memeCutoutCore.ts) — and an image with no
-// subject RESOLVES with `combined: null`, because "nothing to cut out" is an
-// answer, not an error.
-export async function segmentImageSubjects(
+// Step 1 of a cutout request. Resolves null only when the native module is
+// absent; a real failure REJECTS with an E_CUTOUT_* code.
+export async function prepareSubjectSegmentation(
   source: string,
   requestId: string
-): Promise<NativeSubjectCutoutResult | null> {
-  if (!native || typeof native.segmentImageSubjects !== 'function') return null;
-  return native.segmentImageSubjects(source, requestId);
+): Promise<NativePreparedSubjectImage | null> {
+  if (!native || typeof native.prepareSubjectSegmentation !== 'function') return null;
+  return native.prepareSubjectSegmentation(source, requestId);
 }
 
-// Ask an in-flight segmentation to stop. Fire-and-forget: the run rejects with
-// E_CUTOUT_CANCELLED at its next checkpoint, which is what the caller waits on.
-export function cancelSubjectSegmentation(requestId: string): void {
+// Step 2: materialize the chosen subject masks as cutout PNGs. `boxes` is
+// `x, y, width, height` per mask in working pixels; each mask is base64 of its
+// `width * height` bits, row-major, most significant bit first.
+export async function writeSubjectCutouts(
+  requestId: string,
+  boxes: number[],
+  masks: string[],
+  droppedSubjects: number
+): Promise<NativeSubjectCutoutResult | null> {
+  if (!native || typeof native.writeSubjectCutouts !== 'function') return null;
+  return native.writeSubjectCutouts(requestId, boxes, masks, droppedSubjects);
+}
+
+// Ask the native half of a request to stop at its next checkpoint.
+export function cancelNativeSubjectSegmentation(requestId: string): void {
   if (!native || typeof native.cancelSubjectSegmentation !== 'function') return;
   native.cancelSubjectSegmentation(requestId);
 }
 
-// Delete one request's cutout files. Returns false when there was nothing to
-// delete (or no native module), true when a directory went away.
+// Delete one request's cutout files (and drop it if still in flight). Returns
+// false when there was nothing to delete (or no native module).
 export async function releaseSubjectCutouts(requestId: string): Promise<boolean> {
   if (!native || typeof native.releaseSubjectCutouts !== 'function') return false;
   return native.releaseSubjectCutouts(requestId);
@@ -580,15 +568,6 @@ export async function releaseSubjectCutouts(requestId: string): Promise<boolean>
 export async function sweepSubjectCutouts(): Promise<number> {
   if (!native || typeof native.sweepSubjectCutouts !== 'function') return 0;
   return native.sweepSubjectCutouts();
-}
-
-// Subscribe to model-download / segmentation progress. Returns a no-op
-// unsubscribe when events are unavailable, so callers never branch on it.
-export function addSubjectSegmentationProgressListener(
-  listener: (payload: SubjectSegmentationProgressEvent) => void
-): { remove(): void } {
-  if (!native || typeof native.addListener !== 'function') return { remove() {} };
-  return native.addListener('onSubjectSegmentationProgress', listener);
 }
 
 // True once the native video exporter is built in. Without it the studio has

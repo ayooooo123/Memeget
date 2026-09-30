@@ -27,6 +27,11 @@ export const MEME_SEARCH_FTS_DDL = `CREATE VIRTUAL TABLE IF NOT EXISTS meme_sear
 export const MEME_SEARCH_FTS_INSERT = `INSERT INTO meme_search_fts(rowid, name, ocr, caption, transcript, tags, extra_terms)
          VALUES (?, ?, ?, ?, ?, ?, ?)`;
 
+// Retract one meme from the index, by the rowid its INSERT used. Re-indexing a
+// row that a describe or a transcript just changed is DELETE + INSERT of that
+// rowid alone; only an unknown-scope change needs the whole table rebuilt.
+export const MEME_SEARCH_FTS_DELETE = `DELETE FROM meme_search_fts WHERE rowid = ?`;
+
 // Column weights, in DDL order: name, ocr, caption, transcript, tags,
 // extra_terms. Tags/extra-terms are the curated facet channel and outrank raw
 // transcript/OCR; caption (the VLM's own words) sits just above transcript.

@@ -44,6 +44,7 @@ import { guessFacet } from '../facetCoverage';
 import { scoreExemplar } from '../learnCore';
 import { buildExemplarHeads, noteInteractive, saveSharedFiles, type ExemplarModel } from '../indexer';
 import { noteCodecInteractive } from '../interactive';
+import { createPhaseLog } from '../phaseTimer';
 import { success, tap, thud, warn } from '../haptics';
 import {
   cancelVideoExport,
@@ -125,6 +126,10 @@ type Item = MemeRecord | SearchHit;
 function thumbSource(item: Pick<Item, 'kind' | 'uri' | 'thumbUri'>): string {
   return item.thumbUri || item.uri;
 }
+
+// Timing for the open viewer's heavy work. The freeze reproduces when a share
+// lands while a meme is open, so what the viewer runs needs a number on it.
+const viewerPhases = createPhaseLog('viewer');
 
 // Autocomplete for a tag/label text input: given the known labels and what's
 // been typed, surface prefix matches first, then other substring matches. An
@@ -1833,7 +1838,13 @@ function ViewerSheet({
     setSimilar(null);
     if (itemId == null || itemPending) return;
     let stale = false;
-    getSimilarMemes(itemId, 10)
+    // Timed because this is the one heavy thing the OPEN viewer runs, and the
+    // freeze reproduces specifically when a share lands with a meme open. If
+    // sqlite-vec is loaded the ranking never enters JS; if it isn't, the
+    // fallback scans the library (chunked, but still O(N) blob decodes). The log
+    // line says which, instead of us guessing.
+    viewerPhases
+      .time(`similar${sqliteVecReady() ? '-vec' : '-jsScan'}`, () => getSimilarMemes(itemId, 10))
       .then((hits) => {
         if (!stale) setSimilar(hits);
       })

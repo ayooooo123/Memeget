@@ -10,11 +10,11 @@ import {
 
 import {
   borderColorSamplerNativeAvailable,
-  detectTextRegions,
   sampleImageBorderColor,
   sampleImagePixelGrid,
   textDetectionNativeAvailable,
 } from '../../modules/memeget-bg';
+import { detectTextRegions } from '../ocrEngine';
 import {
   createTextRegionLayers,
   canApplyTextRegionAction,
@@ -207,7 +207,7 @@ export const MemeTextReplaceTool = React.memo(function MemeTextReplaceTool({
           setDetectError('Text detection is unavailable in this build. Draw a manual region instead.');
           return;
         }
-        const nextRegions = flattenDetectedTextRegions(result as DetectedTextResult).flatMap((region) => {
+        const nextRegions = flattenDetectedTextRegions(result).flatMap((region) => {
           const rect = remapNormalizedRect(region.rect, FULL_IMAGE_BASE, project.base);
           return rect ? [{ ...region, rect }] : [];
         });

@@ -8,6 +8,9 @@
 module.exports = {
   testEnvironment: 'node',
   testMatch: ['**/*.test.ts'],
+  // `.worktrees/` holds other branches' checkouts; their suites belong to them.
+  testPathIgnorePatterns: ['/node_modules/', '/\\.worktrees/'],
+  modulePathIgnorePatterns: ['<rootDir>/\\.worktrees/'],
   transform: {
     '^.+\\.ts$': ['ts-jest', { diagnostics: false }],
   },

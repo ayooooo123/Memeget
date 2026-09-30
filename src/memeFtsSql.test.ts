@@ -6,6 +6,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import {
   MEME_SEARCH_FTS_DDL,
+  MEME_SEARCH_FTS_DELETE,
   MEME_SEARCH_FTS_INSERT,
   MEME_SEARCH_FTS_QUERY,
 } from './memeFtsSql';
@@ -63,5 +64,118 @@ describe('meme_search_fts', () => {
       { id: 2, tags: 'pepe' },
     ]);
     expect(search(db, '"pepe"')).toEqual([2, 1]);
+  });
+});
+
+// Re-indexing one row is DELETE + INSERT of its rowid. It has to leave the
+// index in the state a whole-table rebuild would have produced — the app trusts
+// BM25 ranking outright once it believes the index is current, so a per-row
+// repair that left a stale copy behind (or dropped the row's neighbours) would
+// misrank silently.
+describe('per-row re-indexing', () => {
+  const original: Row[] = [
+    { id: 1, caption: 'a frog looks smug', tags: 'pepe' },
+    { id: 2, caption: 'a doomer stares out of a window', tags: 'wojak' },
+  ];
+  const describedAgain: Row = { id: 2, caption: 'a soyjak points excitedly', tags: 'soyjak' };
+
+  function reindex(db: DatabaseSync, row: Row): void {
+    db.prepare(MEME_SEARCH_FTS_DELETE).run(row.id);
+    db.prepare(MEME_SEARCH_FTS_INSERT).run(
+      row.id,
+      row.name ?? '',
+      row.ocr ?? '',
+      row.caption ?? '',
+      row.transcript ?? '',
+      row.tags ?? '',
+      row.extra ?? ''
+    );
+  }
+
+  it('replaces the row instead of duplicating it', () => {
+    const db = freshFts(original);
+    reindex(db, describedAgain);
+
+    expect(search(db, '"soyjak"')).toEqual([2]);
+    expect(search(db, '"doomer"')).toEqual([]); // the superseded text is gone
+    expect(search(db, '"frog"')).toEqual([1]); // untouched rows survive
+  });
+
+  it('matches a full rebuild, ranking included', () => {
+    const patched = freshFts(original);
+    reindex(patched, describedAgain);
+    const rebuilt = freshFts([original[0], describedAgain]);
+
+    for (const query of ['"soyjak"', '"a"', '"pepe"', '"points"']) {
+      expect(search(patched, query)).toEqual(search(rebuilt, query));
+    }
+  });
+
+  it('retracts a row that has left the searchable set', () => {
+    // A meme deleted, or bounced back to pending, is a DELETE with no INSERT.
+    const db = freshFts(original);
+    db.prepare(MEME_SEARCH_FTS_DELETE).run(2);
+
+    expect(search(db, '"doomer"')).toEqual([]);
+    expect(search(db, '"frog"')).toEqual([1]);
+  });
+});
+
+// The repair writes in slices (FTS_WRITE_CHUNK rows per transaction) so it
+// hands the event loop back mid-rebuild instead of holding the one SQLite
+// connection for seconds. Committing in pieces must land the same index as one
+// big transaction — if a boundary dropped or doubled rows, search would be
+// wrong only for libraries past the chunk size, which is exactly the kind of
+// bug that ships.
+describe('writing the index in slices', () => {
+  const CHUNK = 100;
+  const library: Row[] = Array.from({ length: 250 }, (_, i) => ({
+    id: i + 1,
+    name: `meme_${i}.jpg`,
+    caption: `caption number ${i}`,
+    tags: i % 3 === 0 ? 'pepe' : 'wojak',
+  }));
+
+  function writeSliced(db: DatabaseSync, rows: Row[]): void {
+    const del = db.prepare(MEME_SEARCH_FTS_DELETE);
+    const ins = db.prepare(MEME_SEARCH_FTS_INSERT);
+    for (let i = 0; i < rows.length; i += CHUNK) {
+      // One transaction per slice, exactly as writeFtsRows does.
+      db.exec('BEGIN');
+      for (const row of rows.slice(i, i + CHUNK)) {
+        del.run(row.id);
+        ins.run(
+          row.id,
+          row.name ?? '',
+          row.ocr ?? '',
+          row.caption ?? '',
+          row.transcript ?? '',
+          row.tags ?? '',
+          row.extra ?? ''
+        );
+      }
+      db.exec('COMMIT');
+    }
+  }
+
+  it('lands the same index as one unsliced write', () => {
+    const sliced = new DatabaseSync(':memory:');
+    sliced.exec(MEME_SEARCH_FTS_DDL);
+    writeSliced(sliced, library);
+    const whole = freshFts(library);
+
+    expect(search(sliced, '"pepe"', 500)).toEqual(search(whole, '"pepe"', 500));
+    expect(search(sliced, '"caption"', 500).length).toBe(250);
+    expect(search(sliced, '"137"')).toEqual(search(whole, '"137"'));
+  });
+
+  it('re-indexes a slice-spanning set without duplicating boundary rows', () => {
+    const db = freshFts(library);
+    const rewritten = library.map((row) => ({ ...row, caption: `rewritten ${row.id}` }));
+    writeSliced(db, rewritten);
+
+    // Every row present exactly once, and no trace of the superseded captions.
+    expect(search(db, '"rewritten"', 500).length).toBe(250);
+    expect(search(db, '"number"', 500)).toEqual([]);
   });
 });

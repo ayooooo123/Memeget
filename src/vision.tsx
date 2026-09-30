@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react';
-import { useLLM } from 'react-native-executorch';
+import { AppState } from 'react-native';
+import { RnExecutorchError, RnExecutorchErrorCode, useLLM } from 'react-native-executorch';
 
 import {
   addIndexError,
@@ -50,6 +51,12 @@ import { useEmbeddings } from './embeddings';
 // Re-export the pure helpers/types screens import from this module.
 export { memesPerHour, intensityLabel } from './visionCore';
 export type { VisionResult, BgThrottles } from './visionCore';
+
+// Generation failures that are about the model's lifecycle, not the input.
+const TRANSIENT_MODEL_ERRORS = new Set<number>([
+  RnExecutorchErrorCode.ModuleNotLoaded,
+  RnExecutorchErrorCode.ModelGenerating,
+]);
 
 // Gemma 4 E2B (multimodal), on-device, via ExecuTorch — the SAME runtime that
 // already runs CLIP, so there's no second engine to ship. One model, no tiers.
@@ -148,6 +155,19 @@ export function VisionProvider({ children }: { children: React.ReactNode }) {
     model: MODEL,
     preventLoad: !(hydrated && enabled && modelWanted),
   });
+
+  // Whether the user is actually looking at the app. Two things below key off
+  // it: the drain linger (sized for someone sharing a burst into an OPEN app)
+  // and the background release effect further down.
+  const appActiveRef = useRef(AppState.currentState === 'active');
+  const [appActive, setAppActive] = useState(appActiveRef.current);
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (state) => {
+      appActiveRef.current = state === 'active';
+      setAppActive(appActiveRef.current);
+    });
+    return () => sub.remove();
+  }, []);
 
   // Summon the model whenever the background trickle has work: on
   // hydrate/settings changes and every time the library changes (a fresh
@@ -249,19 +269,28 @@ export function VisionProvider({ children }: { children: React.ReactNode }) {
     // every meme is described from a clean slate (no drift, no unbounded context
     // growth across a whole library). runVision adds the hard output cap +
     // prefill/decode telemetry; the hook exposes getPromptTokenCount (singular).
-    return runVision(
-      {
-        generate: llm.generate,
-        interrupt: llm.interrupt,
-        getGeneratedTokenCount: llm.getGeneratedTokenCount,
-        getPromptTokenCount: llm.getPromptTokenCount,
-      },
-      [
-        { role: 'system', content: SYSTEM_PROMPT },
-        { role: 'user', content: userTurn(ocrHint, grounding), mediaPath: jpegPath },
-      ],
-      'foreground'
-    );
+    try {
+      return await runVision(
+        {
+          generate: llm.generate,
+          interrupt: llm.interrupt,
+          getGeneratedTokenCount: llm.getGeneratedTokenCount,
+          getPromptTokenCount: llm.getPromptTokenCount,
+        },
+        [
+          { role: 'system', content: SYSTEM_PROMPT },
+          { role: 'user', content: userTurn(ocrHint, grounding), mediaPath: jpegPath },
+        ],
+        'foreground'
+      );
+    } catch (e) {
+      // The model going away (unload/reload) or another generation holding it
+      // says nothing about this meme. Report "unready" — the row stays pending
+      // and is retried — instead of letting describeAndSave stamp it failed,
+      // which is terminal until a manual retry.
+      if (e instanceof RnExecutorchError && TRANSIENT_MODEL_ERRORS.has(e.code)) return null;
+      throw e;
+    }
   };
   const enricherRef = useRef<VisionEnricher>({ ready: false, describe });
   enricherRef.current = {
@@ -506,6 +535,40 @@ export function VisionProvider({ children }: { children: React.ReactNode }) {
     }
   };
 
+  // Hand the model back when the app leaves the foreground with nothing to do.
+  //
+  // The paced loop below has its own drain release, but it only exists while
+  // background describe is ON. With it off, a burst (or a share) summons the
+  // model and NOTHING ever lowers demand again: `dumpsys meminfo` caught this
+  // app holding 2.34 GB of native heap and 2.95 GB of GL memory four minutes
+  // after `onHostPause`, idle, with an empty queue. That resident footprint is
+  // the pressure the ART OOMs fire under, so drop it as soon as the user leaves
+  // — unless a generation is actually running (never yank the model mid-answer)
+  // or work is still queued, in which case the loop or the burst owns the
+  // lifetime and will release when it drains.
+  //
+  // Only a LOADED model is released. A burst awaiting ensureModelLoaded() holds
+  // no busyRef yet, and flipping preventLoad mid-load doesn't cancel it: the
+  // load lands anyway with modelWanted=false, which disarms this effect (the
+  // leak it exists to fix) and makes the next summon unload+reload the model
+  // under whoever captured the ready enricher. Once the load lands, isReady
+  // re-runs this and the release happens then.
+  useEffect(() => {
+    if (appActive || !modelWanted || !llm.isReady || busyRef.current) return;
+    let cancelled = false;
+    (async () => {
+      const queued = await countMemesNeedingVision().catch(() => 0);
+      if (cancelled || busyRef.current) return;
+      if (queued === 0 || !bgEnabled) setModelWanted(false);
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // `running` is in the deps so a generation finishing while the app is
+    // already backgrounded re-evaluates the release (busyRef is a ref and
+    // wouldn't retrigger this on its own).
+  }, [appActive, modelWanted, bgEnabled, running, llm.isReady]);
+
   // A background tick holds the mutex for exactly one generation. Bouncing the
   // user's "Describe N memes" tap with "already describing" for those few
   // seconds was the most common way the button appeared to do nothing — wait
@@ -519,7 +582,7 @@ export function VisionProvider({ children }: { children: React.ReactNode }) {
     await ensureModelLoaded();
     const deadline = Date.now() + BURST_LOCK_WAIT_MS;
     while (busyRef.current && Date.now() < deadline) {
-      if (opts?.shouldCancel?.()) return { described: 0, deduped: 0, failed: 0 };
+      if (opts?.shouldCancel?.()) return { described: 0, deduped: 0, failed: 0, skipped: 0 };
       await new Promise<void>((resolve) => setTimeout(resolve, 250));
     }
     return runGuarded(() => enrichLibrary(enricherRef.current, opts ?? {}));
@@ -566,7 +629,7 @@ export function VisionProvider({ children }: { children: React.ReactNode }) {
         return;
       }
 
-      let status: 'done' | 'deduped' | 'failed' | 'empty' | 'busy' = 'busy';
+      let status: 'done' | 'deduped' | 'failed' | 'empty' | 'skipped' | 'busy' = 'busy';
       try {
         status = await runGuarded(() => enrichNextMeme(enricherRef.current));
       } catch {
@@ -578,9 +641,14 @@ export function VisionProvider({ children }: { children: React.ReactNode }) {
       // empties made every follow-up meme pay the full cold start. After the
       // linger the RAM goes back to the system; the demand effect re-summons
       // the model when new memes arrive.
+      //
+      // Backgrounded, that trade inverts: no share can land in an app nobody is
+      // looking at without going through the share receiver (which re-summons),
+      // so the linger buys nothing and costs gigabytes for up to three minutes.
+      // Release on the first empty poll instead.
       if (status === 'empty') {
         emptyStreak++;
-        if (emptyStreak >= 3) {
+        if (emptyStreak >= 3 || !appActiveRef.current) {
           setModelWanted(false);
           return;
         }

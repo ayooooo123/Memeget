@@ -1,9 +1,11 @@
 // Still-image subject cutouts: the parts that are geometry, state and policy.
 //
-// Native code owns the pixels — ML Kit produces the masks, writes one cutout PNG
-// per subject, and hands back references. That split is deliberate: a
-// full-resolution alpha channel in the JS heap is how this app OOM'd before, so
-// nothing here ever holds a bitmap. What lives here is everything that can be
+// Native code owns the pixels — JS runs the segmentation model (FastSAM via
+// react-native-executorch) and picks the subject masks, native writes one
+// cutout PNG per subject and hands back references. That split is deliberate:
+// a full-resolution ARGB image in the JS heap is how this app OOM'd before, so
+// nothing here holds one — masks are one byte per pixel of their own box, and
+// cross the bridge bit-packed. What lives here is everything that can be
 // wrong without crashing:
 //
 //   * the memory ceiling, derived rather than hoped for;
@@ -41,10 +43,10 @@ export const CUTOUT_MEMORY_CEILING_BYTES = 96 * 1024 * 1024;
 /** Mirrors MemeStillSubjectSegmenter.MAX_WORKING_EDGE. */
 export const CUTOUT_MAX_WORKING_EDGE = 2048;
 
-/** ML Kit documents 512x512 as its accuracy floor. We report, never upscale. */
+/** Below this short edge segmentation gets rough. We report, never upscale. */
 export const CUTOUT_RECOMMENDED_MIN_EDGE = 512;
 
-/** Decoded ARGB source + confidence float + cutout ARGB, per working pixel. */
+/** Decoded ARGB working image + cutout ARGB + masks/model copy, per working pixel. */
 export const CUTOUT_BYTES_PER_WORKING_PIXEL = 12;
 
 /**
@@ -84,7 +86,7 @@ export interface CutoutSegmentationPlan {
   estimatedPeakBytes: number;
   ceilingBytes: number;
   downscaled: boolean;
-  /** Source smaller than ML Kit's documented accuracy floor. */
+  /** Source smaller than the edge segmentation works well at. */
   belowRecommendedResolution: boolean;
 }
 
@@ -156,9 +158,9 @@ export interface CutoutFailure {
 /**
  * Map a native code onto an outcome.
  *
- * Codes, never message matching: ML Kit's strings are not API, and mistaking an
- * offline device for an unsupported one sends the user to fix the wrong thing.
- * Anything unrecognized is a genuine failure rather than a guess.
+ * Codes, never message matching: exception strings are not API, and mistaking
+ * an offline device for an unsupported one sends the user to fix the wrong
+ * thing. Anything unrecognized is a genuine failure rather than a guess.
  */
 export function classifyCutoutFailure(code: string | null | undefined): CutoutOutcome {
   switch (code) {
@@ -199,7 +201,7 @@ export function cutoutFailureFor(
     return {
       kind: 'module-unavailable',
       message: 'Subject cutouts are not available on this device.',
-      remedy: 'Google Play services could not install the cutout model. Update Play services, or use Cover to hide a region instead.',
+      remedy: 'This build cannot run the cutout model. Use Cover to hide a region instead.',
       retryable: false,
       detail,
     };
@@ -267,8 +269,8 @@ function cutoutRef(native: NativeSubjectCutout): CutoutRef | null {
 /**
  * Adopt a native result, or `null` when the image has no subject.
  *
- * The null is the honest half of this function: ML Kit succeeding on a photo of
- * a wall is a successful call with nothing in it, and the studio has to say "no
+ * The null is the honest half of this function: segmenting a photo of a wall
+ * is a successful call with nothing in it, and the studio has to say "no
  * subject found" rather than "cutout failed" — the user did nothing wrong and
  * there is nothing to retry.
  */
@@ -297,6 +299,138 @@ export function cutoutResultFromNative(
     belowRecommendedResolution:
       Math.min(native.workingWidth, native.workingHeight) < CUTOUT_RECOMMENDED_MIN_EDGE,
   };
+}
+
+// --- choosing subjects from "segment everything" masks -----------------------
+
+/**
+ * One instance from the segmentation model (react-native-executorch FastSAM):
+ * a binary mask (0/1 bytes) cropped to its box, whose (0,0) sits at the box's
+ * rounded top-left in the working image.
+ */
+export interface SegmentedMask {
+  bbox: { x1: number; y1: number; x2: number; y2: number };
+  mask: Uint8Array;
+  maskWidth: number;
+  maskHeight: number;
+  score: number;
+}
+
+export interface SubjectMaskChoice {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  mask: Uint8Array;
+  /** Share of the frame the mask covers. */
+  coverage: number;
+}
+
+/** Below this the "subject" is speckle. Mirrors the native MIN_SUBJECT_COVERAGE. */
+export const SUBJECT_MIN_COVERAGE = 0.001;
+/** A mask over this much of the frame is the scene, not something in it. */
+export const SUBJECT_MAX_COVERAGE = 0.9;
+/** Large masks touching this many frame edges are backdrop (sky, wall, floor). */
+const BACKDROP_EDGES = 3;
+const BACKDROP_MIN_COVERAGE = 0.25;
+/** Share of the smaller mask inside an already-chosen one that makes it a part/duplicate. */
+const SUBJECT_OVERLAP_LIMIT = 0.6;
+
+interface MaskCandidate extends SubjectMaskChoice {
+  area: number;
+  score: number;
+}
+
+function maskArea(mask: Uint8Array): number {
+  let n = 0;
+  for (let i = 0; i < mask.length; i++) n += mask[i] ? 1 : 0;
+  return n;
+}
+
+function sharedPixels(a: MaskCandidate, b: MaskCandidate): number {
+  const left = Math.max(a.x, b.x);
+  const top = Math.max(a.y, b.y);
+  const right = Math.min(a.x + a.width, b.x + b.width);
+  const bottom = Math.min(a.y + a.height, b.y + b.height);
+  let n = 0;
+  for (let y = top; y < bottom; y++) {
+    const ar = (y - a.y) * a.width - a.x;
+    const br = (y - b.y) * b.width - b.x;
+    for (let x = left; x < right; x++) {
+      if (a.mask[ar + x] && b.mask[br + x]) n++;
+    }
+  }
+  return n;
+}
+
+/**
+ * Pick the subjects of an image from a "segment everything" result.
+ *
+ * FastSAM returns masks for every region it finds — the person, their shirt,
+ * the wall behind them. What a cutout wants is the things IN the scene: drop
+ * speckle, drop the whole frame, drop large regions hugging three or more
+ * edges (backdrop), then take the rest largest first, skipping any mask that
+ * is mostly inside one already taken (a part, or a near-duplicate). Up to
+ * `max` are returned; the rest are counted, not hidden.
+ */
+export function selectSubjectMasks(
+  instances: readonly SegmentedMask[],
+  frame: { width: number; height: number },
+  max = MAX_CUTOUT_SUBJECTS
+): { subjects: SubjectMaskChoice[]; dropped: number } {
+  const framePixels = Math.max(1, frame.width * frame.height);
+  const marginX = frame.width * 0.01;
+  const marginY = frame.height * 0.01;
+  const candidates: MaskCandidate[] = [];
+  for (const inst of instances) {
+    if (inst.maskWidth <= 0 || inst.maskHeight <= 0) continue;
+    if (inst.mask.length < inst.maskWidth * inst.maskHeight) continue;
+    const area = maskArea(inst.mask);
+    const coverage = area / framePixels;
+    if (coverage < SUBJECT_MIN_COVERAGE || coverage > SUBJECT_MAX_COVERAGE) continue;
+    const x = Math.round(inst.bbox.x1);
+    const y = Math.round(inst.bbox.y1);
+    const edges =
+      Number(inst.bbox.x1 <= marginX) +
+      Number(inst.bbox.y1 <= marginY) +
+      Number(inst.bbox.x2 >= frame.width - marginX) +
+      Number(inst.bbox.y2 >= frame.height - marginY);
+    if (edges >= BACKDROP_EDGES && coverage >= BACKDROP_MIN_COVERAGE) continue;
+    candidates.push({
+      x,
+      y,
+      width: inst.maskWidth,
+      height: inst.maskHeight,
+      mask: inst.mask,
+      coverage,
+      area,
+      score: inst.score,
+    });
+  }
+  candidates.sort((a, b) => b.area - a.area || b.score - a.score);
+  const chosen: MaskCandidate[] = [];
+  let dropped = 0;
+  for (const c of candidates) {
+    if (chosen.some((k) => sharedPixels(c, k) > SUBJECT_OVERLAP_LIMIT * Math.min(c.area, k.area))) continue;
+    if (chosen.length >= max) {
+      dropped++;
+      continue;
+    }
+    chosen.push(c);
+  }
+  return {
+    subjects: chosen.map(({ x, y, width, height, mask, coverage }) => ({ x, y, width, height, mask, coverage })),
+    dropped,
+  };
+}
+
+/** Pack a 0/1 byte mask into bits, row-major, most significant bit first. */
+export function packMaskBits(mask: Uint8Array): Uint8Array {
+  const packed = new Uint8Array(Math.ceil(mask.length / 8));
+  for (let i = 0; i < mask.length; i++) {
+    if (mask[i]) packed[i >> 3] |= 0x80 >> (i & 7);
+  }
+  return packed;
 }
 
 // --- selection --------------------------------------------------------------
@@ -699,7 +833,7 @@ export interface CutoutRequest {
 export interface CutoutDownloadProgress {
   bytesDownloaded: number;
   totalBytes: number;
-  /** 0..1, or null while Play services has not said how big the model is. */
+  /** 0..1, or null while the downloader has not said how big the model is. */
   fraction: number | null;
 }
 
@@ -838,7 +972,7 @@ export function memeCutoutReducer(state: CutoutState, event: CutoutEvent): Cutou
       if (phase.kind === 'segmenting') return state;
       const totalBytes = Math.max(0, Math.floor(event.totalBytes));
       const reported = Math.max(0, Math.floor(event.bytesDownloaded));
-      // Play services re-reports byte counts that can jitter backwards, and a
+      // Download progress can re-report counts that jitter backwards, and a
       // progress bar that walks back reads as "it is going wrong".
       const previous = phase.kind === 'downloading' ? phase.progress.bytesDownloaded : 0;
       const bytesDownloaded = Math.max(previous, reported);

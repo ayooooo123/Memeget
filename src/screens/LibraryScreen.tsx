@@ -192,13 +192,20 @@ export function LibraryScreen({ tagSearchRequest }: { tagSearchRequest?: TagSear
     return run;
   }, []);
 
+  // Timed in parts. A refresh is O(rows currently loaded) — five queries plus a
+  // full re-marshal and re-merge of the loaded span — and it is fired by every
+  // library-changed event, so if the grid ever hitches while something writes in
+  // the background, this is the first place the seconds will show up.
   const refresh = useCallback(
     () =>
       serialize(async () => {
+        const t0 = Date.now();
         setFolders(await getFolders());
+        const t1 = Date.now();
         const k = kindRef.current === 'all' ? undefined : kindRef.current;
         const span = Math.max(PAGE, loadedCountRef.current);
         const rows = await getRecentMemes(span, 0, k);
+        const t2 = Date.now();
         setRecent((prev) => mergeRecords(prev, rows));
         loadedCountRef.current = rows.length;
         // A full span means the library may extend past what's loaded; a short
@@ -206,9 +213,16 @@ export function LibraryScreen({ tagSearchRequest }: { tagSearchRequest?: TagSear
         // span to sit on a PAGE boundary — after any deletion it never did, so
         // one delete permanently switched infinite scroll off.)
         hasMoreRef.current = rows.length === span;
+        const t3 = Date.now();
         setCount(await countMemes());
         setTaughtLabels(await getLabels().catch(() => []));
         setLibraryTags(await getLibraryTagLabels().catch(() => []));
+        const total = Date.now() - t0;
+        if (total >= 200) {
+          console.log(
+            `[memeget/library] refresh ${rows.length} rows in ${total}ms (folders ${t1 - t0} · fetch ${t2 - t1} · merge ${t3 - t2} · tail ${Date.now() - t3})`
+          );
+        }
       }),
     [serialize]
   );
@@ -272,8 +286,11 @@ export function LibraryScreen({ tagSearchRequest }: { tagSearchRequest?: TagSear
   // scroll. Applies to both browse recents and any active search results.
   useEffect(() => {
     return onThumbsUpdated((patches) => {
+      const startedAt = Date.now();
       setRecent((cur) => patchThumbs(cur, patches));
       setResults((cur) => (cur ? (patchThumbs(cur, patches) as SearchHit[]) : cur));
+      const ms = Date.now() - startedAt;
+      if (ms >= 200) console.log(`[memeget/library] thumb patch ${patches.length} in ${ms}ms`);
     });
   }, []);
 
@@ -360,9 +377,21 @@ export function LibraryScreen({ tagSearchRequest }: { tagSearchRequest?: TagSear
       // thread behind the latest one.
       const stale = () => queryRef.current.trim() !== q;
       try {
+        // The embed and the label-vector read are the two model/DB steps a
+        // keystroke waits on. They are timed because the worst cold-start block
+        // measured so far ended exactly as the session's first query ran, and
+        // nothing on the search path was slow enough to explain it.
         await runProgressiveSearch({
           lexicalSearch: () => searchByVector(null, q, Infinity, kindArg(), stale),
-          embed: emb.ready ? () => emb.embedText(q) : undefined,
+          embed: emb.ready
+            ? async () => {
+                const startedAt = Date.now();
+                const vec = await emb.embedText(q);
+                const ms = Date.now() - startedAt;
+                if (ms >= 400) console.log(`[memeget/search] query embed in ${ms}ms`);
+                return vec;
+              }
+            : undefined,
           hybridSearch: emb.ready ? async (vec) => {
             const exactTerms = searchTermsForText(q);
             let expanded = buildExpandedLexicalQuery(exactTerms, []);
@@ -371,7 +400,10 @@ export function LibraryScreen({ tagSearchRequest }: { tagSearchRequest?: TagSear
                 0,
                 SEARCH_LABEL_VECTOR_LIMIT
               );
+              const labelStartedAt = Date.now();
               const vectors = await getLabelVectors(emb.primaryModel.id);
+              const labelMs = Date.now() - labelStartedAt;
+              if (labelMs >= 400) console.log(`[memeget/search] label vectors in ${labelMs}ms`);
               if (stale()) return null;
               const semanticHits = rankSemanticLabels(
                 vec,
@@ -514,8 +546,14 @@ export function LibraryScreen({ tagSearchRequest }: { tagSearchRequest?: TagSear
         const bits = [`${restored.added} memes`];
         if (restored.teachingsAdded) bits.push(`${restored.teachingsAdded} taught examples`);
         showToast(
-          `Restored ${bits.join(' and ')} from “${picked.name}”${restored.vectorsDropped ? ' — tap Index to re-embed' : ''}`,
+          `Restored ${bits.join(' and ')} from “${picked.name}”${restored.vectorsDropped ? ' — tap Index to re-embed' : ''}` +
+            (restored.teachingsForeignModel ? ' · taught examples were made with another model and were not restored' : ''),
           'success'
+        );
+      } else if (restored?.teachingsForeignModel) {
+        showToast(
+          `Linked “${picked.name}” — its taught examples were made with another model and were not restored`,
+          'info'
         );
       } else {
         showToast(`Linked “${picked.name}” — tap Index to scan it`, 'success');

@@ -27,14 +27,9 @@ class MemegetBgModule : Module() {
   override fun definition() = ModuleDefinition {
     Name("MemegetBg")
 
-    // Download/segmentation progress for still-image cutouts. Emitted from a
-    // background thread while `segmentImageSubjects` is in flight, because the
-    // one-time model download is a user-visible wait that has to be cancellable
-    // rather than a spinner with no end in sight.
-    //
-    // `onVideoExportProgress` is the same idea for a video export, tagged with the caller's
-    // `exportId` so a stale subscription cannot drive the current run's progress bar.
-    Events("onSubjectSegmentationProgress", "onVideoExportProgress")
+    // Progress for a video export, tagged with the caller's `exportId` so a
+    // stale subscription cannot drive the current run's progress bar.
+    Events("onVideoExportProgress")
 
     View(MemeTextPreviewView::class) {
       Events("onMetrics")
@@ -292,39 +287,45 @@ class MemegetBgModule : Module() {
       MemeMediaProbe.probe(ctx, source).toMap()
     }
 
-    // Detect real local-image text using the same pinned ML Kit stack as
-    // expo-text-extractor. The detector honors EXIF before recognition and
-    // returns normalized block/line/element geometry.
-    AsyncFunction("detectTextRegions") { source: String ->
+    // Write an upright, size-capped JPEG copy of a local image for the JS OCR
+    // engine (react-native-executorch), which reads file:// paths only and
+    // ignores EXIF. OCR boxes normalized against the returned width/height are
+    // in the EXIF-oriented source frame the editor uses. The caller deletes it.
+    AsyncFunction("prepareTextDetectionImage") { source: String ->
       val ctx = appContext.reactContext
         ?: throw IllegalStateException("React context unavailable")
-      MemeTextDetector.detect(ctx, source).toMap()
+      MemeTextDetector.prepareForTextDetection(ctx, source).toMap()
     }
 
-    // Whether the optional ML Kit subject segmentation module is already on the
-    // device. Cheap probe that does NOT trigger an install, so the studio can
-    // decide up front whether the user is about to wait for a download.
-    AsyncFunction("subjectSegmentationModuleInstalled") {
-      val ctx = appContext.reactContext
-        ?: throw IllegalStateException("React context unavailable")
-      MemeStillSubjectSegmenter.moduleInstalled(ctx)
-    }
-
-    // Segment the subjects of a local still image and materialize one cutout PNG
-    // per subject plus a combined one, all inside a per-request cache directory
-    // the caller releases. Rejects with the segmenter's own failure code
-    // (E_CUTOUT_OFFLINE / E_CUTOUT_MODULE_UNAVAILABLE / E_CUTOUT_CANCELLED /
-    // E_CUTOUT_FAILED) so JS can offer the right remedy; an image with no
-    // subject RESOLVES with a null combined cutout, because that is not a
-    // failure.
-    AsyncFunction("segmentImageSubjects") { source: String, requestId: String, promise: Promise ->
+    // Still-image cutouts, step 1: decode the source upright at a size the
+    // memory ceiling allows, keep it for step 2, and write a JPEG copy for the
+    // JS segmentation model (react-native-executorch FastSAM). Rejects with
+    // E_CUTOUT_* codes so JS can offer the right remedy.
+    AsyncFunction("prepareSubjectSegmentation") { source: String, requestId: String, promise: Promise ->
       val ctx = appContext.reactContext
         ?: return@AsyncFunction promise.reject("E_CONTEXT", "React context unavailable", null)
       try {
+        promise.resolve(MemeStillSubjectSegmenter.prepare(ctx, source, requestId).toMap())
+      } catch (error: SubjectCutoutException) {
+        promise.reject(error.failure.code, error.message, error)
+      } catch (error: Throwable) {
+        promise.reject(SubjectCutoutFailure.FAILED.code, error.message, error)
+      }
+    }
+
+    // Step 2: materialize one cutout PNG per subject mask JS chose, plus a
+    // combined one, into the request's cache directory the caller releases. An
+    // empty mask list RESOLVES with a null combined cutout — "no subject found"
+    // is an answer, not a failure.
+    AsyncFunction("writeSubjectCutouts") {
+      requestId: String,
+      boxes: List<Int>,
+      masks: List<String>,
+      droppedSubjects: Int,
+      promise: Promise ->
+      try {
         promise.resolve(
-          MemeStillSubjectSegmenter.segment(ctx, source, requestId) { payload ->
-            this@MemegetBgModule.sendEvent("onSubjectSegmentationProgress", payload)
-          }.toMap()
+          MemeStillSubjectSegmenter.writeCutouts(requestId, boxes, masks, droppedSubjects).toMap()
         )
       } catch (error: SubjectCutoutException) {
         promise.reject(error.failure.code, error.message, error)
@@ -333,8 +334,7 @@ class MemegetBgModule : Module() {
       }
     }
 
-    // Ask an in-flight request to stop. Returns immediately: the run itself
-    // rejects with E_CUTOUT_CANCELLED once it reaches its next checkpoint.
+    // Ask an in-flight request to stop at its next native checkpoint.
     Function("cancelSubjectSegmentation") { requestId: String ->
       MemeStillSubjectSegmenter.requestCancel(requestId)
     }

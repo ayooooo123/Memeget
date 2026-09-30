@@ -18,7 +18,13 @@ import {
   MEMES_TABLE_SQL,
   RESTORE_SIDECAR_MEME_SQL,
 } from './memeSql';
-import { MEME_SEARCH_FTS_DDL, MEME_SEARCH_FTS_INSERT, MEME_SEARCH_FTS_QUERY } from './memeFtsSql';
+import {
+  MEME_SEARCH_FTS_DDL,
+  MEME_SEARCH_FTS_DELETE,
+  MEME_SEARCH_FTS_INSERT,
+  MEME_SEARCH_FTS_QUERY,
+} from './memeFtsSql';
+import { FtsIndexState } from './ftsIndexState';
 import { hashText } from './contentHash';
 // Knowledge mutations announce themselves here so the `.memeget` sidecar backup
 // picks them up. Emitting from the write helpers rather than the screens means
@@ -27,8 +33,10 @@ import { emitKnowledgeChanged } from './events';
 import {
   ensureSearchIndex,
   invalidateSearchIndex as invalidateResidentSearchIndex,
+  invalidateSearchIndexRows as invalidateResidentSearchIndexRows,
   patchSearchIndexEntries,
   peekSearchIndex,
+  searchIndexGeneration,
   type SearchCacheEntry,
 } from './searchIndexCache';
 import {
@@ -40,6 +48,7 @@ import {
   tagTermScore,
   type LexicalQuery,
 } from './searchExpansion';
+import { SearchVocab } from './fuzzySearch';
 import { rankPropagationHits, scorePropagationCandidate, type PropagationHit } from './tagPropagation';
 import { upsertDurableTag } from './tagMerge';
 import type { MemeRecord, MediaKind, SearchHit, Tag, LinkedFolder, Exemplar } from './types';
@@ -58,17 +67,33 @@ export function sqliteVecReady(): boolean {
 }
 
 let ftsAvailable: boolean | null = null;
-// Content version: bumped on every searchable-content change. The FTS index
-// records the version it was last built at (`ftsBuiltVersion`); it is usable
-// ONLY when the two match. This is what keeps a rebuild that raced a write from
-// ever being trusted — see ensureFtsSearchIndex / scheduleFtsRebuild.
-let contentVersion = 0;
-let ftsBuiltVersion = -1;
-let ftsRebuilding = false;
+// Which rows the FTS index is behind on, and whether it can be trusted at all.
+// Every searchable-content write reports itself here (with the affected ids
+// when they're known) so the repair can re-index those rows instead of the
+// library — see ftsIndexState.ts for the invariant.
+const ftsState = new FtsIndexState();
+let ftsSyncing = false;
+
+// Wall-clock of the last searchable-content write. Repairing derived structures
+// costs more than it saves if it runs between the writes of a single import
+// (insert, describe, caption vector, transcript), so the repair waits for them
+// to settle.
+let lastContentChangeAt = 0;
+const CONTENT_QUIET_MS = 1_500;
 
 function invalidateSearchIndex(): void {
   invalidateResidentSearchIndex();
-  contentVersion++;
+  ftsState.noteContentChange();
+  lastContentChangeAt = Date.now();
+}
+
+// Same, when the affected rows are known: the resident index reloads just these
+// instead of the whole library, and the FTS index re-indexes just these instead
+// of rebuilding. Everything else (quiet window) is identical.
+function invalidateSearchIndexForRows(ids: readonly number[]): void {
+  invalidateResidentSearchIndexRows(ids);
+  ftsState.noteContentChange(ids);
+  lastContentChangeAt = Date.now();
 }
 
 function getDb(): Promise<SQLite.SQLiteDatabase> {
@@ -80,6 +105,21 @@ function getDb(): Promise<SQLite.SQLiteDatabase> {
     })();
   }
   return dbPromise;
+}
+
+// expo-sqlite's withTransactionAsync is a bare BEGIN … COMMIT on the one shared
+// connection, and on ANY error it issues ROLLBACK. Two overlapping callers (a
+// retag while the FTS repair writes a chunk, an error row logged mid-restore)
+// nest BEGINs: the second one throws "cannot start a transaction within a
+// transaction", and its ROLLBACK discards the FIRST caller's in-flight writes,
+// whose remaining statements then autocommit until its own COMMIT fails. Every
+// multi-statement write in this module goes through here so transactions run
+// strictly one at a time. A task must not call runTransaction itself.
+let transactionTail: Promise<void> = Promise.resolve();
+function runTransaction(db: SQLite.SQLiteDatabase, task: () => Promise<void>): Promise<void> {
+  const run = transactionTail.then(() => db.withTransactionAsync(task));
+  transactionTail = run.catch(() => {});
+  return run;
 }
 
 // Best-effort one-time load of the bundled sqlite-vec extension. Enabled at
@@ -330,9 +370,9 @@ export async function initDb(): Promise<void> {
 
 // ---- primary-space guard -------------------------------------------------------
 
-// The stamp of the primary model the index was (last) built with. Written on
-// every index run; compared against the running app's model so a swapped build
-// can't silently search a foreign-space index.
+// The stamp of the primary model the index's vectors were embedded with,
+// compared against the running app's model so a swapped build can't silently
+// search (or back up as current) a foreign-space index.
 export const INDEX_MODEL_KEY = 'index.primaryModel';
 
 export async function getIndexModelMismatch(): Promise<{ stored: string; current: string } | null> {
@@ -342,8 +382,24 @@ export async function getIndexModelMismatch(): Promise<{ stored: string; current
   return { stored, current };
 }
 
+// Called before an index pass. Claims the index for the running model only
+// when no vectors from another model remain: an index run skips rows it
+// already has, so after a model change one shared meme must not relabel the
+// whole old-space library as current (search and backups both trust this).
+// The foreign stamp stays until those rows are gone — "Clear index" deletes
+// the stamp along with them, and the next pass stamps fresh.
 export async function stampIndexModel(): Promise<void> {
-  await setSetting(INDEX_MODEL_KEY, modelStamp(PRIMARY_EMBEDDING_MODEL));
+  const current = modelStamp(PRIMARY_EMBEDDING_MODEL);
+  const stored = await getSetting(INDEX_MODEL_KEY);
+  if (stored === current) return;
+  if (stored) {
+    const db = await getDb();
+    const embedded = await db.getFirstAsync<{ one: number }>(
+      'SELECT 1 AS one FROM memes WHERE pending = 0 AND length(embedding) > 0 LIMIT 1'
+    );
+    if (embedded) return;
+  }
+  await setSetting(INDEX_MODEL_KEY, current);
 }
 
 // ---- float32 <-> blob helpers -------------------------------------------------
@@ -436,7 +492,7 @@ export async function deleteMeme(id: number): Promise<void> {
   // isn't wrongly rejected as a duplicate of a row that no longer exists.
   await db.runAsync('DELETE FROM content_hashes WHERE uri IN (SELECT uri FROM memes WHERE id = ?)', id);
   await db.runAsync('DELETE FROM memes WHERE id = ?', id);
-  invalidateSearchIndex(); // membership changed
+  invalidateSearchIndexForRows([id]); // membership changed
 }
 
 // Record a saved meme's content fingerprint → its URI. Called right after a
@@ -514,7 +570,15 @@ export async function insertMeme(args: {
     args.degraded ? 'none' : args.kind === 'video' ? 'pending' : 'none',
     args.thumbUri ?? ''
   );
-  invalidateSearchIndex(); // a searchable row was added or replaced
+  // A share/import inserts one row at a time; reloading just it keeps the next
+  // keystroke off the whole-library path. The id comes from a lookup, not
+  // lastInsertRowId: this is an upsert, and on the ON CONFLICT DO UPDATE path
+  // (a re-index of a meme already in the library) SQLite leaves the last insert
+  // rowid alone, so trusting it would refresh some unrelated row and leave this
+  // one stale in the resident index.
+  const row = await db.getFirstAsync<{ id: number }>('SELECT id FROM memes WHERE uri = ?', args.uri);
+  if (row) invalidateSearchIndexForRows([row.id]);
+  else invalidateSearchIndex(); // shouldn't happen; reload everything rather than miss it
 }
 
 // Insert a lightweight placeholder for a freshly-saved meme that hasn't been
@@ -707,8 +771,12 @@ export async function updateMemeTags(id: number, tags: Tag[], extraTerms: string
     extraTerms,
     id
   );
-  if (!patchTagSearchCache([{ id, tags: normalized, extraTerms }])) invalidateResidentSearchIndex();
-  contentVersion++; // resident cache patched in place; FTS must still rebuild
+  if (patchTagSearchCache([{ id, tags: normalized, extraTerms }])) {
+    ftsState.noteContentChange([id]); // resident cache patched in place; FTS still needs the row
+    lastContentChangeAt = Date.now();
+  } else {
+    invalidateSearchIndexForRows([id]);
+  }
   emitKnowledgeChanged();
 }
 
@@ -724,7 +792,7 @@ export async function bulkUpdateMemeTags(
   const db = await getDb();
   const stmt = await db.prepareAsync('UPDATE memes SET tags = ?, extra_terms = ? WHERE id = ?');
   try {
-    await db.withTransactionAsync(async () => {
+    await runTransaction(db, async () => {
       for (const u of normalized) {
         await stmt.executeAsync(JSON.stringify(u.tags), u.extraTerms, u.id);
       }
@@ -732,8 +800,13 @@ export async function bulkUpdateMemeTags(
   } finally {
     await stmt.finalizeAsync();
   }
-  if (!patchTagSearchCache(normalized)) invalidateResidentSearchIndex();
-  contentVersion++; // resident cache patched in place; FTS must still rebuild
+  if (patchTagSearchCache(normalized)) {
+    // Resident cache patched in place; the FTS rows still have to be re-indexed.
+    ftsState.noteContentChange(normalized.map((u) => u.id));
+    lastContentChangeAt = Date.now();
+  } else {
+    invalidateSearchIndexForRows(normalized.map((u) => u.id));
+  }
   emitKnowledgeChanged();
 }
 
@@ -830,7 +903,7 @@ export async function setMemeVision(
     args.extraTerms,
     id
   );
-  invalidateSearchIndex(); // caption + caption vector + tags all feed search
+  invalidateSearchIndexForRows([id]); // caption + caption vector + tags all feed search
   emitKnowledgeChanged();
 }
 
@@ -846,7 +919,7 @@ export async function requeueMemeVision(id: number): Promise<void> {
     "UPDATE memes SET vision_state = 'pending', caption = '', caption_embedding = NULL WHERE id = ?",
     id
   );
-  invalidateSearchIndex(); // the stale caption + its vector leave the haystack now
+  invalidateSearchIndexForRows([id]); // the stale caption + its vector leave the haystack now
 }
 
 export interface MemeNeedingCaptionEmbeddingRow {
@@ -883,7 +956,7 @@ export async function getMemesNeedingCaptionEmbedding(
 export async function setMemeCaptionEmbedding(id: number, embedding: number[]): Promise<void> {
   const db = await getDb();
   await db.runAsync('UPDATE memes SET caption_embedding = ? WHERE id = ?', vecToBlob(embedding), id);
-  invalidateSearchIndex(); // caption vector powers the hybrid text↔text channel
+  invalidateSearchIndexForRows([id]); // caption vector powers the hybrid text↔text channel
 }
 
 export interface MemeNeedingVisualEmbeddingRow {
@@ -1113,6 +1186,8 @@ export async function resetVisionFailures(): Promise<number> {
   const res = await db.runAsync(
     "UPDATE memes SET vision_state = 'pending' WHERE vision_state = 'failed' AND pending = 0 AND length(embedding) > 0"
   );
+  // The reasons belong to the attempt just retired; the retry logs its own.
+  await db.execAsync(`DELETE FROM index_errors WHERE stage LIKE 'vision:%';`);
   return res.changes ?? 0;
 }
 
@@ -1167,7 +1242,7 @@ export async function requeueMemeAudio(id: number): Promise<void> {
     "UPDATE memes SET audio_state = 'pending', transcript = '' WHERE id = ? AND kind = 'video'",
     id
   );
-  invalidateSearchIndex(); // the cleared transcript is part of the lexical haystack
+  invalidateSearchIndexForRows([id]); // the cleared transcript is part of the lexical haystack
 }
 
 // Persist a finished analysis. transcript = '' is a valid result — the video
@@ -1180,7 +1255,7 @@ export async function setMemeTranscript(id: number, transcript: string): Promise
     transcript,
     id
   );
-  invalidateSearchIndex(); // transcript is part of the lexical haystack
+  invalidateSearchIndexForRows([id]); // transcript is part of the lexical haystack
   emitKnowledgeChanged();
 }
 
@@ -1595,27 +1670,56 @@ function materializeHits(scored: { row: MemeRow; score: number }[], limit: numbe
 // search never touches it. Runs only on a cold or invalidated cache, never per
 // keystroke, so its cost is amortized across every search until the next
 // content change.
+const SEARCH_INDEX_COLUMNS = `id, uri, name, kind, embedding, caption_embedding, ocr_text, caption,
+            transcript, tags, extra_terms, vision_state, audio_state, indexed_at,
+            modified_at, pending, thumb_uri`;
+
+function toSearchCacheEntry(row: MemeRow): SearchCacheEntry {
+  const { embedding, ...record } = rowToRecord(row);
+  return {
+    id: row.id,
+    kind: row.kind as MediaKind,
+    imageVec: embedding,
+    captionVec: row.caption_embedding ? blobToVec(row.caption_embedding) : null,
+    searchText: rowSearchText(row),
+    record,
+  };
+}
+
+// A whole-library load, and the only O(library) step left on the search path.
+// Decoding two float blobs, parsing tags and reassembling a haystack for every
+// meme is a synchronous loop with nothing to yield to, so its cost lands on the
+// UI as a freeze — timed because the whole point of the resident cache and the
+// row-level invalidation around it is that this runs about once per session.
 async function loadSearchIndex(): Promise<SearchCacheEntry[]> {
   const db = await getDb();
   // Pending placeholders have no embedding/OCR/tags yet, so they'd only add
   // noise — leave them out until the indexer fills them in.
+  const startedAt = Date.now();
   const rows = await db.getAllAsync<MemeRow>(
-    `SELECT id, uri, name, kind, embedding, caption_embedding, ocr_text, caption,
-            transcript, tags, extra_terms, vision_state, audio_state, indexed_at,
-            modified_at, pending, thumb_uri
-     FROM memes WHERE pending = 0`
+    `SELECT ${SEARCH_INDEX_COLUMNS} FROM memes WHERE pending = 0`
   );
-  return rows.map((row) => {
-    const { embedding, ...record } = rowToRecord(row);
-    return {
-      id: row.id,
-      kind: row.kind as MediaKind,
-      imageVec: embedding,
-      captionVec: row.caption_embedding ? blobToVec(row.caption_embedding) : null,
-      searchText: rowSearchText(row),
-      record,
-    };
-  });
+  const fetchedAt = Date.now();
+  const entries = rows.map(toSearchCacheEntry);
+  console.log(
+    `[memeget/search] index load ${rows.length} rows: ${fetchedAt - startedAt}ms fetch + ${Date.now() - fetchedAt}ms decode`
+  );
+  return entries;
+}
+
+// Reload just the rows a write touched, for the resident cache to splice in.
+// Same shape and same pending=0 filter as the full load, so a row that was
+// deleted or bounced back to pending simply isn't returned and the cache drops
+// it. Ids are interpolated (they're numbers straight off our own rows, never
+// user text) because SQLite has no array parameter.
+async function loadSearchIndexRows(ids: readonly number[]): Promise<SearchCacheEntry[]> {
+  const db = await getDb();
+  if (ids.length === 0) return [];
+  const list = ids.map((id) => Math.trunc(id)).join(',');
+  const rows = await db.getAllAsync<MemeRow>(
+    `SELECT ${SEARCH_INDEX_COLUMNS} FROM memes WHERE pending = 0 AND id IN (${list})`
+  );
+  return rows.map(toSearchCacheEntry);
 }
 
 // Ensure the FTS5 virtual table exists. Separated from population so the
@@ -1634,67 +1738,131 @@ async function ensureFtsTable(db: SQLite.SQLiteDatabase): Promise<boolean> {
   }
 }
 
-// Repopulate the FTS index from `entries` (a snapshot taken at content version
-// `version`). Tags the index current ONLY if no write landed across the whole
-// rebuild: if `contentVersion` advanced, `entries` is already stale and
-// `ftsBuiltVersion` is deliberately left behind so the next query reschedules
-// and keeps serving from the always-fresh in-memory scan. This is the invariant
-// that makes `ftsBuiltVersion === contentVersion` a guarantee the index reflects
-// exactly the current content — never stale-but-clean.
-async function buildFtsIndex(
+// Rows per transaction when writing the index. A whole-library rebuild is
+// thousands of statement round-trips and one multi-second write transaction;
+// run as a single unit it monopolises both the JS thread and the one SQLite
+// connection every screen reads through, which is a UI that has gone away
+// (measured on a 2272-meme library: 2516ms). Committing in slices and handing
+// back the event loop between them costs a few extra commits and gives the grid,
+// the keystroke and the timers their turns.
+//
+// Never observable half-written: a query only trusts the index while
+// `ftsState.isCurrent()`, which stays false for the whole repair.
+// Sized off the measured rate: ~1.1ms/row, so 100 rows is roughly a tenth of a
+// second between yields — short enough that nothing on screen notices, long
+// enough that the extra commits (23 of them for the whole library, instead of
+// one) stay in the noise.
+const FTS_WRITE_CHUNK = 100;
+
+// Write `entries` into the FTS index. `ids` names the rows to replace — a
+// DELETE + INSERT per row — or is null to repopulate the whole table. An id
+// with no matching entry has left the searchable set (deleted, or bounced back
+// to pending), so the DELETE alone is the correct result for it.
+async function writeFtsRows(
   db: SQLite.SQLiteDatabase,
   entries: readonly SearchCacheEntry[],
-  version: number
+  ids: readonly number[] | null
 ): Promise<void> {
-  await db.withTransactionAsync(async () => {
-    await db.execAsync('DELETE FROM meme_search_fts;');
-    const stmt = await db.prepareAsync(MEME_SEARCH_FTS_INSERT);
+  const byId = ids ? new Map(entries.map((entry) => [entry.id, entry])) : null;
+  const rows =
+    byId && ids ? ids.map((id) => byId.get(id)).filter((e) => e !== undefined) : [...entries];
+  if (ids) {
+    const del = await db.prepareAsync(MEME_SEARCH_FTS_DELETE);
     try {
-      for (const entry of entries) {
-        const r = entry.record;
-        await stmt.executeAsync(
-          entry.id,
-          r.name,
-          r.ocrText,
-          r.caption,
-          r.transcript,
-          r.tags.map((t) => t.label).join(' '),
-          `${r.extraTerms} ${classificationContextTerms({ tags: r.tags.map((t) => t.label) })}`.trim()
-        );
+      for (let i = 0; i < ids.length; i += FTS_WRITE_CHUNK) {
+        const slice = ids.slice(i, i + FTS_WRITE_CHUNK);
+        await runTransaction(db, async () => {
+          for (const id of slice) await del.executeAsync(id);
+        });
+        if (i + FTS_WRITE_CHUNK < ids.length) {
+          await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        }
       }
     } finally {
-      await stmt.finalizeAsync();
+      await del.finalizeAsync();
     }
-  });
-  if (contentVersion === version) ftsBuiltVersion = version;
+  } else {
+    await db.execAsync('DELETE FROM meme_search_fts;');
+  }
+  const stmt = await db.prepareAsync(MEME_SEARCH_FTS_INSERT);
+  try {
+    for (let i = 0; i < rows.length; i += FTS_WRITE_CHUNK) {
+      const slice = rows.slice(i, i + FTS_WRITE_CHUNK);
+      await runTransaction(db, async () => {
+        for (const entry of slice) {
+          const r = entry.record;
+          await stmt.executeAsync(
+            entry.id,
+            r.name,
+            r.ocrText,
+            r.caption,
+            r.transcript,
+            r.tags.map((t) => t.label).join(' '),
+            `${r.extraTerms} ${classificationContextTerms({ tags: r.tags.map((t) => t.label) })}`.trim()
+          );
+        }
+      });
+      if (i + FTS_WRITE_CHUNK < rows.length) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      }
+    }
+  } finally {
+    await stmt.finalizeAsync();
+  }
 }
 
-// Rebuild the FTS index off the keystroke critical path. Rebuilding every row is
-// far slower than the in-memory scan, so it must never run inline for a query;
-// instead the current query serves from the scan and this repopulates the index
-// so the NEXT query gets BM25 ranking. Guarded so overlapping searches schedule
-// at most one rebuild at a time.
-function scheduleFtsRebuild(db: SQLite.SQLiteDatabase): void {
-  if (ftsRebuilding || ftsAvailable === false) return;
-  ftsRebuilding = true;
-  setTimeout(() => {
+// Bring the FTS index back in line with the content, off the keystroke critical
+// path: the query that noticed the staleness serves from the always-correct
+// in-memory scan, and the NEXT one gets BM25 ranking. Guarded so overlapping
+// searches never start two repairs.
+//
+// Almost always this re-indexes the handful of rows a describe or a transcript
+// touched. Only an unknown-scope invalidation (import, clear, restore) pays for
+// the whole table — which matters because the VLM enrichment pass writes one
+// row every few seconds for hours, and repairing that with a full rebuild each
+// time was O(library) work per described meme, on the JS thread, that the next
+// describe invalidated before anyone could use it. That is what a user feels as
+// the app freezing while "AI descriptions" runs.
+//
+// It still waits for writes to settle: sharing a meme in fires an insert, a
+// describe, a caption vector and maybe a transcript, and repairing between each
+// of them is four passes where one will do.
+function scheduleFtsSync(db: SQLite.SQLiteDatabase): void {
+  if (ftsSyncing || ftsAvailable === false) return;
+  ftsSyncing = true;
+  const attempt = (): void => {
+    const quietIn = CONTENT_QUIET_MS - (Date.now() - lastContentChangeAt);
+    if (quietIn > 0) {
+      setTimeout(attempt, quietIn);
+      return;
+    }
     void (async () => {
+      const startedAt = Date.now();
       try {
         if (!(await ensureFtsTable(db))) return;
-        // Snapshot the version BEFORE reading entries: any write between here
-        // and the build completing advances contentVersion and prevents us from
-        // tagging a stale build as current.
-        const version = contentVersion;
-        const entries = await ensureSearchIndex(loadSearchIndex);
-        if (contentVersion !== version) return; // superseded; a later query reschedules
-        await buildFtsIndex(db, entries, version);
+        // Planned AFTER the wait so the repair covers every write that landed
+        // during it, and BEFORE the entries load so a write racing the write-out
+        // is caught by completeRepair and left dirty for the next pass.
+        const repair = ftsState.planRepair();
+        if (!repair) return;
+        const entries = await ensureSearchIndex(loadSearchIndex, loadSearchIndexRows);
+        await writeFtsRows(db, entries, repair.kind === 'rows' ? repair.ids : null);
+        ftsState.completeRepair(repair);
+        // One line per repair, deliberately unconditional: a full rebuild
+        // appearing here while the library is merely being described is the
+        // exact regression this path was rewritten to kill, and it is invisible
+        // from the outside — it shows up only as the UI going away for seconds.
+        console.log(
+          `[memeget/search] fts ${repair.kind === 'rows' ? `rows=${repair.ids.length}` : `full=${entries.length}`} in ${Date.now() - startedAt}ms${ftsState.isCurrent() ? '' : ' (superseded)'}`
+        );
       } catch {
         // Leave the index un-current; the in-memory scan stays correct.
       } finally {
-        ftsRebuilding = false;
+        ftsSyncing = false;
       }
     })();
-  }, 0);
+  };
+  setTimeout(attempt, 0);
 }
 
 async function ftsRankedIds(
@@ -1708,10 +1876,10 @@ async function ftsRankedIds(
   if (!match || shouldAbort?.()) return [];
   // BM25 ranking is an upgrade over the in-memory scan, kept off the keystroke
   // path. When the index isn't current (initial state, or a write landed since
-  // the last build) serve this query from the scan and rebuild in the
+  // the last repair) serve this query from the scan and repair in the
   // background — never inline — so the next query gets BM25.
-  if (ftsBuiltVersion !== contentVersion) {
-    scheduleFtsRebuild(db);
+  if (!ftsState.isCurrent()) {
+    scheduleFtsSync(db);
     return [];
   }
   const eligible = new Set(eligibleEntries.map((e) => e.id));
@@ -1728,6 +1896,70 @@ async function ftsRankedIds(
 // felt mid-type, so only then do we hand the event loop a macrotask between
 // chunks (and re-check `shouldAbort`).
 const SEARCH_YIELD_THRESHOLD = 20_000;
+
+// Fuzzy-search vocabulary derived from the resident index, memoized against the
+// entries array identity: ensureSearchIndex hands back the same array until
+// something changes, so an identity check is a free "did the corpus move?" test.
+//
+// A change is almost always a few spliced rows (a describe, a transcript), and
+// then the vocabulary only has to learn THOSE documents' words — a couple of
+// milliseconds, so it happens inline. Re-tokenizing every meme and rebuilding a
+// twelve-thousand-term BK-tree, by contrast, measured 802ms of unbroken
+// synchronous work: that one is sliced across the event loop and the queries
+// that arrive meanwhile are served WITHOUT expansions rather than made to wait
+// for it. Expansions only ever add typo/prefix recall on top of exact matching,
+// which always reads the fresh index, so the cost of not having them yet is a
+// moment without typo tolerance — not a wrong answer, and not a dead search bar.
+let fuzzyVocabSource: SearchCacheEntry[] | null = null;
+let fuzzyVocabSeen: Set<SearchCacheEntry> | null = null;
+let fuzzyVocabGeneration = -1;
+let fuzzyVocab: SearchVocab | null = null;
+let fuzzyVocabBuilding: Promise<void> | null = null;
+
+// The resident vocabulary, or null while the first one is still being built.
+function residentFuzzyVocab(entries: SearchCacheEntry[]): SearchVocab | null {
+  if (fuzzyVocab && fuzzyVocabSource === entries) return fuzzyVocab;
+  const generation = searchIndexGeneration();
+  if (fuzzyVocab && fuzzyVocabSeen && generation === fuzzyVocabGeneration) {
+    const startedAt = Date.now();
+    const added: string[] = [];
+    for (const entry of entries) {
+      if (!fuzzyVocabSeen.has(entry)) added.push(entry.searchText);
+    }
+    fuzzyVocab.addTexts(added);
+    fuzzyVocabSource = entries;
+    fuzzyVocabSeen = new Set(entries);
+    console.log(
+      `[memeget/search] vocab grew ${added.length} docs → ${fuzzyVocab.size} terms in ${Date.now() - startedAt}ms`
+    );
+    return fuzzyVocab;
+  }
+  // Cold, or the corpus was replaced wholesale. One build at a time; queries
+  // arriving during it keep whatever vocabulary is already resident (none, on
+  // the first run).
+  if (!fuzzyVocabBuilding) {
+    const startedAt = Date.now();
+    const texts = entries.map((e) => e.searchText);
+    fuzzyVocabBuilding = SearchVocab.buildAsync(
+      texts,
+      () => new Promise<void>((resolve) => setTimeout(resolve, 0))
+    )
+      .then((built) => {
+        fuzzyVocab = built;
+        fuzzyVocabSource = entries;
+        fuzzyVocabSeen = new Set(entries);
+        fuzzyVocabGeneration = generation;
+        console.log(
+          `[memeget/search] vocab built ${texts.length} docs → ${built.size} terms in ${Date.now() - startedAt}ms`
+        );
+      })
+      .catch(() => {})
+      .finally(() => {
+        fuzzyVocabBuilding = null;
+      });
+  }
+  return fuzzyVocab;
+}
 
 // `queryVec` may be null: lexical-only mode, used to serve instant results
 // while the text-embed model is busy behind heavy background work. Scores are
@@ -1750,9 +1982,11 @@ export async function searchByVector(
   expandedQuery?: LexicalQuery
 ): Promise<SearchHit[] | null> {
   // The resident index replaces the per-keystroke `SELECT *` + re-decode: it
-  // rebuilds only when searchable content/membership changed (see
-  // invalidateSearchIndex), so a keystroke pays for scoring alone.
-  const all = await ensureSearchIndex(loadSearchIndex);
+  // rebuilds only when searchable content/membership changed, and when the
+  // change was a known row (an import, a describe, a transcript) it reloads that
+  // row alone instead of the library (see invalidateSearchIndexForRows), so a
+  // keystroke pays for scoring alone even mid-import.
+  const all = await ensureSearchIndex(loadSearchIndex, loadSearchIndexRows);
   if (shouldAbort?.()) return null;
   const entries = searchScopeEntries(all, kind, queryText);
   const scopeRelaxed =
@@ -1773,7 +2007,25 @@ export async function searchByVector(
   if (!queryVec && terms.length === 0) {
     terms = searchTermsForText(queryText, true);
   }
-  const lexicalQuery = expandedQuery ?? { exactTerms: terms };
+  const baseQuery = expandedQuery ?? { exactTerms: terms };
+  // Typo tolerance + search-as-you-type: correct any mistyped term to the
+  // nearest real vocab word, and complete the final token while the user is
+  // mid-word. These ride the low-weight `expandedTerms` channel, so a fuzzy hit
+  // can never outrank an exact one — it only ADDS recall. Guarded on there being
+  // a term to expand so a term-less query never builds the vocab BK-tree; prefix
+  // completion is off once the query ends in whitespace (the word is finished).
+  let lexicalQuery: LexicalQuery = baseQuery;
+  const vocab = baseQuery.exactTerms.length > 0 ? residentFuzzyVocab(all) : null;
+  if (vocab) {
+    const fuzzyTerms = vocab.expand(baseQuery.exactTerms, {
+      lastIsPrefix: !/\s$/.test(queryText),
+    });
+    const priorTerms = new Set([...baseQuery.exactTerms, ...(baseQuery.expandedTerms ?? [])]);
+    const freshFuzzy = fuzzyTerms.filter((t) => !priorTerms.has(t));
+    if (freshFuzzy.length) {
+      lexicalQuery = { ...baseQuery, expandedTerms: [...(baseQuery.expandedTerms ?? []), ...freshFuzzy] };
+    }
+  }
 
   const db = await getDb();
   // Semantic expansions are a relevance hint, not literal evidence. Keep BM25/RRF
@@ -2146,10 +2398,23 @@ export interface SidecarRow {
   captionEmbedding: Float32Array | null;
 }
 
-// Every fully-indexed meme living in one linked folder, with all the knowledge
-// the sidecar mirrors. Placeholders (pending = 1) are skipped: they carry no
-// knowledge yet, and writing them would put rows in the folder that claim to
-// know things they don't.
+// Whether the library holds any row (indexed or pending) for this linked folder.
+export async function folderHasMemes(folderUri: string): Promise<boolean> {
+  const db = await getDb();
+  const row = await db.getFirstAsync<{ one: number }>(
+    `SELECT 1 AS one FROM memes WHERE uri LIKE ? ESCAPE '\\' LIMIT 1`,
+    `${folderUri.replace(LIKE_ESCAPE, '\\$&')}/document/%`
+  );
+  return row !== null;
+}
+
+// Every meme living in one linked folder that carries knowledge the sidecar
+// mirrors. Fully-indexed rows always; pending rows only when they hold text
+// knowledge — a fresh share placeholder knows nothing and must not claim to,
+// but a row restored from a backup whose vectors were dropped (another model)
+// sits pending with its captions/transcripts/tags until re-embedded, and
+// leaving those out made the next sync rewrite every chunk empty over the only
+// copy. They're written without vectors, which a restore reads as "re-embed".
 export async function getSidecarRows(folderUri: string): Promise<SidecarRow[]> {
   const db = await getDb();
   const rows = await db.getAllAsync<{
@@ -2172,7 +2437,8 @@ export async function getSidecarRows(folderUri: string): Promise<SidecarRow[]> {
     `SELECT uri, name, kind, tags, extra_terms, ocr_text, caption, transcript, vision_state,
             audio_state, modified_at, embedding, visual_embedding, visual_model, caption_embedding
      FROM memes
-     WHERE pending = 0 AND uri LIKE ? ESCAPE '\\'
+     WHERE (pending = 0 OR caption != '' OR transcript != '' OR tags NOT IN ('', '[]'))
+       AND uri LIKE ? ESCAPE '\\'
      ORDER BY name`,
     `${folderUri.replace(LIKE_ESCAPE, '\\$&')}/document/%`
   );
@@ -2233,7 +2499,7 @@ export async function restoreSidecarMemes(
   );
   let added = 0;
   let enriched = 0;
-  await db.withTransactionAsync(async () => {
+  await runTransaction(db, async () => {
     const stmt = await db.prepareAsync(RESTORE_SIDECAR_MEME_SQL);
     try {
       for (const e of entries) {
@@ -2762,7 +3028,7 @@ export async function importExemplars(
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   );
   try {
-    await db.withTransactionAsync(async () => {
+    await runTransaction(db, async () => {
       if (mode === 'replace') {
         const res = await db.runAsync('DELETE FROM exemplars');
         removed = res.changes ?? 0;
@@ -2805,9 +3071,14 @@ export interface IndexError {
   reason: string;
 }
 
+// Called at the start of a folder scan, which re-derives every row it logs — so
+// it clears the scan's own stages only. Vision ('vision:*') failures come from
+// the describe loop and do NOT auto-retry (markVisionFailed is terminal until
+// "Retry failed descriptions"), so wiping them here would delete the only
+// record of why a meme never got tagged.
 export async function clearIndexErrors(): Promise<void> {
   const db = await getDb();
-  await db.execAsync('DELETE FROM index_errors;');
+  await db.execAsync(`DELETE FROM index_errors WHERE stage NOT LIKE 'vision:%';`);
 }
 
 // One row per (name, stage): re-logging the same failure REPLACES the prior
@@ -2818,7 +3089,7 @@ export async function clearIndexErrors(): Promise<void> {
 // duplicates left over from before this fix as each file is retried.
 export async function addIndexError(e: IndexError): Promise<void> {
   const db = await getDb();
-  await db.withTransactionAsync(async () => {
+  await runTransaction(db, async () => {
     await db.runAsync('DELETE FROM index_errors WHERE name = ? AND stage = ?', e.name, e.stage);
     await db.runAsync(
       'INSERT INTO index_errors (name, kind, stage, reason, created_at) VALUES (?, ?, ?, ?, ?)',
@@ -2836,6 +3107,13 @@ export async function addIndexError(e: IndexError): Promise<void> {
 export async function clearIndexErrorsFor(name: string): Promise<void> {
   const db = await getDb();
   await db.runAsync('DELETE FROM index_errors WHERE name = ?', name);
+}
+
+// Same, scoped to one pass: a successful description must not retire the
+// thumbnail/poster error for the same file, which is still true.
+export async function clearVisionIndexErrorsFor(name: string): Promise<void> {
+  const db = await getDb();
+  await db.runAsync(`DELETE FROM index_errors WHERE name = ? AND stage LIKE 'vision:%'`, name);
 }
 
 export async function getIndexErrors(limit = 300): Promise<IndexError[]> {

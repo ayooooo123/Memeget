@@ -173,21 +173,30 @@ const NO_FORMAT_GROUNDING =
 export function formatGrounding(
   labels: GroundingLabel[],
   related: string[] = [],
-  tier: RecognitionTier = 'recognized'
+  tier: RecognitionTier = 'recognized',
+  entities?: GroundingLabel[]
 ): string {
-  if (tier === 'unknown' || labels.length === 0) return NO_FORMAT_GROUNDING;
+  const entitySeg = formatEntitiesSegment(entities);
+
+  // Full miss: no trusted zero-shot labels and no entity hits → open-ended ask.
+  if ((tier === 'unknown' || labels.length === 0) && !entitySeg) {
+    return NO_FORMAT_GROUNDING;
+  }
 
   const byFacet = new Map<string, string[]>();
   const seen = new Set<string>();
-  for (const l of labels) {
-    const label = l.label.trim();
-    const key = label.toLowerCase();
-    if (!label || seen.has(key)) continue;
-    seen.add(key);
-    const arr = byFacet.get(l.category) ?? [];
-    if (arr.length < MAX_PER_FACET) {
-      arr.push(label);
-      byFacet.set(l.category, arr);
+  // Unknown tier must not launder weak format/character guesses into the prompt.
+  if (tier !== 'unknown') {
+    for (const l of labels) {
+      const label = l.label.trim();
+      const key = label.toLowerCase();
+      if (!label || seen.has(key)) continue;
+      seen.add(key);
+      const arr = byFacet.get(l.category) ?? [];
+      if (arr.length < MAX_PER_FACET) {
+        arr.push(label);
+        byFacet.set(l.category, arr);
+      }
     }
   }
 
@@ -205,23 +214,44 @@ export function formatGrounding(
     segments.push(`${facet}: ${take.join(', ')}`);
     total += take.length;
   }
+  // Entity hits are already thresholded by the caller — append as their own line.
+  if (entitySeg) segments.push(entitySeg);
   if (segments.length === 0) return NO_FORMAT_GROUNDING;
 
   const rel = [...new Set(related.map((r) => r.trim().toLowerCase()).filter(Boolean))]
     .slice(0, MAX_GROUNDING_RELATED)
     .join(', ');
-  const lead =
-    tier === 'weak'
-      ? `\nA visual recognizer is UNSURE and offers only low-confidence guesses — ${segments.join('; ')}`
-      : `\nA visual recognizer suggests — ${segments.join('; ')}`;
-  const close =
-    tier === 'weak'
-      ? `. Use one ONLY if it is obviously right in front of you; otherwise ignore all of them and do not name a format.`
-      : `. Use any that match what you actually see in SUBJECTS and TAGS; ignore any that do not.`;
+  // Entity-only grounding (unknown tier / empty labels) is pre-thresholded fact,
+  // not a weak format guess — don't hedge it like a low-confidence CLIP hit.
+  const hedge = tier === 'weak' && byFacet.size > 0;
+  const lead = hedge
+    ? `\nA visual recognizer is UNSURE and offers only low-confidence guesses — ${segments.join('; ')}`
+    : `\nA visual recognizer suggests — ${segments.join('; ')}`;
+  const close = hedge
+    ? `. Use one ONLY if it is obviously right in front of you; otherwise ignore all of them and do not name a format.`
+    : `. Use any that match what you actually see in SUBJECTS and TAGS; ignore any that do not.`;
   return lead + (rel ? ` (related: ${rel})` : '') + close;
 }
 
-// Build the user turn, optionally grounding it with (1) text ML Kit already read
+/** `entities: Keanu Reeves (person), Brand X (brand)` — empty/absent → null. */
+function formatEntitiesSegment(entities?: GroundingLabel[]): string | null {
+  if (!entities || entities.length === 0) return null;
+  const parts: string[] = [];
+  const seen = new Set<string>();
+  for (const e of entities) {
+    const label = e.label.trim();
+    if (!label) continue;
+    const key = label.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const cat = e.category.trim();
+    parts.push(cat ? `${label} (${cat})` : label);
+  }
+  if (parts.length === 0) return null;
+  return `entities: ${parts.join(', ')}`;
+}
+
+// Build the user turn, optionally grounding it with (1) text OCR already read
 // so the small model doesn't have to re-OCR a downscaled frame, and (2) the CLIP
 // format/character guess (see formatGrounding).
 export function userTurn(ocrHint?: string, grounding?: string): string {
