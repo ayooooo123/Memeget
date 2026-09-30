@@ -159,8 +159,16 @@ Every release is a standalone, sideloadable APK built by GitHub Actions
 2. Download the `.apk` on your Android phone.
 3. Enable "Install unknown apps" for your browser/Files app, then open it.
 
-The APK is signed with the auto-generated debug key (fine for personal
-testing), so it installs without Metro or an EAS account.
+The APK is signed with the pinned `signing/debug.keystore` (fine for personal
+testing), so it installs without Metro or an EAS account and keeps the same
+signing identity across builds.
+
+**Updating an existing install:** open the new APK and update in place. Do not
+uninstall or clear app data: that deletes the private index and cached models.
+Android rejects an APK whose `versionCode` is lower than the installed build,
+even if the APK was built more recently. This affected CI build 1168 when local
+builds had already reached 1170. Use a corrected, higher-numbered APK rather
+than uninstalling to get past an "App cannot be updated" error.
 
 ### Cutting a release
 
@@ -176,6 +184,12 @@ The workflow stamps that version into the build (`versionName`/`versionCode`),
 builds the APK, and publishes the `v0.2.0` GitHub Release. Pushing to `main`
 (or running the workflow manually) refreshes the rolling `latest` pre-release
 instead. Keep `version` in `app.json` and `package.json` in sync with the tag.
+
+CI calculates `versionCode` as the checked-in `app.json` Android version code
+plus `GITHUB_RUN_NUMBER`, rather than using a fixed offset that local releases
+can overtake. Keep the checked-in code nondecreasing and record local release
+bumps there before publishing the next CI build. A hand-built release that
+replaces a CI install must also use at least that install's version code.
 
 ## Local development
 

@@ -9,9 +9,9 @@ name: Android APK
 #                                  overwritten each time, for grabbing the newest
 #                                  build without cutting a version.
 #
-# The RN Android "release" build type self-signs with the auto-generated debug
-# keystore, so the APK installs on any device (enable "Install unknown apps")
-# without needing a Metro dev server or EAS account. Everything stays local.
+# The RN Android "release" build type signs with the pinned debug keystore
+# (signing/debug.keystore), so updates retain the same signing identity.
+# The APK runs without a Metro dev server or EAS account.
 
 on:
   push:
@@ -79,16 +79,13 @@ jobs:
             PRERELEASE="true"
             MAKE_LATEST="false"
           fi
-          # Android requires a monotonically increasing integer versionCode for
-          # every installable build; the run number gives us that for free.
-          #
-          # Offset by 1000 so a CI build always outranks a hand-built local APK
-          # (app.json carries a plain three-digit code). Android refuses to
-          # install a lower versionCode over a higher one, and the only way past
-          # that is an uninstall — which wipes the app's sandbox, i.e. the whole
-          # index and every taught example. Keeping CI permanently ahead means
-          # the next release always installs *over* whatever is on the device.
-          VERSION_CODE="$((1000 + GITHUB_RUN_NUMBER))"
+          # Use the checked-in local release version as the floor. The old fixed
+          # 1000 offset produced CI build 1168 after local builds reached 1170,
+          # so Android rejected the newer APK as a downgrade.
+          # Keep app.json's versionCode nondecreasing; the workflow run number
+          # then keeps successive CI builds increasing and above that floor.
+          LOCAL_VERSION_CODE="$(node -p "require('./app.json').expo.android.versionCode")"
+          VERSION_CODE="$((LOCAL_VERSION_CODE + GITHUB_RUN_NUMBER))"
           {
             echo "version_name=${VERSION_NAME}"
             echo "version_code=${VERSION_CODE}"
