@@ -9,6 +9,7 @@ import com.memeget.nativeapp.knowledge.CuratedLabelDef
 import com.memeget.nativeapp.knowledge.CuratedLabels
 import com.memeget.nativeapp.knowledge.EntityRetrieve
 import com.memeget.nativeapp.knowledge.LearnCore
+import com.memeget.nativeapp.knowledge.LookalikeVote
 import com.memeget.nativeapp.knowledge.NegativeAnchorDef
 import kotlinx.coroutines.Dispatchers
 import com.memeget.nativeapp.storage.TeachingPackIo
@@ -40,12 +41,9 @@ internal class LocalKnowledge(
     @Volatile private var cachedLabels: List<CuratedLabelDef>? = null
     @Volatile private var cachedAnchors: List<NegativeAnchorDef>? = null
 
-    // Cache of trained exemplar heads and background mean
-    private var cachedHeads: List<LearnCore.LabelHead> = emptyList()
-    private var cachedMean: FloatArray? = null
-    private var cachedTrainingKey: String = ""
-    private var cachedTrainingRevision = -1L
-    private val trainingMutex = Mutex()
+    // People's labels as a look-alike vote index, rebuilt only when labels or teachings change.
+    private val voteMutex = Mutex()
+    private var cachedVote: VoteState? = null
     private val curatedMutex = Mutex()
     private suspend fun ensureCuratedLoaded(): Pair<List<CuratedLabelDef>, List<NegativeAnchorDef>> =
         curatedMutex.withLock {
@@ -58,38 +56,13 @@ internal class LocalKnowledge(
             loadedLabels to loadedAnchors
         }
 
-    private suspend fun getManualPositives(): Map<String, List<FloatArray>> {
-        val sqliteStore = store as? SqliteLibraryStore
-        if (sqliteStore != null) {
-            return sqliteStore.getManualPositiveVectors()
-        }
-        return emptyMap()
-    }
-
-    private suspend fun getManualTagFingerprint(): String {
-        val sqliteStore = store as? SqliteLibraryStore
-        if (sqliteStore != null) {
-            return sqliteStore.getManualTagStamp()
-        }
-        return ""
-    }
-
-    private fun computeTrainingCacheKey(
-        exemplars: List<Exemplar>,
-        corpusCount: Int,
-        revision: Long,
-        manualTagStamp: String,
-    ): String {
-        val sb = StringBuilder()
-        sb.append(ModelRegistry.PRIMARY_MODEL_FINGERPRINT)
-        sb.append(':').append(exemplars.size)
-        sb.append(':').append(corpusCount)
-        sb.append(':').append(revision)
-        sb.append(':').append(manualTagStamp)
-        for (e in exemplars) {
-            sb.append(';').append(e.id).append(',').append(if (e.positive) 1 else 0).append(',').append(e.label)
-        }
-        return sb.toString()
+    private class VoteState(
+        val labelRevision: Long,
+        val index: LookalikeVote.Index,
+        private val labeled: List<LookalikeVote.LabeledMeme>,
+    ) {
+        /** Labels whose held-out votes held up; measured once per label change, when first needed. */
+        val reliable: Set<String> by lazy { LookalikeVote.reliableLabels(index, labeled) }
     }
 
     // The pinned recipe passed the original encoder's 32-image/8-text parity gate.
@@ -97,118 +70,37 @@ internal class LocalKnowledge(
     private fun compatibleTeachingModel(model: String): Boolean =
         model == ModelRegistry.PRIMARY_MODEL_FINGERPRINT || model == TeachingPackIo.PACK_MODEL
 
-    private suspend fun ensureTrainedHeads(): Pair<List<LearnCore.LabelHead>, FloatArray?> =
-        trainingMutex.withLock { loadTrainedHeads() }
-
-    private suspend fun loadTrainedHeads(): Pair<List<LearnCore.LabelHead>, FloatArray?> {
-        val revision = store.revision.value
-        if (revision == cachedTrainingRevision && (cachedHeads.isNotEmpty() || cachedTrainingKey.isNotEmpty())) {
-            return cachedHeads to cachedMean
-        }
-        val allExemplars = store.exemplars()
-        val activeExemplars = allExemplars.filter { compatibleTeachingModel(it.model) }
-        val corpusCount = store.count()
-        val manualTagStamp = getManualTagFingerprint()
-        val currentKey = computeTrainingCacheKey(activeExemplars, corpusCount, revision, manualTagStamp)
-
-        if (currentKey == cachedTrainingKey && (cachedHeads.isNotEmpty() || cachedTrainingKey.isNotEmpty())) {
-            cachedTrainingRevision = revision
-            return Pair(cachedHeads, cachedMean)
-        }
-
-        val manualPositives = getManualPositives()
-        if (activeExemplars.isEmpty() && manualPositives.isEmpty()) {
-            cachedHeads = emptyList()
-            cachedMean = null
-            cachedTrainingKey = currentKey
-            cachedTrainingRevision = revision
-            return Pair(emptyList(), null)
-        }
-        val sample = store.vectorSample(250)
-        val dim = if (activeExemplars.isNotEmpty()) activeExemplars[0].vector.size else 512
-        val mean = FloatArray(dim)
-        if (sample.isNotEmpty()) {
-            for (vr in sample) {
-                val v = vr.image
-                val len = minOf(dim, v.size)
-                for (i in 0 until len) mean[i] += v[i]
-            }
-            for (i in 0 until dim) mean[i] /= sample.size.toFloat()
-        }
-
-        fun center(v: FloatArray): FloatArray {
-            val out = FloatArray(dim)
-            val len = minOf(dim, v.size)
-            for (i in 0 until len) out[i] = v[i] - mean[i]
-            return out
-        }
-
-        val backgroundRaw = sample.map { it.image }
-        val backgroundCentered = backgroundRaw.map { center(it) }
-
-        data class Group(
-            val category: String,
-            val posRaw: MutableList<FloatArray> = ArrayList(),
-            val posCentered: MutableList<FloatArray> = ArrayList(),
-            val negRaw: MutableList<FloatArray> = ArrayList(),
-            val negCentered: MutableList<FloatArray> = ArrayList(),
-        )
-
-        val byLabel = LinkedHashMap<String, Group>()
-        for (e in activeExemplars) {
-            val normLabel = TagMerge.normalizeTagLabel(e.label)
-            val g = byLabel.getOrPut(normLabel) { Group(e.category) }
+    private suspend fun ensureVote(): VoteState = voteMutex.withLock {
+        val revision = store.labelRevision.value
+        cachedVote?.takeIf { it.labelRevision == revision }?.let { return@withLock it }
+        val examples = ArrayList<LookalikeVote.Example>()
+        val negatives = LinkedHashMap<String, MutableList<FloatArray>>()
+        val taught = HashMap<String, MutableList<FloatArray>>()
+        for (e in store.exemplars()) {
+            if (!compatibleTeachingModel(e.model) || e.vector.size != 512) continue
+            val label = TagMerge.normalizeTagLabel(e.label)
             if (e.positive) {
-                g.posRaw.add(e.vector)
-                g.posCentered.add(center(e.vector))
+                examples += LookalikeVote.Example(e.vector, label, e.category, LookalikeVote.NO_MEME)
+                taught.getOrPut(label) { ArrayList() } += e.vector
             } else {
-                g.negRaw.add(e.vector)
-                g.negCentered.add(center(e.vector))
+                negatives.getOrPut(label) { ArrayList() } += e.vector
             }
         }
-
-        // Fold bounded human-confirmed inputs; unreviewed and legacy hints never train.
-        for ((label, vectors) in manualPositives) {
-            val normLabel = TagMerge.normalizeTagLabel(label)
-            val g = byLabel.getOrPut(normLabel) { Group(category = "user") }
-            for (v in vectors) {
-                if (g.posRaw.size >= 16) break
-                g.posRaw.add(v)
-                g.posCentered.add(center(v))
+        val labeled = ArrayList<LookalikeVote.LabeledMeme>()
+        for (h in store.humanLabels()) {
+            val labels = LinkedHashSet<String>()
+            for (t in h.labels) {
+                val label = TagMerge.normalizeTagLabel(t.label)
+                if (!labels.add(label)) continue
+                // A teaching of this exact picture already stands for it in the vote.
+                if (taught[label]?.any { FloatBlob.dot(it, h.image) >= LookalikeVote.SAME_IMAGE_COS } == true) continue
+                examples += LookalikeVote.Example(h.image, label, t.category, h.memeId)
             }
+            val rejected = h.rejected.mapTo(LinkedHashSet()) { TagMerge.normalizeTagLabel(it) }
+            for (label in rejected) negatives.getOrPut(label) { ArrayList() } += h.image
+            labeled += LookalikeVote.LabeledMeme(h.memeId, h.image, labels, rejected)
         }
-        val heads = ArrayList<LearnCore.LabelHead>()
-        for ((label, g) in byLabel) {
-            currentCoroutineContext().ensureActive()
-            if (g.posRaw.isEmpty()) continue
-            val otherPosRaw = ArrayList<FloatArray>()
-            val otherPosCentered = ArrayList<FloatArray>()
-            for ((l2, g2) in byLabel) {
-                if (l2 == label) continue
-                otherPosRaw.addAll(g2.posRaw)
-                otherPosCentered.addAll(g2.posCentered)
-            }
-
-            val head = LearnCore.trainLabelModel(
-                label = label,
-                category = g.category,
-                posRaw = g.posRaw,
-                posCentered = g.posCentered,
-                negRaw = g.negRaw,
-                negCentered = g.negCentered,
-                backgroundRaw = backgroundRaw,
-                backgroundCentered = backgroundCentered,
-                otherPosRaw = otherPosRaw,
-                otherPosCentered = otherPosCentered,
-            )
-            heads.add(head)
-        }
-
-        cachedHeads = heads
-        cachedMean = mean
-        cachedTrainingKey = currentKey
-        cachedTrainingRevision = revision
-        return Pair(heads, mean)
+        VoteState(revision, LookalikeVote.Index(examples, negatives), labeled).also { cachedVote = it }
     }
 
     private fun findVetoedLabelsFromMap(image: FloatArray, negByLabel: Map<String, List<FloatArray>>): Set<String> {
@@ -236,16 +128,14 @@ internal class LocalKnowledge(
     private data class ClassificationSnapshot(
         val labels: List<CuratedLabelDef>,
         val negativeVecs: List<FloatArray>,
-        val heads: List<LearnCore.LabelHead>,
-        val mean: FloatArray?,
-        val allExemplars: List<Exemplar>,
+        val vote: VoteState,
         val negExemplarsByLabel: Map<String, List<FloatArray>>,
         val assocMap: Map<String, List<String>>,
     )
 
     private suspend fun prepareSnapshot(): ClassificationSnapshot {
         val (labels, anchors) = ensureCuratedLoaded()
-        val (heads, mean) = ensureTrainedHeads()
+        val vote = ensureVote()
         val allExemplars = store.exemplars().filter { compatibleTeachingModel(it.model) }
         val negativeVecs = anchors.map { it.vec }
 
@@ -272,56 +162,58 @@ internal class LocalKnowledge(
         return ClassificationSnapshot(
             labels = labels,
             negativeVecs = negativeVecs,
-            heads = heads,
-            mean = mean,
-            allExemplars = allExemplars,
+            vote = vote,
             negExemplarsByLabel = negExemplarsByLabel,
             assocMap = assocMap,
         )
     }
 
-    suspend fun classify(image: FloatArray, ocr: String): Pair<List<Tag>, String> = withContext(Dispatchers.Default) {
-        currentCoroutineContext().ensureActive()
-        val snapshot = prepareSnapshot()
-        classifyInternal(image, ocr, snapshot)
-    }
+    /** [memeId] keeps a meme's own labels out of the vote on it. */
+    suspend fun classify(image: FloatArray, ocr: String, memeId: Long = LookalikeVote.NO_MEME): Pair<List<Tag>, String> =
+        withContext(Dispatchers.Default) {
+            currentCoroutineContext().ensureActive()
+            val snapshot = prepareSnapshot()
+            classifyInternal(image, ocr, snapshot, memeId)
+        }
 
     private fun classifyInternal(
         image: FloatArray,
         ocr: String,
         snapshot: ClassificationSnapshot,
+        memeId: Long,
     ): Pair<List<Tag>, String> {
         val vetoedLabels = findVetoedLabelsFromMap(image, snapshot.negExemplarsByLabel)
         // 1. Zero-shot prompt tags with anchor bias
         val promptTags = LearnCore.classifyPrompts(image, snapshot.labels, snapshot.negativeVecs)
 
-        // 2. Few-shot exemplar tags
-        val exemplarTags = LearnCore.classifyExemplars(image, snapshot.heads, snapshot.mean)
+        // 2. People's labels on look-alikes: copies of a labeled picture always; otherwise the vote
+        // winner once its label has held up on held-out examples. Unproven labels stay suggestions.
+        val index = snapshot.vote.index
+        val lookalike = LinkedHashMap<String, Tag>()
+        for (v in LookalikeVote.samePicture(index, image, excludeMeme = memeId)) lookalike[v.label] = lookalikeTag(v)
+        LookalikeVote.winner(index, image, excludeMeme = memeId)
+            ?.takeIf { it.label in snapshot.vote.reliable && it.label !in lookalike }
+            ?.let { lookalike[it.label] = lookalikeTag(it) }
 
         // 3. OCR tags
         val ocrTags = CuratedLabels.ocrTags(ocr)
 
-        // 4. Entity pack retrieval
-        val anchorMax = if (snapshot.negativeVecs.isNotEmpty()) FloatBlob.maxCosTo(image, snapshot.negativeVecs) else 0f
-        val entityHits = EntityRetrieve.retrieveEntities(
-            imageVec = image,
-            exemplars = snapshot.allExemplars,
-            anchorSim = anchorMax,
-        )
-        val entityTags = EntityRetrieve.entityHitsToTags(entityHits)
-
-        // Merge visual and exemplar classifications
-        val visualMerged = LearnCore.mergeClassified(promptTags, exemplarTags, topK = 6)
-        val initialTags = visualMerged + ocrTags + entityTags
-
-        // Apply durable merging and cap auto tags at 6
-        val durableMerged = TagMerge.mergeDurableTags(initialTags, capAuto = 6)
-
-        // CRITICAL: Explicit negative veto eliminates vetoed labels across ALL branches
+        val visualMerged = LearnCore.mergeClassified(promptTags, lookalike.values.toList(), topK = 6)
+        val durableMerged = TagMerge.mergeDurableTags(visualMerged + ocrTags, capAuto = 6)
+        // Explicit negative veto eliminates vetoed labels across every branch
         val vetoFiltered = durableMerged.filter { !vetoedLabels.contains(TagMerge.normalizeTagLabel(it.label)) }
-
         return Pair(vetoFiltered, extraTermsFor(vetoFiltered, snapshot.assocMap))
     }
+
+    private fun lookalikeTag(v: LookalikeVote.Vote) = Tag(
+        label = v.label,
+        category = v.category,
+        score = v.cosine,
+        source = "exemplar",
+        scoreDomain = "lookalike-cosine",
+        confirmation = "unreviewed",
+        provenance = "learned",
+    )
 
     // Search terms for a final tag list: each label, its association words and context terms.
     private fun extraTermsFor(tags: List<Tag>, assocMap: Map<String, List<String>>): String {
@@ -344,7 +236,7 @@ internal class LocalKnowledge(
     suspend fun candidateLabels(image: FloatArray, limit: Int = 12): List<Tag> = withContext(Dispatchers.Default) {
         currentCoroutineContext().ensureActive()
         val (labels, anchors) = ensureCuratedLoaded()
-        val (heads, mean) = ensureTrainedHeads()
+        val vote = ensureVote()
         val allExemplars = store.exemplars().filter { compatibleTeachingModel(it.model) }
         val vetoedLabels = findVetoedLabels(image, allExemplars)
 
@@ -353,8 +245,8 @@ internal class LocalKnowledge(
         // Tentative prompt candidates without margin floor suppression
         val promptCandidates = LearnCore.rankPromptCandidates(image, labels, negativeVecs)
 
-        // Tentative exemplar candidates
-        val exemplarCandidates = LearnCore.rankExemplarCandidates(image, heads, mean)
+        // People's labels among the nearest examples, without the cutoff
+        val lookalikeCandidates = LookalikeVote.rank(vote.index, image)
 
         // Entity retrieval without suppressing below-floor margins
         val anchorMax = if (negativeVecs.isNotEmpty()) FloatBlob.maxCosTo(image, negativeVecs) else 0f
@@ -375,9 +267,9 @@ internal class LocalKnowledge(
                 candidates.add(ScoredCandidate(cp.tag, cp.margin))
             }
         }
-        for (ec in exemplarCandidates) {
-            if (ec.tag.category.trim().lowercase() in IDENTITY_CANDIDATE_CATEGORIES) {
-                candidates.add(ScoredCandidate(ec.tag, ec.margin))
+        for (v in lookalikeCandidates) {
+            if (v.category.trim().lowercase() in IDENTITY_CANDIDATE_CATEGORIES) {
+                candidates.add(ScoredCandidate(lookalikeTag(v), v.cosine))
             }
         }
         for (eh in entityHits) {
@@ -413,6 +305,27 @@ internal class LocalKnowledge(
         }.take(limit).map { it.tag }
     }
 
+    /**
+     * Up to [limit] of people's labels to ask about for this meme: the look-alike vote's labels
+     * first, then the nearest examples of other labels. Labels the meme already carries from a
+     * person, or rejected, and labels a closer "not X" contradicts are left out.
+     */
+    suspend fun suggestFor(meme: Meme, image: FloatArray, limit: Int = 3): List<Tag> = withContext(Dispatchers.Default) {
+        val vote = ensureVote()
+        val settled = HashSet<String>()
+        for (t in meme.tags) if (TagMerge.isHumanTag(t)) settled += TagMerge.normalizeTagLabel(t.label)
+        for (label in meme.rejectedLabels) settled += TagMerge.normalizeTagLabel(label)
+        val out = LinkedHashMap<String, Tag>()
+        val ranked = LookalikeVote.rank(vote.index, image, excludeMeme = meme.id) +
+            LookalikeVote.nearestPerLabel(vote.index, image, excludeMeme = meme.id)
+        for (v in ranked) {
+            if (out.size >= limit) break
+            if (v.label in settled || v.label in out || LookalikeVote.contradicted(vote.index, v, image)) continue
+            out[v.label] = lookalikeTag(v)
+        }
+        out.values.toList()
+    }
+
     suspend fun retag(progress: (WorkProgress) -> Unit) = withContext(Dispatchers.Default) {
         progress(WorkProgress(stage = "retag", running = true, detail = "Preparing knowledge…"))
         var snapshot = prepareSnapshot()
@@ -436,6 +349,7 @@ internal class LocalKnowledge(
                     image = vectors.image,
                     ocr = meme.ocr,
                     snapshot = snapshot,
+                    memeId = meme.id,
                 )
 
                 // Machine tags classification can't regenerate stay unless a nearby "not X" vetoes

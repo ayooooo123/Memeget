@@ -210,7 +210,7 @@ internal class IndexCoordinator(
                                     }
                                     texts.joinToString("\n")
                                 }
-                                val (localTags, terms) = knowledge.classify(item.image, ocr)
+                                val (localTags, terms) = knowledge.classify(item.image, ocr, item.meme.id)
                                 val hints = cloud.candidateHints(item.image, contentHash = item.hash)
                                     .filterNot { hint -> localTags.any { it.label.equals(hint.label, true) } }
                                 val tags = localTags + hints

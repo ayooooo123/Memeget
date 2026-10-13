@@ -101,6 +101,16 @@ internal data class ImportedAnalysis(
     /** Compatible image vector for these bytes, or null when the export had none. */
     val image: FloatArray?,
 )
+/**
+ * A meme people labeled, with its image vector: confirmed tags (excluding filename-only
+ * legacy restores) and "not X" rejections.
+ */
+internal data class HumanLabeled(
+    val memeId: Long,
+    val image: FloatArray,
+    val labels: List<Tag>,
+    val rejected: List<String>,
+)
 internal data class CloudEvidence(
     val memeId: Long,
     val contentHash: String,
@@ -130,6 +140,9 @@ internal data class CloudResult(
 /** IO belongs to implementations; callers may invoke from lifecycle-scoped UI jobs. */
 internal interface LibraryStore {
     val revision: StateFlow<Long>
+    /** Changes when people's labels, teachings or the vectors behind them may have changed. */
+    val labelRevision: StateFlow<Long>
+    suspend fun humanLabels(): List<HumanLabeled>
     suspend fun folders(): List<Folder>
     suspend fun addFolder(uri: String, name: String)
     suspend fun removeFolder(uri: String)
