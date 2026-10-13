@@ -72,6 +72,12 @@ class CandidateRankingBehaviorTest {
             if (labels.isEmpty() && m.rejectedLabels.isEmpty()) null else HumanLabeled(m.id, image, labels, m.rejectedLabels)
         }
 
+        /** Like the real store, a new teaching changes the label revision. */
+        fun addTeaching(e: Exemplar) {
+            exemplarList.add(e)
+            _revision.value++
+        }
+
         override suspend fun exemplars(): List<Exemplar> = ArrayList(exemplarList)
         override suspend fun count(): Int = memes.size
         override suspend fun vectorSample(limit: Int): List<VectorRecord> = vectors.values.take(limit)
@@ -247,7 +253,7 @@ class CandidateRankingBehaviorTest {
 
         // Add an explicit negative teaching for "pepe" with identical unit vector:
         // dot(probe, probe) = 1.0f >= PU_EXCLUDE_COS (0.85f)
-        store.exemplarList.add(
+        store.addTeaching(
             Exemplar(
                 id = 99L,
                 label = "pepe",
