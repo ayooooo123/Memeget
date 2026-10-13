@@ -326,6 +326,67 @@ internal class LocalKnowledge(
         out.values.toList()
     }
 
+    /** A meme worth labeling next and how many unlabeled look-alikes it stands for. */
+    class QueueItem(val meme: Meme, val image: FloatArray, val lookalikes: Int)
+
+    /**
+     * Memes to ask about, in the order that spreads labels furthest: repeatedly the meme with the
+     * most unlabeled look-alikes (cosine >= [LookalikeVote.MIN_COS]) that no earlier pick covers.
+     * Memes a person labeled, and memes that already get a label on their own, are left out.
+     */
+    suspend fun labelQueue(limit: Int = 60): List<QueueItem> = withContext(Dispatchers.Default) {
+        val vote = ensureVote()
+        val settled = store.humanLabels().mapTo(HashSet()) { it.memeId }
+        val memes = ArrayList<Meme>()
+        val images = ArrayList<FloatArray>()
+        store.allMemes().collect { meme ->
+            currentCoroutineContext().ensureActive()
+            if (meme.id in settled) return@collect
+            val image = store.vectors(meme.id)
+                ?.takeIf { it.model == ModelRegistry.PRIMARY_MODEL_FINGERPRINT && it.image.size == 512 }?.image
+                ?: return@collect
+            if (LookalikeVote.samePicture(vote.index, image, meme.id).isNotEmpty()) return@collect
+            if (LookalikeVote.winner(vote.index, image, meme.id)?.let { it.label in vote.reliable } == true) return@collect
+            memes += meme
+            images += image
+        }
+        val neighbours = Array(memes.size) { ArrayList<Int>() }
+        for (i in memes.indices) {
+            currentCoroutineContext().ensureActive()
+            for (j in i + 1 until memes.size) {
+                if (FloatBlob.dot(images[i], images[j]) >= LookalikeVote.MIN_COS) {
+                    neighbours[i] += j
+                    neighbours[j] += i
+                }
+            }
+        }
+        val covered = BooleanArray(memes.size)
+        val picked = ArrayList<QueueItem>()
+        while (picked.size < limit) {
+            var best = -1
+            var bestGain = 0
+            for (i in memes.indices) {
+                if (covered[i]) continue
+                val gain = 1 + neighbours[i].count { !covered[it] }
+                if (gain > bestGain) {
+                    best = i
+                    bestGain = gain
+                }
+            }
+            if (best < 0) break
+            covered[best] = true
+            for (j in neighbours[best]) covered[j] = true
+            picked += QueueItem(memes[best], images[best], bestGain - 1)
+        }
+        picked
+    }
+
+    /** The category people's examples already give [label]; "topic" for a new label. */
+    suspend fun knownCategory(label: String): String {
+        val norm = TagMerge.normalizeTagLabel(label)
+        return ensureVote().index.examples.firstOrNull { it.label == norm }?.category ?: "topic"
+    }
+
     suspend fun retag(progress: (WorkProgress) -> Unit) = withContext(Dispatchers.Default) {
         progress(WorkProgress(stage = "retag", running = true, detail = "Preparing knowledge…"))
         var snapshot = prepareSnapshot()
