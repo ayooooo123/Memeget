@@ -13,6 +13,7 @@ import com.memeget.nativeapp.data.SqliteLibraryDbHelper
 import com.memeget.nativeapp.data.TagMerge
 import com.memeget.nativeapp.data.TagPropagation
 import com.memeget.nativeapp.inference.ModelRegistry
+import com.memeget.nativeapp.knowledge.LookalikeVote
 import com.memeget.nativeapp.storage.TeachingPackIo
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.InternalCoroutinesApi
@@ -38,12 +39,18 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
     private val writeMutex = Mutex()
     private val _revision = MutableStateFlow(0L)
     override val revision: StateFlow<Long> = _revision.asStateFlow()
+    private val _labelRevision = MutableStateFlow(0L)
+    override val labelRevision: StateFlow<Long> = _labelRevision.asStateFlow()
 
     @Volatile private var cachedVocab: SearchVocab? = null
     @Volatile private var cachedVocabRevision: Long = -1L
 
     private fun bumpRevision() {
         _revision.value += 1L
+    }
+
+    private fun bumpLabels() {
+        _labelRevision.value += 1L
     }
 
     private fun getReadableDb(): SQLiteDatabase = dbHelper.readableDatabase
@@ -61,9 +68,6 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
     }
 
     companion object {
-        /** Image-vector cosine at which two items are the same picture (indexing's frame-dedup bar). */
-        const val SAME_IMAGE_COS = 0.985f
-
         fun serializeTags(tags: List<Tag>): String {
             val array = JSONArray()
             for (t in tags) {
@@ -344,64 +348,30 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
         }
     }
 
-    private fun isManualPositive(tag: Tag): Boolean =
-        tag.label.isNotBlank() && tag.confirmation == "confirmed" && !tag.provenance.startsWith("legacy-") &&
-            (tag.source == "manual" || tag.source == "cloud" || tag.source == "cloud_hint")
-
-    suspend fun getManualPositiveVectors(): Map<String, List<FloatArray>> = withContext(Dispatchers.IO) {
-        val db = getReadableDb()
-        val out = LinkedHashMap<String, MutableList<FloatArray>>()
-        val cursor = db.rawQuery(
+    override suspend fun humanLabels(): List<HumanLabeled> = withContext(Dispatchers.IO) {
+        val out = ArrayList<HumanLabeled>()
+        getReadableDb().rawQuery(
             """
-            SELECT m.tags, v.image
+            SELECT m.id, m.tags, m.rejected_labels, v.image
             FROM memes m
             JOIN vectors v ON m.id = v.id
-            WHERE m.pending = 0 AND v.model = ? AND (
-                m.tags LIKE '%"source":"manual"%' OR m.tags LIKE '%"source":"cloud"%' OR m.tags LIKE '%"source":"cloud_hint"%'
-            )
+            WHERE v.model = ? AND (m.tags LIKE '%"confirmation":"confirmed"%' OR m.rejected_labels <> '[]')
             ORDER BY m.id ASC
             """.trimIndent(),
             arrayOf(ModelRegistry.PRIMARY_MODEL_FINGERPRINT)
-        )
-        cursor.use { c ->
+        ).use { c ->
             while (c.moveToNext()) {
-                val tags = deserializeTags(c.getString(0))
-                val imgBytes = c.getBlob(1) ?: continue
-                val vec = FloatBlob.fromBytes(imgBytes)
-                if (vec.isEmpty()) continue
-                for (t in tags) {
-                    if (isManualPositive(t)) {
-                        val norm = TagMerge.normalizeTagLabel(t.label)
-                        val list = out.getOrPut(norm) { ArrayList() }
-                        if (list.size < 16) {
-                            list.add(vec)
-                        }
-                    }
+                val image = FloatBlob.fromBytes(c.getBlob(3) ?: continue)
+                if (image.size != 512) continue
+                // Filename-only legacy restores are not certified matches to these bytes.
+                val labels = deserializeTags(c.getString(1)).filter {
+                    it.label.isNotBlank() && TagMerge.isHumanTag(it) && !it.provenance.startsWith("legacy-")
                 }
+                val rejected = deserializeStrings(c.getString(2))
+                if (labels.isNotEmpty() || rejected.isNotEmpty()) out += HumanLabeled(c.getLong(0), image, labels, rejected)
             }
         }
         out
-    }
-
-    suspend fun getManualTagStamp(): String = withContext(Dispatchers.IO) {
-        val db = getReadableDb()
-        val sb = StringBuilder()
-        val cursor = db.rawQuery(
-            """SELECT id, tags FROM memes WHERE tags LIKE '%"source":"manual"%' OR tags LIKE '%"source":"cloud"%' OR tags LIKE '%"source":"cloud_hint"%' ORDER BY id ASC""",
-            null
-        )
-        cursor.use { c ->
-            while (c.moveToNext()) {
-                val id = c.getLong(0)
-                val tags = deserializeTags(c.getString(1))
-                for (t in tags) {
-                    if (isManualPositive(t)) {
-                        sb.append(id).append(':').append(TagMerge.normalizeTagLabel(t.label)).append(';')
-                    }
-                }
-            }
-        }
-        sb.toString()
     }
 
     override suspend fun folders(): List<Folder> = withContext(Dispatchers.IO) {
@@ -890,9 +860,11 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
     ) = withContext(Dispatchers.IO) {
         writeMutex.withLock {
             val db = getWritableDb()
+            var labeled = false
             db.beginTransaction()
             try {
                 val currentMeme = meme(id) ?: return@withLock
+                val human = currentMeme.tags.any(TagMerge::isHumanTag) || currentMeme.rejectedLabels.isNotEmpty()
                 val now = System.currentTimeMillis()
 
                 // Fresh analysis replaces recomputed machine tags; per-meme rejections apply to every tag.
@@ -918,6 +890,8 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
 
                 // Preserve existing compatible caption & visual vectors without blindly wiping them
                 val existingVec = vectors(id)
+                // A labeled meme's new vector changes what its labels teach.
+                labeled = human && (existingVec == null || existingVec.model != model || !existingVec.image.contentEquals(analysis.image))
                 val vecCv = ContentValues().apply {
                     put("id", id)
                     put("image", FloatBlob.toBytes(analysis.image))
@@ -951,6 +925,7 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
                 db.endTransaction()
             }
             bumpRevision()
+            if (labeled) bumpLabels()
         }
     }
 
@@ -1390,6 +1365,7 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
                 db.endTransaction()
             }
             bumpRevision()
+            bumpLabels()
             affected
         }
     }
@@ -1423,6 +1399,7 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
                 db.endTransaction()
             }
             bumpRevision()
+            bumpLabels()
         }
     }
 
@@ -1563,6 +1540,7 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
                 db.endTransaction()
             }
             bumpRevision()
+            bumpLabels()
         }
     }
 
@@ -1649,6 +1627,7 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
                 db.endTransaction()
             }
             bumpRevision()
+            bumpLabels()
             imported
         }
     }
@@ -1665,6 +1644,7 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
                 db.endTransaction()
             }
             bumpRevision()
+            bumpLabels()
         }
     }
 
@@ -1679,6 +1659,7 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
                 db.endTransaction()
             }
             bumpRevision()
+            bumpLabels()
         }
     }
 
@@ -1757,6 +1738,7 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
                 db.endTransaction()
             }
             bumpRevision()
+            bumpLabels()
         }
     }
 
@@ -1773,7 +1755,7 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
                 val image = FloatBlob.fromBytes(c.getBlob(1))
                 if (image.size != 512) continue
                 for (e in teachings) {
-                    if (FloatBlob.dot(image, e.vector) < SAME_IMAGE_COS) continue
+                    if (FloatBlob.dot(image, e.vector) < LookalikeVote.SAME_IMAGE_COS) continue
                     matches.getOrPut(c.getLong(0)) { LinkedHashMap() }.putIfAbsent(TagMerge.normalizeTagLabel(e.label), e)
                 }
             }
@@ -1815,7 +1797,10 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
             } finally {
                 db.endTransaction()
             }
-            if (changed > 0) bumpRevision()
+            if (changed > 0) {
+                bumpRevision()
+                bumpLabels()
+            }
         }
         changed
     }
@@ -1835,6 +1820,7 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
                 db.endTransaction()
             }
             bumpRevision()
+            bumpLabels()
         }
     }
 
@@ -1852,6 +1838,7 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
                 db.endTransaction()
             }
             bumpRevision()
+            bumpLabels()
         }
     }
 
@@ -2099,6 +2086,7 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
                 db.endTransaction()
             }
             bumpRevision()
+            bumpLabels()
             restored
         }
     }

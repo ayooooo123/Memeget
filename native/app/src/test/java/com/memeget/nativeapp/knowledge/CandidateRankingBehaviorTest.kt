@@ -5,6 +5,7 @@ import com.memeget.nativeapp.Exemplar
 import com.memeget.nativeapp.Folder
 import com.memeget.nativeapp.InferenceEngine
 import com.memeget.nativeapp.LibraryStore
+import com.memeget.nativeapp.HumanLabeled
 import com.memeget.nativeapp.ImportedAnalysis
 import com.memeget.nativeapp.LocalAnalysis
 import com.memeget.nativeapp.LocalKnowledge
@@ -64,6 +65,12 @@ class CandidateRankingBehaviorTest {
         val exemplarList = ArrayList<Exemplar>()
         private val _revision = MutableStateFlow(1L)
         override val revision: StateFlow<Long> = _revision
+        override val labelRevision: StateFlow<Long> = _revision
+        override suspend fun humanLabels(): List<HumanLabeled> = memes.values.mapNotNull { m ->
+            val image = vectors[m.id]?.image ?: return@mapNotNull null
+            val labels = m.tags.filter { it.confirmation == "confirmed" }
+            if (labels.isEmpty() && m.rejectedLabels.isEmpty()) null else HumanLabeled(m.id, image, labels, m.rejectedLabels)
+        }
 
         override suspend fun exemplars(): List<Exemplar> = ArrayList(exemplarList)
         override suspend fun count(): Int = memes.size

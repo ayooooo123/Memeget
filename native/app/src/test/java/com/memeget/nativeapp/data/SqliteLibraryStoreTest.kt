@@ -171,7 +171,7 @@ class SqliteLibraryStoreTest {
             engine.close()
         }
         assertTrue(store.exemplars().isEmpty())
-        assertTrue(store.getManualPositiveVectors().isEmpty())
+        assertTrue("nothing to learn from until the meme has a vector", store.humanLabels().isEmpty())
         val reviewed = observed.copy(confirmation = "confirmed")
         assertEquals(reviewed, requireNotNull(store.meme(id)).tags.single())
         store.completeIndex(id, LocalAnalysis(axis(), "", emptyList(), ""), model, "")
@@ -181,10 +181,10 @@ class SqliteLibraryStoreTest {
             listOf(observed.copy(label = "unreviewed identity")), ""), model, "")
         store.completeIndex(legacyId, LocalAnalysis(axis(2), "",
             listOf(Tag("legacy identity", "character", 1f, "manual", "user", "confirmed", "legacy-sidecar")), ""), model, "")
-        val positives = store.getManualPositiveVectors()
-        assertEquals(setOf(observed.label), positives.keys)
-        assertArrayEquals(axis(), positives.getValue(observed.label).single(), 0f)
-        assertFalse(store.getManualTagStamp().contains("legacy identity"))
+        val learned = store.humanLabels()
+        assertEquals("unreviewed and filename-only legacy labels never teach", listOf(id), learned.map { it.memeId })
+        assertEquals(listOf(observed.label), learned.single().labels.map { it.label })
+        assertArrayEquals(axis(), learned.single().image, 0f)
     }
 
     @Test fun keysetSearchTraversesBeyondOneHeapWithoutMissingOrRepeatingTies() = runBlocking {
