@@ -157,6 +157,11 @@ internal interface LibraryStore {
     suspend fun importExemplars(items: List<Exemplar>, pack: String, asSelf: Boolean = false): Int
     suspend fun forgetLabel(label: String)
     suspend fun forgetPack(pack: String)
+    /**
+     * Replaces the meme's machine tags with [tags] and its association terms with [extraTerms].
+     * Human-confirmed tags are kept whatever the caller passes; per-meme rejections remove
+     * matching tags and terms.
+     */
     suspend fun updateTags(id: Long, tags: List<Tag>, extraTerms: String)
     suspend fun delete(ids: List<Long>)
     suspend fun clearIndex()

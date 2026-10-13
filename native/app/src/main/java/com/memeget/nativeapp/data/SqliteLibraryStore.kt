@@ -890,10 +890,11 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
                 val currentMeme = meme(id) ?: return@withLock
                 val now = System.currentTimeMillis()
 
-                // Filter out any tags vetoed by durable negative teachings
+                // Fresh analysis replaces recomputed machine tags; per-meme rejections apply to every tag.
                 val rejected = currentMeme.rejectedLabels.map { TagMerge.normalizeTagLabel(it) }.toSet()
-                val validAnalysisTags = analysis.tags.filter { !rejected.contains(TagMerge.normalizeTagLabel(it.label)) }
-                val mergedTags = TagMerge.mergeDurableTags(currentMeme.tags + validAnalysisTags)
+                val kept = currentMeme.tags.filter { TagMerge.survivesReclassification(it) }
+                val mergedTags = TagMerge.mergeDurableTags(kept + analysis.tags)
+                    .filter { !rejected.contains(TagMerge.normalizeTagLabel(it.label)) }
                 val extraTerms = TagMerge.withoutRejectedTerms(analysis.extraTerms, rejected)
 
                 val memeCv = ContentValues().apply {
@@ -1682,8 +1683,9 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
             try {
                 val m = meme(id) ?: return@withLock
                 val rejected = m.rejectedLabels.map { TagMerge.normalizeTagLabel(it) }.toSet()
-                val validTags = tags.filter { !rejected.contains(TagMerge.normalizeTagLabel(it.label)) }
-                val merged = TagMerge.mergeDurableTags(m.tags + validTags)
+                // Callers pass the complete machine tag set; human-confirmed tags are never theirs to drop.
+                val merged = TagMerge.mergeDurableTags(m.tags.filter { TagMerge.isHumanTag(it) } + tags)
+                    .filter { !rejected.contains(TagMerge.normalizeTagLabel(it.label)) }
                 val filteredTerms = TagMerge.withoutRejectedTerms(extraTerms, rejected)
 
                 val cv = ContentValues().apply {

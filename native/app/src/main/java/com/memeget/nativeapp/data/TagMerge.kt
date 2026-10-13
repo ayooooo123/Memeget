@@ -15,11 +15,9 @@ internal object TagMerge {
         "cloud" to 1,
     )
 
-    private val DURABLE_SOURCES = setOf(
-        "manual",
-        "exemplar",
-        "propagated",
-    )
+    // Machine sources that classification recomputes from vectors and OCR on every
+    // pass. A re-classification replaces their previous values instead of merging them.
+    private val RECOMPUTED_SOURCES = setOf("prompt", "exemplar", "ocr", "entity_pack")
 
     fun normalizeTagLabel(label: String): String {
         return label.trim().lowercase()
@@ -30,12 +28,24 @@ internal object TagMerge {
         return TAG_RANK[t.source.lowercase()] ?: 1
     }
 
+    /** A person confirmed this tag: hand tags, teachings and accepted suggestions. */
+    fun isHumanTag(t: Tag): Boolean = t.confirmation == "confirmed"
+
+    /**
+     * Whether an existing tag stays when a meme is classified again. Human tags always
+     * stay; machine tags stay only when nothing in classification regenerates them
+     * (vision captions, propagation, cloud results, legacy imports).
+     */
+    fun survivesReclassification(t: Tag): Boolean =
+        isHumanTag(t) || t.source.lowercase() !in RECOMPUTED_SOURCES
+
     fun isDurableTag(t: Tag): Boolean {
-        return DURABLE_SOURCES.contains(t.source.lowercase()) ||
-            (t.source == "cloud" || t.source == "cloud_hint") && t.confirmation == "confirmed"
+        val source = t.source.lowercase()
+        return isHumanTag(t) || source == "manual" || source == "propagated"
     }
 
     fun betterTag(a: Tag, b: Tag): Tag {
+        if (isHumanTag(a) != isHumanTag(b)) return if (isHumanTag(a)) a else b
         val ar = tagRank(a)
         val br = tagRank(b)
         if (ar != br) return if (ar > br) a else b
