@@ -1,22 +1,14 @@
-// Minimal streaming ZIP writer (STORE / no compression). Emits the archive as a
-// sequence of byte chunks through an injected sink (the caller writes each chunk
-// straight to a file handle), holding only ONE entry's bytes at a time. This
-// replaces jszip's build-then-generate model for the collection export: jszip
-// keeps every added file resident until generation, so a 2000+ item library
-// materialized ~all images at once and OOM'd the JS runtime. Here peak memory is
-// one entry plus a few hundred bytes of central-directory bookkeeping per file.
-//
-// STORE is the right method: entries are already-compressed JPEG/poster bytes
-// plus one JSON manifest, so deflate would burn CPU for a marginal size win.
-// Scope: fewer than 65535 entries and under 4GB total (no ZIP64 / no Zip64 EOCD)
-// — orders of magnitude beyond any on-device meme library. All multi-byte fields
-// are little-endian per the PKZIP APPNOTE.
-//
-// The byte helpers (crc32, utf8Encode, base64Decode) are pure and dependency-free
-// so this works identically on Hermes (no atob/TextEncoder/Buffer needed) and in
-// the Node unit tests.
+// Bounded-memory ZIP64 writer (STORE / no compression). The seekable sink patches
+// streamed entries' CRC and sizes after their last chunk, so Java ZipInputStream
+// can read them without unsupported STORE data descriptors. ZIP64 also keeps
+// original-video collections readable beyond the classic 4 GiB / 65535 limits.
+// Byte helpers remain dependency-free for Hermes and host tooling.
 
-export type ByteSink = (chunk: Uint8Array) => void;
+export interface ZipSink {
+  write(chunk: Uint8Array): void;
+  // Replace earlier bytes without changing the append position.
+  patch(offset: number, chunk: Uint8Array): void;
+}
 
 const CRC_TABLE: Uint32Array = (() => {
   const t = new Uint32Array(256);
@@ -171,10 +163,14 @@ export function base64Encode(bytes: Uint8Array): string {
 
 interface CentralEntry {
   nameBytes: Uint8Array;
-  flags: number;
   crc: number;
   size: number;
   offset: number;
+}
+
+function uint64(view: DataView, offset: number, value: number): void {
+  view.setUint32(offset, value >>> 0, true);
+  view.setUint32(offset + 4, Math.floor(value / 0x100000000), true);
 }
 
 // A single entry being written incrementally: bytes arrive via `write` and are
@@ -198,7 +194,7 @@ export class ZipWriter {
   private streaming = false;
 
   constructor(
-    private readonly sink: ByteSink,
+    private readonly sink: ZipSink,
     when: Date = new Date()
   ) {
     // DOS date/time: 2-second resolution, year relative to 1980. Clamped so a
@@ -212,8 +208,10 @@ export class ZipWriter {
   }
 
   private emit(chunk: Uint8Array): void {
-    this.sink(chunk);
-    this.offset += chunk.length;
+    const next = this.offset + chunk.length;
+    if (!Number.isSafeInteger(next)) throw new Error('ZIP exceeds the supported byte range');
+    this.sink.write(chunk);
+    this.offset = next;
   }
 
   private guard(op: string): void {
@@ -221,21 +219,27 @@ export class ZipWriter {
     if (this.streaming) throw new Error(`ZipWriter.${op} called while a stream entry is open`);
   }
 
-  private writeLocalHeader(nameBytes: Uint8Array, flags: number, crc: number, size: number): void {
+  private writeLocalHeader(nameBytes: Uint8Array, crc: number, size: number): void {
+    if (nameBytes.length > 0xffff) throw new Error('ZIP entry name is too long');
     const header = new DataView(new ArrayBuffer(30));
-    header.setUint32(0, 0x04034b50, true); // local file header signature
-    header.setUint16(4, 20, true); // version needed
-    header.setUint16(6, flags, true);
-    header.setUint16(8, 0, true); // method: STORE
+    header.setUint32(0, 0x04034b50, true);
+    header.setUint16(4, 45, true);
+    header.setUint16(6, 0x0800, true);
     header.setUint16(10, this.dosTime, true);
     header.setUint16(12, this.dosDate, true);
     header.setUint32(14, crc, true);
-    header.setUint32(18, size, true); // compressed size (== uncompressed for STORE)
-    header.setUint32(22, size, true); // uncompressed size
+    header.setUint32(18, 0xffffffff, true);
+    header.setUint32(22, 0xffffffff, true);
     header.setUint16(26, nameBytes.length, true);
-    header.setUint16(28, 0, true); // extra field length
+    header.setUint16(28, 20, true);
+    const extra = new DataView(new ArrayBuffer(20));
+    extra.setUint16(0, 1, true);
+    extra.setUint16(2, 16, true);
+    uint64(extra, 4, size);
+    uint64(extra, 12, size);
     this.emit(new Uint8Array(header.buffer));
     this.emit(nameBytes);
+    this.emit(new Uint8Array(extra.buffer));
   }
 
   add(name: string, data: Uint8Array): void {
@@ -243,38 +247,39 @@ export class ZipWriter {
     const nameBytes = utf8Encode(name);
     const crc = crc32(data);
     const localOffset = this.offset;
-    this.writeLocalHeader(nameBytes, 0x0800, crc, data.length); // bit 11 = UTF-8
+    this.writeLocalHeader(nameBytes, crc, data.length);
     this.emit(data);
-    this.central.push({ nameBytes, flags: 0x0800, crc, size: data.length, offset: localOffset });
+    this.central.push({ nameBytes, crc, size: data.length, offset: localOffset });
   }
 
-  // Begin a streamed entry. The local header advertises a trailing data
-  // descriptor (general-purpose bit 3) with zeroed crc/sizes; the real values
-  // are written in the descriptor — and the central directory — once `end` runs.
   addStream(name: string): ZipEntryStream {
     this.guard('addStream');
-    this.streaming = true;
     const nameBytes = utf8Encode(name);
-    const flags = 0x0808; // bit 3 = data descriptor, bit 11 = UTF-8
     const localOffset = this.offset;
-    this.writeLocalHeader(nameBytes, flags, 0, 0);
+    this.writeLocalHeader(nameBytes, 0, 0);
+    this.streaming = true;
     let crc = CRC_INIT;
     let size = 0;
+    let ended = false;
     return {
       write: (chunk) => {
+        if (ended) throw new Error('ZIP entry is already closed');
         crc = crc32Update(crc, chunk);
         size += chunk.length;
         this.emit(chunk);
       },
       end: () => {
+        if (ended) throw new Error('ZIP entry is already closed');
         const finalCrc = (crc ^ 0xffffffff) >>> 0;
-        const desc = new DataView(new ArrayBuffer(16));
-        desc.setUint32(0, 0x08074b50, true); // data descriptor signature
-        desc.setUint32(4, finalCrc, true);
-        desc.setUint32(8, size, true); // compressed size
-        desc.setUint32(12, size, true); // uncompressed size
-        this.emit(new Uint8Array(desc.buffer));
-        this.central.push({ nameBytes, flags, crc: finalCrc, size, offset: localOffset });
+        const checksum = new DataView(new ArrayBuffer(4));
+        checksum.setUint32(0, finalCrc, true);
+        const sizes = new DataView(new ArrayBuffer(16));
+        uint64(sizes, 0, size);
+        uint64(sizes, 8, size);
+        this.sink.patch(localOffset + 14, new Uint8Array(checksum.buffer));
+        this.sink.patch(localOffset + 30 + nameBytes.length + 4, new Uint8Array(sizes.buffer));
+        this.central.push({ nameBytes, crc: finalCrc, size, offset: localOffset });
+        ended = true;
         this.streaming = false;
       },
     };
@@ -288,35 +293,58 @@ export class ZipWriter {
     for (const e of this.central) {
       const h = new DataView(new ArrayBuffer(46));
       h.setUint32(0, 0x02014b50, true); // central directory header signature
-      h.setUint16(4, 20, true); // version made by
-      h.setUint16(6, 20, true); // version needed
-      h.setUint16(8, e.flags, true);
-      h.setUint16(10, 0, true); // method: STORE
+      h.setUint16(4, 45, true);
+      h.setUint16(6, 45, true);
+      h.setUint16(8, 0x0800, true);
+      h.setUint16(10, 0, true);
       h.setUint16(12, this.dosTime, true);
       h.setUint16(14, this.dosDate, true);
       h.setUint32(16, e.crc, true);
-      h.setUint32(20, e.size, true); // compressed size
-      h.setUint32(24, e.size, true); // uncompressed size
+      h.setUint32(20, 0xffffffff, true);
+      h.setUint32(24, 0xffffffff, true);
       h.setUint16(28, e.nameBytes.length, true);
-      h.setUint16(30, 0, true); // extra length
+      h.setUint16(30, 28, true);
       h.setUint16(32, 0, true); // comment length
       h.setUint16(34, 0, true); // disk number start
       h.setUint16(36, 0, true); // internal attrs
       h.setUint32(38, 0, true); // external attrs
-      h.setUint32(42, e.offset, true); // local header offset
+      h.setUint32(42, 0xffffffff, true);
       this.emit(new Uint8Array(h.buffer));
       this.emit(e.nameBytes);
+      const extra = new DataView(new ArrayBuffer(28));
+      extra.setUint16(0, 1, true);
+      extra.setUint16(2, 24, true);
+      uint64(extra, 4, e.size);
+      uint64(extra, 12, e.size);
+      uint64(extra, 20, e.offset);
+      this.emit(new Uint8Array(extra.buffer));
     }
     const cdSize = this.offset - cdStart;
+    const zip64Offset = this.offset;
+    const zip64 = new DataView(new ArrayBuffer(56));
+    zip64.setUint32(0, 0x06064b50, true);
+    uint64(zip64, 4, 44);
+    zip64.setUint16(12, 45, true);
+    zip64.setUint16(14, 45, true);
+    uint64(zip64, 24, this.central.length);
+    uint64(zip64, 32, this.central.length);
+    uint64(zip64, 40, cdSize);
+    uint64(zip64, 48, cdStart);
+    this.emit(new Uint8Array(zip64.buffer));
+    const locator = new DataView(new ArrayBuffer(20));
+    locator.setUint32(0, 0x07064b50, true);
+    uint64(locator, 8, zip64Offset);
+    locator.setUint32(16, 1, true);
+    this.emit(new Uint8Array(locator.buffer));
 
     const eocd = new DataView(new ArrayBuffer(22));
     eocd.setUint32(0, 0x06054b50, true); // EOCD signature
     eocd.setUint16(4, 0, true); // disk number
     eocd.setUint16(6, 0, true); // disk with central directory
-    eocd.setUint16(8, this.central.length, true); // records on this disk
-    eocd.setUint16(10, this.central.length, true); // total records
-    eocd.setUint32(12, cdSize, true);
-    eocd.setUint32(16, cdStart, true);
+    eocd.setUint16(8, 0xffff, true);
+    eocd.setUint16(10, 0xffff, true);
+    eocd.setUint32(12, 0xffffffff, true);
+    eocd.setUint32(16, 0xffffffff, true);
     eocd.setUint16(20, 0, true); // comment length
     this.emit(new Uint8Array(eocd.buffer));
   }

@@ -145,6 +145,44 @@ to them means a fresh install only has to be pointed at the same folder.
 The indexer never scans `.memeget` — folder scans are non-recursive and only
 match media extensions.
 
+## Exporting a collection
+
+Use **Settings → Export collection (zip)** to save a collection snapshot to
+Downloads. Keep the app open until it finishes. Allow space for both the
+temporary archive and its Downloads copy, plus any temporary source staging.
+
+Android `content://` sources are copied natively to cache one at a time before
+streaming into the ZIP, then each staged source is removed. This avoids
+descriptor-lifetime failures (`Bad file descriptor`) in direct provider handles
+without decoding the media or loading a whole source file into JavaScript.
+
+Version 2 exports contain:
+
+- **Original media bytes** under `media/`: no resizing, JPEG conversion, video
+  poster substitution or audio removal.
+- **`manifest.json`** with names and media kinds, tags including their stored
+  scores and sources, captions, OCR, transcripts, extra search terms, image/
+  caption/visual embeddings, stored model fingerprints, indexing states and
+  timestamps. Device-specific source URIs are excluded.
+- **Every saved item**, including items whose analysis is still pending.
+
+The archive uses streaming ZIP64, including for collections larger than 4 GiB.
+An unreadable, empty or incompletely read original stops the export and names
+the affected item; the app does not share a silently reduced collection.
+Restore access to the original and retry. Existing tag scores are exported
+unchanged, not converted into calibrated identification probabilities.
+
+Version 1 exports were preview bundles: resized JPEG images, video posters and
+reduced metadata without tag scores. Re-export with the updated app when
+original media or classification evaluation is required. A collection ZIP is
+not a complete app backup: use folder backups and teaching export for migration
+of that state. Native ZIP intake imports the media, not the manifest's old
+predictions or vectors; preserve the manifest separately before reindexing.
+
+For large collection ZIPs, use native intake or desktop extraction. The original
+app's ZIP importer still loads the entire archive into memory; streaming export
+does not change that import limitation.
+
 ## Getting the APK
 
 Every release is a standalone, sideloadable APK built by GitHub Actions
