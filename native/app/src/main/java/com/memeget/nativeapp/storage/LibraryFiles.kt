@@ -907,7 +907,8 @@ internal class LibraryFiles(
             } catch (_: Exception) {}
         }
 
-        meme.uri
+        // A video without a poster has none: its own file is not an image for callers to load.
+        if (meme.kind == "video") "" else meme.uri
     }
 
     suspend fun frames(meme: Meme, maxFrames: Int = 4): List<String> = withContext(Dispatchers.IO) {
