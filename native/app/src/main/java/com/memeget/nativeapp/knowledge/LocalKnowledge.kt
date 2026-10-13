@@ -114,28 +114,22 @@ internal class LocalKnowledge(
         return vetoed
     }
 
-    private fun findVetoedLabels(image: FloatArray, exemplars: List<Exemplar>): Set<String> {
-        val negByLabel = LinkedHashMap<String, MutableList<FloatArray>>()
-        for (e in exemplars) {
-            if (!e.positive) {
-                val norm = TagMerge.normalizeTagLabel(e.label)
-                negByLabel.getOrPut(norm) { ArrayList() }.add(e.vector)
-            }
-        }
-        return findVetoedLabelsFromMap(image, negByLabel)
-    }
-
     private data class ClassificationSnapshot(
         val labels: List<CuratedLabelDef>,
         val negativeVecs: List<FloatArray>,
         val vote: VoteState,
+        val exemplars: List<Exemplar>,
         val negExemplarsByLabel: Map<String, List<FloatArray>>,
         val assocMap: Map<String, List<String>>,
     )
 
+    @Volatile private var cachedSnapshot: ClassificationSnapshot? = null
+
     private suspend fun prepareSnapshot(): ClassificationSnapshot {
         val (labels, anchors) = ensureCuratedLoaded()
         val vote = ensureVote()
+        // Teachings change only with the label revision, so their derived maps live as long as the vote.
+        cachedSnapshot?.takeIf { it.vote === vote }?.let { return it }
         val allExemplars = store.exemplars().filter { compatibleTeachingModel(it.model) }
         val negativeVecs = anchors.map { it.vec }
 
@@ -163,9 +157,10 @@ internal class LocalKnowledge(
             labels = labels,
             negativeVecs = negativeVecs,
             vote = vote,
+            exemplars = allExemplars,
             negExemplarsByLabel = negExemplarsByLabel,
             assocMap = assocMap,
-        )
+        ).also { cachedSnapshot = it }
     }
 
     /** [memeId] keeps a meme's own labels out of the vote on it. */
@@ -235,12 +230,11 @@ internal class LocalKnowledge(
 
     suspend fun candidateLabels(image: FloatArray, limit: Int = 12): List<Tag> = withContext(Dispatchers.Default) {
         currentCoroutineContext().ensureActive()
-        val (labels, anchors) = ensureCuratedLoaded()
-        val vote = ensureVote()
-        val allExemplars = store.exemplars().filter { compatibleTeachingModel(it.model) }
-        val vetoedLabels = findVetoedLabels(image, allExemplars)
-
-        val negativeVecs = anchors.map { it.vec }
+        val snapshot = prepareSnapshot()
+        val labels = snapshot.labels
+        val vote = snapshot.vote
+        val vetoedLabels = findVetoedLabelsFromMap(image, snapshot.negExemplarsByLabel)
+        val negativeVecs = snapshot.negativeVecs
 
         // Tentative prompt candidates without margin floor suppression
         val promptCandidates = LearnCore.rankPromptCandidates(image, labels, negativeVecs)
@@ -252,7 +246,7 @@ internal class LocalKnowledge(
         val anchorMax = if (negativeVecs.isNotEmpty()) FloatBlob.maxCosTo(image, negativeVecs) else 0f
         val entityHits = EntityRetrieve.retrieveEntities(
             imageVec = image,
-            exemplars = allExemplars,
+            exemplars = snapshot.exemplars,
             anchorSim = anchorMax,
             minMargin = Float.NEGATIVE_INFINITY,
             topK = limit,

@@ -472,7 +472,7 @@ internal class IndexCoordinator(
             currentCoroutineContext().ensureActive()
             val meme = store.meme(item.meme.id) ?: continue
             mutableProgress.value = WorkProgress("reviewing candidates", detail = meme.name, running = true, memeId = meme.id)
-            try { cloud.consider(meme, knowledge.candidateLabels(item.image, 12)) }
+            try { cloud.consider(meme) { knowledge.candidateLabels(item.image, 12) } }
             catch (cancelled: CancellationException) { throw cancelled }
             catch (failure: Exception) { store.addError(meme.name, "cloud", failure.message ?: "Optional cloud analysis unavailable") }
         }

@@ -52,8 +52,12 @@ internal class CloudAssistant(
         }
     }
 
-    /** Called automatically by indexing; master consent alone never authorizes automatic calls. */
-    suspend fun consider(meme: Meme, candidates: List<Tag>): CloudResult? = analyze(meme, candidates, manual = false)
+    /**
+     * Called automatically by indexing; master consent alone never authorizes automatic calls.
+     * [candidates] is computed only when this meme is eligible, so indexing pays nothing with cloud off.
+     */
+    suspend fun consider(meme: Meme, candidates: suspend () -> List<Tag>): CloudResult? =
+        if (eligible(cached, meme, manual = false)) analyze(meme, candidates(), manual = false) else null
 
     suspend fun analyze(meme: Meme, candidates: List<Tag>, manual: Boolean = true): CloudResult? = withContext(Dispatchers.IO) {
         val consent = cached
