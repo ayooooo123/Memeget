@@ -374,6 +374,17 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
         out
     }
 
+    override suspend fun imageVectors(): Map<Long, FloatArray> = withContext(Dispatchers.IO) {
+        val out = HashMap<Long, FloatArray>()
+        getReadableDb().rawQuery("SELECT id, image FROM vectors WHERE model = ?", arrayOf(ModelRegistry.PRIMARY_MODEL_FINGERPRINT)).use { c ->
+            while (c.moveToNext()) {
+                val image = FloatBlob.fromBytes(c.getBlob(1) ?: continue)
+                if (image.size == 512) out[c.getLong(0)] = image
+            }
+        }
+        out
+    }
+
     override suspend fun folders(): List<Folder> = withContext(Dispatchers.IO) {
         val db = getReadableDb()
         val list = ArrayList<Folder>()

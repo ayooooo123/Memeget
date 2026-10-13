@@ -143,6 +143,8 @@ internal interface LibraryStore {
     /** Changes when people's labels, teachings or the vectors behind them may have changed. */
     val labelRevision: StateFlow<Long>
     suspend fun humanLabels(): List<HumanLabeled>
+    /** Every meme's primary-model image vector, in one read. */
+    suspend fun imageVectors(): Map<Long, FloatArray>
     suspend fun folders(): List<Folder>
     suspend fun addFolder(uri: String, name: String)
     suspend fun removeFolder(uri: String)

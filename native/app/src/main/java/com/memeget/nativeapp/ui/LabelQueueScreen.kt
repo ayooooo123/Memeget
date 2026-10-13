@@ -4,16 +4,24 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
@@ -37,8 +45,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -46,6 +56,7 @@ import coil.compose.SubcomposeAsyncImage
 import coil.request.ImageRequest
 import com.memeget.nativeapp.data.TagMerge
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
@@ -53,6 +64,7 @@ import kotlinx.coroutines.launch
  * a suggested label, "Not this" rejects it, a typed label names the meme. Answers are also the
  * held-out evidence that lets a label apply to look-alikes on its own.
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 internal fun LabelQueueScreen(
     store: LibraryStore,
@@ -62,6 +74,7 @@ internal fun LabelQueueScreen(
     onAnswered: () -> Unit,
 ) {
     val scope = rememberCoroutineScope()
+    val focusManager = LocalFocusManager.current
     var refresh by remember { mutableIntStateOf(0) }
     var queue by remember { mutableStateOf<List<LocalKnowledge.QueueItem>?>(null) }
     var knownLabels by remember { mutableStateOf<List<String>>(emptyList()) }
@@ -96,6 +109,7 @@ internal fun LabelQueueScreen(
     fun answer(label: String, category: String?, positive: Boolean) {
         val current = item ?: return
         if (busy || label.isBlank()) return
+        focusManager.clearFocus()
         busy = true
         scope.launch {
             try {
@@ -144,8 +158,13 @@ internal fun LabelQueueScreen(
                     textAlign = TextAlign.Center,
                 )
             }
-            else -> {
-                QueuePicture(meme ?: item.meme, Modifier.fillMaxWidth().weight(1f)) { onOpenViewer(meme ?: item.meme) }
+            // The app draws edge to edge, so the keyboard does not resize the window: imePadding shrinks
+            // this scroll area instead, which keeps the focused name field (matches above it) in view.
+            else -> Column(
+                modifier = Modifier.fillMaxWidth().weight(1f).imePadding().verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                QueuePicture(meme ?: item.meme, Modifier.fillMaxWidth().height(220.dp)) { onOpenViewer(meme ?: item.meme) }
                 Text(
                     if (item.lookalikes > 0) "Stands for ${item.lookalikes} similar unlabeled memes" else "No close look-alikes",
                     style = MaterialTheme.typography.bodySmall,
@@ -163,29 +182,41 @@ internal fun LabelQueueScreen(
                         OutlinedButton(onClick = { answer(tag.label, tag.category, false) }, enabled = !busy) { Text("Not this") }
                     }
                 }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    OutlinedTextField(
-                        value = typed,
-                        onValueChange = { typed = it.lowercase() },
-                        label = { Text("Name it") },
-                        singleLine = true,
-                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                        keyboardActions = KeyboardActions(onDone = { answer(TagMerge.normalizeTagLabel(typed), null, true) }),
-                        modifier = Modifier.weight(1f),
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    Button(onClick = { answer(TagMerge.normalizeTagLabel(typed), null, true) }, enabled = typed.isNotBlank() && !busy) { Text("Add") }
-                }
                 val prefix = TagMerge.normalizeTagLabel(typed)
                 val matches = remember(prefix, knownLabels) {
                     if (prefix.isEmpty()) emptyList() else knownLabels.filter { it.startsWith(prefix) && it != prefix }.take(6)
                 }
-                if (matches.isNotEmpty()) {
-                    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        for (match in matches) AssistChip(onClick = { typed = match }, label = { Text(match) })
+                // The field's own scroll-into-view runs before the keyboard finishes opening; repeat it after.
+                val inputArea = remember { BringIntoViewRequester() }
+                var inputFocused by remember { mutableStateOf(false) }
+                val keyboardOpen = WindowInsets.isImeVisible
+                LaunchedEffect(inputFocused, keyboardOpen, matches.isNotEmpty()) {
+                    if (inputFocused && keyboardOpen) {
+                        delay(300)
+                        inputArea.bringIntoView()
                     }
                 }
-                TextButton(onClick = { queue = queue?.drop(1) }, enabled = !busy) { Text("Skip") }
+                Column(Modifier.bringIntoViewRequester(inputArea), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    if (matches.isNotEmpty()) {
+                        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            for (match in matches) AssistChip(onClick = { typed = match }, label = { Text(match) })
+                        }
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        OutlinedTextField(
+                            value = typed,
+                            onValueChange = { typed = it.lowercase() },
+                            label = { Text("Name it") },
+                            singleLine = true,
+                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                            keyboardActions = KeyboardActions(onDone = { answer(TagMerge.normalizeTagLabel(typed), null, true) }),
+                            modifier = Modifier.weight(1f).onFocusChanged { inputFocused = it.isFocused },
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Button(onClick = { answer(TagMerge.normalizeTagLabel(typed), null, true) }, enabled = typed.isNotBlank() && !busy) { Text("Add") }
+                    }
+                }
+                TextButton(onClick = { focusManager.clearFocus(); queue = queue?.drop(1) }, enabled = !busy) { Text("Skip") }
             }
         }
     }
