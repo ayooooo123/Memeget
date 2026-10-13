@@ -180,7 +180,11 @@ internal class IndexCoordinator(
                             if (prepared.isNotEmpty() && stagedBytes >= BATCH_DISK_BYTES) break
                             mutableProgress.value = WorkProgress("embedding", completed, completed + pending.size, meme.name, true, memeId = meme.id)
                             try {
-                                val item = prepare(meme)
+                                // A collection import supplied the vector and OCR: reuse them once instead of the models.
+                                val importedVector = if (meme.analysisImported) {
+                                    store.vectors(meme.id)?.takeIf { it.model == engine.primaryModel && it.image.size == 512 }?.image
+                                } else null
+                                val item = prepare(meme, importedVector).copy(imported = importedVector != null)
                                 prepared += item
                                 stagedBytes += item.source.length()
                             } catch (cancelled: CancellationException) {
@@ -195,15 +199,17 @@ internal class IndexCoordinator(
                             currentCoroutineContext().ensureActive()
                             mutableProgress.value = WorkProgress("reading text", completed, completed + prepared.size, item.meme.name, true, memeId = item.meme.id)
                             try {
-                                val texts = ArrayList<String>(item.frames.size)
-                                for (uri in item.frames) {
-                                    val text = engine.recognize(uri).joinToString(" ") { it.text }.trim()
-                                    if (text.isNotEmpty() && texts.none { it.contains(text, ignoreCase = true) }) {
-                                        texts.removeAll { text.contains(it, ignoreCase = true) }
-                                        texts += text
+                                val ocr = if (item.imported) item.meme.ocr else {
+                                    val texts = ArrayList<String>(item.frames.size)
+                                    for (uri in item.frames) {
+                                        val text = engine.recognize(uri).joinToString(" ") { it.text }.trim()
+                                        if (text.isNotEmpty() && texts.none { it.contains(text, ignoreCase = true) }) {
+                                            texts.removeAll { text.contains(it, ignoreCase = true) }
+                                            texts += text
+                                        }
                                     }
+                                    texts.joinToString("\n")
                                 }
-                                val ocr = texts.joinToString("\n")
                                 val (localTags, terms) = knowledge.classify(item.image, ocr)
                                 val hints = cloud.candidateHints(item.image, contentHash = item.hash)
                                     .filterNot { hint -> localTags.any { it.label.equals(hint.label, true) } }
@@ -323,6 +329,8 @@ internal class IndexCoordinator(
         val frames: List<String>,
         val temporaryFrames: List<File>,
         val thumbnail: String,
+        /** Vector and OCR came from a collection import; text recognition is skipped. */
+        val imported: Boolean = false,
     )
 
     private suspend fun prepare(meme: Meme, knownVector: FloatArray? = null): Prepared {
@@ -330,7 +338,8 @@ internal class IndexCoordinator(
         val temporaryFrames = ArrayList<File>()
         try {
             val staged = meme.copy(uri = Uri.fromFile(source).toString())
-            val candidates = if (meme.kind == "video") files.frames(staged, 8) else listOf(staged.uri)
+            // A known vector needs frames only for thumbnails and optional enrichment.
+            val candidates = if (meme.kind == "video") files.frames(staged, if (knownVector != null) 3 else 8) else listOf(staged.uri)
             require(candidates.isNotEmpty()) { "No decodable video frames" }
             val cacheRoot = context.cacheDir.canonicalPath + File.separator
             for (uri in candidates) {

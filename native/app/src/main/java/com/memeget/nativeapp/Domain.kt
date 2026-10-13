@@ -35,6 +35,8 @@ internal data class Meme(
     val cloudObservation: CloudResult? = null,
     val rejectedLabels: List<String> = emptyList(),
     val indexError: String = "",
+    /** OCR and a compatible image vector arrived with the media; indexing reuses them once. */
+    val analysisImported: Boolean = false,
 )
 
 internal data class VectorRecord(
@@ -90,6 +92,14 @@ internal data class LocalAnalysis(
     val ocr: String,
     val tags: List<Tag>,
     val extraTerms: String,
+)
+/** Analysis a collection export carried for exactly these media bytes. */
+internal data class ImportedAnalysis(
+    val humanTags: List<Tag>,
+    val ocr: String,
+    val transcript: String,
+    /** Compatible image vector for these bytes, or null when the export had none. */
+    val image: FloatArray?,
 )
 internal data class CloudEvidence(
     val memeId: Long,
@@ -163,6 +173,14 @@ internal interface LibraryStore {
      * matching tags and terms.
      */
     suspend fun updateTags(id: Long, tags: List<Tag>, extraTerms: String)
+    /** Adds imported human tags and fills OCR, transcript and a missing vector. */
+    suspend fun applyImportedAnalysis(id: Long, analysis: ImportedAnalysis)
+    /**
+     * Attaches taught examples to the memes they show: a meme whose image vector matches a
+     * "this is X" example gets X as a confirmed tag; a "not X" example adds a rejection.
+     * Returns the number of memes changed.
+     */
+    suspend fun relinkTeachings(): Int
     suspend fun delete(ids: List<Long>)
     suspend fun clearIndex()
     suspend fun setting(key: String): String?

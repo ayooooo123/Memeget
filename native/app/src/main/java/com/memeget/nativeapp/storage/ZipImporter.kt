@@ -15,8 +15,13 @@ internal object ZipImporter {
     private const val MAX_ENTRY_BYTES = 350L * 1024 * 1024 // 350 MiB cap per entry to guard against zip bombs
     private const val MAX_ENTRIES_COUNT = 5000 // Guard against excessive entries in one zip
 
+    /** Kind of the root `manifest.json` a collection export carries next to its media. */
+    const val MANIFEST_KIND = "manifest"
+
     data class ExtractedEntry(
         val tempFile: File,
+        /** Archive path with forward slashes, as a collection manifest's `file` field names it. */
+        val entryPath: String,
         val entryName: String,
         val kind: String,
         val sha256: String
@@ -35,7 +40,8 @@ internal object ZipImporter {
         return parts.lastOrNull() ?: ""
     }
 
-    fun extractNextMediaEntry(
+    /** Next media entry, or the root collection manifest (kind [MANIFEST_KIND]); null at the end. */
+    fun extractNextEntry(
         zis: ZipInputStream,
         cacheDir: File
     ): ExtractedEntry? {
@@ -62,7 +68,8 @@ internal object ZipImporter {
                 continue
             }
 
-            val kind = MediaIoUtils.kindOf(basename)
+            val entryPath = name.replace('\\', '/').trimStart('/')
+            val kind = if (entryPath == "manifest.json") MANIFEST_KIND else MediaIoUtils.kindOf(basename)
             if (kind == null) {
                 zis.closeEntry()
                 entry = zis.nextEntry
@@ -107,6 +114,7 @@ internal object ZipImporter {
             val hashHex = md.digest().joinToString("") { "%02x".format(it) }
             return ExtractedEntry(
                 tempFile = tempFile,
+                entryPath = entryPath,
                 entryName = basename,
                 kind = kind,
                 sha256 = hashHex

@@ -5,6 +5,7 @@ import com.memeget.nativeapp.Exemplar
 import com.memeget.nativeapp.Folder
 import com.memeget.nativeapp.InferenceEngine
 import com.memeget.nativeapp.LibraryStore
+import com.memeget.nativeapp.ImportedAnalysis
 import com.memeget.nativeapp.LocalAnalysis
 import com.memeget.nativeapp.LocalKnowledge
 import com.memeget.nativeapp.Meme
@@ -123,6 +124,8 @@ class CandidateRankingBehaviorTest {
         override suspend fun manualTag(ids: List<Long>, label: String, category: String, spread: Boolean): Int = 0
         override suspend fun removeTag(id: Long, label: String) {}
         override suspend fun importExemplars(items: List<Exemplar>, pack: String, asSelf: Boolean): Int = 0
+        override suspend fun applyImportedAnalysis(id: Long, analysis: ImportedAnalysis) {}
+        override suspend fun relinkTeachings(): Int = 0
         override suspend fun forgetLabel(label: String) {}
         override suspend fun forgetPack(pack: String) {}
         override suspend fun delete(ids: List<Long>) {}
