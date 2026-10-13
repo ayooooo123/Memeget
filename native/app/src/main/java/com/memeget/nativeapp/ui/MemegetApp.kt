@@ -47,6 +47,7 @@ import com.memeget.nativeapp.editor.RemixStudio
 
 internal enum class AppTab {
     Library,
+    Label,
     Settings,
 }
 
@@ -67,6 +68,14 @@ internal fun MemegetApp(
     var activeRemixMeme by remember { mutableStateOf<Meme?>(null) }
     var tagSearchRequest by remember { mutableStateOf<String?>(null) }
     var searching by remember { mutableStateOf(false) }
+    // Answers in the Label tab spread to look-alikes on the re-tag that runs when the tab is left.
+    var labelsChanged by remember { mutableStateOf(false) }
+    LaunchedEffect(currentTab) {
+        if (currentTab != AppTab.Label && labelsChanged) {
+            labelsChanged = false
+            scope.launch { coordinator.retag() }
+        }
+    }
     LaunchedEffect(searching, activeRemixMeme) {
         coordinator.setInteractive(searching || activeRemixMeme != null)
     }
@@ -121,6 +130,13 @@ internal fun MemegetApp(
                         )
 
                         TabItem(
+                            label = "Label",
+                            glyph = "✎",
+                            selected = currentTab == AppTab.Label,
+                            onClick = { currentTab = AppTab.Label },
+                        )
+
+                        TabItem(
                             label = "Settings",
                             glyph = "⚙",
                             selected = currentTab == AppTab.Settings,
@@ -154,6 +170,15 @@ internal fun MemegetApp(
                                 onOpenSettings = { currentTab = AppTab.Settings },
                                 tagSearchRequest = tagSearchRequest,
                                 onInteractionChange = { searching = it },
+                            )
+                        }
+                        AppTab.Label -> {
+                            LabelQueueScreen(
+                                store = store,
+                                knowledge = knowledge,
+                                cloud = cloud,
+                                onOpenViewer = { meme -> activeViewerMeme = meme },
+                                onAnswered = { labelsChanged = true },
                             )
                         }
                         AppTab.Settings -> {
