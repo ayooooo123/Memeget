@@ -165,6 +165,8 @@ internal interface LibraryStore {
     suspend fun setThumb(id: Long, uri: String)
     suspend fun setContentHash(id: Long, hash: String)
     suspend fun requeue(ids: List<Long>)
+    /** Queues every item whose last analysis failed for another attempt; returns how many. */
+    suspend fun requeueFailed(): Int
     suspend fun markIndexFailed(id: Long, reason: String)
     suspend fun setCloud(id: Long, result: CloudResult): Boolean
     suspend fun forgetCloud()

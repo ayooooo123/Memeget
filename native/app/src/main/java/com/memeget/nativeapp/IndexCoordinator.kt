@@ -23,6 +23,7 @@ import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import expo.modules.memegetbg.KeepAliveLease
 import com.memeget.nativeapp.inference.ModelRegistry
+import com.memeget.nativeapp.storage.Mp4Repair
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -69,10 +70,11 @@ internal class IndexCoordinator(
     @Volatile private var interactive = false
     fun setInteractive(value: Boolean) { interactive = value }
 
+    /** Indexes [ids] again, or with no ids everything pending plus items whose analysis failed. */
     fun start(ids: List<Long>? = null) {
         scope.launch {
             try {
-                if (ids != null && ids.isNotEmpty()) store.requeue(ids.distinct())
+                if (ids == null) store.requeueFailed() else if (ids.isNotEmpty()) store.requeue(ids.distinct())
                 runSession(background = false)
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -337,6 +339,8 @@ internal class IndexCoordinator(
         val (source, hash) = stage(meme.uri)
         val temporaryFrames = ArrayList<File>()
         try {
+            // The hash above covers the original bytes; the repair only touches this private copy.
+            if (meme.kind == "video") Mp4Repair.zeroCttsFlags(source)
             val staged = meme.copy(uri = Uri.fromFile(source).toString())
             // A known vector needs frames only for thumbnails and optional enrichment.
             val candidates = if (meme.kind == "video") files.frames(staged, if (knownVector != null) 3 else 8) else listOf(staged.uri)
@@ -364,7 +368,7 @@ internal class IndexCoordinator(
                 }
             }
             val pooled = if (vectors.size == 1) vectors[0] else pool(vectors)
-            val thumbnail = if (meme.kind == "video") files.thumbnail(meme) else meme.uri
+            val thumbnail = if (meme.kind == "video") files.thumbnail(staged) else meme.uri
             return Prepared(meme, source, hash, pooled, frames, temporaryFrames, thumbnail)
         } catch (failure: Throwable) {
             withContext(NonCancellable + Dispatchers.IO) {

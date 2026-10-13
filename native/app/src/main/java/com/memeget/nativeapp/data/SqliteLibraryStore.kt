@@ -1106,6 +1106,16 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
         }
     }
 
+    override suspend fun requeueFailed(): Int = withContext(Dispatchers.IO) {
+        writeMutex.withLock {
+            val count = getWritableDb().compileStatement(
+                "UPDATE memes SET pending = 1, index_error = '' WHERE index_error <> ''"
+            ).use { it.executeUpdateDelete() }
+            if (count > 0) bumpRevision()
+            count
+        }
+    }
+
     override suspend fun markIndexFailed(id: Long, reason: String) = withContext(Dispatchers.IO) {
         writeMutex.withLock {
             val db = getWritableDb()
