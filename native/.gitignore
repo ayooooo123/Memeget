@@ -1,0 +1,11 @@
+/.gradle/
+/.kotlin/
+/local.properties
+**/build/
+**/.cxx/
+**/.externalNativeBuild/
+*.iml
+*.hprof
+*.jks
+*.keystore
+.DS_Store
