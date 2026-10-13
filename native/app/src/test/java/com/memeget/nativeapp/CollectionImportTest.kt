@@ -101,7 +101,8 @@ class CollectionImportTest {
         JSONObject().put("file", file).put("name", file.substringAfterLast('/')).put("kind", kind)
             .put("tags", JSONArray(tags)).put("ocr", ocr).put("transcript", transcript).put("caption", "machine caption")
             .put("embedding", embedding?.let(::vectorJson) ?: JSONObject.NULL)
-            .put("captionEmbedding", vectorJson(axis(7))).put("embeddingModel", "mobileclip-s2").put("pending", false)
+            // The original app stamps each item with "<model>@<dim>"; the header carries the bare model.
+            .put("captionEmbedding", vectorJson(axis(7))).put("embeddingModel", "mobileclip-s2@512").put("pending", false)
 
     private fun teachingPack(vararg examples: Triple<String, FloatArray, Boolean>): File {
         val pack = JSONObject().put("format", "memeget-teaching-pack").put("version", 2).put("model", "mobileclip-s2")

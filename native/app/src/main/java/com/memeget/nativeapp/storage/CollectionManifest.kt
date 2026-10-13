@@ -51,8 +51,10 @@ internal object CollectionManifest {
         return records
     }
 
+    // The original app stamps the export header "mobileclip-s2" and each item "mobileclip-s2@512".
     private fun compatibleModel(model: String): Boolean =
-        model == TeachingPackIo.PACK_MODEL || model == ModelRegistry.PRIMARY_MODEL_FINGERPRINT
+        model == TeachingPackIo.PACK_MODEL || model == "${TeachingPackIo.PACK_MODEL}@512" ||
+            model == ModelRegistry.PRIMARY_MODEL_FINGERPRINT
 
     private fun readRecord(reader: JsonReader, vectorsTrusted: Boolean): Record? {
         var file: String? = null
