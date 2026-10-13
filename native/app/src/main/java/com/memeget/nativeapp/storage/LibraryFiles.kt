@@ -12,6 +12,7 @@ import com.memeget.nativeapp.editor.MediaEditKind
 import com.memeget.nativeapp.editor.MemeEditSource
 import com.memeget.nativeapp.editor.NativeVideoComposition
 import com.memeget.nativeapp.editor.ProjectCore
+import com.memeget.nativeapp.storage.CollectionManifest
 import com.memeget.nativeapp.storage.CollectionZipExporter
 import com.memeget.nativeapp.storage.LinkResolver
 import com.memeget.nativeapp.storage.MediaIoUtils
@@ -116,6 +117,11 @@ internal class LibraryFiles(
         if (resolvedMime == "application/zip" || displayName.lowercase(Locale.ROOT).endsWith(".zip")) {
             return@withContext importZip(uri)
         }
+        // Teaching files carry examples, not media.
+        if (resolvedMime == "application/json" || displayName.lowercase(Locale.ROOT).endsWith(".json")) {
+            importTeaching(uri)
+            return@withContext emptyList()
+        }
 
         // Shared media intake: stage source immediately to app-private cache before background continuation
         val safeName = displayName.replace(Regex("[^a-zA-Z0-9._-]"), "_").ifBlank { "import_${System.currentTimeMillis()}.bin" }
@@ -176,20 +182,28 @@ internal class LibraryFiles(
 
     private suspend fun importZip(zipUri: Uri): List<Long> {
         val stagedZip = File(context.cacheDir, "zip_${System.currentTimeMillis()}.zip")
+        var manifest: File? = null
         try {
             MediaIoUtils.copyUriToFile(context, zipUri, stagedZip)
             val zis = ZipInputStream(FileInputStream(stagedZip))
             val importedIds = mutableListOf<Long>()
+            val idByEntry = HashMap<String, Long>()
             val folders = store.folders()
             val targetFolder = folders.firstOrNull()
 
             zis.use { stream ->
                 while (true) {
-                    val extracted = ZipImporter.extractNextMediaEntry(stream, context.cacheDir) ?: break
+                    val extracted = ZipImporter.extractNextEntry(stream, context.cacheDir) ?: break
+                    if (extracted.kind == ZipImporter.MANIFEST_KIND) {
+                        manifest?.delete()
+                        manifest = extracted.tempFile
+                        continue
+                    }
                     try {
                         val duplicate = findMemeByHash(extracted.sha256)
                         if (duplicate != null) {
                             importedIds.add(duplicate.id)
+                            idByEntry[extracted.entryPath] = duplicate.id
                             continue
                         }
 
@@ -226,15 +240,27 @@ internal class LibraryFiles(
                             modifiedAt = System.currentTimeMillis(),
                             contentHash = extracted.sha256
                         )
-                        if (id > 0) importedIds.add(id)
+                        if (id > 0) {
+                            importedIds.add(id)
+                            idByEntry[extracted.entryPath] = id
+                        }
                     } finally {
                         extracted.tempFile.delete()
                     }
                 }
             }
+            // Media first; then what the export knew about each item, matched by archive path.
+            manifest?.let { file ->
+                for (record in CollectionManifest.read(file)) {
+                    val id = idByEntry[record.file] ?: continue
+                    store.applyImportedAnalysis(id, record.analysis)
+                }
+                store.relinkTeachings()
+            }
             return importedIds
         } finally {
             stagedZip.delete()
+            manifest?.delete()
         }
     }
 
@@ -723,7 +749,9 @@ internal class LibraryFiles(
 
         val exemplars = TeachingPackIo.parseNativeTeachings(text)
         val packName = MediaIoUtils.getDisplayName(context, uri).substringBeforeLast(".")
-        store.importExemplars(exemplars, pack = packName, asSelf = false)
+        val imported = store.importExemplars(exemplars, pack = packName, asSelf = false)
+        store.relinkTeachings()
+        imported
     }
 
     suspend fun exportTeaching(destination: Uri): Unit = withContext(Dispatchers.IO) {

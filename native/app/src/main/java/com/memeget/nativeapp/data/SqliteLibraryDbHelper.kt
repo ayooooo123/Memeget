@@ -41,7 +41,8 @@ internal class SqliteLibraryDbHelper(context: Context, dbName: String = DATABASE
                 visual_model TEXT NOT NULL DEFAULT '',
                 caption_embedding BLOB,
                 cloud_observation TEXT NOT NULL DEFAULT '',
-                rejected_labels TEXT NOT NULL DEFAULT '[]'
+                rejected_labels TEXT NOT NULL DEFAULT '[]',
+                analysis_imported INTEGER NOT NULL DEFAULT 0
             );
             """.trimIndent()
         )
@@ -204,6 +205,7 @@ internal class SqliteLibraryDbHelper(context: Context, dbName: String = DATABASE
         addCol("cloud_observation", "TEXT NOT NULL DEFAULT ''")
         addCol("rejected_labels", "TEXT NOT NULL DEFAULT '[]'")
         addCol("index_error", "TEXT NOT NULL DEFAULT ''")
+        addCol("analysis_imported", "INTEGER NOT NULL DEFAULT 0")
         // Ensure vectors table
         db.execSQL(
             """
@@ -227,6 +229,6 @@ internal class SqliteLibraryDbHelper(context: Context, dbName: String = DATABASE
 
     companion object {
         const val DATABASE_NAME = "memeget.db"
-        const val DATABASE_VERSION = 2
+        const val DATABASE_VERSION = 3
     }
 }
