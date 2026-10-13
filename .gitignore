@@ -30,3 +30,10 @@ __pycache__/
 tools/eval/described.json
 tools/eval/collection-manifest.json
 .worktrees/
+
+# Standalone native Android build products
+/native/.gradle/
+/native/.kotlin/
+/native/**/build/
+/native/**/.cxx/
+/native/local.properties

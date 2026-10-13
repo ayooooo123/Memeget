@@ -1,0 +1,84 @@
+# Memeget Native
+
+Standalone Android implementation using Kotlin, Compose, SQLite and a JNI inference adapter. Application ID: `com.memeget.nativeapp`; launcher label: **Memeget Native**. It installs alongside the React Native app and does not replace its package, database or private files.
+
+**Verification is still in progress. Do not treat this directory as a completed parity release.** Current evidence and remaining checks are listed below.
+
+## Build
+
+Build from this directory, within the repository checkout. The build reads an explicit allowlist of existing Kotlin media utilities and fonts from `../modules/memeget-bg/android/src/main`; it copies them into generated build directories without modifying the original module. No React, Expo or JavaScript runtime is included in the APK.
+
+Requirements:
+
+- JDK 17. The included wrapper pins Gradle 8.14.3 and its distribution SHA-256.
+- Android SDK platform 36, Android platform tools, NDK `27.1.12297006`, CMake `3.22.1`.
+- `ANDROID_HOME` pointing to the SDK, or an untracked `local.properties`.
+- Network access for Maven dependencies and the checksum-pinned runtime archive.
+
+```sh
+./gradlew :app:assembleDebug :app:testDebugUnitTest
+adb install -r app/build/outputs/apk/debug/app-debug.apk
+```
+
+Only ARM64 is packaged; minimum Android version is API 26. `runtime/bootstrap.sh` extracts the pinned `react-native-executorch@0.9.2` C++ dependencies into an ignored build cache after SHA-512 verification. This reuses the native runtime, not its React Native application layer. Model files are downloaded separately on demand and must match the sizes and SHA-256 digests in `app/src/main/java/com/memeget/nativeapp/inference/ModelRegistry.kt` before activation.
+
+## Local use and migration
+
+- Link a folder with Android's document picker, or import/share media, supported links, ZIP collections or teaching files. Temporary shared content is copied into private storage before its temporary permission expires.
+- Browse immediately while analysis is pending. Waiting tiles show **Queued**; only the coordinator's active meme animates **Analyzing**. Failed indexing has a persisted **Analysis failed** status, cleared by retry or successful analysis. Search combines indexed text, fuzzy terms and compatible semantic vectors; pagination uses stable keyset cursors.
+- Review tags, add positive/negative teachings, find similar images, and edit images or videos in Remix Studio. Image and video outputs are new files, never in-place changes to originals.
+- Viewer **Copy meme** publishes an image/video content URI to Android's clipboard. **Remix Studio → Export → Copy to Clipboard** copies the rendered result without adding a library item or discarding the editing project. Viewer WebM copies are converted to H.264/AAC MP4; other supported media are copied without re-encoding. The destination app must support pasting that media type.
+- Debug builds keep the screen awake only while the app's window is visible. Release builds and device lock security are unchanged; this does not bypass the lock screen or keep other apps awake.
+- The editor includes text, drawing, crop/rotation/flip/aspect, OCR replacement, cover/pixelation, subjects, stickers, backgrounds, ordering and undo/redo. Video composition supports retained ranges, speed/audio/music, title cards and time-aware overlays. Animated GIF export and automatic video subject isolation remain unsupported; manual motion/keyframes are supported.
+- Keep the original app installed during migration. First make its latest folder backup, then link that folder in the native app. Legacy filename-based imports are marked as legacy evidence, not certified matches to current file bytes. Imported text remains searchable while compatible local records are rebuilt.
+- For a device move, use the original app's **Settings → Folder backup → Back up now**, then copy every linked folder including hidden `.memeget`, preserving names and layout. Compare backup coverage with the collection before assuming private/unlinked imports were included. **Export collection (zip)** version 1 contains resized JPEGs and video posters; version 2 preserves original image/video bytes and stored classification metadata, including tag scores. Re-export with the updated original app when full media is required. Native ZIP intake imports media rather than restoring that manifest. Preserve an immutable prediction/metadata snapshot before reindexing for an accuracy comparison.
+- Native folder backups are explicit and write only `.memeget-native`. Generation-addressed chunks are written before the manifest so interruption does not replace the previous complete generation. The legacy `.memeget` namespace is read-only.
+- Sidecars do not transfer Android permissions, model downloads, private editor drafts, settings or credentials. Teaching files retain their declared model fingerprint; a vector from another recipe is not silently marked current. Native teaching files reject unknown schema versions and missing fingerprints.
+- The original `mobileclip-s2` teaching fingerprint is accepted after independent comparison of 32 images and eight texts against the original encoder recipe. It remains unchanged on import/export. Other foreign fingerprints are excluded from training. Encoder compatibility does not verify media identity: filename-only restores discard stored vectors and reviewed identities, preserve imported text, and require fresh indexing.
+- Removing an indexed item does not delete the user's original media. Shared/imported copies owned by this app can be removed with their entries.
+
+## Optional cloud assistance
+
+Cloud assistance, automatic escalation and media/transcript consent are **off by default**. Configure them in Settings only if wanted. There are separate adapters for hosted Typesafe System One/JEV, Cloudflare Clef/Clef-flash, and an HTTPS self-hosted System One-compatible service. JEV is a decision model here, not JEPA and not a resident phone model. Optional captions use a separately configured OpenAI-compatible HTTPS endpoint.
+
+Text-state consent can disclose OCR or caption content; it is not anonymous. Visual consent allows at most two stripped, resized frames. Transcript consent is separate. Filenames, local paths and embeddings are not ordinary request fields. Enabling automatic escalation applies to new uncertain items; including the existing backlog requires a separate opt-in.
+
+Provider probabilities describe a provider's choice distribution, **not measured identification accuracy**. Cloud suggestions retain source, score domain, review status and provenance. They do not become manual labels or training examples merely because the provider was confident. Explicit acceptance creates a human-reviewed teaching while keeping its cloud origin. Rejection persists a veto and removes the corresponding weak prototype.
+
+Saved cloud observations can improve offline retrieval without retraining a large model: a bounded local vector memory supplies explicitly unreviewed `cloud_hint` candidates for similar content. Captions are not copied onto similar images with different text. Disabling cloud stops future requests but keeps saved evidence for offline use. **Forget cloud** removes unreviewed observations and weak memory while retaining human-confirmed teachings and rejections.
+
+Credentials are encrypted using Android Keystore. Cloud configuration, consent, credentials, request bookkeeping and caches are excluded from OS backup/transfer. No ambient development-agent credentials are used.
+
+## Resource and network limits
+
+- One inference family at a time; primary image/text encoders share a family. Heavy optional captions, speech and DINO enrichment are disabled by default.
+- Core MobileCLIP-S2 plus English CRAFT/CRNN OCR artifacts need about 420 MiB. All non-Gemma artifacts, including DINO, Whisper tiny.en and FastSAM, total about 1.0 GiB. Gemma's Vulkan weights alone require about 4.1 GiB and suitable GPU support; that download is currently deferred by user choice.
+- Indexing uses batches of 32 and seven-minute coroutine sessions, preserving pending work on cancellation. A single native kernel cannot be interrupted midway; this is not a hard process-kill deadline. Heavy enrichment pauses for severe thermal state or low battery.
+- Thumbnail disk cache: 128 MiB. Search uses bounded vector batches/cache and bounded result selection rather than an all-library sort in memory.
+- Weak cloud memory: at most 2,048 vectors of 512 floats, eight per label, 30-day expiry, and an 8 MiB serialized ceiling. Rejections are retained conservatively; saturation disables weak-memory growth rather than resurrecting discarded claims.
+- One cloud request in flight. Complete serialized requests are limited to 1 MiB; responses to 64 KiB. Defaults: 20 requests, 10 MiB and an estimated $0.05 per day, normally on unmetered networks.
+- Consent is rechecked before sending and before persistence. Revocation cancels in-flight work and rejects late results. Cancellation cannot recall bytes already sent. No automatic retries, redirects or implicit provider fallback. Uncertain delivery consumes its conservative reservation.
+- The local cost ledger is an estimate. Configure a provider-account spending cap for a hard monetary limit.
+
+## Verification record
+
+Observed on a Pixel 9 Pro running Android 17, with synthetic media and the separate native package:
+
+- Actual Compose library, search, review and editor surfaces are visible. Editor controls respect system insets, and the editor is modal: blank-canvas touches cannot activate the library or Settings underneath. Image text editing, undo/redo, keeping/restoring a draft and saving a PNG passed through the UI.
+- Gesture transactions read live editor history rather than captured snapshots. Actual UI checks verified two committed strokes, one-stroke undo/redo, repeated text movement, rotated crop gestures, manual OCR-region movement/resizing, pixelation and text replacement. Saved PNG pixels retain the strokes and moved text. A cold restart preserved both the original video keyframe and the new keyframe at `1,466,666` microseconds; repeated dragging did not reset either.
+- The restored video draft was exported through the normal app UI. The saved three-second 320×240 H.264/AAC file visibly interpolates the text position up to the inserted keyframe and holds that position afterward. The temporary test companion and its private export-copy cache were removed after verification.
+- Independent encoder comparison passed 32 images and eight texts in separate processes, avoiding duplicate static OpenMP runtimes. Image cosine similarity was at least `0.9999999999999982`; all text comparisons exceeded `0.999`. Native vector norm error was below `4.34e-7`.
+- Real CRAFT/CRNN OCR read the complete generated text, Whisper transcribed the expected sentence, and DINO returned finite normalized 768-dimensional vectors. FastSAM uses model-metadata input dimensions and the original confidence/IoU thresholds; the foreground check and UI cutout export passed. The sample mask still has visible imperfections; this is runtime proof, not an accuracy benchmark. Gemma was not downloaded or run.
+- Video export retained audio and selected ranges, rendered ten pixelation layers with correct ordering, and moved text/cover overlays according to retained source time. Decoding the approximately two-second 320×240 H.264/AAC output confirmed the synthetic source's 660 Hz tone and RMS level in both retained ranges. A separate normal-APK UI export saved a four-second H.264/AAC composition with a one-second title card and text overlay; the storage boundary now converts rendered files to file URIs consistently for images and videos.
+- Private import, hash deduplication, teaching/ZIP round-trips, pending-video collection export and provisional filename-only reindexing passed. After the user manually granted the synthetic folder, actual SAF migration and native backup restored verified vectors and metadata, preserved all legacy files byte-for-byte, and fell back to a complete generation when a newer manifest was incomplete. Metadata enumeration includes JSON, and the reader verifies both streamed SHA-256 chunk stamps and older length/FNV stamps.
+- Real native embeddings plus verified local TLS exercised cloud-off, opt-in, one request, offline hints after disabling cloud, source-preserving confirmation, rejection and forgetting. A separate process verified persisted review/rejection state and cloud-off/no-outbound behavior. This uses a synthetic local provider, not a live paid vendor call.
+
+All 123 repository host checks pass in the latest normal build, including readable clipboard media after source deletion, preservation of the previous clip on copy failure, bounded expired-draft recovery, durable indexing failures, and active-item identity/cancellation transitions. The earlier extended run passed 127 checks including seven temporary TLS/golden-vector probes. Cloud-provenance, whole-library fuzzy-search, missing-sidecar-fingerprint, filename-only identity, clipboard-provider and expired-draft regressions were reproduced before their fixes. A separate JVM API smoke confirms preserved imported text, pending indexing and no fingerprint promotion. The native classifier agrees with the original algorithm on all 595 repository golden vectors, including labels and recognition tiers; maximum score delta was approximately `5.17e-6`. Algorithm and encoder comparisons do not establish audited real-world identification accuracy. The existing corpus-tag scorer accepts word overlap, not exact identity; collection evaluation needs independently reviewed identity/relevance labels, held-out examples and separate precision, coverage and retrieval results.
+
+The normal debug APK was installed and exercised on the authorized phone without the temporary reference bridge or JNI library. APK signature verification passes. All seven ARM64 libraries and their ZIP entries satisfy 16 KiB alignment; the phone uses 4 KiB pages, so this is not a 16 KiB-device runtime pass. DEX and native-library inspection found no reference/test fixtures, React/Expo runtime, Google Play services classes or this build workstation's home-directory path. Upstream binaries can contain their own build paths.
+
+The clipboard and queue-status update was installed on the dedicated Pixel 5a (Android 14). App-only physical checks passed: original image pixels remained readable after deleting the source; edited image and video copies retained their overlays; WebM became H.264/AAC MP4; copying did not add library rows; and keeping/restoring a draft preserved every rendered image pixel. The actual grid shows static Queued labels while indexing is idle, and the debug app's keep-awake window flag passed a runtime assertion. Cross-app paste remains a user-operated check. The temporary companion and its proof cache were removed; the shipping APK contains neither its smoke classes nor its synthetic video asset. Verified APK SHA-256: `1c647559a58915414e87261e3aad7431f232ec41be83f79b9045187a2f9f4a30`.
+
+Still open: complete end-to-end parity acceptance beyond the exercised workflows, including remaining editor interactions and external share/picker workflows. Device interaction is restricted to this app and authorized synthetic app data; the user performs permission prompts, file picking and other external-screen actions. Gemma runtime verification is deferred, not reported as passing. Live cloud-provider acceptance requires user-supplied credentials and explicit authorization. Cloud, automatic escalation, all upload consents, background indexing and optional caption/speech/DINO enrichment remained off after a cold restart of the normal APK.
+
+Temporary reference JNI libraries, local TLS fixtures and instrumentation assets used during development are not shipping dependencies and must not be included in the normal build.
