@@ -320,29 +320,25 @@ internal class LocalKnowledge(
         // CRITICAL: Explicit negative veto eliminates vetoed labels across ALL branches
         val vetoFiltered = durableMerged.filter { !vetoedLabels.contains(TagMerge.normalizeTagLabel(it.label)) }
 
-        // Build world knowledge extra terms from associations
-        val extraTermsSet = LinkedHashSet<String>()
-        for (t in vetoFiltered) {
+        return Pair(vetoFiltered, extraTermsFor(vetoFiltered, snapshot.assocMap))
+    }
+
+    // Search terms for a final tag list: each label, its association words and context terms.
+    private fun extraTermsFor(tags: List<Tag>, assocMap: Map<String, List<String>>): String {
+        val terms = LinkedHashSet<String>()
+        for (t in tags) {
             val norm = TagMerge.normalizeTagLabel(t.label)
-            extraTermsSet.add(norm)
-            val assocs = snapshot.assocMap[norm]
-            if (assocs != null) {
-                for (a in assocs) {
-                    for (w in a.lowercase().split(Regex("\\s+"))) {
-                        if (w.isNotBlank()) extraTermsSet.add(w)
-                    }
+            terms.add(norm)
+            for (a in assocMap[norm].orEmpty()) {
+                for (w in a.lowercase().split(Regex("\\s+"))) {
+                    if (w.isNotBlank()) terms.add(w)
                 }
             }
         }
-
-        val tagNames = vetoFiltered.map { it.label }
-        val contextTerms = SearchText.classificationContextTerms(tags = tagNames)
-        for (w in contextTerms.split(' ')) {
-            if (w.isNotBlank()) extraTermsSet.add(w)
+        for (w in SearchText.classificationContextTerms(tags = tags.map { it.label }).split(' ')) {
+            if (w.isNotBlank()) terms.add(w)
         }
-
-        val extraTerms = extraTermsSet.joinToString(" ")
-        return Pair(vetoFiltered, extraTerms)
+        return terms.joinToString(" ")
     }
 
     suspend fun candidateLabels(image: FloatArray, limit: Int = 12): List<Tag> = withContext(Dispatchers.Default) {
@@ -436,25 +432,21 @@ internal class LocalKnowledge(
 
             val vectors = store.vectors(meme.id)
             if (vectors != null && vectors.image.isNotEmpty() && vectors.model == ModelRegistry.PRIMARY_MODEL_FINGERPRINT) {
-                val (freshTags, freshExtra) = classifyInternal(
+                val (freshTags, _) = classifyInternal(
                     image = vectors.image,
                     ocr = meme.ocr,
                     snapshot = snapshot,
                 )
 
-                // Preserve user-owned tags (manual, exemplar, propagated) and vision tags
-                val keptTags = meme.tags.filter {
-                    it.source == "manual" || it.source == "exemplar" || it.source == "propagated" || it.source == "vision"
-                }
-
-                // Explicit negative teachings also veto kept tags if they conflict
+                // Machine tags classification can't regenerate stay unless a nearby "not X" vetoes
+                // them; human-confirmed tags always stay. Recomputed sources are replaced outright.
                 val vetoed = findVetoedLabelsFromMap(vectors.image, snapshot.negExemplarsByLabel)
-                val filteredKept = keptTags.filter { !vetoed.contains(TagMerge.normalizeTagLabel(it.label)) }
-
-                val merged = TagMerge.mergeDurableTags(freshTags + filteredKept, capAuto = 6)
-                val combinedExtra = TagMerge.termsWithLabel(freshExtra, meme.extraTerms)
-
-                store.updateTags(meme.id, merged, combinedExtra)
+                val kept = meme.tags.filter {
+                    TagMerge.survivesReclassification(it) &&
+                        (TagMerge.isHumanTag(it) || !vetoed.contains(TagMerge.normalizeTagLabel(it.label)))
+                }
+                val merged = TagMerge.mergeDurableTags(freshTags + kept, capAuto = 6)
+                store.updateTags(meme.id, merged, extraTermsFor(merged, snapshot.assocMap))
                 expectedRevision++
             }
             done++
