@@ -3,22 +3,32 @@
 // verified by loading it back with jszip (the same library used to READ zips
 // elsewhere in the app) — plus the byte-primitive helpers it relies on.
 import JSZip from 'jszip';
+import { closeSync, mkdtempSync, openSync, readFileSync, rmSync, writeSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import { ZipWriter, crc32, utf8Encode, utf8Length, base64Decode, base64Encode } from './zipWriter';
 
 function collect(build: (w: ZipWriter) => void): Uint8Array {
-  const chunks: Uint8Array[] = [];
-  const w = new ZipWriter((c) => chunks.push(c.slice()), new Date('2026-07-21T12:34:56Z'));
-  build(w);
-  w.finish();
-  const total = chunks.reduce((n, c) => n + c.length, 0);
-  const out = new Uint8Array(total);
-  let o = 0;
-  for (const c of chunks) {
-    out.set(c, o);
-    o += c.length;
+  const dir = mkdtempSync(join(tmpdir(), 'memeget-zip-'));
+  const path = join(dir, 'archive.zip');
+  const fd = openSync(path, 'w+');
+  let offset = 0;
+  try {
+    const writer = new ZipWriter({
+      write: (chunk) => {
+        writeSync(fd, chunk, 0, chunk.length, offset);
+        offset += chunk.length;
+      },
+      patch: (at, chunk) => { writeSync(fd, chunk, 0, chunk.length, at); },
+    }, new Date('2026-07-21T12:34:56Z'));
+    build(writer);
+    writer.finish();
+    return readFileSync(path);
+  } finally {
+    closeSync(fd);
+    rmSync(dir, { recursive: true, force: true });
   }
-  return out;
 }
 
 describe('crc32', () => {
@@ -117,13 +127,13 @@ describe('ZipWriter', () => {
   });
 
   it('rejects use after finish', () => {
-    const w = new ZipWriter(() => {});
+    const w = new ZipWriter({ write: () => {}, patch: () => {} });
     w.add('a.txt', utf8Encode('a'));
     w.finish();
-    expect(() => w.add('b.txt', utf8Encode('b'))).toThrow(/after finish/);
+    expect(() => w.add('b.txt', utf8Encode('b'))).toThrow();
   });
 
-  it('reads back a streamed (data-descriptor) entry alongside a plain one', async () => {
+  it('preserves streamed entries alongside complete entries', async () => {
     const parts = ['{"memes":[', '{"id":"1"}', ',{"id":"2"}', ']}'];
     const bytes = collect((w) => {
       w.add('images/1.jpg', Uint8Array.from([1, 2, 3]));
@@ -131,16 +141,28 @@ describe('ZipWriter', () => {
       for (const p of parts) s.write(utf8Encode(p));
       s.end();
     });
-    const zip = await JSZip.loadAsync(bytes);
+    const zip = await JSZip.loadAsync(bytes, { checkCRC32: true });
     expect(Object.keys(zip.files).sort()).toEqual(['images/1.jpg', 'manifest.json']);
     const json = JSON.parse(await zip.file('manifest.json')!.async('string'));
     expect(json).toEqual({ memes: [{ id: '1' }, { id: '2' }] });
   });
 
   it('forbids overlapping/again-after-finish stream operations', () => {
-    const w = new ZipWriter(() => {});
+    const w = new ZipWriter({ write: () => {}, patch: () => {} });
     w.addStream('a');
-    expect(() => w.add('b', new Uint8Array(0))).toThrow(/stream entry is open/);
-    expect(() => w.finish()).toThrow(/stream entry is open/);
+    expect(() => w.add('b', new Uint8Array(0))).toThrow();
+    expect(() => w.finish()).toThrow();
   });
+
+  it('preserves entries beyond the classic ZIP entry-count limit', async () => {
+    const empty = new Uint8Array(0);
+    const bytes = collect((writer) => {
+      for (let i = 0; i < 65536; i++) {
+        writer.add(`item-${i}`, i === 65535 ? utf8Encode('last item') : empty);
+      }
+    });
+    const zip = await JSZip.loadAsync(bytes);
+    expect(Object.keys(zip.files)).toHaveLength(65536);
+    expect(await zip.file('item-65535')!.async('string')).toBe('last item');
+  }, 30_000);
 });

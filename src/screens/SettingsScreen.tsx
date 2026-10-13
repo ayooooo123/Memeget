@@ -3,9 +3,8 @@ import { Alert, Linking, Pressable, ScrollView, StyleSheet, Switch, Text, View }
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
 import Constants from 'expo-constants';
-import { File, FileMode } from 'expo-file-system';
+import { File, FileMode, type FileHandle } from 'expo-file-system';
 import * as Sharing from 'expo-sharing';
-import { manipulateAsync, SaveFormat } from 'expo-image-manipulator';
 import { saveToDownloads } from '../../modules/memeget-bg';
 
 import { showToast } from '../components/Toast';
@@ -64,6 +63,7 @@ import { shouldShowTaughtTags } from '../settingsTagCore';
 import { buildPack, parsePack, serializePack } from '../teachingPack';
 import { writeCollectionZip } from '../collectionExport';
 import { restoreAllSidecars, syncAllSidecars } from '../sidecarSync';
+import { stageSourceToCache } from '../saf';
 import { colors, radius, space, TABBAR_CLEARANCE } from '../theme';
 import type { LinkedFolder } from '../types';
 
@@ -460,17 +460,16 @@ export function SettingsScreen({
     }
   }, [transferBusy]);
 
-  // Export the whole collection as a ZIP: manifest.json (tags + caption + OCR +
-  // embeddings per meme) plus images/<id>.jpg. One artifact carrying everything
-  // needed to re-run tagging, score coverage, and rebuild the eval set.
+  // Preserve original media and stored analysis; never substitute video posters.
   const onExportCollection = useCallback(async () => {
     if (transferBusy) return;
     setTransferBusy(true);
     const release = acquireKeepAlive('Exporting collection');
+    let outputPath: string | undefined;
     try {
       const records = await getCollectionRecords();
       if (records.length === 0) {
-        showToast('Nothing indexed yet', 'info');
+        showToast('Your collection is empty', 'info');
         return;
       }
       setExportProgress({ done: 0, total: records.length });
@@ -483,51 +482,64 @@ export function SettingsScreen({
           setExportProgress({ done, total });
         }
       };
-      // Images: downscale to ~640px via the manipulator (handles content:// SAF
-      // uris); videos fall back to their stored poster. A failure just drops
-      // that one image — metadata is always kept.
-      const loadImage = async (r: CollectionRecord): Promise<string | null> => {
-        if (r.kind === 'image') {
+      const readOriginal = async function* (record: CollectionRecord): AsyncGenerator<Uint8Array> {
+        let input: FileHandle | undefined;
+        let staged: string | undefined;
+        try {
+          if (record.uri.startsWith('content://')) {
+            // Expo's Android content handle does not retain its ParcelFileDescriptor.
+            // Stage natively so GC cannot close a source midway through the ZIP.
+            staged = await stageSourceToCache(record.uri);
+          }
+          input = new File(staged ?? record.uri).open(FileMode.ReadOnly);
+          const expectedBytes = input.size;
+          let bytes = 0;
+          for (;;) {
+            const chunk = input.readBytes(256 * 1024);
+            if (chunk.length === 0) break;
+            bytes += chunk.length;
+            if (input.offset !== bytes) throw new Error('Original media could not be read completely');
+            yield chunk;
+            await new Promise<void>((resolve) => setTimeout(resolve, 0));
+          }
+          if (expectedBytes === null || bytes !== expectedBytes || input.size !== expectedBytes) {
+            throw new Error('Original media changed or became unreadable during export');
+          }
+        } finally {
           try {
-            const out = await manipulateAsync(r.uri, [{ resize: { width: 640 } }], {
-              compress: 0.8,
-              format: SaveFormat.JPEG,
-              base64: true,
-            });
-            if (out.base64) return out.base64;
-          } catch {
-            // fall through to poster
+            input?.close();
+          } finally {
+            if (staged) await FileSystem.deleteAsync(staged, { idempotent: true });
           }
         }
-        if (r.thumbUri) {
-          try {
-            return await FileSystem.readAsStringAsync(r.thumbUri, {
-              encoding: FileSystem.EncodingType.Base64,
-            });
-          } catch {
-            return null;
-          }
-        }
-        return null;
       };
       const stamp = new Date().toISOString().slice(0, 10);
-      const path = `${FileSystem.cacheDirectory}memeget-collection-${stamp}.zip`;
-      // Stream the archive straight to disk in chunks. Building the whole zip as
-      // one base64 string in memory (then decoding it again on write) OOM'd the
-      // JS runtime on large libraries — the export would churn ~30s, then die
-      // with no file and no error. A file handle + chunked writes keeps peak
-      // memory flat.
+      const path = `${FileSystem.cacheDirectory}memeget-collection-${Date.now()}.zip`;
+      outputPath = path;
       const file = new File(path);
-      file.create({ overwrite: true });
+      file.create();
       const handle = file.open(FileMode.WriteOnly);
       try {
-        await writeCollectionZip(records, loadImage, Date.now(), (chunk) => handle.writeBytes(chunk), onProgress);
+        await writeCollectionZip(records, readOriginal, Date.now(), {
+          write: (chunk) => handle.writeBytes(chunk),
+          patch: (offset, chunk) => {
+            const end = handle.offset;
+            if (end === null) throw new Error('Export output is no longer open');
+            try {
+              handle.offset = offset;
+              handle.writeBytes(chunk);
+            } finally {
+              handle.offset = end;
+            }
+          },
+        }, onProgress);
       } finally {
         handle.close();
       }
       await deliverExport(path, `memeget-collection-${stamp}.zip`, 'application/zip');
       success();
     } catch (e) {
+      if (outputPath) await FileSystem.deleteAsync(outputPath, { idempotent: true }).catch(() => {});
       showToast(`Export failed: ${String(e)}`, 'error');
     } finally {
       release();
@@ -1387,8 +1399,9 @@ export function SettingsScreen({
 
         <View style={styles.divider} />
         <Text style={styles.note}>
-          Export the whole collection as a <Text style={styles.noteStrong}>zip</Text> — every meme's
-          image plus its tags, caption, and embeddings in one file to share.
+          Export every saved meme's original image or video (including audio), tags and scores,
+          captions, OCR, transcripts, and embeddings in one <Text style={styles.noteStrong}>zip</Text>.
+          Originals are not resized or replaced with posters. Missing originals stop the export.
         </Text>
         {exportProgress ? (
           <View style={{ gap: 8 }}>

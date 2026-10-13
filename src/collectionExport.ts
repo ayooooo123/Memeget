@@ -1,31 +1,17 @@
-// Build a shareable ZIP of the whole meme collection: a manifest.json (per-meme
-// tags, caption, OCR, and embeddings) plus images/<id>.jpg. One artifact that
-// carries everything — the images to re-run tagging on, the tags to score
-// coverage, and the embeddings for the eval golden set — so it's a single file
-// to hand off instead of a tag dump + a separate image zip.
-//
-// buildManifest is pure (unit-tested); writeCollectionZip streams the archive to
-// an injected chunk sink (via the dependency-free ZipWriter) so the native/IO
-// bits stay out of the testable core and only one entry is resident at a time.
+// Original-media collection archive. Media bytes are copied without conversion;
+// metadata is serialized one record at a time. Only the DB snapshot, ZIP directory
+// and one input chunk need to remain resident.
 import { PRIMARY_EMBEDDING_MODEL } from './embeddingModels';
 import type { CollectionRecord } from './db';
-import { ZipWriter, base64Decode, utf8Encode } from './zipWriter';
+import { ZipWriter, utf8Encode, type ZipSink } from './zipWriter';
 
 export const COLLECTION_FORMAT = 'memeget-collection';
-export const COLLECTION_VERSION = 1;
+export const COLLECTION_VERSION = 2;
 
-export interface ManifestMeme {
+export interface ManifestMeme extends Omit<CollectionRecord, 'id' | 'uri' | 'ocrText'> {
   id: string;
-  file: string | null; // path within the zip, or null if no image was attached
-  name: string;
-  kind: string;
-  caption: string;
+  file: string;
   ocr: string;
-  transcript: string;
-  tags: { label: string; category: string; source?: string }[];
-  extraTerms: string;
-  embedding: number[] | null;
-  captionEmbedding: number[] | null;
 }
 
 export interface CollectionManifest {
@@ -38,81 +24,49 @@ export interface CollectionManifest {
   memes: ManifestMeme[];
 }
 
-// Map one record to its manifest entry. Shared by buildManifest (whole-object,
-// unit-tested) and the streaming export (one meme at a time) so both emit the
-// identical per-meme shape consumers depend on.
-function toManifestMeme(r: CollectionRecord, hasImage: boolean): ManifestMeme {
-  return {
-    id: String(r.id),
-    file: hasImage ? `images/${r.id}.jpg` : null,
-    name: r.name,
-    kind: r.kind,
-    caption: r.caption,
-    ocr: r.ocrText,
-    transcript: r.transcript,
-    tags: r.tags.map((t) => ({ label: t.label, category: t.category, source: t.source })),
-    extraTerms: r.extraTerms,
-    embedding: r.embedding,
-    captionEmbedding: r.captionEmbedding,
-  };
+function mediaPath(record: CollectionRecord): string {
+  const name = record.name.replace(/[/\\\u0000]/g, '_').replace(/\.\./g, '_');
+  return `media/${record.id}_${name || `${record.kind}.bin`}`;
 }
 
-export function buildManifest(
-  records: CollectionRecord[],
-  hasImage: (id: number) => boolean,
-  exportedAt: number
-): CollectionManifest {
-  return {
-    format: COLLECTION_FORMAT,
-    version: COLLECTION_VERSION,
-    model: PRIMARY_EMBEDDING_MODEL.id,
-    dim: PRIMARY_EMBEDDING_MODEL.dim,
-    exportedAt,
-    count: records.length,
-    memes: records.map((r) => toManifestMeme(r, hasImage(r.id))),
-  };
+function toManifestMeme(record: CollectionRecord, file: string): ManifestMeme {
+  const { id, uri: _uri, ocrText, ...metadata } = record;
+  return { ...metadata, id: String(id), file, ocr: ocrText };
 }
 
-// Assemble the zip and stream it out in chunks via `onChunk` — the caller writes
-// each chunk to disk as it arrives. Nothing is ever fully buffered: each image
-// is decoded, written, and released before the next, and the manifest is
-// serialized one meme at a time into a streamed entry. So the whole export stays
-// flat in memory regardless of library size — a 2000+ item collection no longer
-// materializes every image (plus a full base64 copy) and a ~tens-of-MB manifest
-// string at once, which OOM'd the JS runtime mid-export and left no file behind.
-// `loadImageBase64` returns a base64 JPEG for a meme, or null to skip its image
-// (metadata is always kept). A throw is treated as null so one bad image never
-// fails the whole export. `onChunk` is synchronous (a file-handle write), so
-// there's no stream backpressure to manage. Images stream first; the manifest —
-// which records which images made it in — is written last.
+// Readers yield bounded original-byte chunks and close their handles in finally.
+// Any unreadable/empty original or output failure aborts the whole export; the
+// caller must close/delete the partial output rather than publish it.
 export async function writeCollectionZip(
   records: CollectionRecord[],
-  loadImageBase64: (r: CollectionRecord) => Promise<string | null>,
+  readOriginal: (record: CollectionRecord) => AsyncIterable<Uint8Array>,
   exportedAt: number,
-  onChunk: (chunk: Uint8Array) => void,
+  output: ZipSink,
   onProgress?: (done: number, total: number) => void
 ): Promise<void> {
-  const zip = new ZipWriter(onChunk, new Date(exportedAt));
-  const withImage = new Set<number>();
-  let done = 0;
-  for (const r of records) {
-    let b64: string | null = null;
+  const zip = new ZipWriter(output, new Date(exportedAt));
+  const files = records.map(mediaPath);
+  for (let i = 0; i < records.length; i++) {
+    const record = records[i];
     try {
-      b64 = await loadImageBase64(r);
-    } catch {
-      b64 = null;
+      const entry = zip.addStream(files[i]);
+      let bytes = 0;
+      for await (const chunk of readOriginal(record)) {
+        if (chunk.length === 0) continue;
+        entry.write(chunk);
+        bytes += chunk.length;
+      }
+      if (bytes === 0) throw new Error('Original media is empty or unreadable');
+      entry.end();
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      throw new Error(`Cannot export "${record.name}" (item ${record.id}): ${reason}. No partial collection was shared.`);
     }
-    if (b64) {
-      zip.add(`images/${r.id}.jpg`, base64Decode(b64));
-      withImage.add(r.id);
-    }
-    onProgress?.(++done, records.length);
+    onProgress?.(i + 1, records.length);
   }
 
-  // Stream manifest.json meme-by-meme. The envelope is built from an empty-memes
-  // object and split just before the closing `]}` so its top-level shape/order
-  // stays in lockstep with buildManifest; each meme is then appended as its own
-  // JSON fragment.
+  // The manifest keeps complete stored tags (including score/source), analysis
+  // state, timestamps and vector provenance, but never device-local source URIs.
   const envelope = JSON.stringify({
     format: COLLECTION_FORMAT,
     version: COLLECTION_VERSION,
@@ -126,7 +80,7 @@ export async function writeCollectionZip(
   manifest.write(utf8Encode(envelope.slice(0, -2))); // drops trailing "]}" -> ends at "…["
   for (let i = 0; i < records.length; i++) {
     const r = records[i];
-    const fragment = (i > 0 ? ',' : '') + JSON.stringify(toManifestMeme(r, withImage.has(r.id)));
+    const fragment = (i > 0 ? ',' : '') + JSON.stringify(toManifestMeme(r, files[i]));
     manifest.write(utf8Encode(fragment));
   }
   manifest.write(utf8Encode(']}'));

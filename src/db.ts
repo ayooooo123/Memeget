@@ -1408,13 +1408,11 @@ export async function getLibraryTagLabels(limit = 40): Promise<string[]> {
     .map(([label]) => label);
 }
 
-// Full per-meme records for a shareable collection export: metadata + tags +
-// embeddings, plus the uris the caller needs to attach the images. Whole
-// indexed library, so it's one artifact instead of juggling tag + image dumps.
+// Snapshot all saved items, including unfinished analysis, for collection export.
+// Original URIs are used only for reading media; they are not put in the archive.
 export interface CollectionRecord {
   id: number;
   uri: string;
-  thumbUri: string;
   name: string;
   kind: MediaKind;
   caption: string;
@@ -1424,32 +1422,28 @@ export interface CollectionRecord {
   extraTerms: string;
   embedding: number[] | null;
   captionEmbedding: number[] | null;
+  visualEmbedding: number[] | null;
+  visualModel: string;
+  embeddingModel: string | null;
+  pending: boolean;
+  visionState: string;
+  audioState: string;
+  indexedAt: number;
+  modifiedAt: number;
 }
 
 export async function getCollectionRecords(): Promise<CollectionRecord[]> {
   const db = await getDb();
-  const rows = await db.getAllAsync<{
-    id: number;
-    uri: string;
-    thumb_uri: string;
-    name: string;
-    kind: MediaKind;
-    caption: string;
-    ocr_text: string;
-    transcript: string;
-    tags: string;
-    extra_terms: string;
-    embedding: Uint8Array;
-    caption_embedding: Uint8Array | null;
-  }>(
-    `SELECT id, uri, thumb_uri, name, kind, caption, ocr_text, transcript, tags,
-            extra_terms, embedding, caption_embedding
-     FROM memes WHERE pending = 0 ORDER BY id`
+  const embeddingModel = await getSetting(INDEX_MODEL_KEY);
+  const rows = await db.getAllAsync<MemeRow & { kind: MediaKind }>(
+    `SELECT id, uri, name, kind, caption, ocr_text, transcript, tags, extra_terms,
+            embedding, caption_embedding, visual_embedding, visual_model,
+            pending, vision_state, audio_state, indexed_at, modified_at
+     FROM memes ORDER BY id`
   );
   return rows.map((r) => ({
     id: r.id,
     uri: r.uri,
-    thumbUri: r.thumb_uri ?? '',
     name: r.name,
     kind: r.kind,
     caption: r.caption ?? '',
@@ -1462,6 +1456,15 @@ export async function getCollectionRecords(): Promise<CollectionRecord[]> {
       r.caption_embedding && r.caption_embedding.byteLength
         ? Array.from(blobToVec(r.caption_embedding))
         : null,
+    visualEmbedding:
+      r.visual_embedding?.byteLength ? Array.from(blobToVec(r.visual_embedding)) : null,
+    visualModel: r.visual_model ?? '',
+    embeddingModel,
+    pending: !!r.pending,
+    visionState: r.vision_state,
+    audioState: r.audio_state,
+    indexedAt: r.indexed_at,
+    modifiedAt: r.modified_at,
   }));
 }
 
