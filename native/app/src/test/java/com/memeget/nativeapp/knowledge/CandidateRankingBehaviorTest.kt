@@ -71,6 +71,7 @@ class CandidateRankingBehaviorTest {
             val labels = m.tags.filter { it.confirmation == "confirmed" }
             if (labels.isEmpty() && m.rejectedLabels.isEmpty()) null else HumanLabeled(m.id, image, labels, m.rejectedLabels)
         }
+        override suspend fun imageVectors(): Map<Long, FloatArray> = vectors.mapValues { it.value.image }
 
         /** Like the real store, a new teaching changes the label revision. */
         fun addTeaching(e: Exemplar) {

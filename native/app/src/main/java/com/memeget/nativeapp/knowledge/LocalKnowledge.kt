@@ -26,6 +26,8 @@ internal class LocalKnowledge(
 ) {
     companion object {
         val IDENTITY_CANDIDATE_CATEGORIES = setOf("format", "character", "person", "object", "topic")
+        /** Marks a tag that came from people's labels on a look-alike meme. */
+        const val LOOKALIKE_SCORE_DOMAIN = "lookalike-cosine"
     }
 
     private var explicitContext: Context? = null
@@ -205,7 +207,7 @@ internal class LocalKnowledge(
         category = v.category,
         score = v.cosine,
         source = "exemplar",
-        scoreDomain = "lookalike-cosine",
+        scoreDomain = LOOKALIKE_SCORE_DOMAIN,
         confirmation = "unreviewed",
         provenance = "learned",
     )
@@ -326,21 +328,18 @@ internal class LocalKnowledge(
     /**
      * Memes to ask about, in the order that spreads labels furthest: repeatedly the meme with the
      * most unlabeled look-alikes (cosine >= [LookalikeVote.MIN_COS]) that no earlier pick covers.
-     * Memes a person labeled, and memes that already get a label on their own, are left out.
+     * Memes a person labeled, and memes the last classification already gave one of people's
+     * labels, are left out.
      */
     suspend fun labelQueue(limit: Int = 60): List<QueueItem> = withContext(Dispatchers.Default) {
-        val vote = ensureVote()
         val settled = store.humanLabels().mapTo(HashSet()) { it.memeId }
+        val vectors = store.imageVectors()
         val memes = ArrayList<Meme>()
         val images = ArrayList<FloatArray>()
         store.allMemes().collect { meme ->
             currentCoroutineContext().ensureActive()
-            if (meme.id in settled) return@collect
-            val image = store.vectors(meme.id)
-                ?.takeIf { it.model == ModelRegistry.PRIMARY_MODEL_FINGERPRINT && it.image.size == 512 }?.image
-                ?: return@collect
-            if (LookalikeVote.samePicture(vote.index, image, meme.id).isNotEmpty()) return@collect
-            if (LookalikeVote.winner(vote.index, image, meme.id)?.let { it.label in vote.reliable } == true) return@collect
+            if (meme.id in settled || meme.tags.any { it.scoreDomain == LOOKALIKE_SCORE_DOMAIN }) return@collect
+            val image = vectors[meme.id] ?: return@collect
             memes += meme
             images += image
         }
