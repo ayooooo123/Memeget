@@ -8,6 +8,7 @@ import android.graphics.Color
 import android.net.Uri
 import androidx.work.testing.WorkManagerTestInitHelper
 import com.memeget.nativeapp.inference.ModelRegistry
+import com.memeget.nativeapp.storage.SidecarFormat
 import expo.modules.memegetbg.SubjectCutoutResult
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -191,6 +192,44 @@ class CollectionImportTest {
         assertEquals(listOf("milady"), meme.tags.map { it.label })
         assertTrue(meme.analysisImported)
         assertEquals(axis(0).toList(), requireNotNull(store.vectors(id)).image.toList())
+    }
+
+    @Test fun importingFilesAlreadyInTheLibraryBeforeTheyAreIndexedAddsNoCopies() = runBlocking {
+        // Files a linked-folder scan found: in the library, not indexed yet, so without a hash.
+        val folder = temporary.newFolder("memes")
+        val frogBytes = png(17, Color.MAGENTA)
+        val frog = File(folder, "frog.png").apply { writeBytes(frogBytes) }
+        val cat = File(folder, "cat.png").apply { writeBytes(png(18, Color.BLACK)) }
+        val frogId = store.insertPending(Uri.fromFile(frog).toString(), "frog.png", "image", 1L, "")
+        val catId = store.insertPending(Uri.fromFile(cat).toString(), "cat.png", "image", 2L, "")
+        val zip = exportZip("collection.zip", listOf("media/7_frog.png" to frogBytes),
+            listOf(record("media/7_frog.png", "image", listOf(tag("pepe", "manual", 1.0)), embedding = axis(0))))
+
+        assertEquals(listOf(frogId), files.importUri(Uri.fromFile(zip), "application/zip"))
+        assertEquals(listOf(catId), files.importUri(Uri.fromFile(File(temporary.root, "shared.png").apply { writeBytes(cat.readBytes()) }), "image/png"))
+
+        assertEquals(2, store.countAll())
+        assertTrue(File(context.filesDir, "imports").listFiles().isNullOrEmpty())
+        val frogMeme = requireNotNull(store.meme(frogId))
+        assertEquals("confirmed", frogMeme.tags.single { it.label == "pepe" }.confirmation)
+        // The export's analysis applies to these exact bytes, so indexing can reuse it.
+        assertTrue(frogMeme.analysisImported)
+    }
+
+    @Test fun handTagsFromTheOriginalAppsFolderBackupStaySearchableAfterIndexing() = runBlocking {
+        val picture = File(temporary.newFolder("backed-up"), "frog.png").apply { writeBytes(png(16, Color.GREEN)) }
+        val chunk = JSONObject().put("format", SidecarFormat.LEGACY_SIDECAR_FORMAT).put("memes", JSONArray().put(
+            JSONObject().put("name", "frog.png").put("kind", "image").put("tags", JSONArray().put(tag("pepe", "manual", 1.0, "character")))))
+        SidecarFormat.parseLegacyChunk(chunk.toString()) { Uri.fromFile(picture).toString() to "image" }
+            .forEach { store.restore(it.meme, it.vectorRecord) }
+
+        indexPending()
+
+        val meme = requireNotNull(store.memeByUri(Uri.fromFile(picture).toString()))
+        assertFalse(meme.pending)
+        // A file name can't vouch for the bytes, so the tag stays unconfirmed, but indexing keeps it.
+        assertEquals("unreviewed", meme.tags.single { it.label == "pepe" }.confirmation)
+        assertEquals(listOf(meme.id), store.search("pepe", null).map { it.meme.id })
     }
 
     private fun relinkFixtures(): Pair<File, File> {
