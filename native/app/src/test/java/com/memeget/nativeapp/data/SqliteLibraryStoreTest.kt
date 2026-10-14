@@ -118,6 +118,21 @@ class SqliteLibraryStoreTest {
         assertEquals(listOf(id), store.search("desk", null).map { it.meme.id })
     }
 
+    @Test fun aRetagHoldingAnOlderCopyCannotRestoreALabelRejectedSince() = runBlocking {
+        val id = insert("stale-copy.png")
+        store.completeIndex(id, LocalAnalysis(axis(6), "", emptyList(), ""), model, "")
+        store.manualTag(listOf(id), "pepe", "character")
+        val retagCopy = requireNotNull(store.meme(id)) // what a running re-tag read earlier
+        store.teach(id, "pepe", "character", false)    // then the user says "not this"
+
+        store.updateTags(id, retagCopy.tags, retagCopy.extraTerms)
+
+        val after = requireNotNull(store.meme(id))
+        assertFalse(after.tags.any { it.label == "pepe" })
+        assertTrue(after.rejectedLabels.contains("pepe"))
+        assertTrue(store.search("pepe", null).isEmpty())
+    }
+
     @Test fun cloudCommitRejectsChangedVectorsEvenWhenOriginallyAbsent() = runBlocking {
         val id = insert("cloud.png")
         val old = cloudResult(id)

@@ -292,6 +292,23 @@ class CollectionImportTest {
         assertEquals("fresh text", meme.ocr)
     }
 
+    @Test fun aNewHashCommittedBeforeItsAnalysisDoesNotRevalidateTheImport() = runBlocking {
+        val zip = exportZip("collection.zip", listOf("media/known.png" to png(14, Color.YELLOW)),
+            listOf(record("media/known.png", "image", emptyList(), ocr = "imported text", embedding = axis(0))))
+        val id = files.importUri(Uri.fromFile(zip), "application/zip").single()
+        val file = File(requireNotNull(Uri.parse(requireNotNull(store.meme(id)).uri).path))
+        file.writeBytes(png(20, Color.MAGENTA))
+        // An earlier attempt committed the new bytes' hash, then stopped before committing their analysis.
+        val newHash = java.security.MessageDigest.getInstance("SHA-256").digest(file.readBytes()).joinToString("") { "%02x".format(it) }
+        store.setContentHash(id, newHash)
+
+        indexPending()
+
+        assertEquals("the changed bytes ran the image model", 1, engine.embedded.size)
+        assertEquals(axis(3).toList(), requireNotNull(store.vectors(id)).image.toList())
+        assertEquals("fresh text", requireNotNull(store.meme(id)).ocr)
+    }
+
     private class CountingEngine : InferenceEngine {
         val embedded = ArrayList<String>()
         val recognized = ArrayList<String>()
