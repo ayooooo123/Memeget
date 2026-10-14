@@ -6,8 +6,15 @@ import java.util.Locale
 internal data class VisionDescription(val caption: String, val text: String, val tags: List<Tag>)
 
 internal object VisionText {
-    // MiniCPM-V 4.7 1B sometimes writes "SUBJECTS, a, b" instead of "SUBJECTS: a, b".
+    // MiniCPM-V 4.7 1B sometimes writes "SUBJECTS, a, b" instead of "SUBJECTS: a, b",
     private val field = Regex("^\\s*(caption|subjects|text|tags)\\s*[:\\-,]\\s*(.*)$", RegexOption.IGNORE_CASE)
+    // puts several labeled fields on one line,
+    private val inlineField = Regex("(?<=\\S)\\s+(?=(?:CAPTION|TEXT|SUBJECTS|TAGS)\\s*:)")
+    // repeats a field name inside a list ("tag: hitler") or lists a placeholder ("none."),
+    private val itemPrefix = Regex("^(?:tags?|keywords?|subjects?|characters?|objects?)\\s*:\\s*", RegexOption.IGNORE_CASE)
+    private val emptyItem = Regex("^(?:none|n/a|nothing|tags?|keywords?|subjects?|characters?|objects?)$", RegexOption.IGNORE_CASE)
+    // and answers "TEXT: none" for an image without text.
+    private val noText = Regex("^(?:none|n/a|nothing|no text)\\.?$", RegexOption.IGNORE_CASE)
     private val hints = listOf("the feeling or mood", "the situation it is used to react to", "comma-separated", "lowercase keywords", "leave blank if none", "text visible in the image")
 
     private fun clean(value: String): String {
@@ -17,10 +24,15 @@ internal object VisionText {
         return text
     }
 
+    private fun item(value: String): String {
+        val text = clean(value).replace(itemPrefix, "").trimEnd('.').trim()
+        return if (emptyItem.matches(text)) "" else text
+    }
+
     fun parse(raw: String): VisionDescription {
         val fields = linkedMapOf<String, String>()
         var active: String? = null
-        raw.take(16_384).lineSequence().forEach { line ->
+        raw.take(16_384).replace(inlineField, "\n").lineSequence().forEach { line ->
             if (line.trimStart().startsWith("```")) return@forEach
             val match = field.matchEntire(line)
             if (match != null) {
@@ -47,11 +59,12 @@ internal object VisionText {
             }
         }
         val tags = sequenceOf("subjects", "tags").flatMap { key ->
-            fields[key].orEmpty().split(',', ';').asSequence().map(::clean).filter(String::isNotEmpty).map {
+            fields[key].orEmpty().split(',', ';').asSequence().map(::item).filter(String::isNotEmpty).map {
                 Tag(it.lowercase(Locale.ROOT).take(100), if (key == "subjects") "object" else "topic", source = "vision", scoreDomain = "local-generative-unscored")
             }
         }.distinctBy { it.label }.take(24).toList()
-        return VisionDescription(clean(fields["caption"].orEmpty()).take(1000), clean(fields["text"].orEmpty()).take(2000), tags)
+        val text = clean(fields["text"].orEmpty()).let { if (noText.matches(it)) "" else it }
+        return VisionDescription(clean(fields["caption"].orEmpty()).take(1000), text.take(2000), tags)
     }
 
     fun grounding(meme: Meme): String {
