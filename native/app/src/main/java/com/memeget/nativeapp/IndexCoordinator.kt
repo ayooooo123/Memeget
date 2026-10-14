@@ -31,6 +31,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.InternalCoroutinesApi
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.currentCoroutineContext
@@ -94,6 +95,26 @@ internal class IndexCoordinator(
             }
         }
     }
+
+    /**
+     * Looks for new files in every linked folder, then indexes, as the original app's Index does. Runs in this
+     * coordinator's scope, so leaving the screen that asked stops neither the scan nor the session. Returns how many
+     * new files the scan found; a folder that can't be read is logged and skipped.
+     */
+    suspend fun scanAndStart(): Int = scope.async {
+        var found = 0
+        for (folder in store.folders()) {
+            try {
+                found += files.scan(folder).size
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                store.addError(folder.name, "scan", failure.message ?: "Folder could not be read")
+            }
+        }
+        start()
+        found
+    }.await()
     fun cancel() {
         retagCovered.accumulateAndGet(retagRequests.get(), ::maxOf)
         activeJob?.cancel()

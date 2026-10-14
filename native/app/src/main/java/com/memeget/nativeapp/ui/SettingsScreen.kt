@@ -84,6 +84,7 @@ internal fun SettingsScreen(
     val backupAt by lastBackupAt.collectAsState()
     var errorLogs by remember { mutableStateOf<List<String>>(emptyList()) }
     var memeCount by remember { mutableStateOf(0) }
+    var heldBackups by remember { mutableStateOf(0) }
 
     // Persisted toggles
     var visionEnabled by remember { mutableStateOf(false) }
@@ -180,6 +181,7 @@ internal fun SettingsScreen(
             val f = store.folders()
             val errs = store.errors()
             val count = store.count()
+            val held = files.heldBackups()
 
             val vEnabled = store.setting("vision.enabled") == "1"
             val aEnabled = store.setting("audio.enabled") == "1"
@@ -194,6 +196,7 @@ internal fun SettingsScreen(
                 folders = f
                 errorLogs = errs
                 memeCount = count
+                heldBackups = held
 
                 visionEnabled = vEnabled
                 audioEnabled = aEnabled
@@ -525,7 +528,7 @@ internal fun SettingsScreen(
                         )
                     }
 
-                    BackupStatusLine(backupAt)
+                    BackupStatusLine(backupAt, heldBackups)
 
                     Box(
                         modifier = Modifier
@@ -756,7 +759,7 @@ internal fun SettingsScreen(
     if (showClearIndexDialog) {
         ConfirmationDialog(
             title = "Clear Search Index?",
-            message = "Clears all indexed memes and vectors. Your linked folders, taught exemplars, and app settings are preserved. You can re-index anytime.",
+            message = "Clears all indexed memes and vectors. Your linked folders, taught exemplars, and app settings are preserved. You can re-index anytime. Each folder's automatic backup pauses, so it keeps your tags until you tap Restore or Backup on that folder.",
             confirmText = "Clear Index",
             isDanger = true,
             onDismiss = { showClearIndexDialog = false },

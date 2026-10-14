@@ -153,7 +153,7 @@ class CandidateRankingBehaviorTest {
         override suspend fun relinkTeachings(): Int = 0
         override suspend fun forgetLabel(label: String) {}
         override suspend fun forgetPack(pack: String) {}
-        override suspend fun clearExemplars(): Int = 0
+        override suspend fun replaceExemplars(items: List<Exemplar>, pack: String): Pair<Int, Int> = 0 to 0
         override suspend fun delete(ids: List<Long>) {}
         override suspend fun clearIndex() {}
         override suspend fun setting(key: String): String? = null

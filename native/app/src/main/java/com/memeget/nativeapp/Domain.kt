@@ -158,6 +158,13 @@ internal data class CloudResult(
     val expectedVectorHash: String = "",
 )
 
+/**
+ * Setting listing, one per line, the linked folders whose automatic backup is held: their backup holds more than the
+ * library does (after Clear Index) or may be only half restored, so writing the library over it would lose data.
+ * Restoring a folder, or backing it up by hand, releases it.
+ */
+internal const val BACKUP_HOLD_SETTING = "backup.hold"
+
 /** IO belongs to implementations; callers may invoke from lifecycle-scoped UI jobs. */
 internal interface LibraryStore {
     val revision: StateFlow<Long>
@@ -225,8 +232,11 @@ internal interface LibraryStore {
     suspend fun importExemplars(items: List<Exemplar>, pack: String, asSelf: Boolean = false): Int
     suspend fun forgetLabel(label: String)
     suspend fun forgetPack(pack: String)
-    /** Removes every taught example, the user's own and imported ones. Tags already on memes stay. Returns how many. */
-    suspend fun clearExemplars(): Int
+    /**
+     * Removes every taught example, the user's own and imported ones, and imports [items], in one transaction so a
+     * failure leaves the old ones. Tags already on memes stay. Returns (removed, added).
+     */
+    suspend fun replaceExemplars(items: List<Exemplar>, pack: String): Pair<Int, Int>
     /**
      * Replaces the meme's machine tags with [tags] and its association terms with [extraTerms].
      * Human-confirmed tags are kept whatever the caller passes; per-meme rejections remove

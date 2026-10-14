@@ -12,6 +12,7 @@ import java.io.FileOutputStream
 import java.io.IOException
 import java.util.UUID
 import android.net.Uri
+import android.widget.Toast
 import kotlinx.coroutines.CancellationException
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -1902,7 +1903,9 @@ internal fun VideoAudioToolPanel(
                             EditorAssetStorage.copyAssetToEditorStorage(audioContext, uri)
                         }
                         onUpdateMusic(VideoMusicSpec(uri = copiedUri.toString(), volume = 1f, startUs = 0L))
-                    } catch (_: Exception) {
+                    } catch (e: Exception) {
+                        if (e is CancellationException) throw e
+                        Toast.makeText(audioContext, "Could not add the music: ${e.message ?: e}", Toast.LENGTH_LONG).show()
                     }
                 }
             }

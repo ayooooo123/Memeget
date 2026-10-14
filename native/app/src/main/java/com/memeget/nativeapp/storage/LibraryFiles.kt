@@ -24,6 +24,7 @@ import expo.modules.memegetbg.MemeMediaProbe
 import expo.modules.memegetbg.VideoFrameExtractor
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Mutex
@@ -498,6 +499,9 @@ internal class LibraryFiles(
     suspend fun restore(folder: Folder): Int = intakeGate.withLock { restoreLocked(folder) }
 
     private suspend fun restoreLocked(folder: Folder): Int = withContext(Dispatchers.IO) {
+        // Until this restore finishes, the folder's backup holds more than the library: a process death midway must
+        // not let an automatic backup replace it with the half-restored state.
+        setBackupHold(folder.uri, true)
         val folderUri = Uri.parse(folder.uri)
         val mediaFiles = MediaIoUtils.listFilesFast(context, folderUri, mediaOnly = true)
         val filesByExactName = HashMap<String, MediaIoUtils.SafDocument>()
@@ -696,19 +700,39 @@ internal class LibraryFiles(
             }
         }
 
+        setBackupHold(folder.uri, false)
         restoredCount
     }
 
-    suspend fun backup(folder: Folder): Unit = backupGate.withLock { backupLocked(folder) }
+    /** Folders whose automatic backup is held; see [BACKUP_HOLD_SETTING]. Call under [intakeGate]. */
+    private suspend fun backupHolds(): Set<String> =
+        store.setting(BACKUP_HOLD_SETTING).orEmpty().lineSequence().filterTo(LinkedHashSet()) { it.isNotBlank() }
 
-    /** Backs up every linked folder; a folder that fails doesn't stop the others. */
+    /** Call under [intakeGate], which every writer of the setting holds. */
+    private suspend fun setBackupHold(folderUri: String, held: Boolean) {
+        val holds = backupHolds()
+        val next = if (held) holds + folderUri else holds - folderUri
+        if (next != holds) store.setSetting(BACKUP_HOLD_SETTING, next.joinToString("\n"))
+    }
+
+    /** How many linked folders' automatic backups are held until they are restored or backed up by hand. */
+    suspend fun heldBackups(): Int {
+        val linked = store.folders().mapTo(HashSet()) { it.uri }
+        return backupHolds().count { it in linked }
+    }
+
+    /** Backs up [folder] because a person asked, which also lifts a hold on its automatic backup. */
+    suspend fun backup(folder: Folder) {
+        backupGate.withLock { backupLocked(folder, automatic = false) }
+    }
+
+    /** The automatic backup of every linked folder. Held folders are skipped; one that fails doesn't stop the rest. */
     suspend fun backupAll(): BackupRun {
         var written = 0
         val failed = LinkedHashMap<Folder, String>()
         for (folder in store.folders()) {
             try {
-                backup(folder)
-                written++
+                if (backupGate.withLock { backupLocked(folder, automatic = true) }) written++
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (failure: Exception) {
@@ -718,46 +742,54 @@ internal class LibraryFiles(
         return BackupRun(written, failed)
     }
 
-    private suspend fun backupLocked(folder: Folder): Unit = withContext(Dispatchers.IO) {
+    /** False when an automatic backup skipped a held folder. */
+    private suspend fun backupLocked(folder: Folder, automatic: Boolean): Boolean = withContext(Dispatchers.IO) {
         val folderUri = Uri.parse(folder.uri)
         val generation = System.currentTimeMillis()
         val singleFolder = store.folders().size <= 1
 
-        val nativeDir = MediaIoUtils.ensureDirectory(context, folderUri, SidecarFormat.NATIVE_SIDECAR_DIR)
-            ?: throw IllegalStateException("Could not create .memeget-native directory")
-
-        // Spool chunks using 64 temporary files to avoid whole-library in-memory materialization
-        val tempChunkFiles = Array(SidecarFormat.SIDECAR_CHUNKS) {
-            File.createTempFile("native_chunk_${it}_", ".json", context.cacheDir)
-        }
-        val tempWriters = Array(SidecarFormat.SIDECAR_CHUNKS) {
-            tempChunkFiles[it].bufferedWriter(Charsets.UTF_8)
-        }
+        val tempChunkFiles = ArrayList<File>(SidecarFormat.SIDECAR_CHUNKS)
         val chunkCounts = IntArray(SidecarFormat.SIDECAR_CHUNKS)
-
         var totalCount = 0
-        try {
-            store.allMemes().collect { meme ->
-                if (meme.uri.startsWith(folder.uri) || singleFolder) {
-                    val chunkKey = SidecarFormat.chunkFor(meme.name)
-                    val chunkIdx = chunkKey.toInt(16)
-                    val vectors = store.vectors(meme.id)
+        // The library is read under the intake lock, so a restore, scan or import running now is never caught half
+        // done; the slow writes into the folder happen after it is released.
+        val read = intakeGate.withLock {
+            if (automatic && folder.uri in backupHolds()) return@withLock null
+            // Spool chunks using 64 temporary files to avoid whole-library in-memory materialization
+            repeat(SidecarFormat.SIDECAR_CHUNKS) {
+                tempChunkFiles += File.createTempFile("native_chunk_${it}_", ".json", context.cacheDir)
+            }
+            val tempWriters = Array(SidecarFormat.SIDECAR_CHUNKS) {
+                tempChunkFiles[it].bufferedWriter(Charsets.UTF_8)
+            }
+            try {
+                store.allMemes().collect { meme ->
+                    if (meme.uri.startsWith(folder.uri) || singleFolder) {
+                        val chunkKey = SidecarFormat.chunkFor(meme.name)
+                        val chunkIdx = chunkKey.toInt(16)
+                        val vectors = store.vectors(meme.id)
 
-                    val writer = tempWriters[chunkIdx]
-                    if (chunkCounts[chunkIdx] > 0) {
-                        writer.write(",")
+                        val writer = tempWriters[chunkIdx]
+                        if (chunkCounts[chunkIdx] > 0) {
+                            writer.write(",")
+                        }
+                        val memeJson = SidecarFormat.serializeNativeMemeItem(meme, vectors)
+                        writer.write(memeJson)
+                        chunkCounts[chunkIdx]++
+                        totalCount++
                     }
-                    val memeJson = SidecarFormat.serializeNativeMemeItem(meme, vectors)
-                    writer.write(memeJson)
-                    chunkCounts[chunkIdx]++
-                    totalCount++
+                }
+            } finally {
+                for (w in tempWriters) {
+                    try { w.close() } catch (_: Exception) {}
                 }
             }
-        } finally {
-            for (w in tempWriters) {
-                try { w.close() } catch (_: Exception) {}
-            }
+            store.exemplars()
         }
+        if (read == null) return@withContext false
+
+        val nativeDir = MediaIoUtils.ensureDirectory(context, folderUri, SidecarFormat.NATIVE_SIDECAR_DIR)
+            ?: throw IllegalStateException("Could not create .memeget-native directory")
 
         val chunkStamps = mutableMapOf<String, SidecarFormat.ChunkStamp>()
         for (i in 0 until SidecarFormat.SIDECAR_CHUNKS) {
@@ -809,7 +841,7 @@ internal class LibraryFiles(
         }
 
         // Export lossless native teachings
-        val exemplars = store.exemplars()
+        val exemplars = read
         val teachingsJson = TeachingPackIo.serializeNativeTeachings(exemplars, name = "Backup teachings", createdAt = generation)
         val teachingsDigest = SidecarFormat.digest(teachingsJson)
         val teachingsFileName = "teachings_${generation}.json"
@@ -867,6 +899,8 @@ internal class LibraryFiles(
                 // Left for the next backup to remove.
             }
         }
+        if (!automatic) intakeGate.withLock { setBackupHold(folder.uri, false) }
+        true
     }
 
     /** How many examples the teaching file at [uri] holds, read without importing anything. */
@@ -881,8 +915,11 @@ internal class LibraryFiles(
         val exemplars = readTeaching(uri)
         if (replace && exemplars.isEmpty()) throw IllegalArgumentException("The teaching file holds no examples to replace yours with")
         val packName = MediaIoUtils.getDisplayName(context, uri).substringBeforeLast(".")
-        val removed = if (replace) store.clearExemplars() else 0
-        val added = store.importExemplars(exemplars, pack = packName, asSelf = false)
+        val (removed, added) = if (replace) {
+            store.replaceExemplars(exemplars, pack = packName)
+        } else {
+            0 to store.importExemplars(exemplars, pack = packName, asSelf = false)
+        }
         store.relinkTeachings()
         TeachingImport(added = added, removed = removed)
     }
@@ -1120,7 +1157,8 @@ internal class LibraryFiles(
      * files were deleted. Holds the intake lock so a scan running alongside can't add a file back as it goes.
      */
     suspend fun deleteMemes(memes: List<Meme>): Int = intakeGate.withLock {
-        withContext(Dispatchers.IO) {
+        // Not cancellable once started: files deleted without their rows would leave memes that can't be shown.
+        withContext(NonCancellable + Dispatchers.IO) {
             var deleted = 0
             val thumbs = File(context.filesDir, "thumbs")
             for (meme in memes) {
