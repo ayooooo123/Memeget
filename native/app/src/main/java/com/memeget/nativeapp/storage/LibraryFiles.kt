@@ -42,6 +42,12 @@ internal class LibraryFiles(
     private val store: LibraryStore
 ) {
     private val clipboardMutex = Mutex()
+    /**
+     * Intake that adds library items (folder scans and restores, shared files, ZIPs, links) runs one at a time. Each
+     * looks for an existing copy before writing one, so two running together could each miss the item the other is
+     * adding and copy the same file twice.
+     */
+    private val intakeGate = Mutex()
 
     private fun allocateUniqueFile(dir: File, baseName: String): File {
         val candidate = File(dir, baseName)
@@ -129,7 +135,9 @@ internal class LibraryFiles(
         }
     }
 
-    suspend fun scan(folder: Folder): List<Long> = withContext(Dispatchers.IO) {
+    suspend fun scan(folder: Folder): List<Long> = intakeGate.withLock { scanLocked(folder) }
+
+    private suspend fun scanLocked(folder: Folder): List<Long> = withContext(Dispatchers.IO) {
         val folderUri = Uri.parse(folder.uri)
         val discovered = MediaIoUtils.listFilesFast(context, folderUri, mediaOnly = true)
         val newIds = mutableListOf<Long>()
@@ -176,7 +184,9 @@ internal class LibraryFiles(
         folder
     }
 
-    suspend fun importUri(uri: Uri, mime: String? = null): List<Long> = withContext(Dispatchers.IO) {
+    suspend fun importUri(uri: Uri, mime: String? = null): List<Long> = intakeGate.withLock { importUriLocked(uri, mime) }
+
+    private suspend fun importUriLocked(uri: Uri, mime: String?): List<Long> = withContext(Dispatchers.IO) {
         val displayName = MediaIoUtils.getDisplayName(context, uri)
         val resolvedMime = mime ?: context.contentResolver.getType(uri) ?: MediaIoUtils.mimeForName(displayName)
 
@@ -386,7 +396,9 @@ internal class LibraryFiles(
         }
     }
 
-    suspend fun importLink(text: String): List<Long> = withContext(Dispatchers.IO) {
+    suspend fun importLink(text: String): List<Long> = intakeGate.withLock { importLinkLocked(text) }
+
+    private suspend fun importLinkLocked(text: String): List<Long> = withContext(Dispatchers.IO) {
         val url = LinkResolver.extractUrl(text) ?: throw IllegalArgumentException("No valid link found in input")
         val ref = LinkResolver.resolveMediaRef(url)
         val downloaded = LinkResolver.download(ref, context.cacheDir)
@@ -481,7 +493,9 @@ internal class LibraryFiles(
         )
     }
 
-    suspend fun restore(folder: Folder): Int = withContext(Dispatchers.IO) {
+    suspend fun restore(folder: Folder): Int = intakeGate.withLock { restoreLocked(folder) }
+
+    private suspend fun restoreLocked(folder: Folder): Int = withContext(Dispatchers.IO) {
         val folderUri = Uri.parse(folder.uri)
         val mediaFiles = MediaIoUtils.listFilesFast(context, folderUri, mediaOnly = true)
         val filesByExactName = HashMap<String, MediaIoUtils.SafDocument>()
