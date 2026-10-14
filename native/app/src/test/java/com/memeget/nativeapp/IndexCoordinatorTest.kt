@@ -13,6 +13,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -384,6 +386,67 @@ class IndexCoordinatorTest {
         assertEquals("frog waving", captioned.caption)
         assertEquals("pending", memes.single { it.id != captioned.id }.visionState)
         assertTrue(store.errors().none { it.startsWith("[vision]") })
+    }
+
+    @Test(timeout = 30_000)
+    fun stopRightAfterTheCaptionMarkerCommitsReturnsTheMemeToPending() = runBlocking {
+        val memeId = store.insertPending(Uri.fromFile(createValidBitmapFile()).toString(), "sample.png", "image", 100L, "hashM")
+        store.setSetting("vision.enabled", "1")
+        var coordinator: IndexCoordinator? = null
+        val stopAfterMarker = object : LibraryStore by store {
+            override suspend fun setCaption(id: Long, caption: String, tags: List<Tag>, vector: FloatArray?, state: String) {
+                store.setCaption(id, caption, tags, vector, state)
+                if (state == "failed") {
+                    // The marker is committed; Stop lands before the call returns, as withContext allows.
+                    requireNotNull(coordinator).cancel()
+                    currentCoroutineContext().ensureActive()
+                }
+            }
+        }
+        coordinator = IndexCoordinator(
+            context = context,
+            store = stopAfterMarker,
+            files = files,
+            engine = testEngine,
+            knowledge = knowledge,
+            cloud = cloud,
+            sessionTimeoutMillis = 10_000L,
+        )
+
+        launch {
+            try {
+                requireNotNull(coordinator).runPending()
+            } catch (_: CancellationException) {}
+        }.join()
+
+        assertEquals("pending", requireNotNull(store.meme(memeId)).visionState)
+    }
+
+    @Test(timeout = 30_000)
+    fun captionsWaitUntilTheQueueIsIndexedThenUseTheRestOfTheSession() = runBlocking {
+        val ids = (1..9).map { n ->
+            store.insertPending(Uri.fromFile(createValidBitmapFile("m$n.png")).toString(), "m$n.png", "image", 100L + n, "hashQ$n")
+        }
+        store.setSetting("vision.enabled", "1")
+        val events = java.util.Collections.synchronizedList(ArrayList<String>())
+        testEngine.onRecognize = { events += "index"; listOf(TextRegion("text", 1f, 0f, 0f, 1f, 1f)) }
+        testEngine.onDescribe = { _, _ -> events += "describe"; "CAPTION: a frog\nTAGS: frog" }
+        val coordinator = IndexCoordinator(
+            context = context,
+            store = store,
+            files = files,
+            engine = testEngine,
+            knowledge = knowledge,
+            cloud = cloud,
+            sessionTimeoutMillis = 25_000L,
+        )
+
+        coordinator.runPending()
+
+        // More memes than one batch: all are indexed before the first caption, and all get captions in one session.
+        assertTrue(ids.all { requireNotNull(store.meme(it)).visionState == "done" })
+        assertEquals(9, events.count { it == "describe" })
+        assertTrue("captions must wait for indexing: $events", events.indexOf("describe") > events.lastIndexOf("index"))
     }
 
     @Test(timeout = 30_000)
