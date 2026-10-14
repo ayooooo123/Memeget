@@ -206,6 +206,7 @@ internal class NativeInferenceEngine(
         // Step 2: Whisper STT inference
         val whisperModelFile = ensureModel(ModelRegistry.WHISPER_MODEL)
         val tokenizerFile = ensureModel(ModelRegistry.WHISPER_TOKENIZER)
+        ModelRegistry.RETIRED_WHISPER_FILES.forEach { File(modelsDir, it).delete() }
 
         engineMutex.withLock {
             val handle = activeHandle()

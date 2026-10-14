@@ -70,21 +70,29 @@ internal object ModelRegistry {
         expectedSizeBytes = 18368900L,
     )
 
+    // Whisper small.en, the int8 XNNPACK export react-native-executorch 0.9.2 publishes for this runtime.
+    // tiny.en turned a laughing South Park line, "No, dude, no fucking way", into "No, no, no, sucky way.";
+    // small.en transcribes it word for word, as whisper large-v3-turbo does. The fp32 export is 2.5 times the
+    // size and gave the same text there. The export's decoder holds 128 positions per 29 s window.
     val WHISPER_MODEL = ModelArtifact(
-        id = "whisper-tiny-en-model",
-        filename = "whisper_tiny_en_xnnpack_fp32.pte",
-        url = "https://huggingface.co/software-mansion/react-native-executorch-whisper-tiny.en/resolve/v0.9.0/xnnpack/whisper_tiny_en_xnnpack_fp32.pte",
-        sha256Hex = "0e144c4d3a57edede658a733861ed76940a282198d62907918b782b8ea2087ce",
-        expectedSizeBytes = 232613632L,
+        id = "whisper-small-en-int8",
+        filename = "whisper_small_en_xnnpack_int8.pte",
+        url = "https://huggingface.co/software-mansion/react-native-executorch-whisper-small.en/resolve/v0.9.0/xnnpack/whisper_small_en_xnnpack_int8.pte",
+        sha256Hex = "72d92575cc2248a46a8e2f213a94e5927251e4587edf8e2c57ca14b12c8554a3",
+        expectedSizeBytes = 447563136L,
     )
 
+    // One tokenizer serves every English-only Whisper size; the file is identical across them.
     val WHISPER_TOKENIZER = ModelArtifact(
-        id = "whisper-tiny-en-tokenizer",
-        filename = "whisper_tiny_en_tokenizer.json",
-        url = "https://huggingface.co/software-mansion/react-native-executorch-whisper-tiny.en/resolve/v0.9.0/tokenizer.json",
+        id = "whisper-en-tokenizer",
+        filename = "whisper_en_tokenizer.json",
+        url = "https://huggingface.co/software-mansion/react-native-executorch-whisper-small.en/resolve/v0.9.0/tokenizer.json",
         sha256Hex = "5eb60cec1e77aeeb6869a2bb5a8e01a84c3fe5d072d75369343021fe6f5310d0",
         expectedSizeBytes = 2405679L,
     )
+
+    /** Speech model files earlier builds downloaded; removed once the current model is in place. */
+    val RETIRED_WHISPER_FILES = listOf("whisper_tiny_en_xnnpack_fp32.pte", "whisper_tiny_en_tokenizer.json")
 
     val FAST_SAM = ModelArtifact(
         id = "fast-sam-s",
