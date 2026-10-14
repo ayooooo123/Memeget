@@ -43,6 +43,21 @@ android {
             }
         }
     }
+    // Releases use the key the original app pins in the repository (signing/debug.keystore), so a build from any
+    // checkout installs over the last one and keeps the library. Debug builds keep this machine's debug key.
+    signingConfigs {
+        create("release") {
+            storeFile = rootProject.file("../signing/debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+    }
+    buildTypes {
+        release {
+            signingConfig = signingConfigs.getByName("release")
+        }
+    }
     buildFeatures { compose = true; buildConfig = true }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
