@@ -169,6 +169,12 @@ internal interface LibraryStore {
     suspend fun requeue(ids: List<Long>)
     /** Queues every item whose last analysis failed for another attempt; returns how many. */
     suspend fun requeueFailed(): Int
+    /**
+     * Marks every video for transcription again and records [model] as the speech model, in one transaction, unless
+     * [model] is already recorded. Only the audio state changes: transcripts stay until new ones replace them.
+     * Returns how many videos were marked.
+     */
+    suspend fun requeueTranscripts(model: String): Int
     suspend fun markIndexFailed(id: Long, reason: String)
     suspend fun setCloud(id: Long, result: CloudResult): Boolean
     suspend fun forgetCloud()

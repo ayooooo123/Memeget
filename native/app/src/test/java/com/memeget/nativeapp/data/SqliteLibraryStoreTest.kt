@@ -5,6 +5,7 @@ import android.database.sqlite.SQLiteDatabase
 import com.memeget.nativeapp.CloudAssistant
 import com.memeget.nativeapp.CloudResult
 import com.memeget.nativeapp.Exemplar
+import com.memeget.nativeapp.ImportedAnalysis
 import com.memeget.nativeapp.LocalAnalysis
 import com.memeget.nativeapp.Meme
 import com.memeget.nativeapp.NativeInferenceEngine
@@ -132,6 +133,40 @@ class SqliteLibraryStoreTest {
         assertFalse(after.tags.any { it.label == "pepe" })
         assertTrue(after.rejectedLabels.contains("pepe"))
         assertTrue(store.search("pepe", null).isEmpty())
+    }
+
+    @Test fun aNewSpeechModelRequeuesEveryVideoOnceAndKeepsTheirText() = runBlocking {
+        val clip = insert("clip.mp4", "video")
+        val silent = insert("silent.mp4", "video")
+        val still = insert("still.png")
+        store.setTranscript(clip, "No, no, no, sucky way.", "done")
+        store.setTranscript(silent, "", "done")
+
+        assertEquals(2, store.requeueTranscripts("whisper-small-en-int8"))
+        assertEquals("pending", store.meme(clip)?.audioState)
+        assertEquals("No, no, no, sucky way.", store.meme(clip)?.transcript)
+        assertEquals("pending", store.meme(silent)?.audioState)
+        assertEquals("none", store.meme(still)?.audioState)
+
+        store.setTranscript(clip, "No! Dude! No fucking way!", "done")
+        assertEquals(0, store.requeueTranscripts("whisper-small-en-int8"))
+        assertEquals("done", store.meme(clip)?.audioState)
+    }
+
+    @Test fun anImportOnEitherSideOfTheSpeechRequeueKeepsItsTranscript() = runBlocking {
+        // The requeue is one write transaction, so an import lands wholly before or after it.
+        val before = insert("before.mp4", "video")
+        val after = insert("after.mp4", "video")
+        store.setTranscript(before, "", "done")
+        store.setTranscript(after, "", "done")
+
+        store.applyImportedAnalysis(before, ImportedAnalysis(emptyList(), "", "imported before", null))
+        store.requeueTranscripts("whisper-small-en-int8")
+        store.applyImportedAnalysis(after, ImportedAnalysis(emptyList(), "", "imported after", null))
+
+        assertEquals("imported before", store.meme(before)?.transcript)
+        assertEquals("pending", store.meme(before)?.audioState)
+        assertEquals("imported after", store.meme(after)?.transcript)
     }
 
     @Test fun cloudCommitRejectsChangedVectorsEvenWhenOriginallyAbsent() = runBlocking {

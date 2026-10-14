@@ -136,6 +136,7 @@ class CandidateRankingBehaviorTest {
         override suspend fun setThumb(id: Long, uri: String) {}
         override suspend fun setContentHash(id: Long, hash: String) {}
         override suspend fun requeue(ids: List<Long>) {}
+        override suspend fun requeueTranscripts(model: String): Int = 0
         override suspend fun markIndexFailed(id: Long, reason: String) {}
         override suspend fun setCloud(id: Long, result: CloudResult): Boolean = true
         override suspend fun forgetCloud() {}

@@ -142,6 +142,9 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
     }
 
     companion object {
+        /** Speech model that produced the library's transcripts; see [requeueTranscripts]. */
+        private const val SPEECH_MODEL_SETTING = "audio.model"
+
         fun serializeTags(tags: List<Tag>): String {
             val array = JSONArray()
             for (t in tags) {
@@ -1197,6 +1200,34 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
             ).use { it.executeUpdateDelete() }
             if (count > 0) bumpRevision()
             count
+        }
+    }
+
+    override suspend fun requeueTranscripts(model: String): Int = withContext(Dispatchers.IO) {
+        writeMutex.withLock {
+            val db = getWritableDb()
+            db.beginTransaction()
+            val marked = try {
+                val recorded = db.rawQuery("SELECT value FROM settings WHERE key = ?", arrayOf(SPEECH_MODEL_SETTING)).use { c ->
+                    if (c.moveToNext()) c.getString(0) else null
+                }
+                if (recorded == model) return@withLock 0
+                // State only, so a transcript another writer saved meanwhile is never overwritten.
+                val count = db.compileStatement(
+                    "UPDATE memes SET audio_state = 'pending' WHERE kind = 'video' AND audio_state <> 'pending'"
+                ).use { it.executeUpdateDelete() }
+                val cv = ContentValues().apply {
+                    put("key", SPEECH_MODEL_SETTING)
+                    put("value", model)
+                }
+                db.insertWithOnConflict("settings", null, cv, SQLiteDatabase.CONFLICT_REPLACE)
+                db.setTransactionSuccessful()
+                count
+            } finally {
+                db.endTransaction()
+            }
+            if (marked > 0) bumpRevision()
+            marked
         }
     }
 
