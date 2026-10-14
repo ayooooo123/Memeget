@@ -631,6 +631,10 @@ std::string ModelRunner::transcribe(
         constexpr size_t kMaxDecodeLength = 128;
         std::vector<uint64_t> chunkTokens;
         chunkTokens.reserve(kMaxDecodeLength);
+        // Where the last finished segment ends: a timestamp right after text closes one.
+        uint64_t lastClosedStep = 0;
+        size_t closedTokens = 0;
+        bool previousWasTimestamp = true;
 
         while (startPos < kMaxDecodeLength && !cancelled_.load()) {
             if (!logitsTensor.const_data_ptr()) break;
@@ -653,8 +657,15 @@ std::string ModelRunner::transcribe(
                 break;
             }
 
-            if (nextId < timestampBeginToken) {
+            if (nextId >= timestampBeginToken) {
+                if (!previousWasTimestamp) {
+                    lastClosedStep = nextId - timestampBeginToken;
+                    closedTokens = chunkTokens.size();
+                }
+                previousWasTimestamp = true;
+            } else {
                 chunkTokens.push_back(nextId);
+                previousWasTimestamp = false;
             }
 
             curTok = nextId;
@@ -665,6 +676,14 @@ std::string ModelRunner::transcribe(
             logitsTensor = (*decResult)[0].toTensor();
         }
 
+        // When the model stops early in the window, or runs out of room mid-segment, carry on from the end of
+        // its last finished segment instead of skipping the rest of the window; anything after that point is
+        // decoded again from there. Each step moves at least a second, so the loop always ends.
+        const float closedSec = static_cast<float>(lastClosedStep) * 0.02f;
+        const float windowSec = static_cast<float>(chunkLen) / kSamplingRate;
+        const bool resume = closedSec >= 1.0f && closedSec < windowSec - 1.0f;
+        if (resume) chunkTokens.resize(closedTokens);
+
         if (!chunkTokens.empty()) {
             auto decodedText = whisper_tokenizer_->decode(chunkTokens, true);
             if (!decodedText.ok()) throw std::runtime_error("Whisper token decoding failed");
@@ -672,7 +691,7 @@ std::string ModelRunner::transcribe(
             fullTranscript += *decodedText;
         }
 
-        seek += kChunkSizeSec;
+        seek += resume ? closedSec : static_cast<float>(kChunkSizeSec);
     }
 
 #if defined(__ANDROID__)
