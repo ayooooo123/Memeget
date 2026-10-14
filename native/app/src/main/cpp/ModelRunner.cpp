@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -11,6 +12,10 @@
 #include <limits>
 #include <span>
 #include <sstream>
+
+#if defined(__ANDROID__)
+#include <android/log.h>
+#endif
 
 #include <executorch/extension/tensor/tensor_ptr_maker.h>
 #include <rnexecutorch/data_processing/ImageProcessing.h>
@@ -518,7 +523,7 @@ std::vector<OcrItem> ModelRunner::recognize(
 }
 
 // ---------------------------------------------------------------------------
-// 4. Speech-to-Text (Whisper tiny.en)
+// 4. Speech-to-Text (Whisper; model chosen in ModelRegistry.kt)
 // ---------------------------------------------------------------------------
 std::string ModelRunner::transcribe(
     const std::string& modelPath,
@@ -531,6 +536,9 @@ std::string ModelRunner::transcribe(
         return "";
     }
 
+    const auto started = std::chrono::steady_clock::now();
+    std::chrono::steady_clock::duration encodeTime{};
+    size_t decodeSteps = 0;
     std::scoped_lock lock(mutex_);
     ensureFamily(ModelFamily::AUDIO);
 
@@ -587,7 +595,9 @@ std::string ModelRunner::transcribe(
             const_cast<float*>(pcmSamples.data() + start),
             {static_cast<int32_t>(chunkLen)}, ScalarType::Float);
 
+        const auto encodeStarted = std::chrono::steady_clock::now();
         auto encResult = whisper_module_->execute("encode", {EValue(*wavTensor)});
+        encodeTime += std::chrono::steady_clock::now() - encodeStarted;
         if (!encResult.ok()) {
             throw std::runtime_error("Whisper encode method failed");
         }
@@ -613,6 +623,7 @@ std::string ModelRunner::transcribe(
             curTok = sequenceIds[i];
             curPos = startPos;
             auto decResult = whisper_module_->execute("decode", decodeInputs);
+            ++decodeSteps;
             if (!decResult.ok()) throw std::runtime_error("Whisper decoder prefill failed");
             logitsTensor = (*decResult)[0].toTensor();
         }
@@ -649,6 +660,7 @@ std::string ModelRunner::transcribe(
             curTok = nextId;
             curPos = startPos++;
             auto decResult = whisper_module_->execute("decode", decodeInputs);
+            ++decodeSteps;
             if (!decResult.ok()) throw std::runtime_error("Whisper decode method failed");
             logitsTensor = (*decResult)[0].toTensor();
         }
@@ -663,6 +675,12 @@ std::string ModelRunner::transcribe(
         seek += kChunkSizeSec;
     }
 
+#if defined(__ANDROID__)
+    const auto ms = [](auto d) { return static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(d).count()); };
+    __android_log_print(ANDROID_LOG_INFO, "MemegetWhisper", "transcribe %.1f s audio: %lld ms total, encode %lld ms, %zu decode steps",
+                        static_cast<double>(pcmSamples.size()) / kSamplingRate,
+                        ms(std::chrono::steady_clock::now() - started), ms(encodeTime), decodeSteps);
+#endif
     return fullTranscript;
 }
 

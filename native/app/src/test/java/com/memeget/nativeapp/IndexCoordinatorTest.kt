@@ -517,6 +517,28 @@ class IndexCoordinatorTest {
         assertEquals(1, coordinator.progress.value.done)
     }
 
+    @Test(timeout = 30_000)
+    fun aNewSpeechModelRedoesEarlierTranscriptsOnceAndKeepsTheirTextUntilReplaced() = runBlocking {
+        val clip = store.insertPending("file:///clip.mp4", "clip.mp4", "video", 100L, "hashClip")
+        val silent = store.insertPending("file:///silent.mp4", "silent.mp4", "video", 101L, "hashSilent")
+        val still = store.insertPending("file:///still.png", "still.png", "image", 102L, "hashStill")
+        // As imported from the original app, whose Whisper tiny.en wrote these.
+        store.setTranscript(clip, "No, no, no, sucky way.", "done")
+        store.setTranscript(silent, "", "done")
+        val coordinator = IndexCoordinator(context, store, files, testEngine, knowledge, cloud)
+
+        coordinator.requeueOlderTranscripts()
+
+        assertEquals("pending", store.meme(clip)?.audioState)
+        assertEquals("No, no, no, sucky way.", store.meme(clip)?.transcript)
+        assertEquals("pending", store.meme(silent)?.audioState)
+        assertEquals("none", store.meme(still)?.audioState)
+
+        store.setTranscript(clip, "No! Dude! No fucking way!", "done")
+        coordinator.requeueOlderTranscripts()
+        assertEquals("done", store.meme(clip)?.audioState)
+    }
+
     private class TestInferenceEngine : InferenceEngine {
         val cancelled = AtomicBoolean(false)
 
