@@ -620,6 +620,30 @@ class IndexCoordinatorTest {
     }
 
     @Test(timeout = 30_000)
+    fun chargingSessionThatOnlyTranscribesStillCountsAsProgress() = runBlocking {
+        // An indexed video that needs a transcript and a caption; the session only gets the transcript done.
+        val poster = Uri.fromFile(createValidBitmapFile("poster.png")).toString()
+        val memeId = store.insertPending(Uri.fromFile(createValidBitmapFile("clip.mp4")).toString(), "clip.mp4", "video", 100L, "hashV")
+        store.completeIndex(memeId, LocalAnalysis(FloatArray(512).apply { this[0] = 1f }, "", emptyList(), ""), ModelRegistry.PRIMARY_MODEL_FINGERPRINT, poster)
+        plugInCharger()
+        val coordinator = captionSessionThatRunsOutOfTime()
+        store.setSetting("audio.enabled", "1")
+        testEngine.onDescribe = { _, _ ->
+            withContext(Dispatchers.IO) {
+                while (!testEngine.cancelled.get()) Thread.sleep(10)
+                throw RuntimeException("Inference cancelled")
+            }
+        }
+
+        coordinator.runPending()
+
+        val meme = requireNotNull(store.meme(memeId))
+        assertEquals("done", meme.audioState)
+        assertEquals("pending", meme.visionState)
+        assertEquals(listOf(WorkInfo.State.ENQUEUED), queuedHandovers().map { it.state })
+    }
+
+    @Test(timeout = 30_000)
     fun chargingSessionWithoutProgressQueuesNothing() = runBlocking {
         val file = createValidBitmapFile("gone.png")
         val id = store.insertPending(Uri.fromFile(file).toString(), "gone.png", "image", 100L, "hashG")

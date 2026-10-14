@@ -40,7 +40,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.count
+import kotlinx.coroutines.flow.fold
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.take
 import kotlinx.coroutines.flow.toList
@@ -612,15 +612,21 @@ internal class IndexCoordinator(
         item.temporaryFrames.forEach(File::delete)
     }
 
-    /** Items a session can still work on: memes waiting for indexing plus enabled enrichment not done yet. */
+    /**
+     * Tasks a session can still work on: indexing plus each enabled enrichment not done yet, counted separately,
+     * so a video that gets its transcript but still waits for a caption counts as progress.
+     */
     private suspend fun remainingWork(): Int {
         val vision = store.setting("vision.enabled") == "1"
         val audio = store.setting("audio.enabled") == "1"
         val visual = store.setting("visual.enabled") == "1"
-        return store.allMemes().count { meme ->
-            meme.pending || vision && meme.visionState == "pending" ||
-                audio && meme.kind == "video" && meme.audioState == "pending" ||
-                visual && store.vectors(meme.id)?.visual == null
+        return store.allMemes().fold(0) { tasks, meme ->
+            var left = tasks
+            if (meme.pending) left++
+            if (vision && meme.visionState == "pending") left++
+            if (audio && meme.kind == "video" && meme.audioState == "pending") left++
+            if (visual && store.vectors(meme.id)?.visual == null) left++
+            left
         }
     }
 
