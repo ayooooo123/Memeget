@@ -60,6 +60,42 @@ class LookalikeVoteTest {
         val labeled = memes.map { (id, v, label) -> LabeledMeme(id, v, setOf(label), emptySet()) }
 
         // pepe 3/3 right; wojak 3/4 (below 90%); milady only 2 votes (below 3).
-        assertEquals(setOf("pepe"), LookalikeVote.reliableLabels(index, labeled))
+        assertEquals(setOf("pepe"), LookalikeVote.reliableLabels(LookalikeVote.heldOut(index, labeled, LookalikeKernels.Kotlin)))
+    }
+
+    @Test fun aVoteOnAMemeTaggedOtherwiseStaysOpenButOnARejectionItIsAMiss() {
+        val a = sqrt(0.9f)
+        // Three pepe memes; meme 4 shows the same thing but was tagged only "tired"; meme 5 says "not pepe".
+        val memes = listOf(
+            Triple(1L, vec(0, a, side = 11), "pepe"),
+            Triple(2L, vec(0, a, side = 12), "pepe"),
+            Triple(3L, vec(0, a, side = 13), "pepe"),
+            Triple(4L, vec(0, a, side = 14), "tired"),
+            Triple(5L, vec(0, a, side = 15), "doge"),
+        )
+        val index = Index(memes.map { (id, v, label) -> example(v, label, id) }, emptyMap())
+        val labeled = memes.map { (id, v, label) -> LabeledMeme(id, v, setOf(label), if (id == 5L) setOf("pepe") else emptySet()) }
+
+        val pepe = LookalikeVote.heldOut(index, labeled, LookalikeKernels.Kotlin).getValue("pepe")
+
+        assertEquals(3, pepe.hits)
+        assertEquals(2, pepe.misses)
+        assertEquals(listOf(4L), pepe.open.map { it.memeId })
+        assertEquals(false, pepe.reliable)
+    }
+
+    @Test fun winnersFoundTogetherMatchWinnersFoundOneAtATime() {
+        val index = Index(
+            listOf(
+                example(vec(0, 0.95f, side = 1), "pepe"),
+                example(vec(0, 0.9f, side = 2), "pepe"),
+                example(vec(3, 0.97f, side = 4), "wojak"),
+                example(vec(5, 0.7f, side = 6), "faint"),
+            ),
+            mapOf("wojak" to listOf(vec(3, 0.99f, side = 7))),
+        )
+        // A clear winner, one a closer "not this" blocks, one under the cutoff, and one near nothing.
+        val queries = listOf(axis(0), axis(3), axis(5), axis(9))
+        assertEquals(queries.map { LookalikeVote.winner(index, it) }, LookalikeVote.winners(index, queries, LookalikeKernels.Kotlin))
     }
 }

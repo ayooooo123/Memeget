@@ -492,4 +492,43 @@ class CandidateRankingBehaviorTest {
         assertEquals(listOf(1L, 7L, 10L), queue.map { it.meme.id })
         assertEquals(listOf(3, 2, 0), queue.map { it.lookalikes })
     }
+
+    @Test fun labelQueueFirstAsksAboutTaggedMemesWhoseYesLetsALabelSpread() = runBlocking {
+        val store = TestStore()
+        fun look(axis: Int, wobble: Int) = FloatArray(512).apply {
+            this[axis] = 1f
+            this[wobble] = 0.3f
+            val norm = kotlin.math.sqrt(sumOf { (it * it).toDouble() }).toFloat()
+            for (k in indices) this[k] /= norm
+        }
+        fun add(id: Long, image: FloatArray, vararg labels: String) {
+            store.memes[id] = Meme(id = id, uri = "file:///m$id.jpg", name = "m$id.jpg", kind = "image", ocr = "",
+                tags = labels.map { Tag(it, "character", 1f, "manual", "user", "confirmed", "user") })
+            store.vectors[id] = VectorRecord(id = id, image = image, model = ModelRegistry.PRIMARY_MODEL_FINGERPRINT)
+        }
+        // Nine pepe memes; two that show the same thing but were tagged only by what they show; four
+        // unlabeled look-alikes; and an unlabeled pair far from every label.
+        for (id in 1L..9L) add(id, look(0, 10 + id.toInt()), "pepe")
+        add(10, look(0, 30), "tired")
+        add(11, look(0, 31), "hug")
+        for (id in 20L..23L) add(id, look(0, 30 + id.toInt()))
+        add(60, look(1, 61)); add(61, look(1, 62))
+
+        val queue = LocalKnowledge(store, TestEngine()).labelQueue()
+
+        // pepe's held-out votes are right 9 times in 11, the misses being memes 10 and 11; one Yes lifts it to 90%.
+        assertEquals(listOf(10L, 11L, 20L, 60L), queue.map { it.meme.id })
+        val asks = queue.mapNotNull { it.ask }
+        assertEquals(listOf("pepe", "pepe"), asks.map { it.label })
+        assertEquals(listOf(1, 1), asks.map { it.needed })
+        assertEquals(listOf(4, 4), asks.map { it.unlocks })
+        assertEquals(listOf(listOf("tired"), listOf("hug")), asks.map { it.taggedAs })
+
+        // "Yes" on meme 10: pepe now spreads on its own, so nothing asks about it, and its look-alikes get it.
+        val ten = store.memes.getValue(10)
+        store.memes[10] = ten.copy(tags = ten.tags + Tag("pepe", "character", 1f, "manual", "user", "confirmed", "user"))
+        val after = LocalKnowledge(store, TestEngine()).also { injectCuratedLabels(it, emptyList()) }
+        assertTrue(after.labelQueue().none { it.ask != null })
+        assertTrue(after.classify(store.vectors.getValue(20).image, "", 20L).first.any { it.label == "pepe" })
+    }
 }
