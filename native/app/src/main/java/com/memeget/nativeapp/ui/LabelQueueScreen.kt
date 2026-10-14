@@ -176,13 +176,14 @@ internal fun LabelQueueScreen(
             ) {
                 QueuePicture(meme ?: item.meme, Modifier.fillMaxWidth().height(220.dp)) { onOpenViewer(meme ?: item.meme) }
                 val ask = item.ask
+                fun memes(n: Int, noun: String) = "$n $noun${if (n == 1) "" else "s"}"
                 Text(
                     when {
-                        ask == null -> if (item.lookalikes > 0) "Stands for ${item.lookalikes} similar unlabeled memes" else "No close look-alikes"
+                        ask == null -> if (item.lookalikes > 0) "Stands for ${memes(item.lookalikes, "similar unlabeled meme")}" else "No close look-alikes"
                         ask.needed == 1 -> "You tagged this “${ask.taggedAs.joinToString(", ")}”. If it is also ${ask.label}, " +
-                            "a Yes here lets ${ask.label} label ${ask.unlocks} look-alikes on its own."
+                            "a Yes here lets ${ask.label} label ${memes(ask.unlocks, "look-alike")} on its own."
                         else -> "You tagged this “${ask.taggedAs.joinToString(", ")}”. If it is also ${ask.label}, " +
-                            "${ask.needed} Yes answers like this let ${ask.label} label ${ask.unlocks} look-alikes on its own."
+                            "${ask.needed} Yes answers like this let ${ask.label} label ${memes(ask.unlocks, "look-alike")} on its own."
                     },
                     style = MaterialTheme.typography.bodySmall,
                     color = MemegetColors.TextSecondary,
