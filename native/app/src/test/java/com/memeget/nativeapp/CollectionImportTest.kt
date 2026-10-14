@@ -10,9 +10,12 @@ import androidx.work.testing.WorkManagerTestInitHelper
 import com.memeget.nativeapp.inference.ModelRegistry
 import com.memeget.nativeapp.storage.SidecarFormat
 import expo.modules.memegetbg.SubjectCutoutResult
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.After
@@ -230,6 +233,36 @@ class CollectionImportTest {
         // A file name can't vouch for the bytes, so the tag stays unconfirmed, but indexing keeps it.
         assertEquals("unreviewed", meme.tags.single { it.label == "pepe" }.confirmation)
         assertEquals(listOf(meme.id), store.search("pepe", null).map { it.meme.id })
+    }
+
+    @Test fun aFileSharedWhileACollectionImportsIsNotCopiedTwice() = runBlocking {
+        val first = png(21, Color.RED)
+        val shared = png(22, Color.BLUE)
+        val zip = exportZip("collection.zip", listOf("media/a.png" to first, "media/x.png" to shared),
+            listOf(record("media/a.png", "image", emptyList()), record("media/x.png", "image", emptyList())))
+        val paused = CompletableDeferred<Unit>()
+        val resume = CompletableDeferred<Unit>()
+        val pausing = object : LibraryStore by store {
+            override suspend fun insertPending(uri: String, name: String, kind: String, modifiedAt: Long, contentHash: String): Long {
+                if (name.endsWith("a.png") && !paused.isCompleted) {
+                    paused.complete(Unit)
+                    resume.await()
+                }
+                return store.insertPending(uri, name, kind, modifiedAt, contentHash)
+            }
+        }
+        val intake = LibraryFiles(context, pausing)
+        val collection = async { intake.importUri(Uri.fromFile(zip), "application/zip") }
+        paused.await()
+        // Mid-collection, the picture that is its next entry is shared on its own.
+        val single = async { intake.importUri(Uri.fromFile(File(temporary.root, "x.png").apply { writeBytes(shared) }), "image/png") }
+        withTimeoutOrNull(1_000) { single.await() }
+        resume.complete(Unit)
+        collection.await()
+        single.await()
+
+        assertEquals(2, store.countAll())
+        assertEquals(2, File(context.filesDir, "imports").listFiles().orEmpty().size)
     }
 
     private fun relinkFixtures(): Pair<File, File> {
