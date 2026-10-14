@@ -106,14 +106,17 @@ internal class IndexCoordinator(
 
     private suspend fun runOwedRetag() {
         if (!session.tryLock()) return
+        // Published before the coverage check: Stop raises coverage before reading the job, so a Stop
+        // that misses this check still finds the job and cancels it.
+        activeJob = currentCoroutineContext()[Job]
         val upTo = retagRequests.get()
         if (upTo <= retagCovered.get()) {
+            activeJob = null
             session.unlock()
             launchOwedRetag()
             return
         }
         retagCovered.accumulateAndGet(upTo, ::maxOf)
-        activeJob = currentCoroutineContext()[Job]
         try {
             val completed = withSessionDeadline {
                 knowledge.retag { mutableProgress.value = it }
