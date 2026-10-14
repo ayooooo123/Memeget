@@ -631,7 +631,7 @@ internal class IndexCoordinator(
     }
 
     private suspend fun keepGoingWhileCharging(remainingBefore: Int, indexed: Int): Boolean {
-        if (store.setting("background.enabled") != "1" || interactive || !charging() || powerBlock(background = true) != null) return false
+        if (store.setting("background.enabled") != "1" || interactive || !charging()) return false
         val remainingAfter = remainingWork()
         // Only after progress, so items that fail every time can't keep the phone busy all night.
         return remainingAfter > 0 && (indexed > 0 || remainingAfter < remainingBefore)
@@ -643,16 +643,19 @@ internal class IndexCoordinator(
             .setRequiresBatteryNotLow(store.setting("background.pauseLowBattery") != "0")
             .build()
         // The short delay lets the finished worker's foreground service stop first: WorkManager 2.10.3 can crash
-        // when one foreground worker starts while another's service is shutting down.
+        // when one foreground worker starts while another's service is shutting down. A warm phone gets a few
+        // minutes to cool instead; if it is still warm then, that session pauses at once and the periodic run
+        // takes over.
+        val cooling = warm()
         WorkManager.getInstance(context).enqueueUniqueWork(
             CONTINUE_WORK,
             ExistingWorkPolicy.APPEND_OR_REPLACE,
             OneTimeWorkRequestBuilder<IndexWorker>()
                 .setConstraints(constraints)
-                .setInitialDelay(CONTINUE_DELAY_SECONDS, TimeUnit.SECONDS)
+                .setInitialDelay(if (cooling) COOL_DOWN_SECONDS else CONTINUE_DELAY_SECONDS, TimeUnit.SECONDS)
                 .build(),
         )
-        Log.i(LOG_TAG, "Charging with work left: next background session queued")
+        Log.i(LOG_TAG, if (cooling) "Charging with work left, phone warm: next background session queued after a cool-down" else "Charging with work left: next background session queued")
     }
 
     private fun batteryStatus(): Intent? = context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
@@ -666,12 +669,13 @@ internal class IndexCoordinator(
         val scale = battery?.getIntExtra(BatteryManager.EXTRA_SCALE, 100) ?: 100
         if (background && store.setting("background.onlyCharging") == "1" && !plugged) return "Waiting for charging"
         if (store.setting("background.pauseLowBattery") != "0" && !plugged && level >= 0 && scale > 0 && level.toFloat() / scale < 0.2f) return "Paused for low battery"
-        if (Build.VERSION.SDK_INT >= 29 && store.setting("background.pauseHot") != "0") {
-            val power = context.getSystemService(PowerManager::class.java)
-            if (power.currentThermalStatus >= PowerManager.THERMAL_STATUS_MODERATE) return "Paused while the device cools"
-        }
+        if (warm()) return "Paused while the device cools"
         return null
     }
+
+    private suspend fun warm(): Boolean =
+        Build.VERSION.SDK_INT >= 29 && store.setting("background.pauseHot") != "0" &&
+            context.getSystemService(PowerManager::class.java).currentThermalStatus >= PowerManager.THERMAL_STATUS_MODERATE
 
     private fun dot(a: FloatArray, b: FloatArray): Float {
         var sum = 0f
@@ -700,6 +704,7 @@ internal class IndexCoordinator(
         private const val PERIODIC_WORK = "memeget-native-periodic"
         private const val CONTINUE_WORK = "memeget-native-continue"
         private const val CONTINUE_DELAY_SECONDS = 30L
+        private const val COOL_DOWN_SECONDS = 5L * 60
         internal const val LOG_TAG = "MemegetIndex"
     }
 }

@@ -7,6 +7,7 @@ import android.content.Intent
 import android.graphics.Bitmap
 import android.net.Uri
 import android.os.BatteryManager
+import android.os.PowerManager
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import androidx.work.testing.WorkManagerTestInitHelper
@@ -41,8 +42,10 @@ import org.junit.runner.RunWith
 import org.junit.rules.TemporaryFolder
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
+import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import java.io.File
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 @RunWith(RobolectricTestRunner::class)
@@ -602,6 +605,31 @@ class IndexCoordinatorTest {
         assertEquals(listOf(WorkInfo.State.ENQUEUED), queuedHandovers().map { it.state })
         coordinator.cancel()
         assertEquals(listOf(WorkInfo.State.CANCELLED), queuedHandovers().map { it.state })
+    }
+
+    @Test(timeout = 30_000)
+    fun chargingSessionThatEndsWarmQueuesTheNextOneAfterACoolDown() = runBlocking {
+        store.insertPending(Uri.fromFile(createValidBitmapFile("a.png")).toString(), "a.png", "image", 100L, "hashW1")
+        store.insertPending(Uri.fromFile(createValidBitmapFile("b.png")).toString(), "b.png", "image", 101L, "hashW2")
+        store.setSetting("vision.enabled", "1")
+        store.setSetting("background.pauseHot", "1")
+        plugInCharger()
+        // The phone warms up as the session indexes.
+        val warming = object : LibraryStore by store {
+            override suspend fun completeIndex(id: Long, analysis: LocalAnalysis, model: String, thumbUri: String) {
+                store.completeIndex(id, analysis, model, thumbUri)
+                shadowOf(context.getSystemService(PowerManager::class.java)).setCurrentThermalStatus(PowerManager.THERMAL_STATUS_MODERATE)
+            }
+        }
+        val coordinator = IndexCoordinator(context, warming, files, testEngine, knowledge, cloud, sessionTimeoutMillis = 10_000L)
+
+        coordinator.runPending()
+
+        assertEquals("Paused while the device cools", coordinator.progress.value.detail)
+        // Waiting for the next 30-minute run would leave the phone idle long after it has cooled.
+        val handover = queuedHandovers().single()
+        assertEquals(WorkInfo.State.ENQUEUED, handover.state)
+        assertTrue("a warm phone gets time to cool: ${handover.initialDelayMillis} ms", handover.initialDelayMillis >= TimeUnit.MINUTES.toMillis(5))
     }
 
     @Test(timeout = 30_000)
