@@ -3,8 +3,12 @@ package com.memeget.nativeapp
 import android.app.Application
 import android.content.Context
 import android.content.ContextWrapper
+import android.content.Intent
 import android.graphics.Bitmap
 import android.net.Uri
+import android.os.BatteryManager
+import androidx.work.WorkInfo
+import androidx.work.WorkManager
 import androidx.work.testing.WorkManagerTestInitHelper
 import com.memeget.nativeapp.inference.ModelRegistry
 import expo.modules.memegetbg.SubjectCutoutResult
@@ -555,6 +559,82 @@ class IndexCoordinatorTest {
         assertFalse(indexed.pending)
         assertEquals("text", indexed.ocr)
         assertEquals(1, coordinator.progress.value.done)
+    }
+
+    private fun plugInCharger() {
+        RuntimeEnvironment.getApplication().sendStickyBroadcast(
+            Intent(Intent.ACTION_BATTERY_CHANGED)
+                .putExtra(BatteryManager.EXTRA_PLUGGED, BatteryManager.BATTERY_PLUGGED_AC)
+                .putExtra(BatteryManager.EXTRA_LEVEL, 100)
+                .putExtra(BatteryManager.EXTRA_SCALE, 100),
+        )
+    }
+
+    private fun queuedHandovers(): List<WorkInfo> =
+        WorkManager.getInstance(context).getWorkInfosForUniqueWork("memeget-native-continue").get()
+
+    /** Two memes to caption; the second caption blocks until the session limit stops it. */
+    private suspend fun captionSessionThatRunsOutOfTime(): IndexCoordinator {
+        store.setSetting("vision.enabled", "1")
+        var calls = 0
+        testEngine.onDescribe = { _, _ ->
+            if (++calls == 1) {
+                "CAPTION: frog waving\nTAGS: frog, wave"
+            } else {
+                withContext(Dispatchers.IO) {
+                    while (!testEngine.cancelled.get()) Thread.sleep(10)
+                    throw RuntimeException("Inference cancelled")
+                }
+            }
+        }
+        return IndexCoordinator(context, store, files, testEngine, knowledge, cloud, sessionTimeoutMillis = 4_000L)
+    }
+
+    @Test(timeout = 30_000)
+    fun chargingSessionWithWorkLeftQueuesTheNextOneAndStopCancelsIt() = runBlocking {
+        store.insertPending(Uri.fromFile(createValidBitmapFile("a.png")).toString(), "a.png", "image", 100L, "hashC1")
+        store.insertPending(Uri.fromFile(createValidBitmapFile("b.png")).toString(), "b.png", "image", 101L, "hashC2")
+        plugInCharger()
+        val coordinator = captionSessionThatRunsOutOfTime()
+
+        coordinator.runPending()
+
+        assertEquals(listOf(WorkInfo.State.ENQUEUED), queuedHandovers().map { it.state })
+        coordinator.cancel()
+        assertEquals(listOf(WorkInfo.State.CANCELLED), queuedHandovers().map { it.state })
+    }
+
+    @Test(timeout = 30_000)
+    fun sessionOnBatteryLeavesTheRestForTheRegularSchedule() = runBlocking {
+        val ids = listOf(
+            store.insertPending(Uri.fromFile(createValidBitmapFile("a.png")).toString(), "a.png", "image", 100L, "hashB1"),
+            store.insertPending(Uri.fromFile(createValidBitmapFile("b.png")).toString(), "b.png", "image", 101L, "hashB2"),
+        )
+        val coordinator = captionSessionThatRunsOutOfTime()
+
+        coordinator.runPending()
+
+        // Work is left, but without a charger it waits for the regular schedule.
+        assertTrue(ids.any { requireNotNull(store.meme(it)).visionState == "pending" })
+        assertTrue(queuedHandovers().isEmpty())
+    }
+
+    @Test(timeout = 30_000)
+    fun chargingSessionWithoutProgressQueuesNothing() = runBlocking {
+        val file = createValidBitmapFile("gone.png")
+        val id = store.insertPending(Uri.fromFile(file).toString(), "gone.png", "image", 100L, "hashG")
+        plugInCharger()
+        val coordinator = IndexCoordinator(context, store, files, testEngine, knowledge, cloud, sessionTimeoutMillis = 10_000L)
+        coordinator.runPending()
+        assertFalse(requireNotNull(store.meme(id)).pending)
+
+        // Captions turn on after the file is gone, so the one remaining caption fails every time.
+        assertTrue(file.delete())
+        store.setSetting("vision.enabled", "1")
+        coordinator.runPending()
+
+        assertEquals("pending", requireNotNull(store.meme(id)).visionState)
+        assertTrue(queuedHandovers().isEmpty())
     }
 
     private class TestInferenceEngine : InferenceEngine {
