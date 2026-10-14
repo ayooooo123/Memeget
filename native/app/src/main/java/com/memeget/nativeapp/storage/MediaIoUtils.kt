@@ -20,6 +20,7 @@ import androidx.documentfile.provider.DocumentFile
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
 import java.security.MessageDigest
@@ -424,7 +425,8 @@ internal object MediaIoUtils {
         }
     }
 
-    fun decodeUprightBitmap(context: Context, uri: Uri): Bitmap? {
+    /** EXIF-upright bitmap; [sampleSize] > 1 decodes a power-of-two subsample. */
+    fun decodeUprightBitmap(context: Context, uri: Uri, sampleSize: Int = 1): Bitmap? {
         val orientation = try {
             context.contentResolver.openInputStream(uri)?.use { stream ->
                 val exif = ExifInterface(stream)
@@ -435,7 +437,7 @@ internal object MediaIoUtils {
         }
 
         val bitmap = context.contentResolver.openInputStream(uri)?.use { stream ->
-            BitmapFactory.decodeStream(stream)
+            BitmapFactory.decodeStream(stream, null, BitmapFactory.Options().apply { inSampleSize = sampleSize })
         } ?: return null
 
         val matrix = Matrix()
@@ -474,6 +476,42 @@ internal object MediaIoUtils {
             }
         } finally {
             bitmap.recycle()
+        }
+    }
+
+    /** Width of the picture the image model and OCR read: the original app's `toJpeg` default. */
+    const val MODEL_INPUT_WIDTH = 768
+    /** Caps upscaled thin strips; only pictures taller than ~10.7:1 deviate from the original app. */
+    private const val MODEL_INPUT_MAX_HEIGHT = 8192
+
+    /**
+     * Writes the picture the image model and OCR read for one frame the way the original app made it
+     * (expo-image-manipulator resize to 768 px wide, aspect kept, JPEG quality 90): its exports and
+     * teachings were all made from these, so vectors stay comparable. It also turns formats the
+     * native decoder (OpenCV) cannot read, such as WebP, GIF and HEIF, into JPEG.
+     */
+    fun writeModelInputJpeg(context: Context, sourceUri: Uri, destinationFile: File) {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        context.contentResolver.openInputStream(sourceUri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) throw IOException("Unsupported or damaged image")
+        // Huge sources decode subsampled but stay at least four times the model width.
+        var sample = 1
+        while (maxOf(bounds.outWidth, bounds.outHeight) / (sample * 2) >= MODEL_INPUT_WIDTH * 4) sample *= 2
+        val decoded = decodeUprightBitmap(context, sourceUri, sample) ?: throw IOException("Unsupported or damaged image")
+        var width = MODEL_INPUT_WIDTH
+        var height = maxOf(1, (MODEL_INPUT_WIDTH.toFloat() * decoded.height / decoded.width).toInt())
+        if (height > MODEL_INPUT_MAX_HEIGHT) {
+            width = maxOf(1, (MODEL_INPUT_MAX_HEIGHT.toFloat() * decoded.width / decoded.height).toInt())
+            height = MODEL_INPUT_MAX_HEIGHT
+        }
+        val scaled = if (decoded.width == width && decoded.height == height) decoded else Bitmap.createScaledBitmap(decoded, width, height, true)
+        try {
+            destinationFile.parentFile?.mkdirs()
+            val written = destinationFile.outputStream().use { scaled.compress(Bitmap.CompressFormat.JPEG, 90, it) }
+            if (!written) throw IOException("Could not write the image the models read")
+        } finally {
+            if (scaled !== decoded) scaled.recycle()
+            decoded.recycle()
         }
     }
 }

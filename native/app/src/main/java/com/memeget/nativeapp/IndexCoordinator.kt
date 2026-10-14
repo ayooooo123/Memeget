@@ -23,6 +23,7 @@ import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import expo.modules.memegetbg.KeepAliveLease
 import com.memeget.nativeapp.inference.ModelRegistry
+import com.memeget.nativeapp.storage.MediaIoUtils
 import com.memeget.nativeapp.storage.Mp4Repair
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -50,6 +51,7 @@ import java.io.IOException
 import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.sqrt
 
 /** Durable rows are the queue; only one foreground/background session owns the engine pipeline. */
@@ -67,6 +69,8 @@ internal class IndexCoordinator(
     private val mutableProgress = MutableStateFlow(WorkProgress())
     val progress: StateFlow<WorkProgress> = mutableProgress.asStateFlow()
     @Volatile private var activeJob: Job? = null
+    /** A re-tag asked for while another session held the lock; it runs once that session ends. */
+    private val retagWanted = AtomicBoolean(false)
     @Volatile private var interactive = false
     fun setInteractive(value: Boolean) { interactive = value }
 
@@ -84,13 +88,19 @@ internal class IndexCoordinator(
         }
     }
     fun cancel() {
+        retagWanted.set(false)
         activeJob?.cancel()
         engine.cancel()
         cloud.cancel()
         WorkManager.getInstance(context).cancelUniqueWork(IMMEDIATE_WORK)
     }
+    /** Re-tags the library now or, when another session holds the lock, right after it ends. */
     suspend fun retag() {
-        if (!session.tryLock()) return
+        if (!session.tryLock()) {
+            retagWanted.set(true)
+            return
+        }
+        retagWanted.set(false)
         activeJob = currentCoroutineContext()[Job]
         try {
             val completed = withSessionDeadline {
@@ -126,8 +136,13 @@ internal class IndexCoordinator(
                 activeJob = null
                 mutableProgress.value = mutableProgress.value.copy(running = false)
                 session.unlock()
+                runWantedRetag()
             }
         }
+    }
+
+    private fun runWantedRetag() {
+        if (retagWanted.compareAndSet(true, false)) scope.launch { retag() }
     }
 
     fun schedule() {
@@ -186,7 +201,7 @@ internal class IndexCoordinator(
                                 val importedVector = if (meme.analysisImported) {
                                     store.vectors(meme.id)?.takeIf { it.model == engine.primaryModel && it.image.size == 512 }?.image
                                 } else null
-                                val item = prepare(meme, importedVector).copy(imported = importedVector != null)
+                                val item = prepare(meme, importedVector, importedFor = meme.contentHash.takeIf { importedVector != null })
                                 prepared += item
                                 stagedBytes += item.source.length()
                             } catch (cancelled: CancellationException) {
@@ -299,6 +314,7 @@ internal class IndexCoordinator(
                 activeJob = null
                 mutableProgress.value = mutableProgress.value.copy(running = false, memeId = null)
                 session.unlock()
+                runWantedRetag()
             }
         }
     }
@@ -335,15 +351,21 @@ internal class IndexCoordinator(
         val imported: Boolean = false,
     )
 
-    private suspend fun prepare(meme: Meme, knownVector: FloatArray? = null): Prepared {
+    /**
+     * [knownVector] stands in for the image model. With [importedFor] it is a collection import's
+     * vector for the bytes with that hash, reused (with the import's OCR) only while the file
+     * still has those bytes.
+     */
+    private suspend fun prepare(meme: Meme, knownVector: FloatArray? = null, importedFor: String? = null): Prepared {
         val (source, hash) = stage(meme.uri)
         val temporaryFrames = ArrayList<File>()
         try {
+            val reused = knownVector?.takeIf { importedFor == null || importedFor == hash }
             // The hash above covers the original bytes; the repair only touches this private copy.
             if (meme.kind == "video") Mp4Repair.zeroCttsFlags(source)
             val staged = meme.copy(uri = Uri.fromFile(source).toString())
             // A known vector needs frames only for thumbnails and optional enrichment.
-            val candidates = if (meme.kind == "video") files.frames(staged, if (knownVector != null) 3 else 8) else listOf(staged.uri)
+            val candidates = if (meme.kind == "video") files.frames(staged, if (reused != null) 3 else 8) else listOf(staged.uri)
             require(candidates.isNotEmpty()) { "No decodable video frames" }
             val cacheRoot = context.cacheDir.canonicalPath + File.separator
             for (uri in candidates) {
@@ -351,13 +373,25 @@ internal class IndexCoordinator(
                 val file = Uri.parse(uri).path?.let(::File) ?: continue
                 if (file.canonicalPath.startsWith(cacheRoot)) temporaryFrames += file
             }
-            val frames = ArrayList<String>(candidates.size)
-            val vectors = ArrayList<FloatArray>(candidates.size)
-            if (knownVector != null) {
-                frames += candidates.take(3)
-                vectors += knownVector
+            // The models read what the original app gave them, a 768-px-wide JPEG of each frame, so
+            // its exports and teachings stay comparable; WebP, GIF and HEIF, which the native decoder
+            // cannot read, then index like any other image.
+            val workDir = File(context.cacheDir, "index_work")
+            val inputs = ArrayList<String>(candidates.size)
+            for (uri in if (reused != null) candidates.take(3) else candidates) {
+                currentCoroutineContext().ensureActive()
+                val input = File(workDir, "${UUID.randomUUID()}.jpg")
+                temporaryFrames += input
+                withContext(Dispatchers.IO) { MediaIoUtils.writeModelInputJpeg(context, Uri.parse(uri), input) }
+                inputs += Uri.fromFile(input).toString()
+            }
+            val frames = ArrayList<String>(inputs.size)
+            val vectors = ArrayList<FloatArray>(inputs.size)
+            if (reused != null) {
+                frames += inputs
+                vectors += reused
             } else {
-                for (uri in candidates) {
+                for (uri in inputs) {
                     currentCoroutineContext().ensureActive()
                     val vector = engine.embedImage(uri)
                     require(vector.size == 512 && vector.all(Float::isFinite)) { "Invalid image embedding" }
@@ -369,7 +403,7 @@ internal class IndexCoordinator(
             }
             val pooled = if (vectors.size == 1) vectors[0] else pool(vectors)
             val thumbnail = if (meme.kind == "video") files.thumbnail(staged) else meme.uri
-            return Prepared(meme, source, hash, pooled, frames, temporaryFrames, thumbnail)
+            return Prepared(meme, source, hash, pooled, frames, temporaryFrames, thumbnail, imported = importedFor != null && reused != null)
         } catch (failure: Throwable) {
             withContext(NonCancellable + Dispatchers.IO) {
                 source.delete()

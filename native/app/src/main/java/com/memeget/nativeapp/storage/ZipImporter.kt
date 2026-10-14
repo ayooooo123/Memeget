@@ -3,6 +3,7 @@ package com.memeget.nativeapp.storage
 import android.content.Context
 import android.net.Uri
 import java.io.File
+import java.io.IOException
 import java.io.FileOutputStream
 import java.io.InputStream
 import java.security.MessageDigest
@@ -15,8 +16,17 @@ internal object ZipImporter {
     private const val MAX_ENTRY_BYTES = 350L * 1024 * 1024 // 350 MiB cap per entry to guard against zip bombs
     private const val MAX_ENTRIES_COUNT = 5000 // Guard against excessive entries in one zip
 
+    /** Manifests carry vectors for every item (~90 MB per 2,400 memes), so they get their own cap. */
+    const val MAX_MANIFEST_BYTES = 2L * 1024 * 1024 * 1024
+
     /** Kind of the root `manifest.json` a collection export carries next to its media. */
     const val MANIFEST_KIND = "manifest"
+
+    /**
+     * The archive's manifest could not be read, so its labels, text and vectors cannot come along.
+     * Thrown after the entry is closed: the next call continues with the following entry.
+     */
+    class UnreadableManifest(message: String) : IOException(message)
 
     data class ExtractedEntry(
         val tempFile: File,
@@ -40,10 +50,14 @@ internal object ZipImporter {
         return parts.lastOrNull() ?: ""
     }
 
-    /** Next media entry, or the root collection manifest (kind [MANIFEST_KIND]); null at the end. */
+    /**
+     * Next media entry, or the root collection manifest (kind [MANIFEST_KIND]); null at the end.
+     * Unusable media entries are skipped; an unusable manifest throws [UnreadableManifest].
+     */
     fun extractNextEntry(
         zis: ZipInputStream,
-        cacheDir: File
+        cacheDir: File,
+        manifestLimit: Long = MAX_MANIFEST_BYTES,
     ): ExtractedEntry? {
         var entry: ZipEntry? = zis.nextEntry
         while (entry != null) {
@@ -76,7 +90,8 @@ internal object ZipImporter {
                 continue
             }
 
-            // Valid media entry! Stream to temp file with bounded size and SHA-256 calculation
+            // Valid entry! Stream to temp file with bounded size and SHA-256 calculation
+            val limit = if (kind == MANIFEST_KIND) manifestLimit else MAX_ENTRY_BYTES
             val safeBasename = basename.replace(Regex("[^a-zA-Z0-9._-]"), "_")
             val tempFile = File(cacheDir, "zip_entry_${System.currentTimeMillis()}_${safeBasename}")
             tempFile.parentFile?.mkdirs()
@@ -91,7 +106,7 @@ internal object ZipImporter {
                     var read: Int
                     while (zis.read(buffer).also { read = it } != -1) {
                         entryBytes += read
-                        if (entryBytes > MAX_ENTRY_BYTES) {
+                        if (entryBytes > limit) {
                             failed = true
                             break
                         }
@@ -107,6 +122,12 @@ internal object ZipImporter {
 
             if (failed || entryBytes == 0L) {
                 tempFile.delete()
+                if (kind == MANIFEST_KIND) {
+                    throw UnreadableManifest(
+                        if (entryBytes > limit) "its manifest is larger than ${limit / (1024 * 1024)} MiB"
+                        else "its manifest is empty or damaged"
+                    )
+                }
                 entry = zis.nextEntry
                 continue
             }

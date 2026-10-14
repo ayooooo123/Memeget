@@ -102,6 +102,12 @@ internal object TagMerge {
             .joinToString(" ")
     }
 
+    /** A cloud caption that names a rejected label is dropped whole: it has no safe partial edit. */
+    fun captionWithoutRejected(caption: String, label: String): String {
+        val norm = normalizeTagLabel(label)
+        return if (norm.isNotEmpty() && caption.contains(norm, ignoreCase = true)) "" else caption
+    }
+
     fun upsertDurableTag(
         tags: List<Tag>,
         extraTerms: String,

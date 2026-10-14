@@ -72,6 +72,8 @@ class CandidateRankingBehaviorTest {
             if (labels.isEmpty() && m.rejectedLabels.isEmpty()) null else HumanLabeled(m.id, image, labels, m.rejectedLabels)
         }
         override suspend fun imageVectors(): Map<Long, FloatArray> = vectors.mapValues { it.value.image }
+        override suspend fun idsWithScoreDomain(scoreDomain: String): Set<Long> =
+            memes.values.filter { m -> m.tags.any { it.scoreDomain == scoreDomain } }.mapTo(HashSet()) { it.id }
         override suspend fun requeueFailed(): Int = 0
 
         /** Like the real store, a new teaching changes the label revision. */
@@ -462,5 +464,31 @@ class CandidateRankingBehaviorTest {
         }
         val candidates = knowledge.candidateLabels(makeUnitProbe(512, 0.8f, 0.2f, 0.18f), limit = 1)
         assertEquals(listOf("target identity"), candidates.map { it.label })
+    }
+
+    @Test fun labelQueueAsksFirstAboutTheMemesThatCoverTheMostUnnamedLookalikes() = runBlocking {
+        val store = TestStore()
+        fun look(axis: Int, wobble: Int? = null) = FloatArray(512).apply {
+            this[axis] = 1f
+            if (wobble != null) this[wobble] = 0.3f
+            val norm = kotlin.math.sqrt(sumOf { (it * it).toDouble() }).toFloat()
+            for (k in indices) this[k] /= norm
+        }
+        fun add(id: Long, image: FloatArray, tags: List<Tag> = emptyList(), rejected: List<String> = emptyList()) {
+            store.memes[id] = Meme(id = id, uri = "file:///m$id.jpg", name = "m$id.jpg", kind = "image", ocr = "", tags = tags, rejectedLabels = rejected)
+            store.vectors[id] = VectorRecord(id = id, image = image, model = ModelRegistry.PRIMARY_MODEL_FINGERPRINT)
+        }
+        // Cluster A: four unnamed look-alikes, one a person named, one the vote already labeled.
+        add(1, look(0)); add(2, look(0, 5)); add(3, look(0, 6)); add(4, look(0, 7))
+        add(5, look(0, 8), tags = listOf(Tag("pepe", "character", 1f, "manual", "user", "confirmed", "user")))
+        add(6, look(0, 9), tags = listOf(Tag("pepe", "character", 0.9f, "exemplar", LocalKnowledge.LOOKALIKE_SCORE_DOMAIN, "unreviewed", "learned")))
+        // Cluster B: three unnamed; a "not this" alone does not name meme 9.
+        add(7, look(1)); add(8, look(1, 10)); add(9, look(1, 11), rejected = listOf("wojak"))
+        add(10, look(2))
+
+        val queue = LocalKnowledge(store, TestEngine()).labelQueue()
+
+        assertEquals(listOf(1L, 7L, 10L), queue.map { it.meme.id })
+        assertEquals(listOf(3, 2, 0), queue.map { it.lookalikes })
     }
 }

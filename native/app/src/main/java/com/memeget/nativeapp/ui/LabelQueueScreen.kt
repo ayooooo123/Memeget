@@ -69,9 +69,9 @@ import kotlinx.coroutines.launch
 internal fun LabelQueueScreen(
     store: LibraryStore,
     knowledge: LocalKnowledge,
-    cloud: CloudAssistant,
     onOpenViewer: (Meme) -> Unit,
-    onAnswered: () -> Unit,
+    /** Saves an answer as a teaching. It must outlive this screen: leaving the tab mid-save keeps the answer. */
+    saveAnswer: suspend (memeId: Long, label: String, category: String?, positive: Boolean) -> Unit,
 ) {
     val scope = rememberCoroutineScope()
     val focusManager = LocalFocusManager.current
@@ -113,9 +113,8 @@ internal fun LabelQueueScreen(
         busy = true
         scope.launch {
             try {
-                cloud.recordTeaching(current.meme.id, label, category ?: knowledge.knownCategory(label), positive, emptyList())
+                saveAnswer(current.meme.id, label, category, positive)
                 answered++
-                onAnswered()
                 if (positive) queue = queue?.drop(1) else meme = store.meme(current.meme.id)
             } catch (cancelled: CancellationException) {
                 throw cancelled

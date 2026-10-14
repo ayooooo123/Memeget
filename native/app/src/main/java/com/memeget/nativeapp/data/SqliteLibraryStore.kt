@@ -32,6 +32,7 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.PriorityQueue
+import java.util.concurrent.atomic.AtomicLong
 
 internal class SqliteLibraryStore(val context: Context) : LibraryStore {
 
@@ -51,6 +52,79 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
 
     private fun bumpLabels() {
         _labelRevision.value += 1L
+    }
+
+    /** Moves whenever the exemplars table changes; keys [teachingCache]. */
+    private val teachingGeneration = AtomicLong()
+    @Volatile private var teachingCache: Pair<Long, List<Exemplar>>? = null
+
+    /** Call after an exemplar write commits, so a concurrent load can't cache the old list as current. */
+    private fun bumpTeachings() {
+        teachingGeneration.incrementAndGet()
+    }
+
+    /** Teachings whose vectors compare with library vectors; reloaded only after teachings change. */
+    private suspend fun comparableTeachings(): List<Exemplar> {
+        val generation = teachingGeneration.get()
+        teachingCache?.let { (cachedAt, teachings) -> if (cachedAt == generation) return teachings }
+        val teachings = exemplars().filter {
+            it.vector.size == 512 &&
+                (it.model == ModelRegistry.PRIMARY_MODEL_FINGERPRINT || it.model == TeachingPackIo.PACK_MODEL)
+        }
+        teachingCache = generation to teachings
+        return teachings
+    }
+
+    /** Per label, the newest teaching that shows exactly this picture ([exemplars] lists newest first). */
+    private fun teachingsShowing(image: FloatArray, teachings: List<Exemplar>): Map<String, Exemplar> {
+        if (image.size != 512) return emptyMap()
+        val byLabel = LinkedHashMap<String, Exemplar>()
+        for (e in teachings) {
+            if (FloatBlob.dot(image, e.vector) >= LookalikeVote.SAME_IMAGE_COS) byLabel.putIfAbsent(TagMerge.normalizeTagLabel(e.label), e)
+        }
+        return byLabel
+    }
+
+    /** A meme's labels and searchable text. */
+    private data class Labeled(
+        val tags: List<Tag>,
+        val terms: String,
+        val rejected: List<String>,
+        val cloudCaption: String,
+        val cloudTerms: String,
+    )
+
+    /**
+     * Applies teachings of a meme's own picture the way the person meant them: a positive becomes
+     * a confirmed tag; a "not X" becomes a rejection that also strips X from tags and searchable
+     * text. Neither overrides the meme's own decisions (its human tags and rejections). Null when
+     * nothing changes.
+     */
+    private fun attachTeachings(current: Labeled, byLabel: Map<String, Exemplar>): Labeled? {
+        var tags = current.tags
+        var terms = current.terms
+        var cloudCaption = current.cloudCaption
+        var cloudTerms = current.cloudTerms
+        val rejected = LinkedHashSet(current.rejected.map { TagMerge.normalizeTagLabel(it) })
+        var changed = false
+        for ((label, e) in byLabel) {
+            val human = tags.any { TagMerge.isHumanTag(it) && TagMerge.normalizeTagLabel(it.label) == label }
+            if (e.positive) {
+                if (human || label in rejected) continue
+                val provenance = if (e.pack.isNotBlank()) "teaching:${e.pack}" else "teaching"
+                val upserted = TagMerge.upsertDurableTag(tags, terms, Tag(label, e.category, 1f, "exemplar", "user", "confirmed", provenance))
+                tags = upserted.first
+                terms = upserted.second
+                changed = true
+            } else if (!human && rejected.add(label)) {
+                tags = tags.filter { TagMerge.normalizeTagLabel(it.label) != label }
+                terms = TagMerge.withoutRejectedTerms(terms, listOf(label))
+                cloudTerms = TagMerge.withoutRejectedTerms(cloudTerms, listOf(label))
+                cloudCaption = TagMerge.captionWithoutRejected(cloudCaption, label)
+                changed = true
+            }
+        }
+        return if (changed) Labeled(tags, terms, rejected.toList(), cloudCaption, cloudTerms) else null
     }
 
     private fun getReadableDb(): SQLiteDatabase = dbHelper.readableDatabase
@@ -381,6 +455,14 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
                 val image = FloatBlob.fromBytes(c.getBlob(1) ?: continue)
                 if (image.size == 512) out[c.getLong(0)] = image
             }
+        }
+        out
+    }
+
+    override suspend fun idsWithScoreDomain(scoreDomain: String): Set<Long> = withContext(Dispatchers.IO) {
+        val out = HashSet<Long>()
+        getReadableDb().rawQuery("SELECT id FROM memes WHERE tags LIKE ?", arrayOf("%\"scoreDomain\":\"$scoreDomain\"%")).use { c ->
+            while (c.moveToNext()) out += c.getLong(0)
         }
         out
     }
@@ -869,26 +951,41 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
         model: String,
         thumbUri: String,
     ) = withContext(Dispatchers.IO) {
+        // Teachings imported before this meme had a vector attach to it now that it has one.
+        val showing = if (model == ModelRegistry.PRIMARY_MODEL_FINGERPRINT) teachingsShowing(analysis.image, comparableTeachings()) else emptyMap()
         writeMutex.withLock {
             val db = getWritableDb()
             var labeled = false
             db.beginTransaction()
             try {
                 val currentMeme = meme(id) ?: return@withLock
-                val human = currentMeme.tags.any(TagMerge::isHumanTag) || currentMeme.rejectedLabels.isNotEmpty()
                 val now = System.currentTimeMillis()
 
-                // Fresh analysis replaces recomputed machine tags; per-meme rejections apply to every tag.
+                // Fresh analysis replaces recomputed machine tags. Per-meme rejections veto machine
+                // tags; human tags always stay (applying one by hand withdraws a matching rejection).
                 val rejected = currentMeme.rejectedLabels.map { TagMerge.normalizeTagLabel(it) }.toSet()
                 val kept = currentMeme.tags.filter { TagMerge.survivesReclassification(it) }
-                val mergedTags = TagMerge.mergeDurableTags(kept + analysis.tags)
-                    .filter { !rejected.contains(TagMerge.normalizeTagLabel(it.label)) }
-                val extraTerms = TagMerge.withoutRejectedTerms(analysis.extraTerms, rejected)
+                val classified = Labeled(
+                    tags = TagMerge.mergeDurableTags(kept + analysis.tags)
+                        .filter { TagMerge.isHumanTag(it) || !rejected.contains(TagMerge.normalizeTagLabel(it.label)) },
+                    terms = TagMerge.withoutRejectedTerms(analysis.extraTerms, rejected),
+                    rejected = currentMeme.rejectedLabels,
+                    cloudCaption = currentMeme.cloudCaption,
+                    cloudTerms = currentMeme.cloudTerms,
+                )
+                val attached = attachTeachings(classified, showing)
+                val result = attached ?: classified
+                val human = result.tags.any(TagMerge::isHumanTag) || result.rejected.isNotEmpty()
 
                 val memeCv = ContentValues().apply {
                     put("ocr_text", analysis.ocr)
-                    put("tags", serializeTags(mergedTags))
-                    put("extra_terms", extraTerms)
+                    put("tags", serializeTags(result.tags))
+                    put("extra_terms", result.terms)
+                    if (attached != null) {
+                        put("rejected_labels", serializeStrings(result.rejected))
+                        put("cloud_caption", result.cloudCaption)
+                        put("cloud_terms", result.cloudTerms)
+                    }
                     put("pending", 0)
                     put("analysis_imported", 0)
                     put("index_error", "")
@@ -902,7 +999,8 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
                 // Preserve existing compatible caption & visual vectors without blindly wiping them
                 val existingVec = vectors(id)
                 // A labeled meme's new vector changes what its labels teach.
-                labeled = human && (existingVec == null || existingVec.model != model || !existingVec.image.contentEquals(analysis.image))
+                labeled = attached != null ||
+                    human && (existingVec == null || existingVec.model != model || !existingVec.image.contentEquals(analysis.image))
                 val vecCv = ContentValues().apply {
                     put("id", id)
                     put("image", FloatBlob.toBytes(analysis.image))
@@ -926,10 +1024,10 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
                     ocr = analysis.ocr,
                     caption = currentMeme.caption,
                     transcript = currentMeme.transcript,
-                    tags = mergedTags,
-                    extraTerms = extraTerms,
-                    cloudCaption = currentMeme.cloudCaption,
-                    cloudTerms = currentMeme.cloudTerms,
+                    tags = result.tags,
+                    extraTerms = result.terms,
+                    cloudCaption = result.cloudCaption,
+                    cloudTerms = result.cloudTerms,
                 )
                 db.setTransactionSuccessful()
             } finally {
@@ -1271,9 +1369,12 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
                 for (id in ids) {
                     val currentMeme = meme(id) ?: continue
                     val (updatedTags, updatedTerms) = TagMerge.upsertDurableTag(currentMeme.tags, currentMeme.extraTerms, directTags)
+                    // Tagging X by hand is the newest decision: it withdraws an earlier "not X".
+                    val updatedRejected = currentMeme.rejectedLabels.filter { TagMerge.normalizeTagLabel(it) != normLabel }
                     val cv = ContentValues().apply {
                         put("tags", serializeTags(updatedTags))
                         put("extra_terms", updatedTerms)
+                        put("rejected_labels", serializeStrings(updatedRejected))
                     }
                     db.update("memes", cv, "id = ?", arrayOf(id.toString()))
                     updateFtsRow(
@@ -1520,19 +1621,10 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
                     val updatedRejected = (currentMeme.rejectedLabels + normLabel).distinct()
                     val filteredTags = currentMeme.tags.filter { TagMerge.normalizeTagLabel(it.label) != normLabel }
 
-                    // Rebuild extra terms: remove words associated with rejected label
-                    val wordsToRemove = normLabel.split(Regex("\\s+")).filter { it.isNotBlank() }.toSet()
-                    val cleanedExtraTerms = currentMeme.extraTerms.split(Regex("\\s+"))
-                        .filter { it.isNotBlank() && !wordsToRemove.contains(it.lowercase()) }
-                        .joinToString(" ")
-                    val cleanedCloudTerms = currentMeme.cloudTerms.split(Regex("\\s+"))
-                        .filter { it.isNotBlank() && !wordsToRemove.contains(it.lowercase()) }
-                        .joinToString(" ")
-
-                    var updatedCloudCaption = currentMeme.cloudCaption
-                    if (updatedCloudCaption.contains(normLabel, ignoreCase = true)) {
-                        updatedCloudCaption = ""
-                    }
+                    // Strip the rejected label's words from every searchable field.
+                    val cleanedExtraTerms = TagMerge.withoutRejectedTerms(currentMeme.extraTerms, listOf(normLabel))
+                    val cleanedCloudTerms = TagMerge.withoutRejectedTerms(currentMeme.cloudTerms, listOf(normLabel))
+                    val updatedCloudCaption = TagMerge.captionWithoutRejected(currentMeme.cloudCaption, normLabel)
 
                     val memeCv = ContentValues().apply {
                         put("tags", serializeTags(filteredTags))
@@ -1562,6 +1654,7 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
             }
             bumpRevision()
             bumpLabels()
+            bumpTeachings()
         }
     }
 
@@ -1649,6 +1742,7 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
             }
             bumpRevision()
             bumpLabels()
+            bumpTeachings()
             imported
         }
     }
@@ -1666,6 +1760,7 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
             }
             bumpRevision()
             bumpLabels()
+            bumpTeachings()
         }
     }
 
@@ -1681,6 +1776,7 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
             }
             bumpRevision()
             bumpLabels()
+            bumpTeachings()
         }
     }
 
@@ -1693,7 +1789,7 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
                 val rejected = m.rejectedLabels.map { TagMerge.normalizeTagLabel(it) }.toSet()
                 // Callers pass the complete machine tag set; human-confirmed tags are never theirs to drop.
                 val merged = TagMerge.mergeDurableTags(m.tags.filter { TagMerge.isHumanTag(it) } + tags)
-                    .filter { !rejected.contains(TagMerge.normalizeTagLabel(it.label)) }
+                    .filter { TagMerge.isHumanTag(it) || !rejected.contains(TagMerge.normalizeTagLabel(it.label)) }
                 val filteredTerms = TagMerge.withoutRejectedTerms(extraTerms, rejected)
 
                 val cv = ContentValues().apply {
@@ -1764,21 +1860,13 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
     }
 
     override suspend fun relinkTeachings(): Int = withContext(Dispatchers.IO) {
-        val teachings = exemplars().filter {
-            it.vector.size == 512 &&
-                (it.model == ModelRegistry.PRIMARY_MODEL_FINGERPRINT || it.model == TeachingPackIo.PACK_MODEL)
-        }
+        val teachings = comparableTeachings()
         if (teachings.isEmpty()) return@withContext 0
-        // exemplars() lists newest first, so each meme keeps the newest teaching per label.
-        val matches = LinkedHashMap<Long, LinkedHashMap<String, Exemplar>>()
+        val matches = LinkedHashMap<Long, Map<String, Exemplar>>()
         getReadableDb().rawQuery("SELECT id, image FROM vectors WHERE model = ?", arrayOf(ModelRegistry.PRIMARY_MODEL_FINGERPRINT)).use { c ->
             while (c.moveToNext()) {
-                val image = FloatBlob.fromBytes(c.getBlob(1))
-                if (image.size != 512) continue
-                for (e in teachings) {
-                    if (FloatBlob.dot(image, e.vector) < LookalikeVote.SAME_IMAGE_COS) continue
-                    matches.getOrPut(c.getLong(0)) { LinkedHashMap() }.putIfAbsent(TagMerge.normalizeTagLabel(e.label), e)
-                }
+                val showing = teachingsShowing(FloatBlob.fromBytes(c.getBlob(1)), teachings)
+                if (showing.isNotEmpty()) matches[c.getLong(0)] = showing
             }
         }
         var changed = 0
@@ -1786,32 +1874,18 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
             val db = getWritableDb()
             db.beginTransaction()
             try {
-                for ((id, byLabel) in matches) {
+                for ((id, showing) in matches) {
                     val m = meme(id) ?: continue
-                    var tags = m.tags
-                    var terms = m.extraTerms
-                    val rejected = LinkedHashSet(m.rejectedLabels.map { TagMerge.normalizeTagLabel(it) })
-                    for ((label, e) in byLabel) {
-                        val human = tags.any { TagMerge.isHumanTag(it) && TagMerge.normalizeTagLabel(it.label) == label }
-                        if (e.positive) {
-                            if (human || label in rejected) continue
-                            val provenance = if (e.pack.isNotBlank()) "teaching:${e.pack}" else "teaching"
-                            val upserted = TagMerge.upsertDurableTag(tags, terms, Tag(label, e.category, 1f, "exemplar", "user", "confirmed", provenance))
-                            tags = upserted.first
-                            terms = upserted.second
-                        } else if (!human && rejected.add(label)) {
-                            tags = tags.filter { TagMerge.normalizeTagLabel(it.label) != label }
-                            terms = TagMerge.withoutRejectedTerms(terms, listOf(label))
-                        }
-                    }
-                    if (tags == m.tags && terms == m.extraTerms && rejected.size == m.rejectedLabels.size) continue
+                    val attached = attachTeachings(Labeled(m.tags, m.extraTerms, m.rejectedLabels, m.cloudCaption, m.cloudTerms), showing) ?: continue
                     val cv = ContentValues().apply {
-                        put("tags", serializeTags(tags))
-                        put("extra_terms", terms)
-                        put("rejected_labels", serializeStrings(rejected.toList()))
+                        put("tags", serializeTags(attached.tags))
+                        put("extra_terms", attached.terms)
+                        put("rejected_labels", serializeStrings(attached.rejected))
+                        put("cloud_caption", attached.cloudCaption)
+                        put("cloud_terms", attached.cloudTerms)
                     }
                     db.update("memes", cv, "id = ?", arrayOf(id.toString()))
-                    updateFtsRow(db, id, m.name, m.ocr, m.caption, m.transcript, tags, terms, m.cloudCaption, m.cloudTerms)
+                    updateFtsRow(db, id, m.name, m.ocr, m.caption, m.transcript, attached.tags, attached.terms, attached.cloudCaption, attached.cloudTerms)
                     changed++
                 }
                 db.setTransactionSuccessful()

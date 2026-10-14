@@ -41,7 +41,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import com.memeget.nativeapp.editor.RemixStudio
@@ -69,12 +71,29 @@ internal fun MemegetApp(
     var activeRemixMeme by remember { mutableStateOf<Meme?>(null) }
     var tagSearchRequest by remember { mutableStateOf<String?>(null) }
     var searching by remember { mutableStateOf(false) }
-    // Answers in the Label tab spread to look-alikes on the re-tag that runs when the tab is left.
+    // Answers in the Label tab spread to look-alikes on a re-tag once the tab is left. The app scope
+    // owns each save, so leaving mid-save neither cancels the answer nor misses that re-tag.
     var labelsChanged by remember { mutableStateOf(false) }
-    LaunchedEffect(currentTab) {
+    LaunchedEffect(currentTab, labelsChanged) {
         if (currentTab != AppTab.Label && labelsChanged) {
             labelsChanged = false
             scope.launch { coordinator.retag() }
+        }
+    }
+    val saveAnswer: suspend (Long, String, String?, Boolean) -> Unit = remember(scope, cloud, knowledge) {
+        { memeId, label, category, positive ->
+            val failure = scope.async {
+                try {
+                    cloud.recordTeaching(memeId, label, category ?: knowledge.knownCategory(label), positive, emptyList())
+                    labelsChanged = true
+                    null
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (failure: Exception) {
+                    failure
+                }
+            }.await()
+            if (failure != null) throw failure
         }
     }
     LaunchedEffect(searching, activeRemixMeme) {
@@ -179,9 +198,8 @@ internal fun MemegetApp(
                             LabelQueueScreen(
                                 store = store,
                                 knowledge = knowledge,
-                                cloud = cloud,
                                 onOpenViewer = { meme -> activeViewerMeme = meme },
-                                onAnswered = { labelsChanged = true },
+                                saveAnswer = saveAnswer,
                             )
                         }
                         AppTab.Settings -> {

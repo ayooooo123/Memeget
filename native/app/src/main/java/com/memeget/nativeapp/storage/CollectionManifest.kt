@@ -25,29 +25,43 @@ internal object CollectionManifest {
     data class Record(val file: String, val analysis: ImportedAnalysis)
 
     fun read(file: File): List<Record> {
-        val records = ArrayList<Record>()
+        var format = ""
+        var version = 0
+        var model = ""
+        var headerRead = 0
+        var records: List<Record>? = null
         JsonReader(file.bufferedReader(Charsets.UTF_8)).use { reader ->
-            var format = ""
-            var version = 0
-            var model = ""
             reader.beginObject()
             while (reader.hasNext()) {
                 when (reader.nextName()) {
-                    "format" -> format = reader.nextString()
-                    "version" -> version = reader.nextInt()
-                    "model" -> model = reader.nextString()
-                    "memes" -> {
-                        require(format == FORMAT) { "Not a Memeget collection manifest" }
-                        val vectorsTrusted = version >= FIRST_ORIGINAL_MEDIA_VERSION && compatibleModel(model)
-                        reader.beginArray()
-                        while (reader.hasNext()) readRecord(reader, vectorsTrusted)?.let(records::add)
-                        reader.endArray()
-                    }
+                    "format" -> { format = reader.nextString(); headerRead = headerRead or 1 }
+                    "version" -> { version = reader.nextInt(); headerRead = headerRead or 2 }
+                    "model" -> { model = reader.nextString(); headerRead = headerRead or 4 }
+                    // Exporters write the header first; any other member order costs a second pass.
+                    "memes" -> if (headerRead == 7) records = readMemes(reader, format, version, model) else reader.skipValue()
                     else -> reader.skipValue()
                 }
             }
             reader.endObject()
         }
+        return records ?: JsonReader(file.bufferedReader(Charsets.UTF_8)).use { reader ->
+            var found: List<Record> = emptyList()
+            reader.beginObject()
+            while (reader.hasNext()) {
+                if (reader.nextName() == "memes") found = readMemes(reader, format, version, model) else reader.skipValue()
+            }
+            reader.endObject()
+            found
+        }
+    }
+
+    private fun readMemes(reader: JsonReader, format: String, version: Int, model: String): List<Record> {
+        require(format == FORMAT) { "Not a Memeget collection manifest" }
+        val vectorsTrusted = version >= FIRST_ORIGINAL_MEDIA_VERSION && compatibleModel(model)
+        val records = ArrayList<Record>()
+        reader.beginArray()
+        while (reader.hasNext()) readRecord(reader, vectorsTrusted)?.let(records::add)
+        reader.endArray()
         return records
     }
 

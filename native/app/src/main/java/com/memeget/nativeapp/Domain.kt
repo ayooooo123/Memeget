@@ -145,6 +145,8 @@ internal interface LibraryStore {
     suspend fun humanLabels(): List<HumanLabeled>
     /** Every meme's primary-model image vector, in one read. */
     suspend fun imageVectors(): Map<Long, FloatArray>
+    /** Ids of memes holding a tag from [scoreDomain], read without parsing every meme's tags. */
+    suspend fun idsWithScoreDomain(scoreDomain: String): Set<Long>
     suspend fun folders(): List<Folder>
     suspend fun addFolder(uri: String, name: String)
     suspend fun removeFolder(uri: String)
