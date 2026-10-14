@@ -1790,58 +1790,66 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
 
     override suspend fun importExemplars(items: List<Exemplar>, pack: String, asSelf: Boolean): Int = withContext(Dispatchers.IO) {
         if (items.isEmpty()) return@withContext 0
-        writeMutex.withLock {
-            val db = getWritableDb()
-            db.beginTransaction()
-            val imported = try {
-                // Deduplication set built from existing exemplars
-                val existing = exemplars()
-                val seen = HashSet<String>()
-                for (e in existing) {
-                    val norm = TagMerge.normalizeTagLabel(e.label)
-                    val fp = FloatBlob.fingerprint(e.vector)
-                    seen.add("${norm}:${e.positive}:${e.model}:${fp}")
-                }
+        writeMutex.withLock { writeExemplarsLocked(items, pack, asSelf, replace = false).second }
+    }
 
-                var count = 0
-                val now = System.currentTimeMillis()
-                for (item in items) {
-                    val normLabel = TagMerge.normalizeTagLabel(item.label)
-                    val fp = FloatBlob.fingerprint(item.vector)
-                    val sig = "${normLabel}:${item.positive}:${item.model}:${fp}"
-                    if (seen.contains(sig)) {
-                        continue
-                    }
-                    seen.add(sig)
+    override suspend fun replaceExemplars(items: List<Exemplar>, pack: String): Pair<Int, Int> = withContext(Dispatchers.IO) {
+        writeMutex.withLock { writeExemplarsLocked(items, pack, asSelf = false, replace = true) }
+    }
 
-                    val origin = if (asSelf) "self" else if (item.origin.isNotBlank()) item.origin else if (pack.isNotBlank()) "pack" else "self"
-                    val packName = if (asSelf) "" else if (item.pack.isNotBlank()) item.pack else pack
-
-                    val cv = ContentValues().apply {
-                        put("label", normLabel)
-                        put("category", item.category)
-                        put("vector", FloatBlob.toBytes(item.vector))
-                        put("associations", JSONArray(item.associations).toString())
-                        put("source_uri", item.sourceUri)
-                        put("is_positive", if (item.positive) 1 else 0)
-                        put("origin", origin)
-                        put("pack", packName)
-                        put("model", item.model)
-                        put("created_at", now)
-                    }
-                    db.insert("exemplars", null, cv)
-                    count++
-                }
-                db.setTransactionSuccessful()
-                count
-            } finally {
-                db.endTransaction()
+    /** One transaction: removed first when [replace], then inserted. Returns (removed, added). */
+    private suspend fun writeExemplarsLocked(items: List<Exemplar>, pack: String, asSelf: Boolean, replace: Boolean): Pair<Int, Int> {
+        val db = getWritableDb()
+        db.beginTransaction()
+        val written = try {
+            val removed = if (replace) db.delete("exemplars", null, null) else 0
+            // Deduplication set built from existing exemplars
+            val existing = if (replace) emptyList() else exemplars()
+            val seen = HashSet<String>()
+            for (e in existing) {
+                val norm = TagMerge.normalizeTagLabel(e.label)
+                val fp = FloatBlob.fingerprint(e.vector)
+                seen.add("${norm}:${e.positive}:${e.model}:${fp}")
             }
-            bumpRevision()
-            bumpLabels()
-            bumpTeachings()
-            imported
+
+            var count = 0
+            val now = System.currentTimeMillis()
+            for (item in items) {
+                val normLabel = TagMerge.normalizeTagLabel(item.label)
+                val fp = FloatBlob.fingerprint(item.vector)
+                val sig = "${normLabel}:${item.positive}:${item.model}:${fp}"
+                if (seen.contains(sig)) {
+                    continue
+                }
+                seen.add(sig)
+
+                val origin = if (asSelf) "self" else if (item.origin.isNotBlank()) item.origin else if (pack.isNotBlank()) "pack" else "self"
+                val packName = if (asSelf) "" else if (item.pack.isNotBlank()) item.pack else pack
+
+                val cv = ContentValues().apply {
+                    put("label", normLabel)
+                    put("category", item.category)
+                    put("vector", FloatBlob.toBytes(item.vector))
+                    put("associations", JSONArray(item.associations).toString())
+                    put("source_uri", item.sourceUri)
+                    put("is_positive", if (item.positive) 1 else 0)
+                    put("origin", origin)
+                    put("pack", packName)
+                    put("model", item.model)
+                    put("created_at", now)
+                }
+                db.insert("exemplars", null, cv)
+                count++
+            }
+            db.setTransactionSuccessful()
+            removed to count
+        } finally {
+            db.endTransaction()
         }
+        bumpRevision()
+        bumpLabels()
+        bumpTeachings()
+        return written
     }
 
     override suspend fun forgetLabel(label: String) = withContext(Dispatchers.IO) {
@@ -1874,24 +1882,6 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
             bumpRevision()
             bumpLabels()
             bumpTeachings()
-        }
-    }
-
-    override suspend fun clearExemplars(): Int = withContext(Dispatchers.IO) {
-        writeMutex.withLock {
-            val db = getWritableDb()
-            db.beginTransaction()
-            val removed = try {
-                val count = db.delete("exemplars", null, null)
-                db.setTransactionSuccessful()
-                count
-            } finally {
-                db.endTransaction()
-            }
-            bumpRevision()
-            bumpLabels()
-            bumpTeachings()
-            removed
         }
     }
 
@@ -2046,6 +2036,20 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
                 db.execSQL("DELETE FROM meme_search_fts")
                 db.execSQL("DELETE FROM content_hashes")
                 db.execSQL("DELETE FROM memes")
+                // The folder backups now hold more than the library does: an automatic backup must not replace them
+                // with this emptied state until each folder is restored or backed up by hand.
+                val held = LinkedHashSet<String>()
+                db.rawQuery("SELECT value FROM settings WHERE key = ?", arrayOf(BACKUP_HOLD_SETTING)).use { c ->
+                    if (c.moveToNext()) c.getString(0).orEmpty().lineSequence().filterTo(held) { it.isNotBlank() }
+                }
+                db.rawQuery("SELECT uri FROM folders", null).use { c -> while (c.moveToNext()) held += c.getString(0) }
+                if (held.isNotEmpty()) {
+                    val cv = ContentValues().apply {
+                        put("key", BACKUP_HOLD_SETTING)
+                        put("value", held.joinToString("\n"))
+                    }
+                    db.insertWithOnConflict("settings", null, cv, SQLiteDatabase.CONFLICT_REPLACE)
+                }
                 db.setTransactionSuccessful()
             } finally {
                 db.endTransaction()

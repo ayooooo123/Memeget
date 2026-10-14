@@ -77,7 +77,9 @@ import coil.request.ImageRequest
 import com.memeget.nativeapp.data.TagMerge
 import com.memeget.nativeapp.storage.MediaIoUtils
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.text.DateFormat
@@ -329,9 +331,12 @@ internal fun ViewerModal(
                                                 if (!enabled) {
                                                     Toast.makeText(context, "Turn on Local AI Captions in Settings first", Toast.LENGTH_SHORT).show()
                                                 } else {
+                                                    // A session already running keeps the lock, so this start may be
+                                                    // dropped; the meme then waits for the next session.
+                                                    val busy = coordinator.progress.value.running
                                                     store.setVisionState(currentMeme.id, "pending")
                                                     coordinator.start(emptyList())
-                                                    Toast.makeText(context, "Caption queued", Toast.LENGTH_SHORT).show()
+                                                    Toast.makeText(context, if (busy) "Caption queued for the next indexing session" else "Caption queued", Toast.LENGTH_SHORT).show()
                                                 }
                                             } catch (cancelled: CancellationException) {
                                                 throw cancelled
@@ -352,9 +357,10 @@ internal fun ViewerModal(
                                                     if (!enabled) {
                                                         Toast.makeText(context, "Turn on Audio Transcription in Settings first", Toast.LENGTH_SHORT).show()
                                                     } else {
+                                                        val busy = coordinator.progress.value.running
                                                         store.setAudioState(currentMeme.id, "pending")
                                                         coordinator.start(emptyList())
-                                                        Toast.makeText(context, "Transcription queued", Toast.LENGTH_SHORT).show()
+                                                        Toast.makeText(context, if (busy) "Transcription queued for the next indexing session" else "Transcription queued", Toast.LENGTH_SHORT).show()
                                                     }
                                                 } catch (cancelled: CancellationException) {
                                                     throw cancelled
@@ -826,12 +832,15 @@ internal fun ViewerModal(
             onDismiss = { showTagDialog = false },
             onConfirm = { label, category, spread ->
                 showTagDialog = false
-                scope.launch {
+                // Started at once and finished even if the viewer closes: a lost save would also lose its re-tag.
+                scope.launch(start = CoroutineStart.UNDISPATCHED) {
                     try {
-                        store.manualTag(listOf(currentMeme.id), label, category, spread)
+                        withContext(NonCancellable) {
+                            store.manualTag(listOf(currentMeme.id), label, category, spread)
+                            onTaught()
+                        }
                         val fresh = store.meme(currentMeme.id)
                         if (fresh != null) currentMeme = fresh
-                        onTaught()
                         Toast.makeText(context, "Tag applied", Toast.LENGTH_SHORT).show()
                     } catch (cancelled: CancellationException) {
                         throw cancelled
@@ -850,12 +859,14 @@ internal fun ViewerModal(
             onDismiss = { showTeachDialog = false },
             onConfirm = { label, category, positive, associations ->
                 showTeachDialog = false
-                scope.launch {
+                scope.launch(start = CoroutineStart.UNDISPATCHED) {
                     try {
-                        cloud.recordTeaching(currentMeme.id, label, category, positive, associations)
+                        withContext(NonCancellable) {
+                            cloud.recordTeaching(currentMeme.id, label, category, positive, associations)
+                            onTaught()
+                        }
                         val fresh = store.meme(currentMeme.id)
                         if (fresh != null) currentMeme = fresh
-                        onTaught()
                         Toast.makeText(
                             context,
                             if (positive) "Taught positive exemplar" else "Taught negative veto exemplar",
@@ -926,12 +937,14 @@ internal fun ViewerModal(
                         onClick = {
                             val targetTag = verdictTag ?: return@Button
                             verdictTag = null
-                            scope.launch {
+                            scope.launch(start = CoroutineStart.UNDISPATCHED) {
                                 try {
-                                    cloud.recordTeaching(currentMeme.id, targetTag.label, targetTag.category, true, emptyList())
+                                    withContext(NonCancellable) {
+                                        cloud.recordTeaching(currentMeme.id, targetTag.label, targetTag.category, true, emptyList())
+                                        onTaught()
+                                    }
                                     val fresh = store.meme(currentMeme.id)
                                     if (fresh != null) currentMeme = fresh
-                                    onTaught()
                                     Toast.makeText(context, "Taught “${targetTag.label}”", Toast.LENGTH_SHORT).show()
                                     checkAndOpenAlsoThese(targetTag.label, targetTag.category)
                                 } catch (cancelled: CancellationException) {
@@ -954,12 +967,14 @@ internal fun ViewerModal(
                         onClick = {
                             val targetTag = verdictTag ?: return@Button
                             verdictTag = null
-                            scope.launch {
+                            scope.launch(start = CoroutineStart.UNDISPATCHED) {
                                 try {
-                                    cloud.recordTeaching(currentMeme.id, targetTag.label, targetTag.category, false, emptyList())
+                                    withContext(NonCancellable) {
+                                        cloud.recordTeaching(currentMeme.id, targetTag.label, targetTag.category, false, emptyList())
+                                        onTaught()
+                                    }
                                     val fresh = store.meme(currentMeme.id)
                                     if (fresh != null) currentMeme = fresh
-                                    onTaught()
                                     Toast.makeText(context, "Saved: NOT “${targetTag.label}”", Toast.LENGTH_SHORT).show()
                                 } catch (cancelled: CancellationException) {
                                     throw cancelled
@@ -1091,14 +1106,18 @@ internal fun ViewerModal(
                         val toTeach = alsoTheseCandidates.filter { alsoTheseSelected.contains(it.id) }
                         if (toTeach.isEmpty()) return@Button
                         isSavingAlsoThese = true
-                        scope.launch {
+                        val label = alsoTheseLabel
+                        val category = alsoTheseCategory
+                        scope.launch(start = CoroutineStart.UNDISPATCHED) {
                             try {
-                                for (m in toTeach) {
-                                    cloud.recordTeaching(m.id, alsoTheseLabel, alsoTheseCategory, true, emptyList())
+                                withContext(NonCancellable) {
+                                    for (m in toTeach) {
+                                        cloud.recordTeaching(m.id, label, category, true, emptyList())
+                                    }
+                                    onTaught()
                                 }
                                 val fresh = store.meme(currentMeme.id)
                                 if (fresh != null) currentMeme = fresh
-                                onTaught()
                                 Toast.makeText(
                                     context,
                                     "Saved “$alsoTheseLabel” from ${toTeach.size} more example${if (toTeach.size == 1) "" else "s"}",

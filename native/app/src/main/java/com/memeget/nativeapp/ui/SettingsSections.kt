@@ -820,7 +820,7 @@ internal fun ModelsSection() {
 }
 
 @Composable
-internal fun BackupStatusLine(lastBackupAt: Long) {
+internal fun BackupStatusLine(lastBackupAt: Long, heldFolders: Int) {
     val text = if (lastBackupAt <= 0L) {
         "Backs up to each linked folder by itself after changes"
     } else {
@@ -847,6 +847,19 @@ internal fun BackupStatusLine(lastBackupAt: Long) {
         style = MaterialTheme.typography.bodySmall,
         color = MemegetColors.TextMuted,
     )
+    if (heldFolders > 0) {
+        Text(
+            text = if (heldFolders == 1) {
+                "Paused for 1 folder, so its backup isn't replaced by a library that holds less (after Clear Index, " +
+                    "or a restore that didn't finish). Tap Restore or Backup on it to go on."
+            } else {
+                "Paused for $heldFolders folders, so their backups aren't replaced by a library that holds less (after " +
+                    "Clear Index, or a restore that didn't finish). Tap Restore or Backup on each to go on."
+            },
+            style = MaterialTheme.typography.bodySmall,
+            color = MemegetColors.Warning,
+        )
+    }
 }
 
 @Composable

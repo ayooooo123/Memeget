@@ -106,28 +106,21 @@ internal fun LibraryScreen(
 
     var isScanning by remember { mutableStateOf(false) }
     var relaxedFromKind by remember { mutableStateOf<String?>(null) }
+    var loadingFirstPage by remember { mutableStateOf(false) }
 
     val onStartIndex: () -> Unit = {
         if (!isScanning) {
+            isScanning = true
             scope.launch {
-                isScanning = true
-                var found = 0
                 try {
-                    val folders = withContext(Dispatchers.IO) { store.folders() }
-                    for (folder in folders) {
-                        try {
-                            val newIds = files.scan(folder)
-                            found += newIds.size
-                        } catch (e: Exception) {
-                            if (e is CancellationException) throw e
-                            val reason = e.message ?: e.toString()
-                            Toast.makeText(context, "Could not scan ${folder.name}: $reason", Toast.LENGTH_SHORT).show()
-                        }
-                    }
+                    // The scan and session belong to the coordinator: switching tabs only stops this wait.
+                    val found = coordinator.scanAndStart()
                     if (found > 0) {
                         Toast.makeText(context, if (found == 1) "Found 1 new meme" else "Found $found new memes", Toast.LENGTH_SHORT).show()
                     }
-                    coordinator.start()
+                } catch (e: Exception) {
+                    if (e is CancellationException) throw e
+                    Toast.makeText(context, "Could not scan: ${e.message ?: e}", Toast.LENGTH_SHORT).show()
                 } finally {
                     isScanning = false
                 }
@@ -142,6 +135,11 @@ internal fun LibraryScreen(
     var selectedIds by remember { mutableStateOf<Set<Long>>(emptySet()) }
     var showBatchTagDialog by remember { mutableStateOf(false) }
     var showBatchDeleteDialog by remember { mutableStateOf(false) }
+    // A selection is of what's on screen: a new search or filter starts over, so Delete never reaches hidden memes.
+    LaunchedEffect(query, kindFilter, selectedTag) {
+        selectionMode = false
+        selectedIds = emptySet()
+    }
 
     // SAF folder picker launcher
     val linkFolderLauncher = rememberLauncherForActivityResult(
@@ -212,49 +210,58 @@ internal fun LibraryScreen(
         if (resultKey != key) relaxedFromKind = null
         val searchKind = if (relaxedFromKind != null) null else key.second
         resultKey = key
-        if (previous.isEmpty()) memes = emptyList()
+        if (previous.isEmpty()) {
+            memes = emptyList()
+            // Until the first rows arrive an empty grid means "still loading", not "nothing here".
+            loadingFirstPage = true
+        }
         if (vectorText != key.first) {
             vectorText = key.first
             queryVector = null
         }
         isSearching = key.first.isNotEmpty()
         searchError = null
-        fun publish(rows: List<Meme>) {
+        fun publish(rows: List<Meme>, more: Boolean) {
             memes = rows.map { row -> previousById[row.id]?.takeIf { it == row } ?: row }
-            hasMore = rows.size >= wanted
+            hasMore = more
+            loadingFirstPage = false
         }
-        suspend fun searchWindow(vector: FloatArray?, effectiveKind: String?): Pair<List<Meme>, SearchCursor?> = withContext(Dispatchers.IO) {
-            val loaded = ArrayList<Meme>(wanted)
+        // One row past the window tells whether more exist, so the count doesn't flip to "N+" on every write.
+        suspend fun searchWindow(vector: FloatArray?, effectiveKind: String?): Triple<List<Meme>, SearchCursor?, Boolean> = withContext(Dispatchers.IO) {
+            val hits = ArrayList<SearchHit>(wanted + 1)
             var cursor: SearchCursor? = null
-            while (loaded.size < wanted) {
-                val page = store.search(key.first, vector, effectiveKind, key.third, minOf(PAGE_SIZE, wanted - loaded.size), cursor)
-                loaded.addAll(page.map { it.meme })
+            while (hits.size <= wanted) {
+                val page = store.search(key.first, vector, effectiveKind, key.third, minOf(PAGE_SIZE, wanted + 1 - hits.size), cursor)
+                hits.addAll(page)
                 if (page.isEmpty()) break
                 val last = page.last()
                 cursor = SearchCursor(last.score, last.meme.modifiedAt, last.meme.id)
             }
-            loaded to cursor
+            val more = hits.size > wanted
+            val kept = if (more) hits.subList(0, wanted) else hits
+            val keptCursor = kept.lastOrNull()?.let { SearchCursor(it.score, it.meme.modifiedAt, it.meme.id) }
+            Triple(kept.map { it.meme }, keptCursor, more)
         }
         try {
             delay(120)
             if (key.first.isEmpty()) {
-                val rows = withContext(Dispatchers.IO) {
-                    val loaded = ArrayList<Meme>(wanted)
+                val (rows, more) = withContext(Dispatchers.IO) {
+                    val loaded = ArrayList<Meme>(wanted + 1)
                     var cursor: PageCursor? = null
-                    while (loaded.size < wanted) {
-                        val page = store.page(minOf(PAGE_SIZE, wanted - loaded.size), cursor, key.second, key.third)
+                    while (loaded.size <= wanted) {
+                        val page = store.page(minOf(PAGE_SIZE, wanted + 1 - loaded.size), cursor, key.second, key.third)
                         loaded.addAll(page)
                         if (page.isEmpty()) break
                         val last = page.last()
                         cursor = PageCursor(last.modifiedAt, last.id)
                     }
-                    loaded
+                    if (loaded.size > wanted) loaded.subList(0, wanted).toList() to true else loaded to false
                 }
-                publish(rows)
+                publish(rows, more)
             } else {
                 val lexical = searchWindow(null, searchKind)
                 searchCursor = lexical.second
-                publish(lexical.first)
+                publish(lexical.first, lexical.third)
                 val vector = queryVector ?: try {
                     engine.embedText(key.first)
                 } catch (failure: Exception) {
@@ -267,7 +274,7 @@ internal fun LibraryScreen(
                 if (vector != null) {
                     val hybrid = searchWindow(vector, searchKind)
                     searchCursor = hybrid.second
-                    publish(hybrid.first)
+                    publish(hybrid.first, hybrid.third)
                     currentResults = hybrid.first
                 }
                 if (searchKind != null && currentResults.isEmpty()) {
@@ -275,7 +282,7 @@ internal fun LibraryScreen(
                     if (relaxed.first.isNotEmpty()) {
                         relaxedFromKind = key.second
                         searchCursor = relaxed.second
-                        publish(relaxed.first)
+                        publish(relaxed.first, relaxed.third)
                     }
                 }
             }
@@ -284,7 +291,10 @@ internal fun LibraryScreen(
         } catch (failure: Exception) {
             searchError = failure.message ?: "Library retrieval failed"
         } finally {
-            if (generation == resultGeneration) isSearching = false
+            if (generation == resultGeneration) {
+                isSearching = false
+                loadingFirstPage = false
+            }
         }
     }
 
@@ -810,7 +820,7 @@ internal fun LibraryScreen(
                             textAlign = TextAlign.Center,
                         )
                     }
-                } else if (memes.isEmpty() && query.isEmpty() && kindFilter != null) {
+                } else if (memes.isEmpty() && query.isEmpty() && kindFilter != null && !loadingFirstPage) {
                     Column(
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.Center,
