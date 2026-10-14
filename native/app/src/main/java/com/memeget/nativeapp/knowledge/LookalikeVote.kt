@@ -25,7 +25,19 @@ internal object LookalikeVote {
     /** A labeled vector: a taught example ([memeId] = [NO_MEME]) or a meme a person labeled. */
     class Example(val vector: FloatArray, val label: String, val category: String, val memeId: Long)
 
-    class Index(val examples: List<Example>, val negatives: Map<String, List<FloatArray>>)
+    class Index(val examples: List<Example>, val negatives: Map<String, List<FloatArray>>) {
+        internal val dim: Int get() = examples.firstOrNull()?.vector?.size ?: 0
+        /** Every example's vector in one row-major array, and each example's owner, for [LookalikeKernels.nearest]. */
+        internal val flat: FloatArray by lazy {
+            FloatArray(examples.size * dim).also { out ->
+                for ((i, e) in examples.withIndex()) {
+                    require(e.vector.size == dim) { "examples must share one vector size" }
+                    System.arraycopy(e.vector, 0, out, i * dim, dim)
+                }
+            }
+        }
+        internal val owners: LongArray by lazy { LongArray(examples.size) { examples[it].memeId } }
+    }
 
     /** A meme a person labeled, for measuring which labels hold up on memes the vote has not seen. */
     class LabeledMeme(val memeId: Long, val image: FloatArray, val labels: Set<String>, val rejected: Set<String>)
@@ -54,14 +66,20 @@ internal object LookalikeVote {
             topCos[k] = c
             topIndex[k] = i
         }
+        return votesFrom(index, topIndex, topCos, 0)
+    }
+
+    /** Labels among the neighbours at [from] in [topIndex]/[topCos], by summed cosine, as [rank] returns them. */
+    private fun votesFrom(index: Index, topIndex: IntArray, topCos: FloatArray, from: Int): List<Vote> {
         val weight = LinkedHashMap<String, Float>()
         val nearest = HashMap<String, Example>()
         val nearestCos = HashMap<String, Float>()
         for (k in 0 until NEIGHBORS) {
-            val example = index.examples.getOrNull(topIndex[k]) ?: break
-            weight[example.label] = (weight[example.label] ?: 0f) + topCos[k]
-            if (topCos[k] > (nearestCos[example.label] ?: Float.NEGATIVE_INFINITY)) {
-                nearestCos[example.label] = topCos[k]
+            val example = index.examples.getOrNull(topIndex[from + k]) ?: break
+            val c = topCos[from + k]
+            weight[example.label] = (weight[example.label] ?: 0f) + c
+            if (c > (nearestCos[example.label] ?: Float.NEGATIVE_INFINITY)) {
+                nearestCos[example.label] = c
                 nearest[example.label] = example
             }
         }
@@ -71,8 +89,32 @@ internal object LookalikeVote {
     }
 
     /** The winning label when it clears [MIN_COS] and no "not X" example of it is closer. */
-    fun winner(index: Index, image: FloatArray, excludeMeme: Long = NO_MEME, skipSamePicture: Boolean = false): Vote? {
-        val top = rank(index, image, excludeMeme, skipSamePicture).firstOrNull() ?: return null
+    fun winner(index: Index, image: FloatArray, excludeMeme: Long = NO_MEME, skipSamePicture: Boolean = false): Vote? =
+        winnerOf(index, rank(index, image, excludeMeme, skipSamePicture), image, skipSamePicture)
+
+    /** [winner] for each of [images], none of them a labeled meme's own picture, computed together through [kernels]. */
+    fun winners(index: Index, images: List<FloatArray>, kernels: LookalikeKernels): List<Vote?> =
+        winners(index, images, LongArray(images.size) { NO_MEME }, skipSamePicture = false, kernels)
+
+    private fun winners(
+        index: Index, images: List<FloatArray>, owners: LongArray, skipSamePicture: Boolean, kernels: LookalikeKernels,
+    ): List<Vote?> {
+        if (images.isEmpty() || index.examples.isEmpty()) return List(images.size) { null }
+        val dim = index.dim
+        val queries = FloatArray(images.size * dim)
+        for ((i, image) in images.withIndex()) {
+            require(image.size == dim) { "vectors must match the examples' size" }
+            System.arraycopy(image, 0, queries, i * dim, dim)
+        }
+        val topIndex = IntArray(images.size * NEIGHBORS)
+        val topCos = FloatArray(images.size * NEIGHBORS)
+        kernels.nearest(queries, owners, index.flat, index.owners, dim, NEIGHBORS,
+            if (skipSamePicture) SAME_IMAGE_COS else Float.POSITIVE_INFINITY, topIndex, topCos)
+        return images.indices.map { winnerOf(index, votesFrom(index, topIndex, topCos, it * NEIGHBORS), images[it], skipSamePicture) }
+    }
+
+    private fun winnerOf(index: Index, votes: List<Vote>, image: FloatArray, skipSamePicture: Boolean): Vote? {
+        val top = votes.firstOrNull() ?: return null
         if (top.cosine < MIN_COS) return null
         return top.takeIf { nearestNegative(index, it.label, image, skipSamePicture) < it.cosine }
     }
@@ -108,26 +150,43 @@ internal object LookalikeVote {
         nearestNegative(index, vote.label, image, skipSamePicture = false) >= vote.cosine
 
     /**
-     * Labels whose votes held up on people's labeled memes with each meme's own labels and
-     * copies left out: a vote for X on a meme labeled X is a hit; on a meme labeled otherwise
-     * or marked "not X" it is a miss. Labels without enough votes stay suggestions.
+     * How a label's held-out votes went. [open] are its misses on memes a person tagged with other
+     * labels without rejecting this one: votes nobody judged, since people often tag what a meme shows
+     * rather than everything in it. A "Yes" on one turns a miss into a hit.
      */
-    fun reliableLabels(index: Index, labeled: List<LabeledMeme>): Set<String> {
+    class Record(val hits: Int, val misses: Int, val open: List<Open>) {
+        val total: Int get() = hits + misses
+        val reliable: Boolean get() = total >= RELIABLE_SUPPORT && hits >= RELIABLE_PRECISION * total
+    }
+
+    class Open(val memeId: Long, val cosine: Float)
+
+    /**
+     * Each voted label's record over people's labeled memes, with each meme's own labels and copies
+     * left out: a vote for X on a meme labeled X is a hit; on a meme labeled otherwise or marked
+     * "not X" it is a miss.
+     */
+    fun heldOut(index: Index, labeled: List<LabeledMeme>, kernels: LookalikeKernels): Map<String, Record> {
+        val votes = winners(index, labeled.map { it.image }, LongArray(labeled.size) { labeled[it].memeId }, skipSamePicture = true, kernels)
         val hits = HashMap<String, Int>()
         val misses = HashMap<String, Int>()
-        for (meme in labeled) {
-            val vote = winner(index, meme.image, excludeMeme = meme.memeId, skipSamePicture = true) ?: continue
+        val open = HashMap<String, MutableList<Open>>()
+        for ((i, meme) in labeled.withIndex()) {
+            val vote = votes[i] ?: continue
             when {
                 vote.label in meme.labels -> hits.merge(vote.label, 1, Int::plus)
-                vote.label in meme.rejected || meme.labels.isNotEmpty() -> misses.merge(vote.label, 1, Int::plus)
+                vote.label in meme.rejected -> misses.merge(vote.label, 1, Int::plus)
+                meme.labels.isNotEmpty() -> {
+                    misses.merge(vote.label, 1, Int::plus)
+                    open.getOrPut(vote.label) { ArrayList() } += Open(meme.memeId, vote.cosine)
+                }
             }
         }
-        return (hits.keys + misses.keys).filterTo(HashSet()) { label ->
-            val right = hits[label] ?: 0
-            val total = right + (misses[label] ?: 0)
-            total >= RELIABLE_SUPPORT && right >= RELIABLE_PRECISION * total
-        }
+        return (hits.keys + misses.keys).associateWith { Record(hits[it] ?: 0, misses[it] ?: 0, open[it].orEmpty()) }
     }
+
+    /** Labels that apply without review: their held-out votes were right often enough. Others stay suggestions. */
+    fun reliableLabels(records: Map<String, Record>): Set<String> = records.filterValues { it.reliable }.keys
 
     private fun nearestNegative(index: Index, label: String, image: FloatArray, skipSamePicture: Boolean): Float {
         var best = Float.NEGATIVE_INFINITY

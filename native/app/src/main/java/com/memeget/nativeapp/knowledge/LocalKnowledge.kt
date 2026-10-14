@@ -33,6 +33,23 @@ internal class LocalKnowledge(
         /** Marks a tag that came from people's labels on a look-alike meme. */
         const val LOOKALIKE_SCORE_DOMAIN = "lookalike-cosine"
         private const val VECTOR_DIM = 512
+
+        /**
+         * The queue after its first card was dealt with: [yes] true for "Yes" to an ask card's label,
+         * false for "Not this", null for a skip or any other answer. A "Yes" leaves one fewer needed; once
+         * none are, or too few of that label's cards remain to get there, its other cards go.
+         */
+        fun advance(queue: List<QueueItem>, yes: Boolean?): List<QueueItem> {
+            val ask = queue.firstOrNull()?.ask ?: return queue.drop(1)
+            val rest = queue.drop(1)
+            val needed = if (yes == true) ask.needed - 1 else ask.needed
+            if (needed <= 0 || rest.count { it.ask?.label == ask.label } < needed) return rest.filter { it.ask?.label != ask.label }
+            return rest.map { item ->
+                val other = item.ask
+                if (other == null || other.label != ask.label || other.needed == needed) item
+                else QueueItem(item.meme, item.image, item.lookalikes, Ask(other.label, other.category, other.taggedAs, needed, other.unlocks))
+            }
+        }
     }
 
     private var explicitContext: Context? = null
@@ -67,9 +84,12 @@ internal class LocalKnowledge(
         val labelRevision: Long,
         val index: LookalikeVote.Index,
         private val labeled: List<LookalikeVote.LabeledMeme>,
+        private val kernels: LookalikeKernels,
     ) {
-        /** Labels whose held-out votes held up; measured once per label change, when first needed. */
-        val reliable: Set<String> by lazy { LookalikeVote.reliableLabels(index, labeled) }
+        /** Each voted label's held-out record; measured once per label change, when first needed. */
+        val heldOut: Map<String, LookalikeVote.Record> by lazy { LookalikeVote.heldOut(index, labeled, kernels) }
+        /** Labels whose held-out votes held up. */
+        val reliable: Set<String> by lazy { LookalikeVote.reliableLabels(heldOut) }
         /** Memes a person named; a "not this" alone does not name one. */
         val named: Set<Long> by lazy { labeled.filter { it.labels.isNotEmpty() }.mapTo(HashSet()) { it.memeId } }
     }
@@ -109,7 +129,7 @@ internal class LocalKnowledge(
             for (label in rejected) negatives.getOrPut(label) { ArrayList() } += h.image
             labeled += LookalikeVote.LabeledMeme(h.memeId, h.image, labels, rejected)
         }
-        VoteState(revision, LookalikeVote.Index(examples, negatives), labeled).also { cachedVote = it }
+        VoteState(revision, LookalikeVote.Index(examples, negatives), labeled, kernels).also { cachedVote = it }
     }
 
     private fun findVetoedLabelsFromMap(image: FloatArray, negByLabel: Map<String, List<FloatArray>>): Set<String> {
@@ -329,14 +349,22 @@ internal class LocalKnowledge(
         out.values.toList()
     }
 
-    /** A meme worth labeling next and how many unlabeled look-alikes it stands for. */
-    class QueueItem(val meme: Meme, val image: FloatArray, val lookalikes: Int)
+    /**
+     * Whether a meme a person tagged only as [taggedAs] also shows [label], the label the vote gives it.
+     * [needed] more "Yes" answers like this let [label] apply on its own, labeling the [unlocks] unlabeled
+     * memes it wins.
+     */
+    class Ask(val label: String, val category: String, val taggedAs: List<String>, val needed: Int, val unlocks: Int)
+
+    /** A meme worth labeling next and how many unlabeled look-alikes it stands for, or an [ask] about a labeled one. */
+    class QueueItem(val meme: Meme, val image: FloatArray, val lookalikes: Int, val ask: Ask? = null)
 
     /**
-     * Memes to ask about, in the order that spreads labels furthest: repeatedly the meme with the
-     * most unlabeled look-alikes (cosine >= [LookalikeVote.MIN_COS]) that no earlier pick covers.
-     * Memes a person named, and memes the last classification already gave one of people's labels,
-     * are left out; a "not this" alone does not name a meme, so it stays.
+     * Memes to ask about. First [asks]: one "Yes" there can let a label spread to many memes. Then the
+     * order that spreads labels furthest: repeatedly the meme with the most unlabeled look-alikes
+     * (cosine >= [LookalikeVote.MIN_COS]) that no earlier pick covers. Memes a person named, and memes
+     * the last classification already gave one of people's labels, are left out of that part; a
+     * "not this" alone does not name a meme, so it stays.
      *
      * Lazy greedy in O(n) memory: a meme's look-alike count bounds what picking it can still cover
      * and covering only lowers it, so a re-counted meme that still tops every other bound is the
@@ -344,9 +372,11 @@ internal class LocalKnowledge(
      */
     suspend fun labelQueue(limit: Int = 60): List<QueueItem> = withContext(Dispatchers.Default) {
         // The vote is cached per label change and the first card's suggestions need it anyway.
-        val named = ensureVote().named
+        val vote = ensureVote()
+        val named = vote.named
         val spread = store.idsWithScoreDomain(LOOKALIKE_SCORE_DOMAIN)
         val vectors = store.imageVectors()
+        val asks = asks(vote, vectors)
         // Ids and vectors suffice to rank; only the picked memes are loaded whole.
         val ids = vectors.keys.filter { it !in named && it !in spread }.sorted()
         val images = ids.map { vectors.getValue(it) }
@@ -380,7 +410,39 @@ internal class LocalKnowledge(
             val meme = store.meme(ids[i]) ?: continue // deleted since the read
             picked += QueueItem(meme, images[i], found.size)
         }
-        picked
+        asks + picked
+    }
+
+    /**
+     * Cards asking whether a meme a person tagged otherwise also shows the label the vote gives it, for
+     * labels that so few "Yes" answers would let apply on their own. Labels that would then label the
+     * most unlabeled memes come first; each label's memes go from the closest vote down.
+     */
+    private suspend fun asks(vote: VoteState, vectors: Map<Long, FloatArray>): List<QueueItem> {
+        class Candidate(val label: String, val record: LookalikeVote.Record, val needed: Int)
+        val candidates = vote.heldOut.mapNotNull { (label, record) ->
+            if (record.reliable || record.total < LookalikeVote.RELIABLE_SUPPORT) return@mapNotNull null
+            // Each "Yes" turns one of the label's open misses into a hit.
+            (1..record.open.size).firstOrNull { record.hits + it >= LookalikeVote.RELIABLE_PRECISION * record.total }
+                ?.let { Candidate(label, record, it) }
+        }
+        if (candidates.isEmpty()) return emptyList()
+        currentCoroutineContext().ensureActive()
+        val unnamed = vectors.keys.filter { it !in vote.named }.sorted()
+        val wins = LookalikeVote.winners(vote.index, unnamed.map { vectors.getValue(it) }, kernels)
+            .filterNotNull().groupingBy { it.label }.eachCount()
+        val out = ArrayList<QueueItem>()
+        for (c in candidates.sortedWith(compareByDescending<Candidate> { wins[it.label] ?: 0 }.thenBy { it.needed }.thenBy { it.label })) {
+            val unlocks = wins[c.label] ?: continue
+            val category = vote.index.examples.firstOrNull { it.label == c.label }?.category ?: "topic"
+            val cards = c.record.open.sortedByDescending { it.cosine }.mapNotNull { open ->
+                val meme = store.meme(open.memeId) ?: return@mapNotNull null // deleted since the vote
+                val image = vectors[open.memeId] ?: return@mapNotNull null
+                QueueItem(meme, image, 0, Ask(c.label, category, meme.tags.filter(TagMerge::isHumanTag).map { it.label }, c.needed, unlocks))
+            }
+            if (cards.size >= c.needed) out += cards
+        }
+        return out
     }
 
     /** The category people's examples already give [label]; "topic" for a new label. */

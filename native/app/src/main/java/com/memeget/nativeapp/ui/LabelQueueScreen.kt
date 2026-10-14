@@ -103,7 +103,12 @@ internal fun LabelQueueScreen(
     var typed by remember(item) { mutableStateOf("") }
     LaunchedEffect(item, meme) {
         val current = meme
-        suggestions = if (item != null && current != null) knowledge.suggestFor(current, item.image) else emptyList()
+        val ask = item?.ask
+        suggestions = when {
+            item == null || current == null -> emptyList()
+            ask != null -> listOf(Tag(ask.label, ask.category))
+            else -> knowledge.suggestFor(current, item.image)
+        }
     }
 
     fun answer(label: String, category: String?, positive: Boolean) {
@@ -115,7 +120,13 @@ internal fun LabelQueueScreen(
             try {
                 saveAnswer(current.meme.id, label, category, positive)
                 answered++
-                if (positive) queue = queue?.drop(1) else meme = store.meme(current.meme.id)
+                val ask = current.ask
+                when {
+                    // An ask card moves on either way; only "Yes" or "Not this" to its own label counts toward it.
+                    ask != null -> queue = queue?.let { LocalKnowledge.advance(it, positive.takeIf { TagMerge.normalizeTagLabel(label) == ask.label }) }
+                    positive -> queue = queue?.drop(1)
+                    else -> meme = store.meme(current.meme.id)
+                }
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (failure: Exception) {
@@ -164,8 +175,15 @@ internal fun LabelQueueScreen(
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 QueuePicture(meme ?: item.meme, Modifier.fillMaxWidth().height(220.dp)) { onOpenViewer(meme ?: item.meme) }
+                val ask = item.ask
                 Text(
-                    if (item.lookalikes > 0) "Stands for ${item.lookalikes} similar unlabeled memes" else "No close look-alikes",
+                    when {
+                        ask == null -> if (item.lookalikes > 0) "Stands for ${item.lookalikes} similar unlabeled memes" else "No close look-alikes"
+                        ask.needed == 1 -> "You tagged this “${ask.taggedAs.joinToString(", ")}”. If it is also ${ask.label}, " +
+                            "a Yes here lets ${ask.label} label ${ask.unlocks} look-alikes on its own."
+                        else -> "You tagged this “${ask.taggedAs.joinToString(", ")}”. If it is also ${ask.label}, " +
+                            "${ask.needed} Yes answers like this let ${ask.label} label ${ask.unlocks} look-alikes on its own."
+                    },
                     style = MaterialTheme.typography.bodySmall,
                     color = MemegetColors.TextSecondary,
                 )
@@ -215,7 +233,7 @@ internal fun LabelQueueScreen(
                         Button(onClick = { answer(TagMerge.normalizeTagLabel(typed), null, true) }, enabled = typed.isNotBlank() && !busy) { Text("Add") }
                     }
                 }
-                TextButton(onClick = { focusManager.clearFocus(); queue = queue?.drop(1) }, enabled = !busy) { Text("Skip") }
+                TextButton(onClick = { focusManager.clearFocus(); queue = queue?.let { LocalKnowledge.advance(it, null) } }, enabled = !busy) { Text("Skip") }
             }
         }
     }

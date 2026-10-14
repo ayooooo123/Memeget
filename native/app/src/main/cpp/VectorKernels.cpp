@@ -1,8 +1,9 @@
-// Cosine thresholding over unit vectors for the Label tab's queue. The same loops in Kotlin take
+// Cosine work over unit vectors for the Label tab and the look-alike vote. The same loops in Kotlin take
 // ~11 s for 1,700 memes on a Pixel 5a running the debug app; here they take a fraction of a second.
 #include <jni.h>
 
 #include <cstddef>
+#include <limits>
 #include <vector>
 
 #if defined(__aarch64__)
@@ -96,6 +97,57 @@ Java_com_memeget_nativeapp_inference_NativeBridge_nativeLookalikesOf(
     jintArray out = env->NewIntArray(static_cast<jsize>(found.size()));
     if (out != nullptr) env->SetIntArrayRegion(out, 0, static_cast<jsize>(found.size()), found.data());
     return out;
+}
+
+// For each query row, the [k] example rows with the highest dot product, best first, into
+// [outIndex]/[outDot] at row * k; -1 and -infinity fill slots fewer rows reach. An example is passed
+// over when its owner equals the query's (owners below 0 never match) or its dot product reaches
+// [skipAtOrAbove]. Ties keep the lower example index first, as LookalikeVote.rank does.
+JNIEXPORT void JNICALL
+Java_com_memeget_nativeapp_inference_NativeBridge_nativeNearest(
+    JNIEnv* env, jobject /* thiz */, jfloatArray queries, jlongArray queryOwners, jfloatArray examples,
+    jlongArray exampleOwners, jint dim, jint k, jfloat skipAtOrAbove, jintArray outIndex, jfloatArray outDot) {
+    const int nq = rowsOf(env, queries, dim);
+    if (nq < 0) return;
+    const int ne = rowsOf(env, examples, dim);
+    if (ne < 0) return;
+    const jsize slots = static_cast<jsize>(nq) * k;
+    if (k <= 0 || env->GetArrayLength(queryOwners) != nq || env->GetArrayLength(exampleOwners) != ne ||
+        env->GetArrayLength(outIndex) != slots || env->GetArrayLength(outDot) != slots) {
+        env->ThrowNew(env->FindClass("java/lang/IllegalArgumentException"), "owners or outputs do not match the rows");
+        return;
+    }
+    // Copies rather than pinned arrays: this pass runs long enough to matter to the garbage collector.
+    std::vector<float> q(static_cast<size_t>(nq) * dim);
+    std::vector<float> e(static_cast<size_t>(ne) * dim);
+    env->GetFloatArrayRegion(queries, 0, static_cast<jsize>(q.size()), q.data());
+    env->GetFloatArrayRegion(examples, 0, static_cast<jsize>(e.size()), e.data());
+    std::vector<jlong> qOwner(nq);
+    std::vector<jlong> eOwner(ne);
+    env->GetLongArrayRegion(queryOwners, 0, nq, qOwner.data());
+    env->GetLongArrayRegion(exampleOwners, 0, ne, eOwner.data());
+    std::vector<jint> index(static_cast<size_t>(slots), -1);
+    std::vector<jfloat> best(static_cast<size_t>(slots), -std::numeric_limits<float>::infinity());
+    for (int i = 0; i < nq; ++i) {
+        jint* topIndex = index.data() + static_cast<size_t>(i) * k;
+        jfloat* topDot = best.data() + static_cast<size_t>(i) * k;
+        const float* a = q.data() + static_cast<size_t>(i) * dim;
+        for (int j = 0; j < ne; ++j) {
+            if (qOwner[i] >= 0 && eOwner[j] == qOwner[i]) continue;
+            const float c = dot(a, e.data() + static_cast<size_t>(j) * dim, dim);
+            if (c >= skipAtOrAbove || c <= topDot[k - 1]) continue;
+            int s = k - 1;
+            while (s > 0 && topDot[s - 1] < c) {
+                topDot[s] = topDot[s - 1];
+                topIndex[s] = topIndex[s - 1];
+                --s;
+            }
+            topDot[s] = c;
+            topIndex[s] = j;
+        }
+    }
+    env->SetIntArrayRegion(outIndex, 0, slots, index.data());
+    env->SetFloatArrayRegion(outDot, 0, slots, best.data());
 }
 
 }  // extern "C"

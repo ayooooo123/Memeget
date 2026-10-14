@@ -96,4 +96,10 @@ internal object NativeBridge {
 
     /** Rows other than [row], not marked in [covered], that reach [minCos] with row [row]. */
     external fun nativeLookalikesOf(vectors: FloatArray, dim: Int, row: Int, covered: BooleanArray, minCos: Float): IntArray
+
+    /** See [com.memeget.nativeapp.knowledge.LookalikeKernels.nearest]. */
+    external fun nativeNearest(
+        queries: FloatArray, queryOwners: LongArray, examples: FloatArray, exampleOwners: LongArray,
+        dim: Int, k: Int, skipAtOrAbove: Float, outIndex: IntArray, outDot: FloatArray,
+    )
 }
