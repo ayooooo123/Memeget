@@ -104,6 +104,37 @@ internal fun LibraryScreen(
     var taughtLabels by remember { mutableStateOf<List<String>>(emptyList()) }
     var libraryTags by remember { mutableStateOf<List<String>>(emptyList()) }
 
+    var isScanning by remember { mutableStateOf(false) }
+    var relaxedFromKind by remember { mutableStateOf<String?>(null) }
+
+    val onStartIndex: () -> Unit = {
+        if (!isScanning) {
+            scope.launch {
+                isScanning = true
+                var found = 0
+                try {
+                    val folders = withContext(Dispatchers.IO) { store.folders() }
+                    for (folder in folders) {
+                        try {
+                            val newIds = files.scan(folder)
+                            found += newIds.size
+                        } catch (e: Exception) {
+                            if (e is CancellationException) throw e
+                            val reason = e.message ?: e.toString()
+                            Toast.makeText(context, "Could not scan ${folder.name}: $reason", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                    if (found > 0) {
+                        Toast.makeText(context, if (found == 1) "Found 1 new meme" else "Found $found new memes", Toast.LENGTH_SHORT).show()
+                    }
+                    coordinator.start()
+                } finally {
+                    isScanning = false
+                }
+            }
+        }
+    }
+
     var bannerDismissed by remember { mutableStateOf(false) }
 
     // Multi-select state
@@ -176,6 +207,10 @@ internal fun LibraryScreen(
         val previous = if (resultKey == key) memes else emptyList()
         val wanted = maxOf(PAGE_SIZE, previous.size)
         val previousById = previous.associateBy { it.id }
+        // A library write re-runs this search; a search already widened past its media filter stays widened, so
+        // the results don't flash empty on every write while indexing runs.
+        if (resultKey != key) relaxedFromKind = null
+        val searchKind = if (relaxedFromKind != null) null else key.second
         resultKey = key
         if (previous.isEmpty()) memes = emptyList()
         if (vectorText != key.first) {
@@ -188,11 +223,11 @@ internal fun LibraryScreen(
             memes = rows.map { row -> previousById[row.id]?.takeIf { it == row } ?: row }
             hasMore = rows.size >= wanted
         }
-        suspend fun searchWindow(vector: FloatArray?): Pair<List<Meme>, SearchCursor?> = withContext(Dispatchers.IO) {
+        suspend fun searchWindow(vector: FloatArray?, effectiveKind: String?): Pair<List<Meme>, SearchCursor?> = withContext(Dispatchers.IO) {
             val loaded = ArrayList<Meme>(wanted)
             var cursor: SearchCursor? = null
             while (loaded.size < wanted) {
-                val page = store.search(key.first, vector, key.second, key.third, minOf(PAGE_SIZE, wanted - loaded.size), cursor)
+                val page = store.search(key.first, vector, effectiveKind, key.third, minOf(PAGE_SIZE, wanted - loaded.size), cursor)
                 loaded.addAll(page.map { it.meme })
                 if (page.isEmpty()) break
                 val last = page.last()
@@ -217,7 +252,7 @@ internal fun LibraryScreen(
                 }
                 publish(rows)
             } else {
-                val lexical = searchWindow(null)
+                val lexical = searchWindow(null, searchKind)
                 searchCursor = lexical.second
                 publish(lexical.first)
                 val vector = queryVector ?: try {
@@ -228,10 +263,20 @@ internal fun LibraryScreen(
                     null
                 }
                 queryVector = vector
+                var currentResults = lexical.first
                 if (vector != null) {
-                    val hybrid = searchWindow(vector)
+                    val hybrid = searchWindow(vector, searchKind)
                     searchCursor = hybrid.second
                     publish(hybrid.first)
+                    currentResults = hybrid.first
+                }
+                if (searchKind != null && currentResults.isEmpty()) {
+                    val relaxed = searchWindow(vector, null)
+                    if (relaxed.first.isNotEmpty()) {
+                        relaxedFromKind = key.second
+                        searchCursor = relaxed.second
+                        publish(relaxed.first)
+                    }
                 }
             }
         } catch (cancelled: CancellationException) {
@@ -247,6 +292,8 @@ internal fun LibraryScreen(
         if (!isLoadingMore && !isSearching && hasMore && memes.isNotEmpty()) {
             val generation = resultGeneration
             val key = Triple(query.trim(), kindFilter, selectedTag)
+            val isRelaxed = relaxedFromKind != null
+            val effectiveKind = if (isRelaxed) null else key.second
             val cursor = memes.last().let { PageCursor(it.modifiedAt, it.id) }
             val after = searchCursor
             val vector = queryVector
@@ -256,7 +303,7 @@ internal fun LibraryScreen(
                     val page = withContext(Dispatchers.IO) {
                         if (key.first.isEmpty()) store.page(PAGE_SIZE, cursor, key.second, key.third) to null
                         else {
-                            val hits = store.search(key.first, vector, key.second, key.third, PAGE_SIZE, after)
+                            val hits = store.search(key.first, vector, effectiveKind, key.third, PAGE_SIZE, after)
                             hits.map { it.meme } to hits.lastOrNull()?.let { SearchCursor(it.score, it.meme.modifiedAt, it.meme.id) }
                         }
                     }
@@ -574,7 +621,15 @@ internal fun LibraryScreen(
                     Button(
                         onClick = {
                             val selectedMemes = memes.filter { selectedIds.contains(it.id) }
-                            files.share(context, selectedMemes)
+                            scope.launch {
+                                try {
+                                    files.share(context, selectedMemes)
+                                } catch (e: Exception) {
+                                    if (e is CancellationException) throw e
+                                    val reason = e.message ?: e.toString()
+                                    Toast.makeText(context, "Could not share: $reason", Toast.LENGTH_SHORT).show()
+                                }
+                            }
                         },
                         enabled = selectedIds.isNotEmpty(),
                         colors = ButtonDefaults.buttonColors(
@@ -642,8 +697,34 @@ internal fun LibraryScreen(
             isLoadingMore = isLoadingMore,
             modifier = Modifier.weight(1f),
             headerContent = {
-                // Toolbar info & actions
-                if (libraryCount > 0 && !indexProgress.running) {
+                if (query.trim().isNotEmpty()) {
+                    if (memes.isNotEmpty()) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 14.dp, vertical = 6.dp),
+                            verticalArrangement = Arrangement.spacedBy(2.dp),
+                        ) {
+                            val q = query.trim()
+                            val countStr = if (hasMore) "${memes.size}+ matches" else "${memes.size} match${if (memes.size == 1) "" else "es"}"
+                            Text(
+                                text = "$countStr for “$q”",
+                                style = MaterialTheme.typography.bodySmall,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MemegetColors.TextSecondary,
+                            )
+                            if (relaxedFromKind != null) {
+                                val kindLabel = if (relaxedFromKind == "video") "videos" else "images"
+                                Text(
+                                    text = "No $kindLabel matched “$q” — showing all memes",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Medium,
+                                    color = MemegetColors.VoltMuted,
+                                )
+                            }
+                        }
+                    }
+                } else if (libraryCount > 0 && !indexProgress.running) {
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -651,13 +732,9 @@ internal fun LibraryScreen(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
+                        val waiting = libraryCount - totalCount
                         Text(
-                            text = if (query.isNotEmpty()) {
-                                if (isSearching && memes.isEmpty()) "Searching…" else "${memes.size} match${if (memes.size == 1) "" else "es"}"
-                            } else {
-                                val waiting = libraryCount - totalCount
-                                "$libraryCount meme${if (libraryCount == 1) "" else "s"}${if (waiting > 0) " · $waiting to index" else ""}${if (folderCount > 0) " · $folderCount folder${if (folderCount > 1) "s" else ""}" else ""}"
-                            },
+                            text = "$libraryCount meme${if (libraryCount == 1) "" else "s"}${if (waiting > 0) " · $waiting to index" else ""}${if (folderCount > 0) " · $folderCount folder${if (folderCount > 1) "s" else ""}" else ""}",
                             style = MaterialTheme.typography.bodySmall,
                             color = MemegetColors.TextSecondary,
                         )
@@ -670,14 +747,19 @@ internal fun LibraryScreen(
                                 Text("＋ Link", style = MaterialTheme.typography.labelSmall)
                             }
                             Button(
-                                onClick = { coordinator.start() },
+                                onClick = onStartIndex,
+                                enabled = !isScanning,
                                 colors = ButtonDefaults.buttonColors(
                                     containerColor = MemegetColors.Volt,
                                     contentColor = MemegetColors.Background,
                                 ),
                                 contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
                             ) {
-                                Text("⟳ Index", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                                Text(
+                                    text = if (isScanning) "Scanning…" else "⟳ Index",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Bold,
+                                )
                             }
                         }
                     }
@@ -688,8 +770,9 @@ internal fun LibraryScreen(
                     // Onboarding 1-2-3 guide
                     OnboardingCard(
                         onLink = { linkFolderLauncher.launch(null) },
-                        onIndex = { coordinator.start() },
+                        onIndex = onStartIndex,
                         folderCount = folderCount,
+                        isScanning = isScanning,
                     )
                 } else if (memes.isEmpty() && query.isNotEmpty() && isSearching) {
                     // Until the first results arrive; "No memes matched" would be a false answer.
@@ -727,6 +810,26 @@ internal fun LibraryScreen(
                             textAlign = TextAlign.Center,
                         )
                     }
+                } else if (memes.isEmpty() && query.isEmpty() && kindFilter != null) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center,
+                        modifier = Modifier.padding(24.dp),
+                    ) {
+                        Text(
+                            text = if (kindFilter == "video") "▶ No videos here" else "▦ No images here",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = MemegetColors.TextPrimary,
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = "Tap the chip again to show everything.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MemegetColors.TextSecondary,
+                            textAlign = TextAlign.Center,
+                        )
+                    }
                 }
             },
         )
@@ -755,13 +858,29 @@ internal fun LibraryScreen(
         DeleteConfirmationDialog(
             count = selectedIds.size,
             onDismiss = { showBatchDeleteDialog = false },
-            onConfirmDeleteIndex = {
+            onConfirmDelete = {
                 showBatchDeleteDialog = false
+                val targets = memes.filter { it.id in selectedIds }
                 scope.launch {
-                    store.delete(selectedIds.toList())
-                    Toast.makeText(context, "Removed from index", Toast.LENGTH_SHORT).show()
-                    selectionMode = false
-                    selectedIds = emptySet()
+                    try {
+                        val filesDeleted = files.deleteMemes(targets)
+                        val removed = if (targets.size == 1) "Deleted 1 meme" else "Deleted ${targets.size} memes"
+                        // A file already gone, or one in a folder the app can no longer write, isn't deleted.
+                        val kept = targets.size - filesDeleted
+                        Toast.makeText(
+                            context,
+                            if (kept > 0) "$removed ($kept file${if (kept == 1) "" else "s"} could not be deleted)" else removed,
+                            Toast.LENGTH_SHORT,
+                        ).show()
+                        selectionMode = false
+                        selectedIds = emptySet()
+                    } catch (e: Exception) {
+                        if (e is CancellationException) throw e
+                        val reason = e.message ?: e.toString()
+                        selectionMode = false
+                        selectedIds = emptySet()
+                        Toast.makeText(context, reason, Toast.LENGTH_SHORT).show()
+                    }
                 }
             },
         )
@@ -841,6 +960,7 @@ private fun OnboardingCard(
     onLink: () -> Unit,
     onIndex: () -> Unit,
     folderCount: Int,
+    isScanning: Boolean = false,
 ) {
     Column(
         modifier = Modifier
@@ -891,13 +1011,17 @@ private fun OnboardingCard(
         } else {
             Button(
                 onClick = onIndex,
+                enabled = !isScanning,
                 colors = ButtonDefaults.buttonColors(
                     containerColor = MemegetColors.Volt,
                     contentColor = MemegetColors.Background,
                 ),
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Text("Index My Memes", fontWeight = FontWeight.Bold)
+                Text(
+                    text = if (isScanning) "Scanning…" else "Index My Memes",
+                    fontWeight = FontWeight.Bold,
+                )
             }
         }
     }

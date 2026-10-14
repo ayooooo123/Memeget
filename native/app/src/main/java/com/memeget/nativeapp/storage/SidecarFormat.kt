@@ -39,6 +39,24 @@ internal object SidecarFormat {
         return "%02x".format(chunkIdx)
     }
 
+    private val GENERATION_FILE = Regex("""^(?:library_(\d+)_[0-9a-f]{2}|teachings_(\d+)|manifest_(\d+))\.json$""")
+
+    /**
+     * Which of the backup files [names] can go once generation [current] is committed: those of older generations,
+     * except the newest older one with its own manifest, which stays as a fallback. Newer generations (another
+     * install writing the same folder) and files of no generation, such as `manifest.json`, always stay.
+     */
+    fun staleGenerationFiles(names: Collection<String>, current: Long): List<String> {
+        val generationOf = names.associateWith { name ->
+            GENERATION_FILE.matchEntire(name)?.groupValues?.drop(1)?.firstOrNull { it.isNotEmpty() }?.toLongOrNull()
+        }
+        val fallback = generationOf.values.filterNotNull()
+            .filter { it < current && "manifest_$it.json" in names }
+            .maxOrNull()
+        return generationOf.filter { (_, generation) -> generation != null && generation < current && generation != fallback }
+            .keys.sorted()
+    }
+
     fun digest(payload: String): String {
         var h = 0x811c9dc5.toInt()
         for (i in 0 until payload.length) {

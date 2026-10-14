@@ -1,6 +1,7 @@
 package com.memeget.nativeapp.knowledge
 
 import com.memeget.nativeapp.CloudResult
+import com.memeget.nativeapp.EnrichmentCounts
 import com.memeget.nativeapp.Exemplar
 import com.memeget.nativeapp.Folder
 import com.memeget.nativeapp.InferenceEngine
@@ -133,6 +134,10 @@ class CandidateRankingBehaviorTest {
         override suspend fun setCaption(id: Long, caption: String, tags: List<Tag>, vector: FloatArray?, state: String) {}
         override suspend fun setTranscript(id: Long, text: String, state: String) {}
         override suspend fun setAudioState(id: Long, state: String) {}
+        override suspend fun setVisionState(id: Long, state: String) {}
+        override suspend fun enrichmentCounts(): EnrichmentCounts = EnrichmentCounts()
+        override suspend fun requeueFailedEnrichment(stage: String): Int = 0
+        override suspend fun requeueAllTranscripts(): Int = 0
         override suspend fun setVisual(id: Long, vector: FloatArray, model: String) {}
         override suspend fun setThumb(id: Long, uri: String) {}
         override suspend fun setContentHash(id: Long, hash: String) {}
@@ -148,14 +153,17 @@ class CandidateRankingBehaviorTest {
         override suspend fun relinkTeachings(): Int = 0
         override suspend fun forgetLabel(label: String) {}
         override suspend fun forgetPack(pack: String) {}
+        override suspend fun clearExemplars(): Int = 0
         override suspend fun delete(ids: List<Long>) {}
         override suspend fun clearIndex() {}
         override suspend fun setting(key: String): String? = null
         override suspend fun setSetting(key: String, value: String) {}
         override suspend fun addError(name: String, stage: String, reason: String) {}
         override suspend fun errors(): List<String> = emptyList()
+        override suspend fun errorCounts(): Map<String, Int> = emptyMap()
         override suspend fun clearErrors() {}
         override suspend fun tagLabels(): List<String> = emptyList()
+        override suspend fun tagCounts(): Map<String, Int> = emptyMap()
         override suspend fun restore(meme: Meme, vectors: VectorRecord?): Boolean = true
     }
 

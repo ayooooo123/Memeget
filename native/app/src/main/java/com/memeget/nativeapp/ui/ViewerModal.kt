@@ -5,9 +5,11 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.net.Uri
 import android.widget.Toast
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -30,19 +32,24 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Divider
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -67,12 +74,17 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
 import coil.compose.SubcomposeAsyncImage
 import coil.request.ImageRequest
-import kotlinx.coroutines.Dispatchers
+import com.memeget.nativeapp.data.TagMerge
+import com.memeget.nativeapp.storage.MediaIoUtils
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.text.DateFormat
+import java.util.Date
+import java.util.Locale
 
-@OptIn(ExperimentalLayoutApi::class)
+@OptIn(ExperimentalLayoutApi::class, ExperimentalFoundationApi::class)
 @Composable
 internal fun ViewerModal(
     meme: Meme,
@@ -85,31 +97,126 @@ internal fun ViewerModal(
     onSearchTag: (String) -> Unit,
     onNavigateToMeme: (Meme) -> Unit,
     onMemeDeleted: (Long) -> Unit,
+    onTaught: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val revision by store.revision.collectAsState()
 
     var showDeleteDialog by remember { mutableStateOf(false) }
     var showTagDialog by remember { mutableStateOf(false) }
     var showTeachDialog by remember { mutableStateOf(false) }
+    var showMoreMenu by remember { mutableStateOf(false) }
+    var showConfidenceDialog by remember { mutableStateOf(false) }
+    var verdictTag by remember { mutableStateOf<Tag?>(null) }
+
+    var alsoTheseCandidates by remember { mutableStateOf<List<Meme>>(emptyList()) }
+    var alsoTheseLabel by remember { mutableStateOf("") }
+    var alsoTheseCategory by remember { mutableStateOf("") }
+    var alsoTheseSelected by remember { mutableStateOf<Set<Long>>(emptySet()) }
+    var showAlsoTheseDialog by remember { mutableStateOf(false) }
+
+    var confidenceState by remember { mutableStateOf<ConfidenceState>(ConfidenceState.Loading) }
+
     var similarHits by remember { mutableStateOf<List<SearchHit>>(emptyList()) }
     var loadingSimilar by remember { mutableStateOf(false) }
     var currentMeme by remember(meme.id) { mutableStateOf(meme) }
     var copying by remember(meme.id) { mutableStateOf(false) }
 
-    // Fetch refreshed meme and similar hits when meme changes
+    val dateFormat = remember {
+        DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT)
+    }
+
+    fun checkAndOpenAlsoThese(label: String, category: String) {
+        scope.launch {
+            try {
+                val normLabel = TagMerge.normalizeTagLabel(label)
+                val hits = withContext(Dispatchers.IO) {
+                    store.similar(currentMeme.id, limit = 24)
+                }
+                val candidates = hits.filter { hit ->
+                    hit.score >= 0.6f &&
+                        hit.meme.id != currentMeme.id &&
+                        hit.meme.tags.none { TagMerge.normalizeTagLabel(it.label) == normLabel } &&
+                        hit.meme.rejectedLabels.none { TagMerge.normalizeTagLabel(it) == normLabel }
+                }.map { it.meme }
+
+                if (candidates.isNotEmpty()) {
+                    alsoTheseCandidates = candidates
+                    alsoTheseLabel = label
+                    alsoTheseCategory = category
+                    alsoTheseSelected = emptySet()
+                    showAlsoTheseDialog = true
+                }
+            } catch (_: Exception) {
+                // Best effort candidate retrieval
+            }
+        }
+    }
+
+    // Live refresh: reload meme when store.revision changes (or currentMeme.id changes)
+    LaunchedEffect(currentMeme.id, revision) {
+        val fresh = withContext(Dispatchers.IO) {
+            store.meme(currentMeme.id)
+        }
+        if (fresh != null) {
+            currentMeme = fresh
+        }
+    }
+
+    // Keep loading of the similar-memes row keyed on the meme id only
     LaunchedEffect(currentMeme.id) {
         loadingSimilar = true
-        withContext(Dispatchers.IO) {
-            val fresh = store.meme(currentMeme.id)
-            if (fresh != null) {
-                withContext(Dispatchers.Main) { currentMeme = fresh }
+        val similar = withContext(Dispatchers.IO) {
+            store.similar(currentMeme.id, limit = 24)
+        }
+        similarHits = similar
+        loadingSimilar = false
+    }
+
+    // Compute taught-label confidence scores when dialog is shown
+    LaunchedEffect(showConfidenceDialog, currentMeme.id) {
+        if (!showConfidenceDialog) return@LaunchedEffect
+        confidenceState = ConfidenceState.Loading
+        val (vectorRecord, exemplars) = withContext(Dispatchers.IO) {
+            val v = store.vectors(currentMeme.id)
+            val e = store.exemplars()
+            Pair(v, e)
+        }
+        if (vectorRecord == null || vectorRecord.image.isEmpty()) {
+            confidenceState = ConfidenceState.NoVector
+            return@LaunchedEffect
+        }
+        val entries = withContext(Dispatchers.Default) {
+            val memeImage = vectorRecord.image
+            val memeModel = vectorRecord.model
+            val matchingExemplars = exemplars.filter {
+                it.model == memeModel && it.vector.size == memeImage.size
             }
-            val similar = store.similar(currentMeme.id, limit = 24)
-            withContext(Dispatchers.Main) {
-                similarHits = similar
-                loadingSimilar = false
+            if (matchingExemplars.isEmpty()) {
+                return@withContext emptyList<ConfidenceEntry>()
             }
+            val byLabel = matchingExemplars.groupBy { it.label }
+            byLabel.map { (label, exs) ->
+                var bestPos: Float? = null
+                var bestNeg: Float? = null
+                for (ex in exs) {
+                    val score = dot(memeImage, ex.vector)
+                    if (ex.positive) {
+                        if (bestPos == null || score > bestPos) bestPos = score
+                    } else {
+                        if (bestNeg == null || score > bestNeg) bestNeg = score
+                    }
+                }
+                ConfidenceEntry(label = label, bestPositive = bestPos, bestNegative = bestNeg)
+            }
+                .sortedByDescending { it.bestPositive ?: Float.NEGATIVE_INFINITY }
+                .take(15)
+        }
+        confidenceState = if (entries.isEmpty()) {
+            ConfidenceState.NoTeachings
+        } else {
+            ConfidenceState.Loaded(entries)
         }
     }
 
@@ -180,15 +287,121 @@ internal fun ViewerModal(
                     }
 
                     // Action buttons
-                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
                         IconButton(onClick = { onRemix(currentMeme) }) {
                             Text("✎", color = MemegetColors.Volt, fontSize = 18.sp)
                         }
-                        IconButton(onClick = { files.share(context, listOf(currentMeme)) }) {
+                        IconButton(onClick = {
+                            scope.launch {
+                                try {
+                                    files.share(context, listOf(currentMeme))
+                                } catch (cancelled: CancellationException) {
+                                    throw cancelled
+                                } catch (e: Exception) {
+                                    Toast.makeText(context, "Could not share: ${e.message ?: e.toString()}", Toast.LENGTH_LONG).show()
+                                }
+                            }
+                        }) {
                             Text("↗", color = MemegetColors.TextPrimary, fontSize = 18.sp)
                         }
                         IconButton(onClick = { showDeleteDialog = true }) {
                             Text("🗑", color = MemegetColors.Danger, fontSize = 16.sp)
+                        }
+                        Box {
+                            IconButton(onClick = { showMoreMenu = true }) {
+                                Text("⋯", color = MemegetColors.TextPrimary, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                            }
+                            DropdownMenu(
+                                expanded = showMoreMenu,
+                                onDismissRequest = { showMoreMenu = false },
+                                modifier = Modifier.background(MemegetColors.Surface),
+                            ) {
+                                DropdownMenuItem(
+                                    text = { Text("Re-run the caption", color = MemegetColors.TextPrimary) },
+                                    onClick = {
+                                        showMoreMenu = false
+                                        scope.launch {
+                                            try {
+                                                val enabled = store.setting("vision.enabled") == "1"
+                                                if (!enabled) {
+                                                    Toast.makeText(context, "Turn on Local AI Captions in Settings first", Toast.LENGTH_SHORT).show()
+                                                } else {
+                                                    store.setVisionState(currentMeme.id, "pending")
+                                                    coordinator.start(emptyList())
+                                                    Toast.makeText(context, "Caption queued", Toast.LENGTH_SHORT).show()
+                                                }
+                                            } catch (cancelled: CancellationException) {
+                                                throw cancelled
+                                            } catch (e: Exception) {
+                                                Toast.makeText(context, "Could not queue caption: ${e.message ?: e.toString()}", Toast.LENGTH_LONG).show()
+                                            }
+                                        }
+                                    },
+                                )
+                                if (currentMeme.kind == "video") {
+                                    DropdownMenuItem(
+                                        text = { Text("Re-run the transcription", color = MemegetColors.TextPrimary) },
+                                        onClick = {
+                                            showMoreMenu = false
+                                            scope.launch {
+                                                try {
+                                                    val enabled = store.setting("audio.enabled") == "1"
+                                                    if (!enabled) {
+                                                        Toast.makeText(context, "Turn on Audio Transcription in Settings first", Toast.LENGTH_SHORT).show()
+                                                    } else {
+                                                        store.setAudioState(currentMeme.id, "pending")
+                                                        coordinator.start(emptyList())
+                                                        Toast.makeText(context, "Transcription queued", Toast.LENGTH_SHORT).show()
+                                                    }
+                                                } catch (cancelled: CancellationException) {
+                                                    throw cancelled
+                                                } catch (e: Exception) {
+                                                    Toast.makeText(context, "Could not queue transcription: ${e.message ?: e.toString()}", Toast.LENGTH_LONG).show()
+                                                }
+                                            }
+                                        },
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("Regenerate the thumbnail", color = MemegetColors.TextPrimary) },
+                                        onClick = {
+                                            showMoreMenu = false
+                                            scope.launch {
+                                                try {
+                                                    val result = files.thumbnail(currentMeme.copy(thumbUri = ""))
+                                                    if (result.isNotBlank()) {
+                                                        Toast.makeText(context, "Thumbnail updated", Toast.LENGTH_SHORT).show()
+                                                    } else {
+                                                        Toast.makeText(context, "Could not extract thumbnail", Toast.LENGTH_LONG).show()
+                                                    }
+                                                } catch (cancelled: CancellationException) {
+                                                    throw cancelled
+                                                } catch (e: Exception) {
+                                                    Toast.makeText(context, "Could not regenerate thumbnail: ${e.message ?: e.toString()}", Toast.LENGTH_LONG).show()
+                                                }
+                                            }
+                                        },
+                                    )
+                                }
+                                if (currentMeme.ocr.isNotBlank()) {
+                                    DropdownMenuItem(
+                                        text = { Text("Copy the text in this meme", color = MemegetColors.TextPrimary) },
+                                        onClick = {
+                                            showMoreMenu = false
+                                            copyText(context, currentMeme.ocr, "OCR text copied")
+                                        },
+                                    )
+                                }
+                                DropdownMenuItem(
+                                    text = { Text("Show taught-label confidence", color = MemegetColors.TextPrimary) },
+                                    onClick = {
+                                        showMoreMenu = false
+                                        showConfidenceDialog = true
+                                    },
+                                )
+                            }
                         }
                     }
                 }
@@ -276,9 +489,15 @@ internal fun ViewerModal(
                             OutlinedButton(
                                 onClick = {
                                     scope.launch {
-                                        val mime = if (currentMeme.kind == "video") "video/mp4" else "image/png"
-                                        files.exportToDownloads(currentMeme.uri, currentMeme.name, mime)
-                                        Toast.makeText(context, "Saved to Downloads", Toast.LENGTH_SHORT).show()
+                                        try {
+                                            val mime = MediaIoUtils.mimeForName(currentMeme.name)
+                                            files.exportToDownloads(currentMeme.uri, currentMeme.name, mime)
+                                            Toast.makeText(context, "Saved to Downloads", Toast.LENGTH_SHORT).show()
+                                        } catch (cancelled: CancellationException) {
+                                            throw cancelled
+                                        } catch (e: Exception) {
+                                            Toast.makeText(context, "Could not export: ${e.message ?: e.toString()}", Toast.LENGTH_LONG).show()
+                                        }
                                     }
                                 },
                                 enabled = !copying,
@@ -336,6 +555,23 @@ internal fun ViewerModal(
                                     color = if (currentMeme.audioState == "done") MemegetColors.Success else MemegetColors.TextMuted,
                                 )
                             }
+                        }
+
+                        // Timestamps
+                        val timestampTexts = buildList {
+                            if (currentMeme.modifiedAt > 0) {
+                                add("File date: ${dateFormat.format(Date(currentMeme.modifiedAt))}")
+                            }
+                            if (currentMeme.indexedAt > 0) {
+                                add("Added: ${dateFormat.format(Date(currentMeme.indexedAt))}")
+                            }
+                        }
+                        if (timestampTexts.isNotEmpty()) {
+                            Text(
+                                text = timestampTexts.joinToString("  ·  "),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MemegetColors.TextMuted,
+                            )
                         }
 
                         // Cloud Analysis Section with honest confirmation contract
@@ -493,6 +729,9 @@ internal fun ViewerModal(
                                             onClose()
                                             onSearchTag(tag.label)
                                         },
+                                        onLongClick = {
+                                            verdictTag = tag
+                                        },
                                         onRemove = {
                                             scope.launch {
                                                 store.removeTag(currentMeme.id, tag.label)
@@ -588,10 +827,17 @@ internal fun ViewerModal(
             onConfirm = { label, category, spread ->
                 showTagDialog = false
                 scope.launch {
-                    store.manualTag(listOf(currentMeme.id), label, category, spread)
-                    val fresh = store.meme(currentMeme.id)
-                    if (fresh != null) currentMeme = fresh
-                    Toast.makeText(context, "Tag applied", Toast.LENGTH_SHORT).show()
+                    try {
+                        store.manualTag(listOf(currentMeme.id), label, category, spread)
+                        val fresh = store.meme(currentMeme.id)
+                        if (fresh != null) currentMeme = fresh
+                        onTaught()
+                        Toast.makeText(context, "Tag applied", Toast.LENGTH_SHORT).show()
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (e: Exception) {
+                        Toast.makeText(context, "Could not apply tag: ${e.message ?: e.toString()}", Toast.LENGTH_LONG).show()
+                    }
                 }
             },
         )
@@ -605,14 +851,24 @@ internal fun ViewerModal(
             onConfirm = { label, category, positive, associations ->
                 showTeachDialog = false
                 scope.launch {
-                    cloud.recordTeaching(currentMeme.id, label, category, positive, associations)
-                    val fresh = store.meme(currentMeme.id)
-                    if (fresh != null) currentMeme = fresh
-                    Toast.makeText(
-                        context,
-                        if (positive) "Taught positive exemplar" else "Taught negative veto exemplar",
-                        Toast.LENGTH_SHORT,
-                    ).show()
+                    try {
+                        cloud.recordTeaching(currentMeme.id, label, category, positive, associations)
+                        val fresh = store.meme(currentMeme.id)
+                        if (fresh != null) currentMeme = fresh
+                        onTaught()
+                        Toast.makeText(
+                            context,
+                            if (positive) "Taught positive exemplar" else "Taught negative veto exemplar",
+                            Toast.LENGTH_SHORT,
+                        ).show()
+                        if (positive) {
+                            checkAndOpenAlsoThese(label, category)
+                        }
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (e: Exception) {
+                        Toast.makeText(context, "Could not teach: ${e.message ?: e.toString()}", Toast.LENGTH_LONG).show()
+                    }
                 }
             },
         )
@@ -623,15 +879,344 @@ internal fun ViewerModal(
         DeleteConfirmationDialog(
             count = 1,
             onDismiss = { showDeleteDialog = false },
-            onConfirmDeleteIndex = {
+            onConfirmDelete = {
                 showDeleteDialog = false
                 scope.launch {
-                    store.delete(listOf(currentMeme.id))
-                    onMemeDeleted(currentMeme.id)
-                    onClose()
-                    Toast.makeText(context, "Removed from index", Toast.LENGTH_SHORT).show()
+                    try {
+                        files.deleteMemes(listOf(currentMeme))
+                        onMemeDeleted(currentMeme.id)
+                        onClose()
+                        Toast.makeText(context, "Meme deleted", Toast.LENGTH_SHORT).show()
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (e: Exception) {
+                        Toast.makeText(context, "Could not delete: ${e.message ?: e.toString()}", Toast.LENGTH_LONG).show()
+                    }
                 }
             },
+        )
+    }
+
+    // Tag Verdict Dialog
+    if (verdictTag != null) {
+        val tag = verdictTag!!
+        AlertDialog(
+            onDismissRequest = { verdictTag = null },
+            title = {
+                Text(
+                    text = "“${tag.label}”",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = MemegetColors.TextPrimary,
+                )
+            },
+            text = {
+                Text(
+                    text = "Is “${tag.label}” right for this meme?",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MemegetColors.TextPrimary,
+                )
+            },
+            confirmButton = {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Button(
+                        onClick = {
+                            val targetTag = verdictTag ?: return@Button
+                            verdictTag = null
+                            scope.launch {
+                                try {
+                                    cloud.recordTeaching(currentMeme.id, targetTag.label, targetTag.category, true, emptyList())
+                                    val fresh = store.meme(currentMeme.id)
+                                    if (fresh != null) currentMeme = fresh
+                                    onTaught()
+                                    Toast.makeText(context, "Taught “${targetTag.label}”", Toast.LENGTH_SHORT).show()
+                                    checkAndOpenAlsoThese(targetTag.label, targetTag.category)
+                                } catch (cancelled: CancellationException) {
+                                    throw cancelled
+                                } catch (e: Exception) {
+                                    Toast.makeText(context, "Could not teach: ${e.message ?: e.toString()}", Toast.LENGTH_LONG).show()
+                                }
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MemegetColors.Volt,
+                            contentColor = MemegetColors.Background,
+                        ),
+                    ) {
+                        Text("✓ Right — teach it", fontWeight = FontWeight.Bold)
+                    }
+
+                    Button(
+                        onClick = {
+                            val targetTag = verdictTag ?: return@Button
+                            verdictTag = null
+                            scope.launch {
+                                try {
+                                    cloud.recordTeaching(currentMeme.id, targetTag.label, targetTag.category, false, emptyList())
+                                    val fresh = store.meme(currentMeme.id)
+                                    if (fresh != null) currentMeme = fresh
+                                    onTaught()
+                                    Toast.makeText(context, "Saved: NOT “${targetTag.label}”", Toast.LENGTH_SHORT).show()
+                                } catch (cancelled: CancellationException) {
+                                    throw cancelled
+                                } catch (e: Exception) {
+                                    Toast.makeText(context, "Could not teach: ${e.message ?: e.toString()}", Toast.LENGTH_LONG).show()
+                                }
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MemegetColors.Danger,
+                            contentColor = MemegetColors.TextPrimary,
+                        ),
+                    ) {
+                        Text("✗ Wrong — not this")
+                    }
+
+                    TextButton(
+                        onClick = { verdictTag = null },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text("Cancel", color = MemegetColors.TextSecondary)
+                    }
+                }
+            },
+            containerColor = MemegetColors.Surface,
+        )
+    }
+
+    // "Also these?" Dialog
+    if (showAlsoTheseDialog && alsoTheseCandidates.isNotEmpty()) {
+        var isSavingAlsoThese by remember { mutableStateOf(false) }
+
+        AlertDialog(
+            onDismissRequest = {
+                if (!isSavingAlsoThese) {
+                    showAlsoTheseDialog = false
+                }
+            },
+            title = {
+                Text(
+                    text = "More “$alsoTheseLabel”?",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = MemegetColors.TextPrimary,
+                )
+            },
+            text = {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    Text(
+                        text = "These look similar. Tap the ones that are also “$alsoTheseLabel” — every confirmation becomes another example and makes the label sharper.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MemegetColors.TextSecondary,
+                    )
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 260.dp)
+                            .verticalScroll(rememberScrollState()),
+                    ) {
+                        FlowRow(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            alsoTheseCandidates.forEach { candidate ->
+                                val isPicked = alsoTheseSelected.contains(candidate.id)
+                                val thumbSource = if (candidate.thumbUri.isNotEmpty()) candidate.thumbUri else candidate.uri
+
+                                Box(
+                                    modifier = Modifier
+                                        .size(68.dp)
+                                        .clip(RoundedCornerShape(6.dp))
+                                        .background(MemegetColors.SurfaceVariant)
+                                        .border(
+                                            width = if (isPicked) 2.dp else 0.5.dp,
+                                            color = if (isPicked) MemegetColors.Volt else MemegetColors.SurfaceBright,
+                                            shape = RoundedCornerShape(6.dp),
+                                        )
+                                        .clickable {
+                                            if (!isSavingAlsoThese) {
+                                                alsoTheseSelected = if (isPicked) {
+                                                    alsoTheseSelected - candidate.id
+                                                } else {
+                                                    alsoTheseSelected + candidate.id
+                                                }
+                                            }
+                                        },
+                                ) {
+                                    SubcomposeAsyncImage(
+                                        model = ImageRequest.Builder(context)
+                                            .data(thumbSource)
+                                            .crossfade(true)
+                                            .build(),
+                                        contentDescription = candidate.name,
+                                        contentScale = ContentScale.Crop,
+                                        modifier = Modifier.fillMaxSize(),
+                                    )
+                                    if (isPicked) {
+                                        Box(
+                                            modifier = Modifier
+                                                .align(Alignment.TopEnd)
+                                                .padding(2.dp)
+                                                .size(18.dp)
+                                                .clip(CircleShape)
+                                                .background(MemegetColors.Volt),
+                                            contentAlignment = Alignment.Center,
+                                        ) {
+                                            Text(
+                                                text = "✓",
+                                                color = MemegetColors.Background,
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.Bold,
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val toTeach = alsoTheseCandidates.filter { alsoTheseSelected.contains(it.id) }
+                        if (toTeach.isEmpty()) return@Button
+                        isSavingAlsoThese = true
+                        scope.launch {
+                            try {
+                                for (m in toTeach) {
+                                    cloud.recordTeaching(m.id, alsoTheseLabel, alsoTheseCategory, true, emptyList())
+                                }
+                                val fresh = store.meme(currentMeme.id)
+                                if (fresh != null) currentMeme = fresh
+                                onTaught()
+                                Toast.makeText(
+                                    context,
+                                    "Saved “$alsoTheseLabel” from ${toTeach.size} more example${if (toTeach.size == 1) "" else "s"}",
+                                    Toast.LENGTH_SHORT,
+                                ).show()
+                                showAlsoTheseDialog = false
+                            } catch (cancelled: CancellationException) {
+                                throw cancelled
+                            } catch (e: Exception) {
+                                Toast.makeText(context, "Could not save examples: ${e.message ?: e.toString()}", Toast.LENGTH_LONG).show()
+                            } finally {
+                                isSavingAlsoThese = false
+                            }
+                        }
+                    },
+                    enabled = !isSavingAlsoThese && alsoTheseSelected.isNotEmpty(),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MemegetColors.Volt,
+                        contentColor = MemegetColors.Background,
+                    ),
+                ) {
+                    Text(
+                        text = if (isSavingAlsoThese) "Saving…" else "Teach ${alsoTheseSelected.size} more",
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { showAlsoTheseDialog = false },
+                    enabled = !isSavingAlsoThese,
+                ) {
+                    Text("Skip", color = MemegetColors.TextSecondary)
+                }
+            },
+            containerColor = MemegetColors.Surface,
+        )
+    }
+
+    // Taught-label Confidence Dialog
+    if (showConfidenceDialog) {
+        AlertDialog(
+            onDismissRequest = { showConfidenceDialog = false },
+            title = {
+                Text(
+                    text = "Taught-label confidence",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = MemegetColors.TextPrimary,
+                )
+            },
+            text = {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Text(
+                        text = "Closest taught example for each label. A look-alike takes a label at 0.80 or more when no “not” example is closer.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MemegetColors.TextMuted,
+                    )
+                    when (val state = confidenceState) {
+                        is ConfidenceState.Loading -> {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(80.dp),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                CircularProgressIndicator(
+                                    color = MemegetColors.Volt,
+                                    modifier = Modifier.size(24.dp),
+                                )
+                            }
+                        }
+                        is ConfidenceState.NoVector -> {
+                            Text(
+                                text = "No stored vector for this meme.",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MemegetColors.TextSecondary,
+                            )
+                        }
+                        is ConfidenceState.NoTeachings -> {
+                            Text(
+                                text = "No matching taught concepts found.",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MemegetColors.TextSecondary,
+                            )
+                        }
+                        is ConfidenceState.Loaded -> {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(max = 300.dp)
+                                    .verticalScroll(rememberScrollState()),
+                                verticalArrangement = Arrangement.spacedBy(6.dp),
+                            ) {
+                                state.entries.forEach { entry ->
+                                    val posStr = entry.bestPositive?.let { String.format(Locale.US, "%.2f", it) } ?: "—"
+                                    val negStr = entry.bestNegative?.let { String.format(Locale.US, "%.2f", it) } ?: "—"
+                                    Text(
+                                        text = "${entry.label}  $posStr · not $negStr",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.Medium,
+                                        color = MemegetColors.TextPrimary,
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showConfidenceDialog = false }) {
+                    Text("Close", color = MemegetColors.Volt)
+                }
+            },
+            containerColor = MemegetColors.Surface,
         )
     }
 }
@@ -705,10 +1290,12 @@ private fun DetailSection(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun TagChip(
     tag: Tag,
     onClick: () -> Unit,
+    onLongClick: () -> Unit,
     onRemove: () -> Unit,
 ) {
     val sourceColor = when (tag.source) {
@@ -723,7 +1310,10 @@ private fun TagChip(
             .clip(RoundedCornerShape(6.dp))
             .background(MemegetColors.SurfaceVariant)
             .border(0.5.dp, sourceColor.copy(alpha = 0.5f), RoundedCornerShape(6.dp))
-            .clickable { onClick() }
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = onLongClick,
+            )
             .padding(horizontal = 8.dp, vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(4.dp),
@@ -821,4 +1411,24 @@ private fun copyText(context: Context, text: String, toastMsg: String) {
     val clip = ClipData.newPlainText("Memeget", text)
     clipboard?.setPrimaryClip(clip)
     Toast.makeText(context, toastMsg, Toast.LENGTH_SHORT).show()
+}
+
+private fun dot(a: FloatArray, b: FloatArray): Float {
+    var sum = 0f
+    val n = minOf(a.size, b.size)
+    for (i in 0 until n) sum += a[i] * b[i]
+    return sum
+}
+
+private data class ConfidenceEntry(
+    val label: String,
+    val bestPositive: Float?,
+    val bestNegative: Float?,
+)
+
+private sealed interface ConfidenceState {
+    object Loading : ConfidenceState
+    object NoVector : ConfidenceState
+    object NoTeachings : ConfidenceState
+    data class Loaded(val entries: List<ConfidenceEntry>) : ConfidenceState
 }

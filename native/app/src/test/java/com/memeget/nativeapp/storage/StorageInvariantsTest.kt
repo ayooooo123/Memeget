@@ -48,6 +48,22 @@ class StorageInvariantsTest {
     }
 
     @Test
+    fun aNewBackupRemovesOlderGenerationsButKeepsTheNewestCompleteOneBeforeIt() {
+        fun generation(g: Long, complete: Boolean = true) =
+            listOf("library_${g}_00.json", "library_${g}_3f.json", "teachings_$g.json") +
+                if (complete) listOf("manifest_$g.json") else emptyList()
+        val names = generation(100) + generation(200) + generation(250, complete = false) + generation(300) +
+            generation(400) + generation(500) + listOf("manifest.json", "notes.txt")
+
+        // 300 was just written; 400 and 500 came from another install sharing the folder.
+        val stale = SidecarFormat.staleGenerationFiles(names, current = 300).toSet()
+
+        // 200 is the fallback: 250 is newer, but a backup cut short never committed it.
+        assertEquals((generation(100) + generation(250, complete = false)).toSet(), stale)
+        assertTrue(SidecarFormat.staleGenerationFiles(generation(300) + "manifest.json", current = 300).isEmpty())
+    }
+
+    @Test
     fun testVectorEncodingDecodingRoundTrip() {
         val original = FloatArray(512) { i -> (i * 0.123f) - 10f }
         val encoded = SidecarFormat.encodeVector(original)

@@ -37,6 +37,27 @@ internal data class Meme(
     val indexError: String = "",
     /** OCR and a compatible image vector arrived with the media; indexing reuses them once. */
     val analysisImported: Boolean = false,
+    /** When the meme was added, or last indexed, in epoch milliseconds. */
+    val indexedAt: Long = 0,
+)
+
+/** How far each stage of the library's analysis has got. */
+internal data class EnrichmentCounts(
+    val total: Int = 0,
+    /** Analysis done. */
+    val indexed: Int = 0,
+    /** Waiting for analysis, not counting failures. */
+    val waiting: Int = 0,
+    val indexFailed: Int = 0,
+    /** Analysed memes whose local caption is waiting or failed. */
+    val captionsWaiting: Int = 0,
+    val captionsFailed: Int = 0,
+    val videos: Int = 0,
+    /** Analysed videos whose transcript is waiting or failed. */
+    val transcriptsWaiting: Int = 0,
+    val transcriptsFailed: Int = 0,
+    /** Analysed videos without a poster frame. */
+    val postersMissing: Int = 0,
 )
 
 internal data class VectorRecord(
@@ -165,6 +186,16 @@ internal interface LibraryStore {
     suspend fun setTranscript(id: Long, text: String, state: String = "done")
     /** Changes only a video's transcription state; its transcript stays as it is. */
     suspend fun setAudioState(id: Long, state: String)
+    /** Changes only a meme's caption state; its caption and tags stay as they are. */
+    suspend fun setVisionState(id: Long, state: String)
+    suspend fun enrichmentCounts(): EnrichmentCounts
+    /**
+     * Queues every analysed meme whose caption ([stage] "vision") or every video whose transcript ([stage] "audio")
+     * failed for another attempt. Returns how many.
+     */
+    suspend fun requeueFailedEnrichment(stage: String): Int
+    /** Marks every video for transcription again, whatever model made its transcript. Transcripts stay until replaced. */
+    suspend fun requeueAllTranscripts(): Int
     suspend fun setVisual(id: Long, vector: FloatArray, model: String)
     suspend fun setThumb(id: Long, uri: String)
     suspend fun setContentHash(id: Long, hash: String)
@@ -194,6 +225,8 @@ internal interface LibraryStore {
     suspend fun importExemplars(items: List<Exemplar>, pack: String, asSelf: Boolean = false): Int
     suspend fun forgetLabel(label: String)
     suspend fun forgetPack(pack: String)
+    /** Removes every taught example, the user's own and imported ones. Tags already on memes stay. Returns how many. */
+    suspend fun clearExemplars(): Int
     /**
      * Replaces the meme's machine tags with [tags] and its association terms with [extraTerms].
      * Human-confirmed tags are kept whatever the caller passes; per-meme rejections remove
@@ -214,12 +247,16 @@ internal interface LibraryStore {
     suspend fun setSetting(key: String, value: String)
     suspend fun addError(name: String, stage: String, reason: String)
     suspend fun errors(): List<String>
+    /** How many logged errors each stage has. */
+    suspend fun errorCounts(): Map<String, Int>
     suspend fun clearErrors()
     /** Memes whose analysis is done. */
     suspend fun count(): Int
     /** Every meme in the library, whether or not its analysis is done. */
     suspend fun countAll(): Int
     suspend fun tagLabels(): List<String>
+    /** How many memes carry each tag, keyed by normalized label, whatever the tag's source. */
+    suspend fun tagCounts(): Map<String, Int>
     suspend fun restore(meme: Meme, vectors: VectorRecord?): Boolean
 }
 
