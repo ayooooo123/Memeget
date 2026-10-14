@@ -22,6 +22,8 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 Only ARM64 is packaged; minimum Android version is API 26. `runtime/bootstrap.sh` extracts the pinned `react-native-executorch@0.9.2` C++ dependencies into an ignored build cache after SHA-512 verification. This reuses the native runtime, not its React Native application layer. Model files are downloaded separately on demand and must match the sizes and SHA-256 digests in `app/src/main/java/com/memeget/nativeapp/inference/ModelRegistry.kt` before activation.
 
+`./gradlew :app:assembleRelease` builds `app/build/outputs/apk/release/app-release.apk` for everyday use. It is signed with the key the original app pins in `../signing/debug.keystore`, so each release installs over the last one and keeps the library. It is not debuggable: no keep-awake flag and no `run-as` access to its database. Debug builds are signed with the build machine's own debug key, so a release and a debug build cannot replace each other; switching means uninstalling first, which deletes that install's library.
+
 ## Local use and migration
 
 - Link a folder with Android's document picker, or import/share media, supported links, ZIP collections or teaching files. Temporary shared content is copied into private storage before its temporary permission expires.
