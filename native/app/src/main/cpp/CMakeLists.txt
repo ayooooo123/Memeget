@@ -127,6 +127,7 @@ add_library(memeget_inference SHARED
   LlamaVisionRunner.cpp
   ProjectorConversion.cpp
   ImageProcessing.cpp
+  VectorKernels.cpp
   ${ET_COMMON_DIR}/rnexecutorch/data_processing/Numerical.cpp
   ${ET_COMMON_DIR}/rnexecutorch/data_processing/gzip.cpp
   ${ET_COMMON_DIR}/rnexecutorch/models/ocr/utils/DetectorUtils.cpp
@@ -135,6 +136,8 @@ add_library(memeget_inference SHARED
   ${ET_COMMON_DIR}/rnexecutorch/models/ocr/CTCLabelConverter.cpp
   ${ET_COMMON_DIR}/rnexecutorch/utils/computer_vision/Processing.cpp
 )
+# The Label queue's kernels run on the UI's wait path, so debug APKs need them optimized too.
+set_source_files_properties(VectorKernels.cpp PROPERTIES COMPILE_OPTIONS "-O3")
 
 # The prebuilt OpenCV archives require OpenMP; keep its runtime private to this JNI library.
 target_link_options(memeget_inference PRIVATE
