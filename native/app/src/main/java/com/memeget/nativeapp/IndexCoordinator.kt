@@ -283,19 +283,30 @@ internal class IndexCoordinator(
                     val visual = store.setting("visual.enabled") == "1"
                     if (vision || audio || visual) {
                         val tried = HashSet<Long>()
+                        val triedSpeech = HashSet<Long>()
                         while (SystemClock.elapsedRealtime() - started < sessionTimeoutMillis && powerBlock(background) == null && !interactive) {
-                            val candidates = store.allMemes().filter { meme ->
-                                meme.id !in tried && !meme.pending && (vision && meme.visionState == "pending" ||
-                                    audio && meme.kind == "video" && meme.audioState == "pending" ||
-                                    visual && store.vectors(meme.id)?.visual == null)
-                            }.take(BATCH_SIZE).toList()
+                            // Videos waiting for a transcript go first, in batches that skip captions: on the Pixel 5a
+                            // small.en transcribes a 30 s clip in about 30 s, while captioning a video takes about a
+                            // minute, and the caption backlog is several times longer.
+                            val speech = if (audio) {
+                                store.allMemes().filter { meme ->
+                                    meme.id !in triedSpeech && !meme.pending && meme.kind == "video" && meme.audioState == "pending"
+                                }.take(BATCH_SIZE).toList()
+                            } else emptyList()
+                            val candidates = speech.ifEmpty {
+                                store.allMemes().filter { meme ->
+                                    meme.id !in tried && !meme.pending && (vision && meme.visionState == "pending" ||
+                                        audio && meme.kind == "video" && meme.audioState == "pending" ||
+                                        visual && store.vectors(meme.id)?.visual == null)
+                                }.take(BATCH_SIZE).toList()
+                            }
                             if (candidates.isEmpty()) break
                             val batch = ArrayList<Prepared>(candidates.size)
                             var stagedBytes = 0L
                             try {
                                 for (meme in candidates) {
                                     if (batch.isNotEmpty() && stagedBytes >= BATCH_DISK_BYTES) break
-                                    tried += meme.id
+                                    if (speech.isEmpty()) tried += meme.id else triedSpeech += meme.id
                                     val vectors = store.vectors(meme.id)?.takeIf { it.model == engine.primaryModel } ?: continue
                                     mutableProgress.value = WorkProgress("preparing media", detail = meme.name, running = true, memeId = meme.id)
                                     try {
@@ -308,7 +319,7 @@ internal class IndexCoordinator(
                                     }
                                 }
                                 // One call per batch, so each model loads once per batch rather than once per meme.
-                                enrich(batch, background)
+                                enrich(batch, background, describe = speech.isEmpty())
                             } finally {
                                 withContext(NonCancellable + Dispatchers.IO) { batch.forEach(::cleanPrepared) }
                             }
