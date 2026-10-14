@@ -272,6 +272,44 @@ class IndexCoordinatorTest {
     }
 
     @Test(timeout = 30_000)
+    fun retagAskedForWhileIndexingRunsOnceTheSessionEnds() = runBlocking {
+        val file = createValidBitmapFile()
+        store.insertPending(Uri.fromFile(file).toString(), "sample.png", "image", 100L, "hash-retag")
+        // Indexing holds the session in text recognition, then fails the item before classifying
+        // it, so only a re-tag loads the labels that call the text model.
+        val recognizing = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        testEngine.onRecognize = {
+            recognizing.complete(Unit)
+            release.await()
+            throw IllegalStateException("synthetic recognition failure")
+        }
+        val retagged = CompletableDeferred<Unit>()
+        testEngine.onEmbedText = {
+            retagged.complete(Unit)
+            FloatArray(512).apply { this[1] = 1f }
+        }
+        val coordinator = IndexCoordinator(
+            context = context,
+            store = store,
+            files = files,
+            engine = testEngine,
+            knowledge = knowledge,
+            cloud = cloud,
+            sessionTimeoutMillis = 10_000L,
+        )
+
+        val indexing = launch { coordinator.runPending() }
+        awaitStage(recognizing, indexing, coordinator)
+        coordinator.retag()
+        assertFalse("indexing still owns the session", retagged.isCompleted)
+
+        release.complete(Unit)
+        indexing.join()
+        withTimeout(10_000L) { retagged.await() }
+    }
+
+    @Test(timeout = 30_000)
     fun visionCancellationRestoresPendingStateUnderNonCancellable() = runBlocking {
         val file = createValidBitmapFile()
         val memeId = store.insertPending(Uri.fromFile(file).toString(), "sample.png", "image", 100L, "hash4")

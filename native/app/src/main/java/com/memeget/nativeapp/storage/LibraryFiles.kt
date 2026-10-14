@@ -31,6 +31,7 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.io.IOException
 import java.io.InputStream
 import java.util.Locale
 import java.util.zip.ZipInputStream
@@ -190,10 +191,16 @@ internal class LibraryFiles(
             val idByEntry = HashMap<String, Long>()
             val folders = store.folders()
             val targetFolder = folders.firstOrNull()
+            var manifestProblem: String? = null
 
             zis.use { stream ->
                 while (true) {
-                    val extracted = ZipImporter.extractNextEntry(stream, context.cacheDir) ?: break
+                    val extracted = try {
+                        ZipImporter.extractNextEntry(stream, context.cacheDir)
+                    } catch (unreadable: ZipImporter.UnreadableManifest) {
+                        manifestProblem = unreadable.message
+                        continue
+                    } ?: break
                     if (extracted.kind == ZipImporter.MANIFEST_KIND) {
                         manifest?.delete()
                         manifest = extracted.tempFile
@@ -257,6 +264,8 @@ internal class LibraryFiles(
                 }
                 store.relinkTeachings()
             }
+            // Media are in either way; say plainly when what the export knew about them is not.
+            manifestProblem?.let { throw IOException("Imported ${importedIds.size} items without their labels: $it") }
             return importedIds
         } finally {
             stagedZip.delete()

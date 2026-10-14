@@ -79,7 +79,13 @@ class CollectionImportTest {
         JSONObject().put("label", label).put("category", category).put("score", score).put("source", source)
 
     /** An original-app version 2 export: media under media/, manifest.json written last. */
-    private fun exportZip(name: String, media: List<Pair<String, ByteArray>>, records: List<JSONObject>, version: Int = 2): File {
+    private fun exportZip(
+        name: String,
+        media: List<Pair<String, ByteArray>>,
+        records: List<JSONObject>,
+        version: Int = 2,
+        memesFirst: Boolean = false,
+    ): File {
         val zip = File(temporary.root, name)
         ZipOutputStream(zip.outputStream()).use { out ->
             for ((path, bytes) in media) {
@@ -88,13 +94,22 @@ class CollectionImportTest {
                 out.closeEntry()
             }
             val manifest = JSONObject()
-                .put("format", "memeget-collection").put("version", version).put("model", "mobileclip-s2").put("dim", 512)
-                .put("count", records.size).put("memes", JSONArray(records))
+            if (memesFirst) manifest.put("memes", JSONArray(records))
+            manifest.put("format", "memeget-collection").put("version", version).put("model", "mobileclip-s2").put("dim", 512)
+                .put("count", records.size)
+            if (!memesFirst) manifest.put("memes", JSONArray(records))
             out.putNextEntry(ZipEntry("manifest.json"))
             out.write(manifest.toString().toByteArray())
             out.closeEntry()
         }
         return zip
+    }
+
+    private suspend fun indexPending() {
+        store.setSetting("background.enabled", "1")
+        store.setSetting("background.pauseLowBattery", "0")
+        store.setSetting("background.pauseHot", "0")
+        IndexCoordinator(context, store, files, engine, LocalKnowledge(context, store, engine), CloudAssistant(context, store, engine)).runPending()
     }
 
     private fun record(file: String, kind: String, tags: List<JSONObject>, ocr: String = "", transcript: String = "", embedding: FloatArray? = null) =
@@ -168,6 +183,16 @@ class CollectionImportTest {
         assertNull(store.vectors(id))
     }
 
+    @Test fun manifestMembersMayComeInAnyOrder() = runBlocking {
+        val zip = exportZip("reordered.zip", listOf("media/1.png" to png(13, Color.CYAN)),
+            listOf(record("media/1.png", "image", listOf(tag("milady", "manual", 1.0)), embedding = axis(0))), memesFirst = true)
+        val id = files.importUri(Uri.fromFile(zip), "application/zip").single()
+        val meme = requireNotNull(store.meme(id))
+        assertEquals(listOf("milady"), meme.tags.map { it.label })
+        assertTrue(meme.analysisImported)
+        assertEquals(axis(0).toList(), requireNotNull(store.vectors(id)).image.toList())
+    }
+
     private fun relinkFixtures(): Pair<File, File> {
         val zip = exportZip("collection.zip",
             media = listOf("media/a.png" to png(10, Color.GREEN), "media/b.png" to png(11, Color.GREEN)),
@@ -211,6 +236,23 @@ class CollectionImportTest {
         assertTeachingsAttached(a, b)
     }
 
+    @Test fun teachingsAttachWhenIndexingFirstGivesTheirMemeAVector() = runBlocking {
+        // The image model sees this picture as axis 3, the vector both teachings carry.
+        val pack = teachingPack(Triple("milady", axis(3), true), Triple("wojak", axis(3), false))
+        assertTrue(files.importUri(Uri.fromFile(pack), "application/json").isEmpty())
+        val picture = File(temporary.root, "plain.png").apply { writeBytes(png(9, Color.GRAY)) }
+        val id = files.importUri(Uri.fromFile(picture), "image/png").single()
+        assertNull(store.vectors(id))
+
+        indexPending()
+
+        val meme = requireNotNull(store.meme(id))
+        assertEquals("confirmed", meme.tags.single { it.label == "milady" }.confirmation)
+        assertTrue(meme.rejectedLabels.contains("wojak"))
+        assertFalse(meme.tags.any { it.label == "wojak" })
+        assertEquals(listOf(id), store.search("milady", null).map { it.meme.id })
+    }
+
     @Test fun importedAnalysisIndexesWithoutRunningImageOrTextModels() = runBlocking {
         val zip = exportZip("collection.zip",
             media = listOf("media/known.png" to png(14, Color.YELLOW), "media/fresh.png" to png(15, Color.YELLOW)),
@@ -219,12 +261,7 @@ class CollectionImportTest {
                 record("media/fresh.png", "image", emptyList()),
             ))
         val (known, fresh) = files.importUri(Uri.fromFile(zip), "application/zip")
-        store.setSetting("background.enabled", "1")
-        store.setSetting("background.pauseLowBattery", "0")
-        store.setSetting("background.pauseHot", "0")
-        val coordinator = IndexCoordinator(context, store, files, engine, LocalKnowledge(context, store, engine), CloudAssistant(context, store, engine))
-
-        coordinator.runPending()
+        indexPending()
 
         val knownMeme = requireNotNull(store.meme(known))
         assertFalse(knownMeme.pending || knownMeme.analysisImported)
@@ -237,6 +274,22 @@ class CollectionImportTest {
         assertFalse(freshMeme.pending)
         assertEquals("fresh text", freshMeme.ocr)
         assertNotNull(store.vectors(fresh))
+    }
+
+    @Test fun importedAnalysisIsIgnoredWhenTheFileChangedBeforeIndexing() = runBlocking {
+        val zip = exportZip("collection.zip", listOf("media/known.png" to png(14, Color.YELLOW)),
+            listOf(record("media/known.png", "image", emptyList(), ocr = "imported text", embedding = axis(0))))
+        val id = files.importUri(Uri.fromFile(zip), "application/zip").single()
+        // Another app rewrites the file before indexing reaches it.
+        File(requireNotNull(Uri.parse(requireNotNull(store.meme(id)).uri).path)).writeBytes(png(20, Color.MAGENTA))
+
+        indexPending()
+
+        val meme = requireNotNull(store.meme(id))
+        assertFalse(meme.pending || meme.analysisImported)
+        assertEquals("the new bytes ran the image model", 1, engine.embedded.size)
+        assertEquals(axis(3).toList(), requireNotNull(store.vectors(id)).image.toList())
+        assertEquals("fresh text", meme.ocr)
     }
 
     private class CountingEngine : InferenceEngine {

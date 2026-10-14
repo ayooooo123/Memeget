@@ -84,6 +84,19 @@ class RetagCorrectionTest {
         assertTrue(store.search("kept", null).any { it.meme.id == copy })
     }
 
+    @Test fun aHandTagAddedAfterNotThisSurvivesRetagging() = runBlocking {
+        val id = indexed("relabeled.png", 'd', unit(3 to 1f))
+        store.teach(id, "milady", "character", false)
+        store.manualTag(listOf(id), "milady", "character")
+
+        knowledge.retag {}
+
+        val after = requireNotNull(store.meme(id))
+        assertTrue(after.tags.any { it.label == "milady" && it.confirmation == "confirmed" })
+        assertFalse("the newer hand tag withdraws the older 'not this'", after.rejectedLabels.contains("milady"))
+        assertEquals(listOf(id), store.search("milady", null).map { it.meme.id })
+    }
+
     private class NoModelEngine : InferenceEngine {
         override val progress: StateFlow<ModelProgress> = MutableStateFlow(ModelProgress())
         override val primaryModel: String = ModelRegistry.PRIMARY_MODEL_FINGERPRINT

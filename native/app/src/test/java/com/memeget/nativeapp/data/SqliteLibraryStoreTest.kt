@@ -104,6 +104,20 @@ class SqliteLibraryStoreTest {
         assertTrue(reopened.search("wrong", null).isEmpty())
     }
 
+    @Test fun importedNotThisAlsoRemovesTheLabelFromCloudSearchText() = runBlocking {
+        val id = insert("cloud-terms.png")
+        store.completeIndex(id, LocalAnalysis(axis(4), "", emptyList(), ""), model, "")
+        assertTrue(store.setCloud(id, cloudResult(id, caption = "a wojak at a desk").copy(terms = "wojak desk")))
+        assertEquals(listOf(id), store.search("wojak", null).map { it.meme.id })
+
+        store.importExemplars(listOf(Exemplar(0L, "wojak", "character", axis(4), false, emptyList(), "", model)), pack = "sample", asSelf = false)
+        store.relinkTeachings()
+
+        assertTrue(requireNotNull(store.meme(id)).rejectedLabels.contains("wojak"))
+        assertTrue(store.search("wojak", null).isEmpty())
+        assertEquals(listOf(id), store.search("desk", null).map { it.meme.id })
+    }
+
     @Test fun cloudCommitRejectsChangedVectorsEvenWhenOriginallyAbsent() = runBlocking {
         val id = insert("cloud.png")
         val old = cloudResult(id)
