@@ -258,7 +258,8 @@ internal class IndexCoordinator(
                                 store.markIndexFailed(item.meme.id, failure.message ?: "Text recognition failed")
                             }
                         }
-                        enrich(indexed, background)
+                        // Captions wait until the queue is indexed; the enrichment pass below writes them.
+                        enrich(indexed, background, describe = false)
                     } finally {
                         withContext(NonCancellable + Dispatchers.IO) {
                             prepared.forEach(::cleanPrepared)
@@ -268,24 +269,43 @@ internal class IndexCoordinator(
                     if (background && completed + failed >= BACKGROUND_ITEMS) break
                 }
 
-                // Already-indexed items also need optional enrichment after the user enables a model.
+                // Already-indexed items need optional enrichment too. Captions only happen here, after the queue is
+                // indexed, and keep going until the session ends.
                 if (pause == null && SystemClock.elapsedRealtime() - started < sessionTimeoutMillis && !interactive) {
                     val vision = store.setting("vision.enabled") == "1"
                     val audio = store.setting("audio.enabled") == "1"
                     val visual = store.setting("visual.enabled") == "1"
                     if (vision || audio || visual) {
-                        val candidates = store.allMemes().filter { meme ->
-                            !meme.pending && (vision && meme.visionState == "pending" ||
-                                audio && meme.kind == "video" && meme.audioState == "pending" ||
-                                visual && store.vectors(meme.id)?.visual == null)
-                        }.take(BATCH_SIZE).toList()
-                        for (meme in candidates) {
-                            if (SystemClock.elapsedRealtime() - started >= sessionTimeoutMillis || powerBlock(background) != null || interactive) break
-                            val vectors = store.vectors(meme.id)?.takeIf { it.model == engine.primaryModel } ?: continue
-                            mutableProgress.value = WorkProgress("preparing media", detail = meme.name, running = true, memeId = meme.id)
-                            val item = prepare(meme, vectors.image)
-                            try { enrich(listOf(item), background) }
-                            finally { withContext(NonCancellable + Dispatchers.IO) { cleanPrepared(item) } }
+                        val tried = HashSet<Long>()
+                        while (SystemClock.elapsedRealtime() - started < sessionTimeoutMillis && powerBlock(background) == null && !interactive) {
+                            val candidates = store.allMemes().filter { meme ->
+                                meme.id !in tried && !meme.pending && (vision && meme.visionState == "pending" ||
+                                    audio && meme.kind == "video" && meme.audioState == "pending" ||
+                                    visual && store.vectors(meme.id)?.visual == null)
+                            }.take(BATCH_SIZE).toList()
+                            if (candidates.isEmpty()) break
+                            val batch = ArrayList<Prepared>(candidates.size)
+                            var stagedBytes = 0L
+                            try {
+                                for (meme in candidates) {
+                                    if (batch.isNotEmpty() && stagedBytes >= BATCH_DISK_BYTES) break
+                                    tried += meme.id
+                                    val vectors = store.vectors(meme.id)?.takeIf { it.model == engine.primaryModel } ?: continue
+                                    mutableProgress.value = WorkProgress("preparing media", detail = meme.name, running = true, memeId = meme.id)
+                                    try {
+                                        prepare(meme, vectors.image).also { batch += it; stagedBytes += it.source.length() }
+                                    } catch (cancelled: CancellationException) {
+                                        throw cancelled
+                                    } catch (failure: Exception) {
+                                        // One unreadable item must not end every session before the rest are enriched.
+                                        store.addError(meme.name, "enrichment", failure.message ?: "Media could not be prepared")
+                                    }
+                                }
+                                // One call per batch, so each model loads once per batch rather than once per meme.
+                                enrich(batch, background)
+                            } finally {
+                                withContext(NonCancellable + Dispatchers.IO) { batch.forEach(::cleanPrepared) }
+                            }
                         }
                     }
                 }
@@ -429,19 +449,20 @@ internal class IndexCoordinator(
         }
     }
 
-    private suspend fun enrich(items: List<Prepared>, background: Boolean) {
+    private suspend fun enrich(items: List<Prepared>, background: Boolean, describe: Boolean = true) {
         if (items.isEmpty() || powerBlock(background) != null || interactive) return
         val captions = ArrayList<Pair<Long, VisionDescription>>()
-        if (store.setting("vision.enabled") == "1") {
+        if (describe && store.setting("vision.enabled") == "1") {
             for (item in items) {
                 currentCoroutineContext().ensureActive()
                 if (powerBlock(background) != null || interactive) break
                 val meme = store.meme(item.meme.id) ?: continue
                 if (meme.visionState != "pending") continue
                 mutableProgress.value = WorkProgress("local description", detail = meme.name, running = true, memeId = meme.id)
-                // A process-killing native failure must not create an automatic crash loop.
-                store.setCaption(meme.id, meme.caption, emptyList(), null, "failed")
                 val result = try {
+                    // A process-killing native failure must not create an automatic crash loop. The marker is set
+                    // inside this try so a stop that lands as it commits still returns the meme to pending.
+                    store.setCaption(meme.id, meme.caption, emptyList(), null, "failed")
                     val descriptions = ArrayList<VisionDescription>()
                     for (frame in item.frames.take(3)) {
                         val parsed = VisionText.parse(engine.describe(frame, VisionText.grounding(meme)))
