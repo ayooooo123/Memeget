@@ -454,6 +454,46 @@ class IndexCoordinatorTest {
     }
 
     @Test(timeout = 30_000)
+    fun stopRightAfterTheTranscriptMarkerCommitsReturnsTheClipToTheQueue() = runBlocking {
+        // An indexed video. Robolectric cannot decode video frames, so its poster stands in for them.
+        val poster = Uri.fromFile(createValidBitmapFile("poster.png")).toString()
+        val memeId = store.insertPending(Uri.fromFile(createValidBitmapFile("clip.mp4")).toString(), "clip.mp4", "video", 100L, "hashT")
+        store.completeIndex(memeId, LocalAnalysis(FloatArray(512).apply { this[0] = 1f }, "", emptyList(), ""), ModelRegistry.PRIMARY_MODEL_FINGERPRINT, poster)
+        store.setSetting("audio.enabled", "1")
+        var coordinator: IndexCoordinator? = null
+        var markerCommitted = false
+        val stopAfterMarker = object : LibraryStore by store {
+            override suspend fun setAudioState(id: Long, state: String) {
+                store.setAudioState(id, state)
+                if (state == "failed") {
+                    markerCommitted = true
+                    // The marker is committed; Stop lands before the call returns, as withContext allows.
+                    requireNotNull(coordinator).cancel()
+                    currentCoroutineContext().ensureActive()
+                }
+            }
+        }
+        coordinator = IndexCoordinator(
+            context = context,
+            store = stopAfterMarker,
+            files = files,
+            engine = testEngine,
+            knowledge = knowledge,
+            cloud = cloud,
+            sessionTimeoutMillis = 10_000L,
+        )
+
+        launch {
+            try {
+                requireNotNull(coordinator).runPending()
+            } catch (_: CancellationException) {}
+        }.join()
+
+        assertTrue("the session never reached the transcript marker: ${store.errors()}", markerCommitted)
+        assertEquals("pending", requireNotNull(store.meme(memeId)).audioState)
+    }
+
+    @Test(timeout = 30_000)
     fun captionsWaitUntilTheQueueIsIndexedThenUseTheRestOfTheSession() = runBlocking {
         val ids = (1..9).map { n ->
             store.insertPending(Uri.fromFile(createValidBitmapFile("m$n.png")).toString(), "m$n.png", "image", 100L + n, "hashQ$n")

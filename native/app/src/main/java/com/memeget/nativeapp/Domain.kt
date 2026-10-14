@@ -163,6 +163,8 @@ internal interface LibraryStore {
     suspend fun completeIndex(id: Long, analysis: LocalAnalysis, model: String, thumbUri: String)
     suspend fun setCaption(id: Long, caption: String, tags: List<Tag>, vector: FloatArray?, state: String = "done")
     suspend fun setTranscript(id: Long, text: String, state: String = "done")
+    /** Changes only a video's transcription state; its transcript stays as it is. */
+    suspend fun setAudioState(id: Long, state: String)
     suspend fun setVisual(id: Long, vector: FloatArray, model: String)
     suspend fun setThumb(id: Long, uri: String)
     suspend fun setContentHash(id: Long, hash: String)

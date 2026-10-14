@@ -530,18 +530,24 @@ internal class IndexCoordinator(
                 if (powerBlock(background) != null || interactive) break
                 val meme = store.meme(item.meme.id) ?: continue
                 if (meme.audioState == "done") continue
-                store.setTranscript(meme.id, meme.transcript, "failed")
                 mutableProgress.value = WorkProgress("local transcription", detail = meme.name, running = true, memeId = meme.id)
-                try {
-                    store.setTranscript(meme.id, engine.transcribe(Uri.fromFile(item.source).toString()))
-                } catch (cancelled: CancellationException) {
-                    withContext(NonCancellable + Dispatchers.IO) {
-                        store.setTranscript(meme.id, meme.transcript, "pending")
-                    }
-                    throw cancelled
+                val text = try {
+                    // As for captions: a native crash must not loop, so the clip is marked failed while it runs, and
+                    // the marker is set inside this try so a stop that lands as it commits returns the clip to the queue.
+                    store.setAudioState(meme.id, "failed")
+                    engine.transcribe(Uri.fromFile(item.source).toString())
                 } catch (failure: Exception) {
+                    // A native call stopped by Stop or the session limit can fail as an ordinary exception.
+                    if (failure is CancellationException || !currentCoroutineContext().isActive) {
+                        withContext(NonCancellable + Dispatchers.IO) { store.setAudioState(meme.id, "pending") }
+                        throw failure as? CancellationException
+                            ?: CancellationException("Local transcription stopped").apply { initCause(failure) }
+                    }
                     store.addError(meme.name, "audio", failure.message ?: "Transcription failed")
-                }
+                    null
+                } ?: continue
+                // Keep the transcript as soon as it exists, so a later stop cannot discard it.
+                withContext(NonCancellable) { store.setTranscript(meme.id, text) }
             }
         }
         if (store.setting("visual.enabled") == "1") {
