@@ -18,6 +18,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -153,23 +154,29 @@ internal class NativeInferenceEngine(
         val modelFile = ensureModel(ModelRegistry.MINICPM_V47_MODEL)
         val projectorFile = ensureProjector()
 
-        engineMutex.withLock {
-            val handle = activeHandle()
-            NativeBridge.nativeResetCancel(handle)
+        try {
+            engineMutex.withLock {
+                val handle = activeHandle()
+                NativeBridge.nativeResetCancel(handle)
 
-            withLocalPath(uri) { localPath ->
-                NativeBridge.nativeDescribe(
-                    handle = handle,
-                    modelPath = modelFile.absolutePath,
-                    projectorPath = projectorFile.absolutePath,
-                    imagePath = localPath,
-                    systemPrompt = PromptBuilder.SYSTEM_PROMPT,
-                    userPrompt = PromptBuilder.buildUserPrompt(grounding),
-                    maxTokens = 320,
-                    temperature = 0.1f,
-                    maxImagePixels = DESCRIBE_MAX_PIXELS,
-                )
+                withLocalPath(uri) { localPath ->
+                    NativeBridge.nativeDescribe(
+                        handle = handle,
+                        modelPath = modelFile.absolutePath,
+                        projectorPath = projectorFile.absolutePath,
+                        imagePath = localPath,
+                        systemPrompt = PromptBuilder.SYSTEM_PROMPT,
+                        userPrompt = PromptBuilder.buildUserPrompt(grounding),
+                        maxTokens = 320,
+                        temperature = 0.1f,
+                        maxImagePixels = DESCRIBE_MAX_PIXELS,
+                    )
+                }
             }
+        } catch (failure: RuntimeException) {
+            // cancel() makes the native call fail as an ordinary exception; report that as cancellation.
+            currentCoroutineContext().ensureActive()
+            throw failure
         }
     }
 
@@ -326,10 +333,13 @@ internal class NativeInferenceEngine(
                     NativeBridge.nativeConvertProjector(handle, source.absolutePath, output.absolutePath)
                 }
             }
-        } catch (cancelled: CancellationException) {
-            _progress.value = ModelProgress(name = artifact.id, loading = false, error = "Cancelled")
-            throw cancelled
         } catch (failure: Exception) {
+            // A stopped conversion fails as an ordinary exception; report it as cancellation.
+            if (failure is CancellationException || !currentCoroutineContext().isActive) {
+                _progress.value = ModelProgress(name = artifact.id, loading = false, error = "Cancelled")
+                throw failure as? CancellationException
+                    ?: CancellationException("Model preparation stopped").apply { initCause(failure) }
+            }
             val err = failure.message ?: "Failed to prepare model ${artifact.filename}"
             _progress.value = ModelProgress(name = artifact.id, loading = false, error = err)
             throw IOException(err, failure)
