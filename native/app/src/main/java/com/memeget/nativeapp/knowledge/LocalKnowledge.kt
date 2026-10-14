@@ -432,7 +432,7 @@ internal class LocalKnowledge(
         progress(WorkProgress(stage = "retag", running = true, detail = "Preparing knowledge…"))
         var snapshot = prepareSnapshot()
         var expectedRevision = store.revision.value
-        val total = store.count()
+        val total = store.countAll()
         var done = 0
 
         // Stream bounded rows without materializing the whole library

@@ -2018,10 +2018,17 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
         }
     }
 
+    override suspend fun countAll(): Int = withContext(Dispatchers.IO) {
+        getReadableDb().rawQuery("SELECT COUNT(*) FROM memes", null).use { c ->
+            if (c.moveToNext()) c.getInt(0) else 0
+        }
+    }
+
     override suspend fun tagLabels(): List<String> = withContext(Dispatchers.IO) {
         val db = getReadableDb()
         val set = LinkedHashSet<String>()
-        val cursor = db.rawQuery("SELECT tags FROM memes WHERE pending = 0 AND tags != '[]'", null)
+        // Pending rows count too: an imported collection's labels sit on rows still waiting for analysis.
+        val cursor = db.rawQuery("SELECT tags FROM memes WHERE tags != '[]'", null)
         cursor.use { c ->
             while (c.moveToNext()) {
                 val tags = deserializeTags(c.getString(0))

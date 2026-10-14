@@ -98,6 +98,8 @@ internal fun LibraryScreen(
     var searchError by remember { mutableStateOf<String?>(null) }
 
     var totalCount by remember { mutableStateOf(0) }
+    // Rows still waiting for analysis count here, so a freshly imported library keeps its Index button.
+    var libraryCount by remember { mutableStateOf(0) }
     var folderCount by remember { mutableStateOf(0) }
     var taughtLabels by remember { mutableStateOf<List<String>>(emptyList()) }
     var libraryTags by remember { mutableStateOf<List<String>>(emptyList()) }
@@ -130,12 +132,14 @@ internal fun LibraryScreen(
     LaunchedEffect(revision) {
         withContext(Dispatchers.IO) {
             val count = store.count()
+            val all = store.countAll()
             val folders = store.folders()
             val exemplars = store.exemplars()
             val tags = store.tagLabels()
             val taught = exemplars.map { it.label }.distinct()
             withContext(Dispatchers.Main) {
                 totalCount = count
+                libraryCount = all
                 folderCount = folders.size
                 taughtLabels = taught
                 libraryTags = tags
@@ -639,7 +643,7 @@ internal fun LibraryScreen(
             modifier = Modifier.weight(1f),
             headerContent = {
                 // Toolbar info & actions
-                if (totalCount > 0 && !indexProgress.running) {
+                if (libraryCount > 0 && !indexProgress.running) {
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -651,7 +655,8 @@ internal fun LibraryScreen(
                             text = if (query.isNotEmpty()) {
                                 "${memes.size} match${if (memes.size == 1) "" else "es"}"
                             } else {
-                                "$totalCount meme${if (totalCount == 1) "" else "s"}${if (folderCount > 0) " · $folderCount folder${if (folderCount > 1) "s" else ""}" else ""}"
+                                val waiting = libraryCount - totalCount
+                                "$libraryCount meme${if (libraryCount == 1) "" else "s"}${if (waiting > 0) " · $waiting to index" else ""}${if (folderCount > 0) " · $folderCount folder${if (folderCount > 1) "s" else ""}" else ""}"
                             },
                             style = MaterialTheme.typography.bodySmall,
                             color = MemegetColors.TextSecondary,
@@ -679,7 +684,7 @@ internal fun LibraryScreen(
                 }
             },
             emptyContent = {
-                if (totalCount == 0 && !indexProgress.running) {
+                if (libraryCount == 0 && !indexProgress.running) {
                     // Onboarding 1-2-3 guide
                     OnboardingCard(
                         onLink = { linkFolderLauncher.launch(null) },

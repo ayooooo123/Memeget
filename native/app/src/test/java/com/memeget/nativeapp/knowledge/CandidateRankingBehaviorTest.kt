@@ -84,6 +84,7 @@ class CandidateRankingBehaviorTest {
 
         override suspend fun exemplars(): List<Exemplar> = ArrayList(exemplarList)
         override suspend fun count(): Int = memes.size
+        override suspend fun countAll(): Int = memes.size
         override suspend fun vectorSample(limit: Int): List<VectorRecord> = vectors.values.take(limit)
         override suspend fun vectors(id: Long): VectorRecord? = vectors[id]
 
