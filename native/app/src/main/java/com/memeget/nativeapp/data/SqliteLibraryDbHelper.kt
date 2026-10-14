@@ -169,6 +169,12 @@ internal class SqliteLibraryDbHelper(context: Context, dbName: String = DATABASE
                 """.trimIndent()
             )
         }
+        ensureSearchTerms(db)
+    }
+
+    /** Read-only view of the full-text index's words and counts: the search vocabulary, built by SQLite. */
+    private fun ensureSearchTerms(db: SQLiteDatabase) {
+        db.execSQL("CREATE VIRTUAL TABLE IF NOT EXISTS meme_search_terms USING fts4aux(meme_search_fts);")
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
@@ -225,10 +231,11 @@ internal class SqliteLibraryDbHelper(context: Context, dbName: String = DATABASE
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_memes_pending ON memes(pending);")
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_exemplars_model ON exemplars(model);")
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_vectors_model ON vectors(model);")
+        ensureSearchTerms(db)
     }
 
     companion object {
         const val DATABASE_NAME = "memeget.db"
-        const val DATABASE_VERSION = 3
+        const val DATABASE_VERSION = 4
     }
 }

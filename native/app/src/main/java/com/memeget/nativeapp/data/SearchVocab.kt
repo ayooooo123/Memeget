@@ -40,94 +40,35 @@ internal object FuzzySearch {
     }
 }
 
-internal class SearchVocab {
+/**
+ * The library's words and how often each occurs, for typo corrections and prefix completions.
+ * Built from counts the full-text index already keeps, so nothing re-reads or re-tokenizes memes.
+ */
+internal class SearchVocab private constructor(private val freq: Map<String, Int>) {
 
-    private data class BkNode(val term: String, val children: MutableMap<Int, BkNode> = HashMap())
-    data class Hit(val term: String, val dist: Int, val freq: Int)
-
-    private var root: BkNode? = null
-    private val sorted = ArrayList<String>()
-    private val freq = HashMap<String, Int>()
+    private val sorted: List<String> = freq.keys.sorted()
+    /** Words grouped by length: a correction only differs in length by at most its edit budget. */
+    private val byLength: Map<Int, List<String>> = freq.keys.groupBy { it.length }
 
     val size: Int get() = freq.size
 
     fun has(term: String): Boolean = freq.containsKey(term)
 
-    fun addTexts(texts: Iterable<String>) {
-        val counts = HashMap<String, Int>()
-        for (text in texts) {
-            for (match in tokenRegex.findAll(text.lowercase())) {
-                val tok = match.value
-                if (tok.length >= 2) {
-                    counts[tok] = (counts[tok] ?: 0) + 1
-                }
-            }
-        }
-        for ((term, count) in counts) {
-            val prev = freq[term]
-            freq[term] = (prev ?: 0) + count
-            if (prev != null) continue
-
-            var lo = 0
-            var hi = sorted.size
-            while (lo < hi) {
-                val mid = (lo + hi) ushr 1
-                if (sorted[mid] < term) lo = mid + 1
-                else hi = mid
-            }
-            sorted.add(lo, term)
-            insert(term)
-        }
-    }
-
-    private fun insert(term: String) {
-        val r = root
-        if (r == null) {
-            root = BkNode(term)
-            return
-        }
-        var node: BkNode = r
-        while (true) {
-            val d = FuzzySearch.boundedEditDistance(term, node.term, term.length + node.term.length)
-            if (d == 0) return
-            val child = node.children[d]
-            if (child == null) {
-                node.children[d] = BkNode(term)
-                return
-            }
-            node = child
-        }
-    }
-
-    fun search(term: String, maxDist: Int): List<Hit> {
-        val out = ArrayList<Hit>()
-        val r = root ?: return out
-        val stack = ArrayDeque<BkNode>()
-        stack.add(r)
-        while (stack.isNotEmpty()) {
-            val node = stack.removeLast()
-            val d = FuzzySearch.boundedEditDistance(term, node.term, term.length + node.term.length)
-            if (d <= maxDist) {
-                out.add(Hit(node.term, d, freq[node.term] ?: 0))
-            }
-            val lo = d - maxDist
-            val hi = d + maxDist
-            for ((dist, child) in node.children) {
-                if (dist in lo..hi) {
-                    stack.add(child)
-                }
-            }
-        }
-        return out
-    }
-
+    /** Up to [limit] known words within the term's edit budget: nearest first, then most frequent, then alphabetical. */
     fun corrections(term: String, limit: Int = 2): List<String> {
         if (freq.containsKey(term)) return emptyList()
         val budget = FuzzySearch.typoBudget(term.length)
         if (budget == 0) return emptyList()
-        return search(term, budget)
-            .filter { it.term != term }
-            .sortedWith(compareBy({ it.dist }, { -it.freq }, { it.term }))
+        data class Hit(val term: String, val dist: Int, val freq: Int)
+        val hits = ArrayList<Hit>()
+        for (len in term.length - budget..term.length + budget) {
+            for (candidate in byLength[len] ?: continue) {
+                val d = FuzzySearch.boundedEditDistance(term, candidate, budget)
+                if (d <= budget) hits += Hit(candidate, d, freq[candidate] ?: 0)
+            }
+        }
+        return hits
+            .sortedWith(compareBy<Hit>({ it.dist }, { -it.freq }, { it.term }))
             .take(limit)
             .map { it.term }
     }
@@ -172,12 +113,10 @@ internal class SearchVocab {
     }
 
     companion object {
-        private val tokenRegex = Regex("[a-z0-9]+")
+        private val wordRegex = Regex("[a-z0-9]{2,}")
 
-        fun build(texts: Iterable<String>): SearchVocab {
-            val vocab = SearchVocab()
-            vocab.addTexts(texts)
-            return vocab
-        }
+        /** Words of two or more ASCII letters or digits, with how often each occurs; others are ignored. */
+        fun fromCounts(counts: Map<String, Int>): SearchVocab =
+            SearchVocab(counts.filterKeys { wordRegex.matches(it) })
     }
 }
