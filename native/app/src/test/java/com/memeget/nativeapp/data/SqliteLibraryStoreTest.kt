@@ -1,6 +1,7 @@
 package com.memeget.nativeapp.data
 
 import android.app.Application
+import android.database.sqlite.SQLiteDatabase
 import com.memeget.nativeapp.CloudAssistant
 import com.memeget.nativeapp.CloudResult
 import com.memeget.nativeapp.Exemplar
@@ -292,5 +293,27 @@ class SqliteLibraryStoreTest {
         val restored = requireNotNull(store.memeByUri(incoming.uri))
         assertTrue(restored.pending)
         assertEquals(listOf(restored.id), store.search("orhard", null).map { it.meme.id })
+    }
+
+    private fun rawDatabase(): SQLiteDatabase = SQLiteDatabase.openDatabase(
+        RuntimeEnvironment.getApplication().getDatabasePath(SqliteLibraryDbHelper.DATABASE_NAME).path,
+        null, SQLiteDatabase.OPEN_READWRITE,
+    )
+
+    @Test fun aLibraryWrittenByANewerBuildStillOpensAfterARollback() = runBlocking {
+        val id = insert("rollback.png")
+        store.completeIndex(id, LocalAnalysis(axis(), "quartzite", emptyList(), ""), model, "")
+        // Reinstalling an older APK over a newer one must keep the owner's library readable.
+        rawDatabase().use { it.version = SqliteLibraryDbHelper.DATABASE_VERSION + 1 }
+        val reopened = SqliteLibraryStore(RuntimeEnvironment.getApplication())
+        assertEquals(listOf(id), reopened.search("quarzite", null).map { it.meme.id })
+    }
+
+    @Test fun aLibraryCreatedBeforeTheSearchWordListStillCorrectsTypos() = runBlocking {
+        val id = insert("older.png")
+        store.completeIndex(id, LocalAnalysis(axis(), "quartzite", emptyList(), ""), model, "")
+        rawDatabase().use { it.execSQL("DROP TABLE meme_search_terms") }
+        val reopened = SqliteLibraryStore(RuntimeEnvironment.getApplication())
+        assertEquals(listOf(id), reopened.search("quarzite", null).map { it.meme.id })
     }
 }
