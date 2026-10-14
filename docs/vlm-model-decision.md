@@ -68,6 +68,8 @@ runtime, not by quality:
 | **Qwen3-VL 2B/4B** | Likely edges Gemma on document-OCR; an ExecuTorch vision export just landed in `optimum-executorch` (PR #214). **Not in the RNE catalog, not Vulkan-validated.** The one to watch as a future upgrade if OCR becomes the bottleneck. |
 | **SmolVLM2 / moondream 2·3 / MiniCPM-V / InternVL / PaliGemma 2** | No working ExecuTorch vision export. Disqualified regardless of quality. |
 
+Update 2026-10-13: this table covers the React Native app's ExecuTorch runtime. Memeget Native (`native/`) runs MiniCPM-V 4.7 1B through a pinned llama.cpp build instead, on the CPU; see `native/README.md`.
+
 ## GPU vs CPU — why "a smaller model on the GPU" isn't an option
 
 The obvious instinct is "run a small model on the GPU for speed." On this stack
