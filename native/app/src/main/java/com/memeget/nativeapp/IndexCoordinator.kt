@@ -196,7 +196,8 @@ internal class IndexCoordinator(
 
         try {
             mutableProgress.value = WorkProgress("indexing", running = true)
-            if (store.setting("audio.enabled") == "1") requeueOlderTranscripts()
+            // Transcripts made by an earlier speech model (or imported from the original app's tiny.en) are redone once.
+            if (store.setting("audio.enabled") == "1") store.requeueTranscripts(ModelRegistry.WHISPER_MODEL.id)
             if (!background) {
                 KeepAliveLease.acquire(context, "Memeget Native", "Indexing saved media")
                 held = true
@@ -454,19 +455,6 @@ internal class IndexCoordinator(
         }
     }
 
-    /**
-     * Videos transcribed by an earlier speech model, including transcripts imported from the original app (Whisper
-     * tiny.en), are transcribed again once per model. Their old text stays searchable until the new text replaces it.
-     */
-    internal suspend fun requeueOlderTranscripts() {
-        val model = ModelRegistry.WHISPER_MODEL.id
-        if (store.setting(SPEECH_MODEL_SETTING) == model) return
-        store.allMemes().collect { meme ->
-            if (meme.kind == "video" && meme.audioState != "pending") store.setTranscript(meme.id, meme.transcript, "pending")
-        }
-        store.setSetting(SPEECH_MODEL_SETTING, model)
-    }
-
     private suspend fun enrich(items: List<Prepared>, background: Boolean, describe: Boolean = true) {
         if (items.isEmpty() || powerBlock(background) != null || interactive) return
         val captions = ArrayList<Pair<Long, VisionDescription>>()
@@ -638,7 +626,6 @@ internal class IndexCoordinator(
         private const val BATCH_DISK_BYTES = 256L * 1024 * 1024
         private const val IMMEDIATE_WORK = "memeget-native-index"
         private const val PERIODIC_WORK = "memeget-native-periodic"
-        private const val SPEECH_MODEL_SETTING = "audio.model"
     }
 }
 
