@@ -132,6 +132,7 @@ class CandidateRankingBehaviorTest {
         override suspend fun completeIndex(id: Long, analysis: LocalAnalysis, model: String, thumbUri: String) {}
         override suspend fun setCaption(id: Long, caption: String, tags: List<Tag>, vector: FloatArray?, state: String) {}
         override suspend fun setTranscript(id: Long, text: String, state: String) {}
+        override suspend fun setAudioState(id: Long, state: String) {}
         override suspend fun setVisual(id: Long, vector: FloatArray, model: String) {}
         override suspend fun setThumb(id: Long, uri: String) {}
         override suspend fun setContentHash(id: Long, hash: String) {}

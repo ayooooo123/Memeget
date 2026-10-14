@@ -1108,6 +1108,17 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
         }
     }
 
+    override suspend fun setAudioState(id: Long, state: String) = withContext(Dispatchers.IO) {
+        writeMutex.withLock {
+            getWritableDb().compileStatement("UPDATE memes SET audio_state = ? WHERE id = ?").use {
+                it.bindString(1, state)
+                it.bindLong(2, id)
+                it.executeUpdateDelete()
+            }
+            bumpRevision()
+        }
+    }
+
     override suspend fun setVisual(id: Long, vector: FloatArray, model: String) = withContext(Dispatchers.IO) {
         writeMutex.withLock {
             val db = getWritableDb()
