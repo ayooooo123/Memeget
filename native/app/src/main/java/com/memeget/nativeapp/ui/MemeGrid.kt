@@ -1,5 +1,11 @@
 package com.memeget.nativeapp
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -25,6 +31,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
@@ -43,6 +50,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.SubcomposeAsyncImage
 import coil.request.ImageRequest
+import kotlinx.coroutines.launch
 
 @Composable
 internal fun MemeGrid(
@@ -60,6 +68,13 @@ internal fun MemeGrid(
     emptyContent: (@Composable () -> Unit)? = null,
     gridState: LazyGridState = rememberLazyGridState(),
 ) {
+    val coroutineScope = rememberCoroutineScope()
+    val showTopButton by remember {
+        derivedStateOf {
+            gridState.firstVisibleItemIndex > 30
+        }
+    }
+
     // Detect when user scrolls near the end to trigger infinite keyset load
     val shouldLoadMore by remember(hasMore, isLoadingMore, memes.size) {
         derivedStateOf {
@@ -92,14 +107,15 @@ internal fun MemeGrid(
             }
         }
     } else {
-        LazyVerticalGrid(
-            columns = GridCells.Fixed(3),
-            state = gridState,
-            contentPadding = PaddingValues(2.dp),
-            horizontalArrangement = Arrangement.spacedBy(2.dp),
-            verticalArrangement = Arrangement.spacedBy(2.dp),
-            modifier = modifier.fillMaxSize(),
-        ) {
+        Box(modifier = modifier.fillMaxSize()) {
+            LazyVerticalGrid(
+                columns = GridCells.Fixed(3),
+                state = gridState,
+                contentPadding = PaddingValues(2.dp),
+                horizontalArrangement = Arrangement.spacedBy(2.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+                modifier = Modifier.fillMaxSize(),
+            ) {
             if (headerContent != null) {
                 item(span = { GridItemSpan(maxLineSpan) }) {
                     headerContent()
@@ -135,6 +151,36 @@ internal fun MemeGrid(
                             strokeWidth = 2.5.dp,
                         )
                     }
+                }
+            }
+        }
+            AnimatedVisibility(
+                visible = !selectionMode && showTopButton,
+                enter = fadeIn() + scaleIn(),
+                exit = fadeOut() + scaleOut(),
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(16.dp),
+            ) {
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(20.dp))
+                        .background(MemegetColors.SurfaceBright)
+                        .border(1.dp, MemegetColors.Border, RoundedCornerShape(20.dp))
+                        .clickable {
+                            coroutineScope.launch {
+                                gridState.animateScrollToItem(0)
+                            }
+                        }
+                        .padding(horizontal = 14.dp, vertical = 8.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = "↑ Top",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = MemegetColors.Volt,
+                    )
                 }
             }
         }

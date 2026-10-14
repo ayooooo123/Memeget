@@ -62,6 +62,7 @@ internal fun MemegetApp(
     knowledge: LocalKnowledge,
     cloud: CloudAssistant,
     coordinator: IndexCoordinator,
+    backups: FolderBackupSync,
 ) {
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
@@ -71,11 +72,13 @@ internal fun MemegetApp(
     var activeRemixMeme by remember { mutableStateOf<Meme?>(null) }
     var tagSearchRequest by remember { mutableStateOf<String?>(null) }
     var searching by remember { mutableStateOf(false) }
-    // Answers in the Label tab spread to look-alikes on a re-tag once the tab is left. The app scope
-    // owns each save, so leaving mid-save neither cancels the answer nor misses that re-tag.
+    // Answers in the Label tab spread to look-alikes on a re-tag once the tab is left, and teachings in the viewer
+    // once it closes, as the original app applies a teaching shortly after it. The app scope owns each save, so
+    // leaving mid-save neither cancels the answer nor misses that re-tag.
     var labelsChanged by remember { mutableStateOf(false) }
-    LaunchedEffect(currentTab, labelsChanged) {
-        if (currentTab != AppTab.Label && labelsChanged) {
+    val viewerOpen = activeViewerMeme != null
+    LaunchedEffect(currentTab, labelsChanged, viewerOpen) {
+        if (currentTab != AppTab.Label && !viewerOpen && labelsChanged) {
             labelsChanged = false
             scope.launch { coordinator.retag() }
         }
@@ -215,6 +218,7 @@ internal fun MemegetApp(
                                     tagSearchRequest = tag
                                     currentTab = AppTab.Library
                                 },
+                                lastBackupAt = backups.lastBackupAt,
                             )
                         }
                     }
@@ -246,6 +250,7 @@ internal fun MemegetApp(
                 onMemeDeleted = {
                     activeViewerMeme = null
                 },
+                onTaught = { labelsChanged = true },
             )
         }
 

@@ -320,49 +320,41 @@ internal fun TeachDialog(
 internal fun DeleteConfirmationDialog(
     count: Int,
     onDismiss: () -> Unit,
-    onConfirmDeleteIndex: () -> Unit,
+    onConfirmDelete: () -> Unit,
 ) {
+    val title = if (count > 1) "Delete $count memes?" else "Delete meme?"
+    val text = if (count > 1) {
+        "This removes them from your library and deletes the files from their folders. This can't be undone."
+    } else {
+        "This removes it from your library and deletes the file from its folder. This can't be undone."
+    }
+
     AlertDialog(
         onDismissRequest = onDismiss,
         title = {
             Text(
-                text = if (count > 1) "Remove $count Memes from Index?" else "Remove Meme from Index?",
+                text = title,
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.Bold,
                 color = MemegetColors.TextPrimary,
             )
         },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text(
-                    text = "This removes the selected item(s) from Memeget's search index and library display.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MemegetColors.TextPrimary,
-                )
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(MemegetColors.SurfaceVariant)
-                        .padding(10.dp),
-                ) {
-                    Text(
-                        text = "Safety Note: Your original files in your storage folders will NOT be deleted. Memeget does not perform destructive file deletion to prevent accidental loss.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MemegetColors.TextSecondary,
-                    )
-                }
-            }
+            Text(
+                text = text,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MemegetColors.TextPrimary,
+            )
         },
         confirmButton = {
             Button(
-                onClick = onConfirmDeleteIndex,
+                onClick = onConfirmDelete,
                 colors = ButtonDefaults.buttonColors(
                     containerColor = MemegetColors.Danger,
                     contentColor = MemegetColors.TextPrimary,
                 ),
             ) {
-                Text("Remove from Index", fontWeight = FontWeight.Bold)
+                Text("Delete", fontWeight = FontWeight.Bold)
             }
         },
         dismissButton = {

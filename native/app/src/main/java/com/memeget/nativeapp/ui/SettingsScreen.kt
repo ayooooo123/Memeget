@@ -1,6 +1,7 @@
 package com.memeget.nativeapp
 
 import android.content.Context
+import android.net.Uri
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -55,6 +56,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.withContext
 
 @Composable
@@ -67,6 +69,8 @@ internal fun SettingsScreen(
     coordinator: IndexCoordinator,
     onBack: () -> Unit,
     onSearchTag: (String) -> Unit,
+    /** When the automatic folder backup last wrote every linked folder. */
+    lastBackupAt: StateFlow<Long>,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
@@ -77,7 +81,7 @@ internal fun SettingsScreen(
     val indexProgress by coordinator.progress.collectAsState()
 
     var folders by remember { mutableStateOf<List<Folder>>(emptyList()) }
-    var exemplars by remember { mutableStateOf<List<Exemplar>>(emptyList()) }
+    val backupAt by lastBackupAt.collectAsState()
     var errorLogs by remember { mutableStateOf<List<String>>(emptyList()) }
     var memeCount by remember { mutableStateOf(0) }
 
@@ -94,10 +98,9 @@ internal fun SettingsScreen(
     var showImportUrlDialog by remember { mutableStateOf(false) }
     var showClearIndexDialog by remember { mutableStateOf(false) }
     var showUnlinkDialogForFolder by remember { mutableStateOf<Folder?>(null) }
-    var showForgetLabelDialog by remember { mutableStateOf<String?>(null) }
-    var showForgetPackDialog by remember { mutableStateOf<String?>(null) }
 
     var exportCollectionProgress by remember { mutableStateOf<WorkProgress?>(null) }
+    var teachingImportUri by remember { mutableStateOf<Uri?>(null) }
 
     // Activity Result Launchers
     val linkFolderLauncher = rememberLauncherForActivityResult(
@@ -130,19 +133,11 @@ internal fun SettingsScreen(
         }
     }
 
+    // Asks whether to merge or replace once the file is picked, as the original app does.
     val importTeachingLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri ->
-        if (uri != null) {
-            scope.launch {
-                try {
-                    val count = files.importTeaching(uri)
-                    Toast.makeText(context, "Imported $count teachings", Toast.LENGTH_SHORT).show()
-                } catch (e: Exception) {
-                    Toast.makeText(context, "Import teachings failed: ${e.message}", Toast.LENGTH_LONG).show()
-                }
-            }
-        }
+        if (uri != null) teachingImportUri = uri
     }
 
     val exportCollectionLauncher = rememberLauncherForActivityResult(
@@ -183,7 +178,6 @@ internal fun SettingsScreen(
     LaunchedEffect(revision) {
         withContext(Dispatchers.IO) {
             val f = store.folders()
-            val e = store.exemplars()
             val errs = store.errors()
             val count = store.count()
 
@@ -198,7 +192,6 @@ internal fun SettingsScreen(
 
             withContext(Dispatchers.Main) {
                 folders = f
-                exemplars = e
                 errorLogs = errs
                 memeCount = count
 
@@ -255,7 +248,7 @@ internal fun SettingsScreen(
                     color = MemegetColors.Volt,
                 )
                 Text(
-                    text = "Runs in complete isolation. Existing React Native Memeget installations, database files, and app caches are untouched. Linked folders are read without modifying originals.",
+                    text = "Runs on its own. Existing React Native Memeget installs, their database files and app caches are untouched.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MemegetColors.TextSecondary,
                 )
@@ -332,6 +325,8 @@ internal fun SettingsScreen(
                     )
                 }
             }
+
+            ModelsSection()
 
             // Local ML Features Opt-in Toggles
             SettingsCard {
@@ -530,6 +525,8 @@ internal fun SettingsScreen(
                         )
                     }
 
+                    BackupStatusLine(backupAt)
+
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -545,6 +542,8 @@ internal fun SettingsScreen(
                     }
                 }
             }
+
+            EnrichmentSection(store, files, coordinator)
 
             // Data Import & Export Card
             SettingsCard {
@@ -600,6 +599,8 @@ internal fun SettingsScreen(
                     Text("Export Full Collection ZIP", style = MaterialTheme.typography.labelSmall)
                 }
 
+                ExportDescribedTagsButton(store)
+
                 if (exportCollectionProgress != null) {
                     LinearProgressIndicator(
                         modifier = Modifier.fillMaxWidth(),
@@ -608,61 +609,9 @@ internal fun SettingsScreen(
                 }
             }
 
-            // Exemplars & Taught Concepts Card
-            SettingsCard {
-                Text(
-                    text = "Taught Concepts (${exemplars.size} exemplars)",
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.Bold,
-                    color = MemegetColors.TextPrimary,
-                )
+            TaughtConceptsSection(store, coordinator, onSearchTag)
 
-                val groupedExemplars = exemplars.groupBy { it.label }
-                if (groupedExemplars.isEmpty()) {
-                    Text(
-                        text = "No concepts taught yet. Teach memes as positive or negative exemplars from the viewer.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MemegetColors.TextMuted,
-                    )
-                } else {
-                    groupedExemplars.entries.forEach { (label, items) ->
-                        val posCount = items.count { it.positive }
-                        val negCount = items.count { !it.positive }
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(6.dp))
-                                .background(MemegetColors.SurfaceVariant)
-                                .padding(horizontal = 10.dp, vertical = 6.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Column {
-                                Text(
-                                    text = label,
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = MemegetColors.TextPrimary,
-                                )
-                                Text(
-                                    text = "$posCount positive · $negCount negative",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MemegetColors.TextMuted,
-                                )
-                            }
-
-                            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                TextButton(onClick = { onSearchTag(label) }) {
-                                    Text("View", style = MaterialTheme.typography.labelSmall)
-                                }
-                                TextButton(onClick = { showForgetLabelDialog = label }) {
-                                    Text("Forget", style = MaterialTheme.typography.labelSmall, color = MemegetColors.Danger)
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            TeachingPacksSection(store, coordinator)
 
             // Optional Cloud Escalation
             SettingsCard {
@@ -755,6 +704,8 @@ internal fun SettingsScreen(
                 }
             }
 
+            AboutSection()
+
             Spacer(modifier = Modifier.height(20.dp))
         }
     }
@@ -797,24 +748,8 @@ internal fun SettingsScreen(
         )
     }
 
-    // Forget Label Confirmation
-    if (showForgetLabelDialog != null) {
-        val label = showForgetLabelDialog!!
-        ConfirmationDialog(
-            title = "Forget “$label”?",
-            message = "Removes all taught positive and negative exemplars for this concept.",
-            confirmText = "Forget Concept",
-            isDanger = true,
-            onDismiss = { showForgetLabelDialog = null },
-            onConfirm = {
-                showForgetLabelDialog = null
-                scope.launch {
-                    store.forgetLabel(label)
-                    exemplars = store.exemplars()
-                    Toast.makeText(context, "Forgot $label", Toast.LENGTH_SHORT).show()
-                }
-            },
-        )
+    teachingImportUri?.let { uri ->
+        TeachingImportDialog(uri, files, coordinator) { teachingImportUri = null }
     }
 
     // Clear Index Confirmation
@@ -838,7 +773,7 @@ internal fun SettingsScreen(
 }
 
 @Composable
-private fun SettingsCard(
+internal fun SettingsCard(
     content: @Composable () -> Unit,
 ) {
     Column(

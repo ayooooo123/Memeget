@@ -347,6 +347,7 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
                 rejectedLabels = deserializeStrings(rejJson),
                 indexError = c.getString(c.getColumnIndexOrThrow("index_error")) ?: "",
                 analysisImported = c.getColumnIndex("analysis_imported").let { it >= 0 && c.getInt(it) != 0 },
+                indexedAt = c.getColumnIndex("indexed_at").let { if (it >= 0) c.getLong(it) else 0L },
             )
         }
 
@@ -1119,6 +1120,17 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
         }
     }
 
+    override suspend fun setVisionState(id: Long, state: String) = withContext(Dispatchers.IO) {
+        writeMutex.withLock {
+            getWritableDb().compileStatement("UPDATE memes SET vision_state = ? WHERE id = ?").use {
+                it.bindString(1, state)
+                it.bindLong(2, id)
+                it.executeUpdateDelete()
+            }
+            bumpRevision()
+        }
+    }
+
     override suspend fun setVisual(id: Long, vector: FloatArray, model: String) = withContext(Dispatchers.IO) {
         writeMutex.withLock {
             val db = getWritableDb()
@@ -1239,6 +1251,63 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
             }
             if (marked > 0) bumpRevision()
             marked
+        }
+    }
+
+    override suspend fun enrichmentCounts(): EnrichmentCounts = withContext(Dispatchers.IO) {
+        getReadableDb().rawQuery(
+            """
+            SELECT COUNT(*),
+                   SUM(pending = 0 AND index_error = ''),
+                   SUM(pending = 1 AND index_error = ''),
+                   SUM(index_error <> ''),
+                   SUM(pending = 0 AND index_error = '' AND vision_state = 'pending'),
+                   SUM(pending = 0 AND vision_state = 'failed'),
+                   SUM(kind = 'video'),
+                   SUM(kind = 'video' AND pending = 0 AND index_error = '' AND audio_state = 'pending'),
+                   SUM(kind = 'video' AND audio_state = 'failed'),
+                   SUM(kind = 'video' AND pending = 0 AND index_error = '' AND thumb_uri = '')
+            FROM memes
+            """.trimIndent(),
+            null,
+        ).use { c ->
+            if (!c.moveToNext()) return@use EnrichmentCounts()
+            EnrichmentCounts(
+                total = c.getInt(0),
+                indexed = c.getInt(1),
+                waiting = c.getInt(2),
+                indexFailed = c.getInt(3),
+                captionsWaiting = c.getInt(4),
+                captionsFailed = c.getInt(5),
+                videos = c.getInt(6),
+                transcriptsWaiting = c.getInt(7),
+                transcriptsFailed = c.getInt(8),
+                postersMissing = c.getInt(9),
+            )
+        }
+    }
+
+    override suspend fun requeueFailedEnrichment(stage: String): Int = withContext(Dispatchers.IO) {
+        val sql = when (stage) {
+            "vision" -> "UPDATE memes SET vision_state = 'pending' WHERE vision_state = 'failed'"
+            "audio" -> "UPDATE memes SET audio_state = 'pending' WHERE kind = 'video' AND audio_state = 'failed'"
+            else -> throw IllegalArgumentException("No enrichment stage named $stage")
+        }
+        writeMutex.withLock {
+            val count = getWritableDb().compileStatement(sql).use { it.executeUpdateDelete() }
+            if (count > 0) bumpRevision()
+            count
+        }
+    }
+
+    override suspend fun requeueAllTranscripts(): Int = withContext(Dispatchers.IO) {
+        writeMutex.withLock {
+            // State only, as for a new speech model: a transcript stays searchable until its replacement is saved.
+            val count = getWritableDb().compileStatement(
+                "UPDATE memes SET audio_state = 'pending' WHERE kind = 'video' AND audio_state <> 'pending'"
+            ).use { it.executeUpdateDelete() }
+            if (count > 0) bumpRevision()
+            count
         }
     }
 
@@ -1808,6 +1877,24 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
         }
     }
 
+    override suspend fun clearExemplars(): Int = withContext(Dispatchers.IO) {
+        writeMutex.withLock {
+            val db = getWritableDb()
+            db.beginTransaction()
+            val removed = try {
+                val count = db.delete("exemplars", null, null)
+                db.setTransactionSuccessful()
+                count
+            } finally {
+                db.endTransaction()
+            }
+            bumpRevision()
+            bumpLabels()
+            bumpTeachings()
+            removed
+        }
+    }
+
     override suspend fun updateTags(id: Long, tags: List<Tag>, extraTerms: String) = withContext(Dispatchers.IO) {
         writeMutex.withLock {
             val db = getWritableDb()
@@ -2017,6 +2104,14 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
         list
     }
 
+    override suspend fun errorCounts(): Map<String, Int> = withContext(Dispatchers.IO) {
+        val counts = LinkedHashMap<String, Int>()
+        getReadableDb().rawQuery("SELECT stage, COUNT(*) FROM index_errors GROUP BY stage ORDER BY COUNT(*) DESC", null).use { c ->
+            while (c.moveToNext()) counts[c.getString(0) ?: ""] = c.getInt(1)
+        }
+        counts
+    }
+
     override suspend fun clearErrors() = withContext(Dispatchers.IO) {
         writeMutex.withLock {
             val db = getWritableDb()
@@ -2059,6 +2154,18 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
             }
         }
         set.sorted()
+    }
+
+    override suspend fun tagCounts(): Map<String, Int> = withContext(Dispatchers.IO) {
+        val counts = HashMap<String, Int>()
+        getReadableDb().rawQuery("SELECT tags FROM memes WHERE tags != '[]'", null).use { c ->
+            while (c.moveToNext()) {
+                deserializeTags(c.getString(0))
+                    .mapNotNullTo(HashSet()) { tag -> TagMerge.normalizeTagLabel(tag.label).takeIf { it.isNotBlank() } }
+                    .forEach { label -> counts[label] = (counts[label] ?: 0) + 1 }
+            }
+        }
+        counts
     }
 
     override suspend fun restore(meme: Meme, vectors: VectorRecord?): Boolean = withContext(Dispatchers.IO) {

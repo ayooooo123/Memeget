@@ -548,6 +548,15 @@ internal object ProjectCore {
         return null
     }
 
+    fun segmentEasingAt(keyframes: List<TransformKeyframe>, timeUs: Long): String {
+        var easing = "linear"
+        for (kf in keyframes.sortedBy { it.timeUs }) {
+            if (kf.timeUs > timeUs) break
+            easing = kf.easing
+        }
+        return easing
+    }
+
     fun upsertKeyframeAtPlayhead(layer: MemeEditLayer, playheadUs: Long): MemeEditLayer {
         when (layer) {
             is MemeEditLayer.Text -> {
@@ -559,7 +568,8 @@ internal object ProjectCore {
                     center = eval.center,
                     scale = eval.scale,
                     rotationDegrees = eval.rotationDegrees,
-                    opacity = eval.opacity
+                    opacity = eval.opacity,
+                    easing = if (existingIdx >= 0) layer.keyframes[existingIdx].easing else segmentEasingAt(layer.keyframes, playheadUs)
                 )
                 val updated = if (existingIdx >= 0) {
                     layer.keyframes.toMutableList().apply { set(existingIdx, newKf) }
@@ -577,7 +587,8 @@ internal object ProjectCore {
                     center = eval.center,
                     scale = eval.scale,
                     rotationDegrees = eval.rotationDegrees,
-                    opacity = eval.opacity
+                    opacity = eval.opacity,
+                    easing = if (existingIdx >= 0) layer.keyframes[existingIdx].easing else segmentEasingAt(layer.keyframes, playheadUs)
                 )
                 val updated = if (existingIdx >= 0) {
                     layer.keyframes.toMutableList().apply { set(existingIdx, newKf) }
@@ -595,7 +606,8 @@ internal object ProjectCore {
                     center = eval.center,
                     scale = eval.scale,
                     rotationDegrees = eval.rotationDegrees,
-                    opacity = eval.opacity
+                    opacity = eval.opacity,
+                    easing = if (existingIdx >= 0) layer.keyframes[existingIdx].easing else segmentEasingAt(layer.keyframes, playheadUs)
                 )
                 val updated = if (existingIdx >= 0) {
                     layer.keyframes.toMutableList().apply { set(existingIdx, newKf) }
@@ -605,6 +617,55 @@ internal object ProjectCore {
                 return layer.copy(keyframes = updated)
             }
             else -> return layer
+        }
+    }
+
+    fun copyKeyframeForward(layer: MemeEditLayer, fromUs: Long, toUs: Long): MemeEditLayer {
+        if (toUs <= fromUs) return layer
+        val keyframes = when (layer) {
+            is MemeEditLayer.Text -> layer.keyframes
+            is MemeEditLayer.Subject -> layer.keyframes
+            is MemeEditLayer.Media -> layer.keyframes
+            else -> return layer
+        }
+        val active = layer.active
+        if (active != null) {
+            if (fromUs !in active.startUs..active.endUs || toUs !in active.startUs..active.endUs) {
+                return layer
+            }
+        }
+        val transform = interpolateTransformKeyframes(keyframes, fromUs) ?: return layer
+        fun insertedInOrder(kfs: List<TransformKeyframe>, inserted: TransformKeyframe): List<TransformKeyframe> {
+            val next = kfs.filter { it.timeUs != inserted.timeUs }.toMutableList()
+            val idx = next.indexOfFirst { it.timeUs > inserted.timeUs }
+            if (idx < 0) next.add(inserted) else next.add(idx, inserted)
+            return next
+        }
+        val fromEasing = segmentEasingAt(keyframes, fromUs)
+        val fromKf = TransformKeyframe(
+            timeUs = fromUs,
+            center = transform.center,
+            scale = transform.scale,
+            rotationDegrees = transform.rotationDegrees,
+            opacity = transform.opacity,
+            easing = fromEasing
+        )
+        val anchored = insertedInOrder(keyframes, fromKf)
+        val toEasing = segmentEasingAt(anchored, toUs)
+        val toKf = TransformKeyframe(
+            timeUs = toUs,
+            center = transform.center,
+            scale = transform.scale,
+            rotationDegrees = transform.rotationDegrees,
+            opacity = transform.opacity,
+            easing = toEasing
+        )
+        val finalKfs = insertedInOrder(anchored, toKf)
+        return when (layer) {
+            is MemeEditLayer.Text -> layer.copy(keyframes = finalKfs)
+            is MemeEditLayer.Subject -> layer.copy(keyframes = finalKfs)
+            is MemeEditLayer.Media -> layer.copy(keyframes = finalKfs)
+            else -> layer
         }
     }
 

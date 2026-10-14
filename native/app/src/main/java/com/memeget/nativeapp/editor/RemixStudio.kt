@@ -5,6 +5,8 @@ import android.graphics.Bitmap
 import android.net.Uri
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.OptIn
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -104,6 +106,13 @@ internal fun RemixStudio(
     var history by remember { mutableStateOf<ProjectHistory?>(null) }
     var sourceProbeResult by remember { mutableStateOf<MemeMediaProbe.Result?>(null) }
 
+
+    // Clean expired editor assets older than 8 days
+    LaunchedEffect(Unit) {
+        withContext(Dispatchers.IO) {
+            EditorAssetStorage.cleanExpiredAssets(context)
+        }
+    }
     // Probe media and check draft journal on enter
     LaunchedEffect(meme.uri) {
         val probe = withContext(Dispatchers.IO) {
@@ -243,8 +252,28 @@ internal fun RemixStudio(
     var exportStage by remember { mutableStateOf("exporting") }
     var exportJob by remember { mutableStateOf<Job?>(null) }
     var showDiscardConfirmDialog by remember { mutableStateOf(false) }
-    var showStickerImportDialog by remember { mutableStateOf(false) }
-    var stickerUriInput by remember { mutableStateOf("") }
+    val stickerPickerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri != null) {
+            scope.launch {
+                try {
+                    val copiedUri = withContext(Dispatchers.IO) {
+                        EditorAssetStorage.copyAssetToEditorStorage(context, uri)
+                    }
+                    val layer = MemeEditLayer.Media(
+                        id = "media_${System.currentTimeMillis()}",
+                        assetUri = copiedUri.toString(),
+                        keyframes = listOf(TransformKeyframe(center = NormalizedPoint(0.5f, 0.5f), scale = 1f))
+                    )
+                    history = applyProjectAction(currentHistory, ProjectAction.AddLayer(layer))
+                    selectedLayerId = layer.id
+                } catch (e: Exception) {
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(context, "Failed to load sticker: ${e.message}", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
+        }
+    }
 
     fun exportTo(destination: StudioExportDestination) {
         if (isExporting) return
@@ -296,6 +325,11 @@ internal fun RemixStudio(
 
     // Intercept back button
     BackHandler {
+        if (isExporting) {
+            exportJob?.cancel()
+            showExportDialog = false
+            return@BackHandler
+        }
         if (currentHistory.past.isNotEmpty()) {
             showDiscardConfirmDialog = true
         } else {
@@ -341,49 +375,6 @@ internal fun RemixStudio(
         )
     }
 
-    // Sticker Import Dialog
-    if (showStickerImportDialog) {
-        AlertDialog(
-            onDismissRequest = { showStickerImportDialog = false },
-            title = { Text("Add Media Sticker", color = Color.White, fontWeight = FontWeight.Bold) },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedTextField(
-                        value = stickerUriInput,
-                        onValueChange = { stickerUriInput = it },
-                        label = { Text("Image URI / path") },
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = OutlinedTextFieldDefaults.colors(focusedTextColor = Color.White, unfocusedTextColor = Color.White)
-                    )
-                }
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        showStickerImportDialog = false
-                        if (stickerUriInput.isNotBlank()) {
-                            val layer = MemeEditLayer.Media(
-                                id = "media_${System.currentTimeMillis()}",
-                                assetUri = stickerUriInput.trim(),
-                                keyframes = listOf(TransformKeyframe(center = NormalizedPoint(0.5f, 0.5f), scale = 1f))
-                            )
-                            history = applyProjectAction(currentHistory, ProjectAction.AddLayer(layer))
-                            selectedLayerId = layer.id
-                        }
-                    },
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFD8FF4A))
-                ) {
-                    Text("Add", color = Color.Black, fontWeight = FontWeight.Bold)
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showStickerImportDialog = false }) {
-                    Text("Cancel", color = Color.White)
-                }
-            },
-            containerColor = Color(0xFF161B22)
-        )
-    }
 
     // Export Sheet / Dialog
     if (showExportDialog) {
@@ -391,7 +382,7 @@ internal fun RemixStudio(
             onDismissRequest = { if (!isExporting) showExportDialog = false },
             title = {
                 Text(
-                    if (isExporting) "Exporting Remix..." else "Export Meme",
+                    if (isExporting) "Rendering your remix" else "Export Meme",
                     color = Color.White,
                     fontWeight = FontWeight.Bold
                 )
@@ -768,7 +759,7 @@ internal fun RemixStudio(
                         onUpdateBackground = { newBg ->
                             history = applyProjectAction(currentHistory, ProjectAction.SetBackground(newBg))
                         },
-                        onAddCutoutLayer = addCutout@ { result, subjectIdx, outline, shadow ->
+                        onAddCutoutLayer = addCutout@ { result, subjectIdx, outline, shadow, duplicate ->
                             val cutout = if (subjectIdx != null && subjectIdx in result.subjects.indices) {
                                 result.subjects[subjectIdx]
                             } else {
@@ -791,7 +782,7 @@ internal fun RemixStudio(
                                 cutout.bounds.width.toFloat() * activeProject.source.width / displayW,
                                 cutout.bounds.height.toFloat() * activeProject.source.height / displayH
                             )
-                            val layer = MemeEditLayer.Subject(
+                            val mainLayer = MemeEditLayer.Subject(
                                 id = "subject_${System.currentTimeMillis()}",
                                 bounds = bounds,
                                 subjectIndex = subjectIdx,
@@ -805,8 +796,27 @@ internal fun RemixStudio(
                                 outlineScale = outline,
                                 shadowScale = shadow
                             )
-                            history = applyProjectAction(currentHistory, ProjectAction.AddLayer(layer))
-                            selectedLayerId = layer.id
+                            if (duplicate) {
+                                val duplicateLayer = MemeEditLayer.Subject(
+                                    id = "subject_dup_${System.currentTimeMillis()}",
+                                    bounds = bounds,
+                                    subjectIndex = subjectIdx,
+                                    maskTrackId = result.requestId,
+                                    cutoutUri = cutout.cutoutUri,
+                                    keyframes = listOf(TransformKeyframe(
+                                        center = ProjectCore.clampNormalizedPoint(NormalizedPoint(center.x + 0.04f, center.y + 0.04f)),
+                                        rotationDegrees = activeProject.base.rotation.degrees.toFloat()
+                                    )),
+                                    outlineColor = "#FFFFFF",
+                                    outlineScale = outline,
+                                    shadowScale = 0f
+                                )
+                                val withDup = applyProjectAction(currentHistory, ProjectAction.AddLayer(duplicateLayer))
+                                history = applyProjectAction(withDup, ProjectAction.AddLayer(mainLayer))
+                            } else {
+                                history = applyProjectAction(currentHistory, ProjectAction.AddLayer(mainLayer))
+                            }
+                            selectedLayerId = mainLayer.id
                             Toast.makeText(context, "Cutout added as layer", Toast.LENGTH_SHORT).show()
                         }
                     )
@@ -927,7 +937,8 @@ internal fun RemixStudio(
                         },
                         onUpdateLayer = { updated ->
                             history = applyProjectAction(currentHistory, ProjectAction.UpdateLayer(updated))
-                        }
+                        },
+                        onSeekPlayhead = { playheadUs = it }
                     )
                 }
                 "audio" -> {
@@ -1003,7 +1014,7 @@ internal fun RemixStudio(
                 modifier = Modifier
                     .clip(RoundedCornerShape(8.dp))
                     .background(Color(0xFF21262D))
-                    .clickable { showStickerImportDialog = true }
+                    .clickable { stickerPickerLauncher.launch("image/*") }
                     .padding(horizontal = 14.dp, vertical = 8.dp)
             ) {
                 Text(

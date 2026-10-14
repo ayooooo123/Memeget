@@ -1,5 +1,16 @@
 package com.memeget.nativeapp.editor
 
+import android.content.Context
+import android.provider.OpenableColumns
+import android.webkit.MimeTypeMap
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.io.File
+import java.io.FileOutputStream
+import java.io.IOException
+import java.util.UUID
 import android.net.Uri
 import kotlinx.coroutines.CancellationException
 import androidx.compose.foundation.background
@@ -81,6 +92,65 @@ import kotlin.math.roundToInt
 import kotlin.math.roundToLong
 import kotlin.math.max
 
+/**
+ * Pictures and music picked in the editor, copied into app storage: a draft lasts up to a week, and a picker's
+ * permission to read the original does not.
+ */
+internal object EditorAssetStorage {
+    fun copyAssetToEditorStorage(context: Context, uri: Uri): Uri {
+        val dir = File(context.filesDir, "editor_assets")
+        if (!dir.exists()) dir.mkdirs()
+        val ext = getFileExtension(context, uri)
+        val targetFile = File(dir, "asset_${UUID.randomUUID()}.$ext")
+        context.contentResolver.openInputStream(uri)?.use { input ->
+            FileOutputStream(targetFile).use { output ->
+                input.copyTo(output)
+            }
+        } ?: throw IOException("Could not open picked asset: $uri")
+        return Uri.fromFile(targetFile)
+    }
+
+    fun cleanExpiredAssets(context: Context) {
+        val dir = File(context.filesDir, "editor_assets")
+        if (!dir.exists()) return
+        val cutoff = System.currentTimeMillis() - DraftJournalStore.DRAFT_EXPIRY_MS - 24L * 60L * 60L * 1000L
+        val old = dir.listFiles()?.filter { it.lastModified() < cutoff }.orEmpty()
+        if (old.isEmpty()) return
+        // A draft kept in use for more than a week can still name an asset picked at its start. Names are random,
+        // so finding one in a draft's text means that draft uses it.
+        val drafts = File(context.cacheDir, "meme_drafts").walkTopDown()
+            .filter { it.isFile && it.name.startsWith("slot_") }
+            .joinToString("\n") { runCatching { it.readText() }.getOrDefault("") }
+        old.forEach { if (!drafts.contains(it.name)) it.delete() }
+    }
+
+    private fun getFileExtension(context: Context, uri: Uri): String {
+        var ext: String? = null
+        try {
+            context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val name = cursor.getString(0)
+                    if (name != null && name.contains(".")) {
+                        ext = name.substringAfterLast('.').lowercase()
+                    }
+                }
+            }
+        } catch (_: Exception) {}
+        if (ext.isNullOrBlank()) {
+            val type = context.contentResolver.getType(uri)
+            if (type != null) {
+                ext = MimeTypeMap.getSingleton().getExtensionFromMimeType(type)
+            }
+        }
+        if (ext.isNullOrBlank()) {
+            val path = uri.path
+            if (path != null && path.contains(".")) {
+                ext = path.substringAfterLast('.').lowercase()
+            }
+        }
+        return ext?.ifBlank { "bin" } ?: "bin"
+    }
+}
 @Composable
 internal fun TextInspectorPanel(
     selectedLayer: MemeEditLayer.Text?,
@@ -262,6 +332,68 @@ internal fun TextInspectorPanel(
                     colors = SwitchDefaults.colors(checkedThumbColor = Color.Black, checkedTrackColor = Color(0xFFD8FF4A))
                 )
             }
+        }
+
+        Spacer(modifier = Modifier.height(12.dp))
+
+        // Backing Toggle & Colors
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("Backing", color = Color.White, fontSize = 13.sp)
+            Switch(
+                checked = selectedLayer.style.backgroundColor != null,
+                onCheckedChange = { enabled ->
+                    val defaultBg = TextLayoutBridge.getPresetSpec(selectedLayer.style.preset).style.backgroundColor ?: "#0a0b0e"
+                    onUpdateLayer(selectedLayer.copy(style = selectedLayer.style.copy(backgroundColor = if (enabled) defaultBg else null)))
+                },
+                colors = SwitchDefaults.colors(checkedThumbColor = Color.Black, checkedTrackColor = Color(0xFFD8FF4A))
+            )
+        }
+
+        if (selectedLayer.style.backgroundColor != null) {
+            Spacer(modifier = Modifier.height(6.dp))
+            Text("BACKING COLOR", color = Color(0xFF8B949E), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+            Spacer(modifier = Modifier.height(6.dp))
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                for (hex in TextLayoutBridge.COLOR_SWATCHES) {
+                    val selected = selectedLayer.style.backgroundColor.equals(hex, ignoreCase = true)
+                    Box(
+                        modifier = Modifier
+                            .size(32.dp)
+                            .clip(CircleShape)
+                            .background(Color(android.graphics.Color.parseColor(hex)))
+                            .border(
+                                if (selected) 2.5.dp else 1.dp,
+                                if (selected) Color(0xFFD8FF4A) else Color(0xFF30363D),
+                                CircleShape
+                            )
+                            .clickable { onUpdateLayer(selectedLayer.copy(style = selectedLayer.style.copy(backgroundColor = hex))) }
+                    )
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        // Opacity Slider
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("Opacity", color = Color.White, fontSize = 13.sp, modifier = Modifier.width(60.dp))
+            Slider(
+                value = selectedLayer.style.opacity,
+                onValueChange = { onUpdateLayer(selectedLayer.copy(style = selectedLayer.style.copy(opacity = it))) },
+                valueRange = 0f..1f,
+                modifier = Modifier.weight(1f),
+                colors = SliderDefaults.colors(thumbColor = Color(0xFFD8FF4A), activeTrackColor = Color(0xFFD8FF4A))
+            )
+            Text("${(selectedLayer.style.opacity * 100).roundToInt()}%", color = Color(0xFF8B949E), fontSize = 12.sp, modifier = Modifier.width(40.dp))
         }
 
         Spacer(modifier = Modifier.height(12.dp))
@@ -815,7 +947,7 @@ internal fun SubjectCutoutToolPanel(
     engine: InferenceEngine,
     backgroundSpec: BackgroundSpec,
     onUpdateBackground: (BackgroundSpec) -> Unit,
-    onAddCutoutLayer: (SubjectCutoutResult, Int?, Float, Float) -> Unit,
+    onAddCutoutLayer: (SubjectCutoutResult, Int?, Float, Float, Boolean) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val scope = rememberCoroutineScope()
@@ -825,7 +957,7 @@ internal fun SubjectCutoutToolPanel(
     var selectedSubjectIndex by remember { mutableStateOf<Int?>(null) }
     var outlineScale by remember { mutableFloatStateOf(0.35f) }
     var shadowScale by remember { mutableFloatStateOf(0.4f) }
-    var imageBgUri by remember { mutableStateOf("") }
+    var duplicateSticker by remember { mutableStateOf(false) }
 
     Column(
         modifier = modifier
@@ -922,7 +1054,7 @@ internal fun SubjectCutoutToolPanel(
             val bgModes = listOf(
                 Pair("source", "Keep Source"),
                 Pair("transparent", "Transparent"),
-                Pair("solid", "Solid Black"),
+                Pair("solid", "Solid"),
                 Pair("blurred-source", "Blurred Source"),
                 Pair("image", "Image")
             )
@@ -945,22 +1077,61 @@ internal fun SubjectCutoutToolPanel(
             }
         }
 
+        if (backgroundSpec.mode == "solid") {
+            Spacer(modifier = Modifier.height(8.dp))
+            Text("SOLID COLOR", color = Color(0xFF8B949E), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+            Spacer(modifier = Modifier.height(6.dp))
+            val solidColors = listOf("#000000", "#FFFFFF", "#B8FF2C", "#FF4E42", "#20242A", "#E9E5DC")
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                for (hex in solidColors) {
+                    val selected = backgroundSpec.color.equals(hex, ignoreCase = true)
+                    Box(
+                        modifier = Modifier
+                            .size(32.dp)
+                            .clip(CircleShape)
+                            .background(Color(android.graphics.Color.parseColor(hex)))
+                            .border(
+                                if (selected) 2.5.dp else 1.dp,
+                                if (selected) Color(0xFFD8FF4A) else Color(0xFF30363D),
+                                CircleShape
+                            )
+                            .clickable { onUpdateBackground(backgroundSpec.copy(mode = "solid", color = hex)) }
+                    )
+                }
+            }
+        }
+
+        val context = LocalContext.current
+        val bgImagePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+            if (uri != null) {
+                scope.launch {
+                    try {
+                        val copiedUri = withContext(Dispatchers.IO) {
+                            EditorAssetStorage.copyAssetToEditorStorage(context, uri)
+                        }
+                        onUpdateBackground(backgroundSpec.copy(mode = "image", assetUri = copiedUri.toString()))
+                    } catch (e: Exception) {
+                        errorMessage = "Failed to copy background image: ${e.message}"
+                    }
+                }
+            }
+        }
+
         if (backgroundSpec.mode == "image") {
             Spacer(modifier = Modifier.height(8.dp))
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedTextField(
-                    value = imageBgUri,
-                    onValueChange = { imageBgUri = it },
-                    label = { Text("Background Image URI") },
-                    modifier = Modifier.weight(1f),
-                    colors = OutlinedTextFieldDefaults.colors(focusedTextColor = Color.White, unfocusedTextColor = Color.White)
+            Button(
+                onClick = { bgImagePicker.launch("image/*") },
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF21262D))
+            ) {
+                Text(
+                    if (backgroundSpec.assetUri.isNullOrBlank()) "Choose Background Image" else "Change Background Image",
+                    color = Color.White
                 )
-                Button(
-                    onClick = { onUpdateBackground(backgroundSpec.copy(mode = "image", assetUri = imageBgUri)) },
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFD8FF4A))
-                ) {
-                    Text("Set", color = Color.Black)
-                }
             }
         }
 
@@ -994,12 +1165,25 @@ internal fun SubjectCutoutToolPanel(
             Text("${(shadowScale * 100).roundToInt()}%", color = Color(0xFF8B949E), fontSize = 12.sp, modifier = Modifier.width(40.dp))
         }
 
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("Duplicate", color = Color.White, fontSize = 13.sp)
+            Switch(
+                checked = duplicateSticker,
+                onCheckedChange = { duplicateSticker = it },
+                colors = SwitchDefaults.colors(checkedThumbColor = Color.Black, checkedTrackColor = Color(0xFFD8FF4A))
+            )
+        }
+
         Spacer(modifier = Modifier.height(12.dp))
 
         cutoutResult?.let { res ->
             Button(
                 onClick = {
-                    onAddCutoutLayer(res, selectedSubjectIndex, outlineScale, shadowScale)
+                    onAddCutoutLayer(res, selectedSubjectIndex, outlineScale, shadowScale, duplicateSticker)
                 },
                 modifier = Modifier.fillMaxWidth(),
                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF3FB950))
@@ -1427,6 +1611,7 @@ internal fun VideoMotionToolPanel(
     onAddKeyframe: () -> Unit,
     onRemoveKeyframe: () -> Unit,
     onUpdateLayer: (MemeEditLayer) -> Unit,
+    onSeekPlayhead: (Long) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     if (selectedLayer == null || (selectedLayer !is MemeEditLayer.Text && selectedLayer !is MemeEditLayer.Subject && selectedLayer !is MemeEditLayer.Media)) {
@@ -1447,6 +1632,45 @@ internal fun VideoMotionToolPanel(
             .verticalScroll(rememberScrollState())
             .padding(16.dp)
     ) {
+        val keyframes = when (selectedLayer) {
+            is MemeEditLayer.Text -> selectedLayer.keyframes
+            is MemeEditLayer.Subject -> selectedLayer.keyframes
+            is MemeEditLayer.Media -> selectedLayer.keyframes
+            else -> emptyList()
+        }
+        val prevKfUs = keyframes.filter { it.timeUs < playheadUs }.maxByOrNull { it.timeUs }?.timeUs
+        val nextKfUs = keyframes.filter { it.timeUs > playheadUs }.minByOrNull { it.timeUs }?.timeUs
+        // As in the original app, easing belongs to the keyframe under the playhead; elsewhere the chips are off.
+        val targetKeyframe = keyframes.find { it.timeUs == playheadUs }
+        val active = selectedLayer.active ?: TimeRangeUs(0L, durationUs)
+        val copyTargetUs = nextKfUs ?: active.endUs
+        val canCopyForward = copyTargetUs > playheadUs &&
+            (selectedLayer.active == null || (playheadUs in active.startUs..active.endUs && copyTargetUs in active.startUs..active.endUs))
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            OutlinedButton(
+                onClick = { prevKfUs?.let { onSeekPlayhead(it) } },
+                modifier = Modifier.weight(1f),
+                enabled = prevKfUs != null,
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White)
+            ) {
+                Text("◀ Prev keyframe")
+            }
+
+            OutlinedButton(
+                onClick = { nextKfUs?.let { onSeekPlayhead(it) } },
+                modifier = Modifier.weight(1f),
+                enabled = nextKfUs != null,
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White)
+            ) {
+                Text("Next keyframe ▶")
+            }
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
         Text("KEYFRAMES AT PLAYHEAD", color = Color(0xFF8B949E), fontSize = 11.sp, fontWeight = FontWeight.Bold)
         Spacer(modifier = Modifier.height(8.dp))
 
@@ -1471,13 +1695,72 @@ internal fun VideoMotionToolPanel(
             }
         }
 
+        Spacer(modifier = Modifier.height(8.dp))
+
+        Button(
+            onClick = {
+                onUpdateLayer(ProjectCore.copyKeyframeForward(selectedLayer, playheadUs, copyTargetUs))
+            },
+            modifier = Modifier.fillMaxWidth(),
+            enabled = canCopyForward,
+            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF21262D))
+        ) {
+            Text("Copy forward", color = if (canCopyForward) Color.White else Color(0xFF8B949E))
+        }
+
+        Spacer(modifier = Modifier.height(12.dp))
+        Text("KEYFRAME EASING", color = Color(0xFF8B949E), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+        Spacer(modifier = Modifier.height(6.dp))
+
+        val easingOptions = listOf(
+            "linear" to "Ease linear",
+            "hold" to "Hold"
+        )
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            for ((wire, label) in easingOptions) {
+                val selected = targetKeyframe?.easing == wire
+                val enabled = targetKeyframe != null
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(if (selected) Color(0xFFD8FF4A) else Color(0xFF21262D))
+                        .clickable(enabled = enabled) {
+                            if (targetKeyframe != null) {
+                                val updatedKfs = keyframes.map { kf ->
+                                    if (kf.timeUs == targetKeyframe.timeUs) kf.copy(easing = wire) else kf
+                                }
+                                val updated = when (selectedLayer) {
+                                    is MemeEditLayer.Text -> selectedLayer.copy(keyframes = updatedKfs)
+                                    is MemeEditLayer.Subject -> selectedLayer.copy(keyframes = updatedKfs)
+                                    is MemeEditLayer.Media -> selectedLayer.copy(keyframes = updatedKfs)
+                                    else -> selectedLayer
+                                }
+                                onUpdateLayer(updated)
+                            }
+                        }
+                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                ) {
+                    Text(
+                        label,
+                        color = if (selected) Color.Black else if (enabled) Color.White else Color(0xFF8B949E),
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+        }
+
         Spacer(modifier = Modifier.height(16.dp))
 
         // Active Range on timeline
         Text("ACTIVE TIME RANGE", color = Color(0xFF8B949E), fontSize = 11.sp, fontWeight = FontWeight.Bold)
         Spacer(modifier = Modifier.height(6.dp))
 
-        val active = selectedLayer.active ?: TimeRangeUs(0L, durationUs)
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("Start", color = Color.White, fontSize = 12.sp, modifier = Modifier.width(44.dp))
             Slider(
@@ -1609,29 +1892,31 @@ internal fun VideoAudioToolPanel(
         Text("BACKGROUND MUSIC", color = Color(0xFF8B949E), fontSize = 11.sp, fontWeight = FontWeight.Bold)
         Spacer(modifier = Modifier.height(6.dp))
 
-        if (musicSpec == null) {
-            var musicUriInput by remember { mutableStateOf("") }
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedTextField(
-                    value = musicUriInput,
-                    onValueChange = { musicUriInput = it },
-                    label = { Text("Music file URI or path") },
-                    modifier = Modifier.weight(1f),
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedTextColor = Color.White,
-                        unfocusedTextColor = Color.White
-                    )
-                )
-                Button(
-                    onClick = {
-                        if (musicUriInput.isNotBlank()) {
-                            onUpdateMusic(VideoMusicSpec(uri = musicUriInput.trim(), volume = 1f, startUs = 0L))
+        val audioContext = LocalContext.current
+        val audioScope = rememberCoroutineScope()
+        val audioPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+            if (uri != null) {
+                audioScope.launch {
+                    try {
+                        val copiedUri = withContext(Dispatchers.IO) {
+                            EditorAssetStorage.copyAssetToEditorStorage(audioContext, uri)
                         }
-                    },
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFD8FF4A))
-                ) {
-                    Text("Add", color = Color.Black)
+                        onUpdateMusic(VideoMusicSpec(uri = copiedUri.toString(), volume = 1f, startUs = 0L))
+                    } catch (_: Exception) {
+                    }
                 }
+            }
+        }
+
+        if (musicSpec == null) {
+            Button(
+                onClick = { audioPicker.launch("audio/*") },
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF21262D)),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Icon(Icons.Default.Add, contentDescription = null, tint = Color.White)
+                Spacer(modifier = Modifier.width(6.dp))
+                Text("Select Music Track", color = Color.White)
             }
         } else {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {

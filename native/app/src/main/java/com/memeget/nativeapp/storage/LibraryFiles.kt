@@ -42,6 +42,8 @@ internal class LibraryFiles(
     private val store: LibraryStore
 ) {
     private val clipboardMutex = Mutex()
+    /** One backup writes at a time: the automatic backup and the Settings buttons share folders. */
+    private val backupGate = Mutex()
     /**
      * Intake that adds library items (folder scans and restores, shared files, ZIPs, links) runs one at a time. Each
      * looks for an existing copy before writing one, so two running together could each miss the item the other is
@@ -697,9 +699,29 @@ internal class LibraryFiles(
         restoredCount
     }
 
-    suspend fun backup(folder: Folder): Unit = withContext(Dispatchers.IO) {
+    suspend fun backup(folder: Folder): Unit = backupGate.withLock { backupLocked(folder) }
+
+    /** Backs up every linked folder; a folder that fails doesn't stop the others. */
+    suspend fun backupAll(): BackupRun {
+        var written = 0
+        val failed = LinkedHashMap<Folder, String>()
+        for (folder in store.folders()) {
+            try {
+                backup(folder)
+                written++
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                failed[folder] = failure.message ?: "Backup failed"
+            }
+        }
+        return BackupRun(written, failed)
+    }
+
+    private suspend fun backupLocked(folder: Folder): Unit = withContext(Dispatchers.IO) {
         val folderUri = Uri.parse(folder.uri)
         val generation = System.currentTimeMillis()
+        val singleFolder = store.folders().size <= 1
 
         val nativeDir = MediaIoUtils.ensureDirectory(context, folderUri, SidecarFormat.NATIVE_SIDECAR_DIR)
             ?: throw IllegalStateException("Could not create .memeget-native directory")
@@ -716,7 +738,7 @@ internal class LibraryFiles(
         var totalCount = 0
         try {
             store.allMemes().collect { meme ->
-                if (meme.uri.startsWith(folder.uri) || store.folders().size <= 1) {
+                if (meme.uri.startsWith(folder.uri) || singleFolder) {
                     val chunkKey = SidecarFormat.chunkFor(meme.name)
                     val chunkIdx = chunkKey.toInt(16)
                     val vectors = store.vectors(meme.id)
@@ -829,21 +851,47 @@ internal class LibraryFiles(
             manifestUri = MediaIoUtils.createSafDocument(context, nativeDir, "manifest.json", "application/json")
         }
         if (manifestUri != null) {
-            val mainOut = context.contentResolver.openOutputStream(manifestUri)
+            // "wt": a shorter manifest must not keep the tail of the longer one it replaces.
+            val mainOut = context.contentResolver.openOutputStream(manifestUri, "wt")
             mainOut?.use { it.write(manifestBytes) }
+        }
+
+        // Older generations go once this one is committed. The newest complete one before it stays as a fallback.
+        val written = MediaIoUtils.listFilesFast(context, nativeDir, mediaOnly = false)
+        val stale = SidecarFormat.staleGenerationFiles(written.map { it.displayName }, generation).toHashSet()
+        for (doc in written) {
+            if (doc.displayName !in stale) continue
+            try {
+                DocumentsContract.deleteDocument(context.contentResolver, doc.uri)
+            } catch (_: Exception) {
+                // Left for the next backup to remove.
+            }
         }
     }
 
-    suspend fun importTeaching(uri: Uri): Int = withContext(Dispatchers.IO) {
+    /** How many examples the teaching file at [uri] holds, read without importing anything. */
+    suspend fun peekTeaching(uri: Uri): Int = withContext(Dispatchers.IO) { readTeaching(uri).size }
+
+    /**
+     * Imports the teaching file at [uri]. With [replace], every taught example already here, the user's own and
+     * imported packs alike, goes first, as the original app's "Replace all" does; tags already on memes stay.
+     */
+    suspend fun importTeaching(uri: Uri, replace: Boolean = false): TeachingImport = withContext(Dispatchers.IO) {
+        // Read the whole file first: a file that can't be used must not cost the teachings already here.
+        val exemplars = readTeaching(uri)
+        if (replace && exemplars.isEmpty()) throw IllegalArgumentException("The teaching file holds no examples to replace yours with")
+        val packName = MediaIoUtils.getDisplayName(context, uri).substringBeforeLast(".")
+        val removed = if (replace) store.clearExemplars() else 0
+        val added = store.importExemplars(exemplars, pack = packName, asSelf = false)
+        store.relinkTeachings()
+        TeachingImport(added = added, removed = removed)
+    }
+
+    private fun readTeaching(uri: Uri): List<Exemplar> {
         val text = context.contentResolver.openInputStream(uri)?.use {
             it.bufferedReader().readText()
         } ?: throw IllegalArgumentException("Could not read teaching pack file")
-
-        val exemplars = TeachingPackIo.parseNativeTeachings(text)
-        val packName = MediaIoUtils.getDisplayName(context, uri).substringBeforeLast(".")
-        val imported = store.importExemplars(exemplars, pack = packName, asSelf = false)
-        store.relinkTeachings()
-        imported
+        return TeachingPackIo.parseNativeTeachings(text)
     }
 
     suspend fun exportTeaching(destination: Uri): Unit = withContext(Dispatchers.IO) {
@@ -879,26 +927,39 @@ internal class LibraryFiles(
         MediaIoUtils.saveToDownloads(context, Uri.parse(uri), name, mime)
     }
 
-    fun share(context: Context, memes: List<Meme>) {
+    /** Opens the share sheet for [memes]. WebM videos go as MP4, as copying does, since many apps refuse WebM. */
+    suspend fun share(context: Context, memes: List<Meme>) {
         if (memes.isEmpty()) return
-        val shareDir = File(context.cacheDir, "share")
-        shareDir.mkdirs()
-
-        val shareUris = arrayListOf<Uri>()
-        var singleMime = MediaIoUtils.MIME_OCTET
-
-        for (m in memes) {
-            val safeName = m.name.replace(Regex("[^a-zA-Z0-9._-]"), "_").ifBlank { "meme_${m.id}.bin" }
-            val staged = File(shareDir, "share_${m.id}_$safeName")
-            try {
-                MediaIoUtils.copyUriToFile(context, Uri.parse(m.uri), staged)
-                val contentUri = MediaIoUtils.shareableUriForFile(context, staged)
-                shareUris.add(contentUri)
-                singleMime = MediaIoUtils.mimeForName(m.name)
-            } catch (_: Exception) {}
+        val (shareUris, singleMime) = withContext(Dispatchers.IO) {
+            val shareDir = File(this@LibraryFiles.context.cacheDir, "share")
+            shareDir.mkdirs()
+            // Earlier shares may still be uploading from their staged copies, so only old ones go.
+            val stale = System.currentTimeMillis() - SHARE_STAGING_MILLIS
+            shareDir.listFiles()?.forEach { if (it.lastModified() < stale) it.delete() }
+            val uris = arrayListOf<Uri>()
+            var mime = MediaIoUtils.MIME_OCTET
+            for (m in memes) {
+                ensureActive()
+                var converted: File? = null
+                try {
+                    converted = mp4ForWebm(m.uri, m.name, "share_${m.id}")
+                    val name = if (converted != null) "${m.name.substringBeforeLast('.')}.mp4" else m.name
+                    val safeName = name.replace(Regex("[^a-zA-Z0-9._-]"), "_").ifBlank { "meme_${m.id}.bin" }
+                    val staged = File(shareDir, "share_${m.id}_$safeName")
+                    MediaIoUtils.copyUriToFile(this@LibraryFiles.context, converted?.let(Uri::fromFile) ?: Uri.parse(m.uri), staged)
+                    uris.add(MediaIoUtils.shareableUriForFile(this@LibraryFiles.context, staged))
+                    mime = MediaIoUtils.mimeForName(name)
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    // One unreadable item doesn't stop the others.
+                } finally {
+                    converted?.delete()
+                }
+            }
+            uris to mime
         }
-
-        if (shareUris.isEmpty()) return
+        if (shareUris.isEmpty()) throw IOException("The selected media could not be read")
 
         val intent = if (shareUris.size == 1) {
             Intent(Intent.ACTION_SEND).apply {
@@ -917,7 +978,28 @@ internal class LibraryFiles(
         val chooser = Intent.createChooser(intent, "Share meme").apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
-        context.startActivity(chooser)
+        withContext(Dispatchers.Main) { context.startActivity(chooser) }
+    }
+
+    /** An H.264/AAC MP4 copy of a WebM video, or null when it isn't WebM. The caller deletes the copy. */
+    private suspend fun mp4ForWebm(uri: String, name: String, exportId: String): File? {
+        val mime = context.contentResolver.getType(Uri.parse(uri)) ?: MediaIoUtils.mimeForName(name)
+        if (mime != "video/webm" && MediaIoUtils.extOf(name) != "webm") return null
+        val probe = MemeMediaProbe.probe(context, uri)
+        val rotated = probe.rotationDegrees == 90 || probe.rotationDegrees == 270
+        val videoSource = MemeEditSource(
+            uri = uri,
+            name = name,
+            kind = MediaEditKind.VIDEO,
+            width = if (rotated) probe.height else probe.width,
+            height = if (rotated) probe.width else probe.height,
+            durationUs = requireNotNull(probe.durationUs) { "Could not read video duration" },
+        )
+        return NativeVideoComposition.exportVideo(
+            context,
+            ProjectCore.createDefaultVideoProject(videoSource),
+            exportId = "${exportId}_${System.nanoTime()}",
+        ).file
     }
 
     suspend fun copyToClipboard(uri: String, name: String): Unit = clipboardMutex.withLock {
@@ -931,22 +1013,8 @@ internal class LibraryFiles(
                 var source = Uri.parse(uri)
                 var copyName = name
                 var mime = context.contentResolver.getType(source) ?: MediaIoUtils.mimeForName(name)
-                if (mime == "video/webm" || MediaIoUtils.extOf(name) == "webm") {
-                    val probe = MemeMediaProbe.probe(context, uri)
-                    val rotated = probe.rotationDegrees == 90 || probe.rotationDegrees == 270
-                    val videoSource = MemeEditSource(
-                        uri = uri,
-                        name = name,
-                        kind = MediaEditKind.VIDEO,
-                        width = if (rotated) probe.height else probe.width,
-                        height = if (rotated) probe.width else probe.height,
-                        durationUs = requireNotNull(probe.durationUs) { "Could not read video duration" },
-                    )
-                    converted = NativeVideoComposition.exportVideo(
-                        context,
-                        ProjectCore.createDefaultVideoProject(videoSource),
-                        exportId = "clipboard_${System.nanoTime()}",
-                    ).file
+                converted = mp4ForWebm(uri, name, "clipboard")
+                if (converted != null) {
                     source = Uri.fromFile(converted)
                     copyName = "${name.substringBeforeLast('.')}.mp4"
                     mime = MediaIoUtils.MIME_MP4
@@ -1046,8 +1114,24 @@ internal class LibraryFiles(
         results
     }
 
-    suspend fun deleteOriginal(meme: Meme): Boolean = withContext(Dispatchers.IO) {
-        deleteFile(meme.uri)
+    /**
+     * Deletes each meme's file from its folder, or the app's own copy, and removes the meme from the library, as the
+     * original app's Delete does. A meme leaves the library even when its file can't be deleted. Returns how many
+     * files were deleted. Holds the intake lock so a scan running alongside can't add a file back as it goes.
+     */
+    suspend fun deleteMemes(memes: List<Meme>): Int = intakeGate.withLock {
+        withContext(Dispatchers.IO) {
+            var deleted = 0
+            val thumbs = File(context.filesDir, "thumbs")
+            for (meme in memes) {
+                if (deleteFile(meme.uri)) deleted++
+                // Posters are the app's own files.
+                Uri.parse(meme.thumbUri).takeIf { it.scheme == "file" }?.path?.let(::File)
+                    ?.takeIf { it.parentFile == thumbs }?.delete()
+            }
+            store.delete(memes.map { it.id })
+            deleted
+        }
     }
 
     suspend fun deleteFile(uriStr: String): Boolean = withContext(Dispatchers.IO) {
@@ -1067,3 +1151,12 @@ internal class LibraryFiles(
         }
     }
 }
+
+/** What a teaching import did: examples added, and examples removed first when it replaced the ones here. */
+internal data class TeachingImport(val added: Int, val removed: Int)
+
+/** Staged share copies older than this are deleted; newer ones may still be uploading in the app shared to. */
+private const val SHARE_STAGING_MILLIS = 60L * 60 * 1000
+
+/** One backup pass over the linked folders: how many were written, and the ones that failed with their reasons. */
+internal data class BackupRun(val written: Int, val failed: Map<Folder, String>)
