@@ -99,10 +99,14 @@ internal class IndexCoordinator(
         cloud.cancel()
         WorkManager.getInstance(context).cancelUniqueWork(IMMEDIATE_WORK)
     }
-    /** Re-tags the library now or, when another session holds the lock, as soon as it ends. */
+    /**
+     * Re-tags the library now or, when another session holds the lock, as soon as it ends. The pass
+     * runs in the coordinator's scope and the caller only waits for it, so a caller that stops
+     * waiting, such as a screen the user left, does not stop the re-tag.
+     */
     suspend fun retag() {
         retagRequests.incrementAndGet()
-        runOwedRetag()
+        scope.launch { runOwedRetag() }.join()
     }
 
     private suspend fun runOwedRetag() {

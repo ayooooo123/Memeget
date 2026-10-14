@@ -18,6 +18,7 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.selects.select
@@ -273,6 +274,36 @@ class IndexCoordinatorTest {
         val progress = coordinator.progress.value
         assertEquals("cancelled", progress.stage)
         assertFalse(progress.running)
+    }
+
+    @Test(timeout = 30_000)
+    fun retagKeepsRunningAfterTheScreenThatAskedForItGoesAway() = runBlocking {
+        val entered = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        testEngine.onEmbedText = {
+            entered.complete(Unit)
+            release.await()
+            FloatArray(512).apply { this[1] = 1f }
+        }
+        val coordinator = IndexCoordinator(
+            context = context,
+            store = store,
+            files = files,
+            engine = testEngine,
+            knowledge = knowledge,
+            cloud = cloud,
+            sessionTimeoutMillis = 10_000L,
+        )
+
+        // A screen's coroutine asks for the re-tag; then the screen leaves and its scope is cancelled.
+        val screen = launch { coordinator.retag() }
+        awaitStage(entered, screen, coordinator)
+        screen.cancel()
+        screen.join()
+        release.complete(Unit)
+
+        val finished = withTimeout(10_000L) { coordinator.progress.first { !it.running && it.stage != "retag" } }
+        assertEquals("complete", finished.stage)
     }
 
     @Test(timeout = 30_000)

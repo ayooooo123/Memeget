@@ -451,10 +451,9 @@ internal fun SettingsScreen(
 
                     OutlinedButton(
                         onClick = {
-                            scope.launch {
-                                coordinator.retag()
-                                Toast.makeText(context, "Re-tagging started", Toast.LENGTH_SHORT).show()
-                            }
+                            // The toast comes first: retag() returns only when the pass has ended.
+                            Toast.makeText(context, "Re-tagging started", Toast.LENGTH_SHORT).show()
+                            scope.launch { coordinator.retag() }
                         },
                         modifier = Modifier.weight(1f),
                     ) {
