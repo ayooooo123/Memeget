@@ -169,13 +169,20 @@ internal class SqliteLibraryDbHelper(context: Context, dbName: String = DATABASE
                 """.trimIndent()
             )
         }
-        ensureSearchTerms(db)
     }
 
-    /** Read-only view of the full-text index's words and counts: the search vocabulary, built by SQLite. */
-    private fun ensureSearchTerms(db: SQLiteDatabase) {
-        db.execSQL("CREATE VIRTUAL TABLE IF NOT EXISTS meme_search_terms USING fts4aux(meme_search_fts);")
+    /**
+     * The search word list, a read-only fts4aux view of the full-text index's words and counts. It is
+     * created at every open, not by a version step, so libraries from older builds get it too and the
+     * schema version that older builds check stays where it was.
+     */
+    override fun onOpen(db: SQLiteDatabase) {
+        super.onOpen(db)
+        if (!db.isReadOnly) db.execSQL("CREATE VIRTUAL TABLE IF NOT EXISTS meme_search_terms USING fts4aux(meme_search_fts);")
     }
+
+    /** Schema changes are additive, so a library written by a newer build stays readable after a rollback. */
+    override fun onDowngrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {}
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
         // Additive column migrations
@@ -231,11 +238,10 @@ internal class SqliteLibraryDbHelper(context: Context, dbName: String = DATABASE
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_memes_pending ON memes(pending);")
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_exemplars_model ON exemplars(model);")
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_vectors_model ON vectors(model);")
-        ensureSearchTerms(db)
     }
 
     companion object {
         const val DATABASE_NAME = "memeget.db"
-        const val DATABASE_VERSION = 4
+        const val DATABASE_VERSION = 3
     }
 }
