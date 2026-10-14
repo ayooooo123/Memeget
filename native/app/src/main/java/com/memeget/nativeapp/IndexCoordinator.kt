@@ -51,7 +51,7 @@ import java.io.IOException
 import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.sqrt
 
 /** Durable rows are the queue; only one foreground/background session owns the engine pipeline. */
@@ -69,8 +69,12 @@ internal class IndexCoordinator(
     private val mutableProgress = MutableStateFlow(WorkProgress())
     val progress: StateFlow<WorkProgress> = mutableProgress.asStateFlow()
     @Volatile private var activeJob: Job? = null
-    /** A re-tag asked for while another session held the lock; it runs once that session ends. */
-    private val retagWanted = AtomicBoolean(false)
+    /**
+     * Re-tags asked for, and how many of those a started pass or Stop has covered. Requests count
+     * up before anyone tries the lock, so the session that holds it always sees them on unlock.
+     */
+    private val retagRequests = AtomicLong()
+    private val retagCovered = AtomicLong()
     @Volatile private var interactive = false
     fun setInteractive(value: Boolean) { interactive = value }
 
@@ -88,19 +92,27 @@ internal class IndexCoordinator(
         }
     }
     fun cancel() {
-        retagWanted.set(false)
+        retagCovered.accumulateAndGet(retagRequests.get(), ::maxOf)
         activeJob?.cancel()
         engine.cancel()
         cloud.cancel()
         WorkManager.getInstance(context).cancelUniqueWork(IMMEDIATE_WORK)
     }
-    /** Re-tags the library now or, when another session holds the lock, right after it ends. */
+    /** Re-tags the library now or, when another session holds the lock, as soon as it ends. */
     suspend fun retag() {
-        if (!session.tryLock()) {
-            retagWanted.set(true)
+        retagRequests.incrementAndGet()
+        runOwedRetag()
+    }
+
+    private suspend fun runOwedRetag() {
+        if (!session.tryLock()) return
+        val upTo = retagRequests.get()
+        if (upTo <= retagCovered.get()) {
+            session.unlock()
+            launchOwedRetag()
             return
         }
-        retagWanted.set(false)
+        retagCovered.accumulateAndGet(upTo, ::maxOf)
         activeJob = currentCoroutineContext()[Job]
         try {
             val completed = withSessionDeadline {
@@ -136,13 +148,13 @@ internal class IndexCoordinator(
                 activeJob = null
                 mutableProgress.value = mutableProgress.value.copy(running = false)
                 session.unlock()
-                runWantedRetag()
+                launchOwedRetag()
             }
         }
     }
 
-    private fun runWantedRetag() {
-        if (retagWanted.compareAndSet(true, false)) scope.launch { retag() }
+    private fun launchOwedRetag() {
+        if (retagRequests.get() > retagCovered.get()) scope.launch { runOwedRetag() }
     }
 
     fun schedule() {
@@ -314,7 +326,7 @@ internal class IndexCoordinator(
                 activeJob = null
                 mutableProgress.value = mutableProgress.value.copy(running = false, memeId = null)
                 session.unlock()
-                runWantedRetag()
+                launchOwedRetag()
             }
         }
     }

@@ -951,9 +951,10 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
         model: String,
         thumbUri: String,
     ) = withContext(Dispatchers.IO) {
-        // Teachings imported before this meme had a vector attach to it now that it has one.
-        val showing = if (model == ModelRegistry.PRIMARY_MODEL_FINGERPRINT) teachingsShowing(analysis.image, comparableTeachings()) else emptyMap()
         writeMutex.withLock {
+            // Teachings imported before this meme had a vector attach to it now that it has one; read
+            // under the writer lock so a teaching import committing alongside is never missed.
+            val showing = if (model == ModelRegistry.PRIMARY_MODEL_FINGERPRINT) teachingsShowing(analysis.image, comparableTeachings()) else emptyMap()
             val db = getWritableDb()
             var labeled = false
             db.beginTransaction()
@@ -961,13 +962,15 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
                 val currentMeme = meme(id) ?: return@withLock
                 val now = System.currentTimeMillis()
 
-                // Fresh analysis replaces recomputed machine tags. Per-meme rejections veto machine
-                // tags; human tags always stay (applying one by hand withdraws a matching rejection).
+                // Fresh analysis replaces recomputed machine tags, and per-meme rejections veto machine
+                // tags. Human tags come from the current row and always stay (tagging one by hand
+                // withdraws a matching rejection).
                 val rejected = currentMeme.rejectedLabels.map { TagMerge.normalizeTagLabel(it) }.toSet()
-                val kept = currentMeme.tags.filter { TagMerge.survivesReclassification(it) }
+                val machine = (currentMeme.tags.filter { !TagMerge.isHumanTag(it) && TagMerge.survivesReclassification(it) } +
+                    analysis.tags.filterNot(TagMerge::isHumanTag))
+                    .filter { !rejected.contains(TagMerge.normalizeTagLabel(it.label)) }
                 val classified = Labeled(
-                    tags = TagMerge.mergeDurableTags(kept + analysis.tags)
-                        .filter { TagMerge.isHumanTag(it) || !rejected.contains(TagMerge.normalizeTagLabel(it.label)) },
+                    tags = TagMerge.mergeDurableTags(currentMeme.tags.filter(TagMerge::isHumanTag) + machine),
                     terms = TagMerge.withoutRejectedTerms(analysis.extraTerms, rejected),
                     rejected = currentMeme.rejectedLabels,
                     cloudCaption = currentMeme.cloudCaption,
@@ -1167,8 +1170,12 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
             val db = getWritableDb()
             db.beginTransaction()
             try {
+                // Imported analysis describes the exported bytes; once the bytes differ it no longer
+                // applies, even if the new analysis has not been committed yet.
+                val before = meme(id)
                 val cv = ContentValues().apply {
                     put("content_hash", hash)
+                    if (before != null && before.contentHash != hash) put("analysis_imported", 0)
                 }
                 db.update("memes", cv, "id = ?", arrayOf(id.toString()))
 
@@ -1787,9 +1794,12 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
             try {
                 val m = meme(id) ?: return@withLock
                 val rejected = m.rejectedLabels.map { TagMerge.normalizeTagLabel(it) }.toSet()
-                // Callers pass the complete machine tag set; human-confirmed tags are never theirs to drop.
-                val merged = TagMerge.mergeDurableTags(m.tags.filter { TagMerge.isHumanTag(it) } + tags)
-                    .filter { TagMerge.isHumanTag(it) || !rejected.contains(TagMerge.normalizeTagLabel(it.label)) }
+                // Human tags come from the current row only: a caller's copy may predate a "not this".
+                // Callers supply the machine tags, which per-meme rejections veto.
+                val merged = TagMerge.mergeDurableTags(
+                    m.tags.filter(TagMerge::isHumanTag) +
+                        tags.filter { !TagMerge.isHumanTag(it) && !rejected.contains(TagMerge.normalizeTagLabel(it.label)) }
+                )
                 val filteredTerms = TagMerge.withoutRejectedTerms(extraTerms, rejected)
 
                 val cv = ContentValues().apply {

@@ -407,8 +407,10 @@ internal class LocalKnowledge(
             }
             while (order.peek()?.let { covered[it] } == true) order.poll()
             val next = order.peek()
-            if (next != null && 1 + count < bound[next]) {
-                bound[i] = 1 + count
+            // Accept only if the exact gain still wins the heap's order, ties going to the lower index.
+            val gain = 1 + count
+            if (next != null && (gain < bound[next] || gain == bound[next] && next < i)) {
+                bound[i] = gain
                 order += i
                 continue
             }
