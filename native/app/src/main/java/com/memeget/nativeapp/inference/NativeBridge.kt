@@ -90,4 +90,10 @@ internal object NativeBridge {
         sourcePath: String,
         destinationPath: String,
     ): Int
+
+    /** For each row of [dim] floats in [vectors], how many other rows reach [minCos] with it. */
+    external fun nativeLookalikeCounts(vectors: FloatArray, dim: Int, minCos: Float): IntArray
+
+    /** Rows other than [row], not marked in [covered], that reach [minCos] with row [row]. */
+    external fun nativeLookalikesOf(vectors: FloatArray, dim: Int, row: Int, covered: BooleanArray, minCos: Float): IntArray
 }

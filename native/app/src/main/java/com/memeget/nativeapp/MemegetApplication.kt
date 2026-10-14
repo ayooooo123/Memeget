@@ -9,13 +9,14 @@ import coil.decode.ImageDecoderDecoder
 import coil.decode.VideoFrameDecoder
 import coil.disk.DiskCache
 import coil.memory.MemoryCache
+import com.memeget.nativeapp.knowledge.LookalikeKernels
 import kotlin.math.min
 
 internal class AppGraph(context: Application) {
     val store: LibraryStore = SqliteLibraryStore(context)
     val engine: InferenceEngine = NativeInferenceEngine(context)
     val files = LibraryFiles(context, store)
-    val knowledge = LocalKnowledge(store, engine)
+    val knowledge = LocalKnowledge(store, engine, LookalikeKernels.Native)
     val cloud = CloudAssistant(context, store, engine)
     val coordinator = IndexCoordinator(context, store, files, engine, knowledge, cloud)
 }

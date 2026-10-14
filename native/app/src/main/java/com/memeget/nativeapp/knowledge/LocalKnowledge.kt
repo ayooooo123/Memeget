@@ -12,9 +12,7 @@ import com.memeget.nativeapp.knowledge.LearnCore
 import com.memeget.nativeapp.knowledge.LookalikeVote
 import com.memeget.nativeapp.knowledge.NegativeAnchorDef
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
+import com.memeget.nativeapp.knowledge.LookalikeKernels
 import com.memeget.nativeapp.storage.TeachingPackIo
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -27,28 +25,14 @@ import java.util.concurrent.ConcurrentHashMap
 internal class LocalKnowledge(
     private val store: LibraryStore,
     private val engine: InferenceEngine,
+    /** Native in the app; JVM tests keep the default, which gives the same results. */
+    private val kernels: LookalikeKernels = LookalikeKernels.Kotlin,
 ) {
     companion object {
         val IDENTITY_CANDIDATE_CATEGORIES = setOf("format", "character", "person", "object", "topic")
         /** Marks a tag that came from people's labels on a look-alike meme. */
         const val LOOKALIKE_SCORE_DOMAIN = "lookalike-cosine"
-
-        /** Cosine of two unit 512-vectors; four running sums keep the multiply-adds independent. */
-        private fun dot512(a: FloatArray, b: FloatArray): Float {
-            var s0 = 0f
-            var s1 = 0f
-            var s2 = 0f
-            var s3 = 0f
-            var k = 0
-            while (k < 512) {
-                s0 += a[k] * b[k]
-                s1 += a[k + 1] * b[k + 1]
-                s2 += a[k + 2] * b[k + 2]
-                s3 += a[k + 3] * b[k + 3]
-                k += 4
-            }
-            return (s0 + s1) + (s2 + s3)
-        }
+        private const val VECTOR_DIM = 512
     }
 
     private var explicitContext: Context? = null
@@ -367,57 +351,34 @@ internal class LocalKnowledge(
         val ids = vectors.keys.filter { it !in named && it !in spread }.sorted()
         val images = ids.map { vectors.getValue(it) }
         val n = ids.size
-        // Each look-alike count bounds what picking that meme can cover. Rows are dealt round-robin
-        // so every core gets a similar share of the triangle.
-        val workers = Runtime.getRuntime().availableProcessors().coerceIn(1, 8)
-        val partial = coroutineScope {
-            (0 until workers).map { first ->
-                async {
-                    val counts = IntArray(n)
-                    for (i in first until n step workers) {
-                        currentCoroutineContext().ensureActive()
-                        val a = images[i]
-                        for (j in i + 1 until n) {
-                            if (dot512(a, images[j]) >= LookalikeVote.MIN_COS) {
-                                counts[i]++
-                                counts[j]++
-                            }
-                        }
-                    }
-                    counts
-                }
-            }.awaitAll()
-        }
-        val bound = IntArray(n) { i -> 1 + partial.sumOf { it[i] } }
+        val flat = FloatArray(n * VECTOR_DIM)
+        for (i in 0 until n) System.arraycopy(images[i], 0, flat, i * VECTOR_DIM, VECTOR_DIM)
+        currentCoroutineContext().ensureActive()
+        // Each look-alike count bounds what picking that meme can cover.
+        val counts = kernels.counts(flat, VECTOR_DIM, LookalikeVote.MIN_COS)
+        val bound = IntArray(n) { 1 + counts[it] }
         val order = PriorityQueue<Int>(maxOf(1, n), compareByDescending<Int> { bound[it] }.thenBy { it })
         for (i in 0 until n) order += i
         val covered = BooleanArray(n)
-        var found = IntArray(16)
         val picked = ArrayList<QueueItem>()
         while (picked.size < limit) {
             currentCoroutineContext().ensureActive()
             val i = order.poll() ?: break
             if (covered[i]) continue
-            val a = images[i]
-            var count = 0
-            for (j in 0 until n) {
-                if (j == i || covered[j] || dot512(a, images[j]) < LookalikeVote.MIN_COS) continue
-                if (count == found.size) found = found.copyOf(count * 2)
-                found[count++] = j
-            }
+            val found = kernels.lookalikesOf(flat, VECTOR_DIM, i, covered, LookalikeVote.MIN_COS)
             while (order.peek()?.let { covered[it] } == true) order.poll()
             val next = order.peek()
             // Accept only if the exact gain still wins the heap's order, ties going to the lower index.
-            val gain = 1 + count
+            val gain = 1 + found.size
             if (next != null && (gain < bound[next] || gain == bound[next] && next < i)) {
                 bound[i] = gain
                 order += i
                 continue
             }
             covered[i] = true
-            for (k in 0 until count) covered[found[k]] = true
+            for (j in found) covered[j] = true
             val meme = store.meme(ids[i]) ?: continue // deleted since the read
-            picked += QueueItem(meme, a, count)
+            picked += QueueItem(meme, images[i], found.size)
         }
         picked
     }
