@@ -9,6 +9,7 @@ import androidx.work.testing.WorkManagerTestInitHelper
 import com.memeget.nativeapp.inference.ModelRegistry
 import expo.modules.memegetbg.SubjectCutoutResult
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.awaitCancellation
@@ -18,6 +19,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.selects.select
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -346,6 +348,42 @@ class IndexCoordinatorTest {
         val meme = store.meme(memeId)
         assertNotNull(meme)
         assertEquals("pending", meme!!.visionState)
+    }
+
+    @Test(timeout = 30_000)
+    fun sessionLimitDuringCaptionsKeepsFinishedCaptionsAndRequeuesTheInterruptedMeme() = runBlocking {
+        val first = store.insertPending(Uri.fromFile(createValidBitmapFile("a.png")).toString(), "a.png", "image", 100L, "hashA")
+        val second = store.insertPending(Uri.fromFile(createValidBitmapFile("b.png")).toString(), "b.png", "image", 101L, "hashB")
+        store.setSetting("vision.enabled", "1")
+        var calls = 0
+        testEngine.onDescribe = { _, _ ->
+            if (++calls == 1) {
+                "CAPTION: frog waving\nTAGS: frog, wave"
+            } else {
+                withContext(Dispatchers.IO) {
+                    // Like the native runner: blocks until cancel(), then fails as an ordinary exception.
+                    while (!testEngine.cancelled.get()) Thread.sleep(10)
+                    throw RuntimeException("Inference cancelled")
+                }
+            }
+        }
+        val coordinator = IndexCoordinator(
+            context = context,
+            store = store,
+            files = files,
+            engine = testEngine,
+            knowledge = knowledge,
+            cloud = cloud,
+            sessionTimeoutMillis = 4_000L,
+        )
+
+        coordinator.runPending()
+
+        val memes = listOf(first, second).map { requireNotNull(store.meme(it)) }
+        val captioned = memes.single { it.visionState == "done" }
+        assertEquals("frog waving", captioned.caption)
+        assertEquals("pending", memes.single { it.id != captioned.id }.visionState)
+        assertTrue(store.errors().none { it.startsWith("[vision]") })
     }
 
     @Test(timeout = 30_000)

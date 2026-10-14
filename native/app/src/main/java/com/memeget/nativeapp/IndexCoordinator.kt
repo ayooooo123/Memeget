@@ -35,6 +35,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -440,55 +441,49 @@ internal class IndexCoordinator(
                 mutableProgress.value = WorkProgress("local description", detail = meme.name, running = true, memeId = meme.id)
                 // A process-killing native failure must not create an automatic crash loop.
                 store.setCaption(meme.id, meme.caption, emptyList(), null, "failed")
-                try {
+                val result = try {
                     val descriptions = ArrayList<VisionDescription>()
                     for (frame in item.frames.take(3)) {
                         val parsed = VisionText.parse(engine.describe(frame, VisionText.grounding(meme)))
                         require(parsed.caption.isNotBlank() || parsed.tags.isNotEmpty()) { "The local model returned no usable description" }
                         if (descriptions.none { it.caption.equals(parsed.caption, ignoreCase = true) }) descriptions += parsed
                     }
-                    captions += meme.id to VisionDescription(
+                    VisionDescription(
                         descriptions.map { it.caption }.filter(String::isNotBlank).joinToString(" / ").take(1000),
                         descriptions.map { it.text }.filter(String::isNotBlank).distinct().joinToString("\n"),
                         descriptions.flatMap { it.tags }.distinctBy { it.label },
                     )
-                    delay(1200)
-                } catch (cancelled: CancellationException) {
-                    captions.removeAll { it.first == meme.id }
-                    withContext(NonCancellable + Dispatchers.IO) {
-                        store.setCaption(meme.id, meme.caption, emptyList(), null, "pending")
-                        for ((pendingId, _) in captions) {
-                            val m = store.meme(pendingId)
-                            store.setCaption(pendingId, m?.caption ?: "", emptyList(), null, "pending")
-                        }
-                    }
-                    throw cancelled
                 } catch (failure: Exception) {
+                    // A native call stopped by Stop or the session limit can fail as an ordinary exception.
+                    if (failure is CancellationException || !currentCoroutineContext().isActive) {
+                        withContext(NonCancellable + Dispatchers.IO) {
+                            store.setCaption(meme.id, meme.caption, emptyList(), null, "pending")
+                        }
+                        throw failure as? CancellationException
+                            ?: CancellationException("Local description stopped").apply { initCause(failure) }
+                    }
                     store.addError(meme.name, "vision", failure.message ?: "Local description failed")
-                }
+                    null
+                } ?: continue
+                // Keep each caption as soon as it exists, so a later stop cannot discard finished work.
+                withContext(NonCancellable) { store.setCaption(meme.id, result.caption, result.tags, null) }
+                captions += meme.id to result
+                delay(1200)
             }
         }
-        val pendingCaptions = captions.toMutableList()
-        while (pendingCaptions.isNotEmpty()) {
-            val (id, result) = pendingCaptions.first()
+        // The captions are saved; this adds their search vectors. Their text stays searchable if it stops or fails.
+        for ((id, result) in captions) {
+            currentCoroutineContext().ensureActive()
             mutableProgress.value = mutableProgress.value.copy(stage = "caption embedding", detail = "", memeId = id)
             val searchable = listOf(result.caption, result.text, result.tags.joinToString(" ") { it.label }).joinToString(" ").trim()
             try {
-                val vector = engine.embedText(searchable)
-                store.setCaption(id, result.caption, result.tags, vector)
-                pendingCaptions.removeAt(0)
-            } catch (cancelled: CancellationException) {
-                withContext(NonCancellable + Dispatchers.IO) {
-                    for ((pendingId, _) in pendingCaptions) {
-                        val m = store.meme(pendingId)
-                        store.setCaption(pendingId, m?.caption ?: "", emptyList(), null, "pending")
-                    }
-                }
-                throw cancelled
+                store.setCaption(id, result.caption, result.tags, engine.embedText(searchable))
             } catch (failure: Exception) {
-                store.setCaption(id, result.caption, result.tags, null)
+                if (failure is CancellationException || !currentCoroutineContext().isActive) {
+                    throw failure as? CancellationException
+                        ?: CancellationException("Caption embedding stopped").apply { initCause(failure) }
+                }
                 store.addError("item $id", "caption embedding", failure.message ?: "Caption vector failed; text remains searchable")
-                pendingCaptions.removeAt(0)
             }
         }
         if (store.setting("audio.enabled") == "1") {
