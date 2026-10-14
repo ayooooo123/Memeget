@@ -375,51 +375,21 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
         }
     }
 
-    @OptIn(InternalCoroutinesApi::class)
+    /** The full-text index's words and counts; cheap enough to reload whenever the library changed. */
     private suspend fun getSearchVocab(): SearchVocab {
         val rev = _revision.value
         val cur = cachedVocab
         if (cur != null && cachedVocabRevision == rev) return cur
-        val db = getReadableDb()
-        val coroutine = currentCoroutineContext()
-        val signal = CancellationSignal()
-        val cancellation = coroutine.job.invokeOnCompletion(onCancelling = true, invokeImmediately = true) { cause ->
-            if (cause != null) signal.cancel()
+        val counts = HashMap<String, Int>()
+        // col = '*' totals each word over every column, as the meme text the index holds.
+        getReadableDb().rawQuery("SELECT term, occurrences FROM meme_search_terms WHERE col = '*'", null).use { cursor ->
+            while (cursor.moveToNext()) counts[cursor.getString(0)] = cursor.getInt(1)
         }
-        try {
-            val vocab = SearchVocab()
-            val texts = ArrayList<String>(256)
-            var rows = 0
-            db.rawQuery(
-                "SELECT name, ocr_text, caption, transcript, extra_terms, cloud_caption, cloud_terms, tags FROM memes",
-                null, signal,
-            ).use { cursor ->
-                while (cursor.moveToNext()) {
-                    for (column in 0..6) {
-                        val text = cursor.getString(column).orEmpty()
-                        if (text.isNotBlank()) texts.add(text)
-                    }
-                    for (tag in deserializeTags(cursor.getString(7))) {
-                        if (tag.label.isNotBlank()) texts.add(tag.label)
-                    }
-                    if (++rows % 32 == 0) {
-                        coroutine.ensureActive()
-                        vocab.addTexts(texts)
-                        texts.clear()
-                    }
-                }
-            }
-            coroutine.ensureActive()
-            if (texts.isNotEmpty()) vocab.addTexts(texts)
-            cachedVocab = vocab
-            cachedVocabRevision = rev
-            return vocab
-        } catch (failure: RuntimeException) {
-            coroutine.ensureActive()
-            throw failure
-        } finally {
-            cancellation.dispose()
-        }
+        currentCoroutineContext().ensureActive()
+        val vocab = SearchVocab.fromCounts(counts)
+        cachedVocab = vocab
+        cachedVocabRevision = rev
+        return vocab
     }
 
     override suspend fun humanLabels(): List<HumanLabeled> = withContext(Dispatchers.IO) {
@@ -677,10 +647,18 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
                 val filters = ArrayList<String>()
                 val rank: String
                 val from: String
-                if (useFts && semantic) {
-                    // Correlated FTS lookup avoids materializing every lexical hit or a huge IN list.
-                    rank = "(SELECT matchinfo(meme_search_fts, 'pcx') FROM meme_search_fts WHERE rowid = m.id AND meme_search_fts MATCH ?) AS fts_rank"
-                    args.add(ftsQuery)
+                // Semantic scans score every meme, so the text matches come from one full-text query up
+                // front: a correlated lookup per row re-ran the query 2,000+ times.
+                val ftsRanks: Map<Long, ByteArray>? = if (useFts && semantic) {
+                    HashMap<Long, ByteArray>().also { ranks ->
+                        db.rawQuery(
+                            "SELECT rowid, matchinfo(meme_search_fts, 'pcx') FROM meme_search_fts WHERE meme_search_fts MATCH ?",
+                            arrayOf(ftsQuery), signal,
+                        ).use { c -> while (c.moveToNext()) ranks[c.getLong(0)] = c.getBlob(1) }
+                    }
+                } else null
+                if (ftsRanks != null) {
+                    rank = "NULL AS fts_rank"
                     from = "memes m LEFT JOIN vectors v ON m.id = v.id"
                 } else if (useFts) {
                     rank = "matchinfo(meme_search_fts, 'pcx') AS fts_rank"
@@ -726,7 +704,8 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
                         )
                         var score = SearchRanking.scoreEntry(vector, exactTerms, expandedTerms, image, caption, document)
                         score += SearchRanking.tagTermScore(labels, exactTerms)
-                        if (!cursor.isNull(rankColumn)) score += SearchRanking.calculateFts4Bm25(cursor.getBlob(rankColumn)) * 0.5f
+                        val rankBlob = if (ftsRanks != null) ftsRanks[meme.id] else if (!cursor.isNull(rankColumn)) cursor.getBlob(rankColumn) else null
+                        if (rankBlob != null) score += SearchRanking.calculateFts4Bm25(rankBlob) * 0.5f
                         if (hasPhrase && SearchText.containsPhrase(SearchText.phraseKey(document), phrase)) score += 10f
                         if (!score.isFinite()) continue
                         if (after != null) {

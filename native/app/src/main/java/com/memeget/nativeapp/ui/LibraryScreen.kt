@@ -653,7 +653,7 @@ internal fun LibraryScreen(
                     ) {
                         Text(
                             text = if (query.isNotEmpty()) {
-                                "${memes.size} match${if (memes.size == 1) "" else "es"}"
+                                if (isSearching && memes.isEmpty()) "Searching…" else "${memes.size} match${if (memes.size == 1) "" else "es"}"
                             } else {
                                 val waiting = libraryCount - totalCount
                                 "$libraryCount meme${if (libraryCount == 1) "" else "s"}${if (waiting > 0) " · $waiting to index" else ""}${if (folderCount > 0) " · $folderCount folder${if (folderCount > 1) "s" else ""}" else ""}"
@@ -691,6 +691,21 @@ internal fun LibraryScreen(
                         onIndex = { coordinator.start() },
                         folderCount = folderCount,
                     )
+                } else if (memes.isEmpty() && query.isNotEmpty() && isSearching) {
+                    // Until the first results arrive; "No memes matched" would be a false answer.
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center,
+                        modifier = Modifier.padding(24.dp),
+                    ) {
+                        CircularProgressIndicator(color = MemegetColors.Volt, modifier = Modifier.size(24.dp), strokeWidth = 2.dp)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = "Searching for “$query”…",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MemegetColors.TextSecondary,
+                        )
+                    }
                 } else if (memes.isEmpty() && query.isNotEmpty()) {
                     Column(
                         horizontalAlignment = Alignment.CenterHorizontally,

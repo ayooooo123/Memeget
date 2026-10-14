@@ -120,12 +120,13 @@ class QueryRankingTest {
 
     @Test
     fun testSearchVocabTypoToleranceAndPrefixExpansion() {
-        val texts = listOf(
+        // Word counts as the full-text index reports them for these three memes.
+        val counts = listOf(
             "pepe the green frog feelsgoodman rare pepe",
             "wojak feels guy depressed doomer bloomer",
             "gigachad chad jawline sigma",
-        )
-        val vocab = SearchVocab.build(texts)
+        ).flatMap { it.split(' ') }.groupingBy { it }.eachCount()
+        val vocab = SearchVocab.fromCounts(counts)
         assertTrue(vocab.has("pepe"))
         assertTrue(vocab.has("wojak"))
         assertTrue(vocab.has("gigachad"))
