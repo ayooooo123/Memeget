@@ -207,7 +207,10 @@ internal interface LibraryStore {
     suspend fun addError(name: String, stage: String, reason: String)
     suspend fun errors(): List<String>
     suspend fun clearErrors()
+    /** Memes whose analysis is done. */
     suspend fun count(): Int
+    /** Every meme in the library, whether or not its analysis is done. */
+    suspend fun countAll(): Int
     suspend fun tagLabels(): List<String>
     suspend fun restore(meme: Meme, vectors: VectorRecord?): Boolean
 }
