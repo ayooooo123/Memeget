@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.provider.DocumentsContract
+import android.provider.OpenableColumns
 import androidx.documentfile.provider.DocumentFile
 import androidx.core.content.FileProvider
 import com.memeget.nativeapp.editor.MediaEditKind
@@ -23,10 +24,10 @@ import expo.modules.memegetbg.MemeMediaProbe
 import expo.modules.memegetbg.VideoFrameExtractor
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileInputStream
@@ -56,10 +57,75 @@ internal class LibraryFiles(
         return unique
     }
 
-    private suspend fun findMemeByHash(hash: String): Meme? {
-        if (hash.isBlank()) return null
-        return store.allMemes().firstOrNull { meme ->
-            meme.contentHash.isNotBlank() && meme.contentHash == hash
+    /**
+     * Finds library items by their bytes, for one import. Items found by scanning a linked folder have no hash until
+     * they are indexed, so when no known hash matches, unhashed items of the same size are hashed as well. Without
+     * that, sharing a file or collection that is already in the linked folder wrote a second copy of each file into it.
+     * A hash worked out here is saved on its item, so indexing can still reuse the analysis an export carried for it.
+     */
+    private inner class LibraryContent {
+        private var byHash: HashMap<String, Long>? = null
+        private val unhashed = ArrayList<Meme>()
+        private val sizes = HashMap<String, Long>()
+
+        suspend fun find(hash: String, size: Long): Long? {
+            if (hash.isBlank()) return null
+            val known = byHash ?: load()
+            known[hash]?.let { return it }
+            val candidates = unhashed.iterator()
+            while (candidates.hasNext()) {
+                currentCoroutineContext().ensureActive()
+                val meme = candidates.next()
+                val memeSize = sizes.getOrPut(meme.uri) { sizeOf(meme.uri) }
+                if (memeSize >= 0 && memeSize != size) continue
+                val memeHash = hashOf(meme.uri) ?: continue
+                candidates.remove()
+                store.setContentHash(meme.id, memeHash)
+                known.putIfAbsent(memeHash, meme.id)
+                if (memeHash == hash) return meme.id
+            }
+            return null
+        }
+
+        fun add(hash: String, id: Long) {
+            if (hash.isNotBlank() && id > 0) byHash?.putIfAbsent(hash, id)
+        }
+
+        private suspend fun load(): HashMap<String, Long> {
+            val known = HashMap<String, Long>()
+            store.allMemes().collect { meme ->
+                if (meme.contentHash.isBlank()) unhashed += meme else known.putIfAbsent(meme.contentHash, meme.id)
+            }
+            // One listing per linked folder gives the sizes a document query per item would.
+            for (folder in store.folders()) {
+                for (doc in MediaIoUtils.listFilesFast(context, Uri.parse(folder.uri), mediaOnly = true)) {
+                    if (doc.size > 0) sizes[doc.uri.toString()] = doc.size
+                }
+            }
+            byHash = known
+            return known
+        }
+
+        /** Byte size, or -1 when it can't be told cheaply (the item is then hashed whatever its size). */
+        private fun sizeOf(uri: String): Long = try {
+            val parsed = Uri.parse(uri)
+            if (parsed.scheme == "file") {
+                File(parsed.path ?: "").takeIf(File::isFile)?.length() ?: -1L
+            } else {
+                context.contentResolver.query(parsed, arrayOf(OpenableColumns.SIZE), null, null, null)?.use { c ->
+                    if (c.moveToFirst() && !c.isNull(0)) c.getLong(0) else -1L
+                } ?: -1L
+            }
+        } catch (_: Exception) {
+            -1L
+        }
+
+        private fun hashOf(uri: String): String? = try {
+            val parsed = Uri.parse(uri)
+            val input = if (parsed.scheme == "file") File(parsed.path ?: "").inputStream() else context.contentResolver.openInputStream(parsed)
+            input?.use { MediaIoUtils.computeSha256(it) }
+        } catch (_: Exception) {
+            null
         }
     }
 
@@ -131,11 +197,11 @@ internal class LibraryFiles(
             MediaIoUtils.copyUriToFile(context, uri, stagedFile)
             val sha256 = MediaIoUtils.computeSha256(stagedFile)
 
-            // Duplicate detection by content SHA-256
-            val existing = findMemeByHash(sha256)
+            // Duplicate detection by content SHA-256, including linked-folder files not indexed yet
+            val existing = LibraryContent().find(sha256, stagedFile.length())
             if (existing != null) {
                 stagedFile.delete()
-                return@withContext listOf(existing.id)
+                return@withContext listOf(existing)
             }
 
             val folders = store.folders()
@@ -192,6 +258,7 @@ internal class LibraryFiles(
             val folders = store.folders()
             val targetFolder = folders.firstOrNull()
             var manifestProblem: String? = null
+            val library = LibraryContent()
 
             zis.use { stream ->
                 while (true) {
@@ -207,10 +274,10 @@ internal class LibraryFiles(
                         continue
                     }
                     try {
-                        val duplicate = findMemeByHash(extracted.sha256)
+                        val duplicate = library.find(extracted.sha256, extracted.tempFile.length())
                         if (duplicate != null) {
-                            importedIds.add(duplicate.id)
-                            idByEntry[extracted.entryPath] = duplicate.id
+                            importedIds.add(duplicate)
+                            idByEntry[extracted.entryPath] = duplicate
                             continue
                         }
 
@@ -250,6 +317,8 @@ internal class LibraryFiles(
                         if (id > 0) {
                             importedIds.add(id)
                             idByEntry[extracted.entryPath] = id
+                            // A later entry with the same bytes is the same meme.
+                            library.add(extracted.sha256, id)
                         }
                     } finally {
                         extracted.tempFile.delete()
@@ -323,9 +392,9 @@ internal class LibraryFiles(
         val downloaded = LinkResolver.download(ref, context.cacheDir)
 
         try {
-            val duplicate = findMemeByHash(downloaded.sha256)
+            val duplicate = LibraryContent().find(downloaded.sha256, downloaded.file.length())
             if (duplicate != null) {
-                return@withContext listOf(duplicate.id)
+                return@withContext listOf(duplicate)
             }
 
             val folders = store.folders()
