@@ -192,8 +192,9 @@ internal fun SettingsScreen(
             val visEnabled = store.setting("visual.enabled") == "1"
             val bgEnabled = store.setting("background.enabled") == "1"
             val bgCharge = store.setting("background.onlyCharging") == "1"
-            val bgHot = store.setting("background.pauseHot") == "1"
-            val bgBattery = store.setting("background.pauseLowBattery") == "1"
+            // Unset means on for these two, as the coordinator reads them.
+            val bgHot = store.setting("background.pauseHot") != "0"
+            val bgBattery = store.setting("background.pauseLowBattery") != "0"
 
             withContext(Dispatchers.Main) {
                 folders = f
@@ -387,7 +388,7 @@ internal fun SettingsScreen(
                     checked = backgroundEnabled,
                     onCheckedChange = { checked ->
                         backgroundEnabled = checked
-                        scope.launch { store.setSetting("background.enabled", if (checked) "1" else "0") }
+                        scope.launch { store.setSetting("background.enabled", if (checked) "1" else "0"); coordinator.schedule() }
                     },
                 )
 
@@ -399,7 +400,7 @@ internal fun SettingsScreen(
                             checked = backgroundOnlyCharging,
                             onCheckedChange = { checked ->
                                 backgroundOnlyCharging = checked
-                                scope.launch { store.setSetting("background.onlyCharging", if (checked) "1" else "0") }
+                                scope.launch { store.setSetting("background.onlyCharging", if (checked) "1" else "0"); coordinator.schedule() }
                             },
                         )
 
@@ -409,7 +410,7 @@ internal fun SettingsScreen(
                             checked = backgroundPauseHot,
                             onCheckedChange = { checked ->
                                 backgroundPauseHot = checked
-                                scope.launch { store.setSetting("background.pauseHot", if (checked) "1" else "0") }
+                                scope.launch { store.setSetting("background.pauseHot", if (checked) "1" else "0"); coordinator.schedule() }
                             },
                         )
 
@@ -419,7 +420,7 @@ internal fun SettingsScreen(
                             checked = backgroundPauseLowBattery,
                             onCheckedChange = { checked ->
                                 backgroundPauseLowBattery = checked
-                                scope.launch { store.setSetting("background.pauseLowBattery", if (checked) "1" else "0") }
+                                scope.launch { store.setSetting("background.pauseLowBattery", if (checked) "1" else "0"); coordinator.schedule() }
                             },
                         )
                     }

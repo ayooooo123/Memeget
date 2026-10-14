@@ -11,6 +11,7 @@ import android.os.BatteryManager
 import android.os.Build
 import android.os.PowerManager
 import android.os.SystemClock
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.work.Constraints
 import androidx.work.CoroutineWorker
@@ -39,6 +40,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.count
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.take
 import kotlinx.coroutines.flow.toList
@@ -98,6 +100,7 @@ internal class IndexCoordinator(
         engine.cancel()
         cloud.cancel()
         WorkManager.getInstance(context).cancelUniqueWork(IMMEDIATE_WORK)
+        WorkManager.getInstance(context).cancelUniqueWork(CONTINUE_WORK)
     }
     /**
      * Re-tags the library now or, when another session holds the lock, as soon as it ends. The pass
@@ -170,6 +173,7 @@ internal class IndexCoordinator(
             val manager = WorkManager.getInstance(context)
             if (store.setting("background.enabled") != "1") {
                 manager.cancelUniqueWork(PERIODIC_WORK)
+                manager.cancelUniqueWork(CONTINUE_WORK)
                 return@launch
             }
             val constraints = Constraints.Builder()
@@ -198,6 +202,7 @@ internal class IndexCoordinator(
             mutableProgress.value = WorkProgress("indexing", running = true)
             // Transcripts made by an earlier speech model (or imported from the original app's tiny.en) are redone once.
             if (store.setting("audio.enabled") == "1") store.requeueTranscripts(ModelRegistry.WHISPER_MODEL.id)
+            val remainingBefore = if (background) remainingWork() else 0
             if (!background) {
                 KeepAliveLease.acquire(context, "Memeget Native", "Indexing saved media")
                 held = true
@@ -352,6 +357,9 @@ internal class IndexCoordinator(
                     running = false,
                 )
             }
+            // While the phone charges, a background session that made progress hands over to the next one instead
+            // of leaving the rest for the periodic run 30 minutes later.
+            if (background && keepGoingWhileCharging(remainingBefore, completed)) continueWhileCharging()
         } catch (cancelled: CancellationException) {
             mutableProgress.value = mutableProgress.value.copy(
                 stage = "cancelled",
@@ -604,8 +612,49 @@ internal class IndexCoordinator(
         item.temporaryFrames.forEach(File::delete)
     }
 
+    /** Items a session can still work on: memes waiting for indexing plus enabled enrichment not done yet. */
+    private suspend fun remainingWork(): Int {
+        val vision = store.setting("vision.enabled") == "1"
+        val audio = store.setting("audio.enabled") == "1"
+        val visual = store.setting("visual.enabled") == "1"
+        return store.allMemes().count { meme ->
+            meme.pending || vision && meme.visionState == "pending" ||
+                audio && meme.kind == "video" && meme.audioState == "pending" ||
+                visual && store.vectors(meme.id)?.visual == null
+        }
+    }
+
+    private suspend fun keepGoingWhileCharging(remainingBefore: Int, indexed: Int): Boolean {
+        if (store.setting("background.enabled") != "1" || interactive || !charging() || powerBlock(background = true) != null) return false
+        val remainingAfter = remainingWork()
+        // Only after progress, so items that fail every time can't keep the phone busy all night.
+        return remainingAfter > 0 && (indexed > 0 || remainingAfter < remainingBefore)
+    }
+
+    private suspend fun continueWhileCharging() {
+        val constraints = Constraints.Builder()
+            .setRequiresCharging(true)
+            .setRequiresBatteryNotLow(store.setting("background.pauseLowBattery") != "0")
+            .build()
+        // The short delay lets the finished worker's foreground service stop first: WorkManager 2.10.3 can crash
+        // when one foreground worker starts while another's service is shutting down.
+        WorkManager.getInstance(context).enqueueUniqueWork(
+            CONTINUE_WORK,
+            ExistingWorkPolicy.APPEND_OR_REPLACE,
+            OneTimeWorkRequestBuilder<IndexWorker>()
+                .setConstraints(constraints)
+                .setInitialDelay(CONTINUE_DELAY_SECONDS, TimeUnit.SECONDS)
+                .build(),
+        )
+        Log.i(LOG_TAG, "Charging with work left: next background session queued")
+    }
+
+    private fun batteryStatus(): Intent? = context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+
+    private fun charging(): Boolean = (batteryStatus()?.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) ?: 0) != 0
+
     private suspend fun powerBlock(background: Boolean): String? {
-        val battery = context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        val battery = batteryStatus()
         val plugged = (battery?.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) ?: 0) != 0
         val level = battery?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
         val scale = battery?.getIntExtra(BatteryManager.EXTRA_SCALE, 100) ?: 100
@@ -643,6 +692,9 @@ internal class IndexCoordinator(
         private const val BATCH_DISK_BYTES = 256L * 1024 * 1024
         private const val IMMEDIATE_WORK = "memeget-native-index"
         private const val PERIODIC_WORK = "memeget-native-periodic"
+        private const val CONTINUE_WORK = "memeget-native-continue"
+        private const val CONTINUE_DELAY_SECONDS = 30L
+        internal const val LOG_TAG = "MemegetIndex"
     }
 }
 
@@ -655,7 +707,16 @@ class IndexWorker(context: Context, parameters: WorkerParameters) : CoroutineWor
         val notification = NotificationCompat.Builder(applicationContext, "native-index")
             .setSmallIcon(android.R.drawable.ic_menu_search).setContentTitle("Memeget Native")
             .setContentText("Processing saved items locally").setOngoing(true).build()
-        setForeground(if (Build.VERSION.SDK_INT >= 29) ForegroundInfo(7240, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC) else ForegroundInfo(7240, notification))
+        try {
+            setForeground(if (Build.VERSION.SDK_INT >= 29) ForegroundInfo(7240, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC) else ForegroundInfo(7240, notification))
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (refused: Exception) {
+            // Android 12+ refuses a foreground service started while the app is in the background, which is how
+            // these runs usually start (phone locked on the charger). A session ends within 7 minutes, inside a
+            // regular job's 10-minute limit, so it runs without one.
+            Log.i(IndexCoordinator.LOG_TAG, "Background session runs without a foreground service: ${refused.javaClass.simpleName}")
+        }
         return try {
             graph.coordinator.runPending()
             Result.success()
