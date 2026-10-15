@@ -134,6 +134,9 @@ internal fun MemeGrid(
                     analyzing = activeMemeId == meme.id,
                     onClick = { onItemClick(meme) },
                     onLongClick = { onItemLongClick(meme) },
+                    // The semantic pass reorders text matches about two seconds in: tiles glide to their new places
+                    // instead of jumping, and a deleted meme fades out.
+                    modifier = Modifier.animateItem(),
                 )
             }
 
