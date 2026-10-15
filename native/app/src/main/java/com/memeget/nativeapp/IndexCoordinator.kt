@@ -67,6 +67,7 @@ internal class IndexCoordinator(
     private val knowledge: LocalKnowledge,
     private val cloud: CloudAssistant,
     private val sessionTimeoutMillis: Long = SESSION_MILLIS,
+    private val sessionGraceMillis: Long = SESSION_GRACE_MILLIS,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val session = Mutex()
@@ -147,7 +148,7 @@ internal class IndexCoordinator(
         }
         retagCovered.accumulateAndGet(upTo, ::maxOf)
         try {
-            val completed = withSessionDeadline {
+            val completed = withSessionDeadline(sessionTimeoutMillis) {
                 knowledge.retag { mutableProgress.value = it }
                 true
             }
@@ -246,7 +247,7 @@ internal class IndexCoordinator(
                 held = true
             }
 
-            val sessionFinished = withSessionDeadline {
+            val sessionFinished = withSessionDeadline(sessionTimeoutMillis + sessionGraceMillis) {
                 val tried = HashSet<Long>()
                 val triedSpeech = HashSet<Long>()
                 // Memes waiting to be indexed come first: transcripts and captions stop for them between clips. A
@@ -254,6 +255,12 @@ internal class IndexCoordinator(
                 // missing: those memes stay queued and indexing can't take them.
                 val newMemesWaiting: suspend () -> Boolean = {
                     (!background || completed + failed < BACKGROUND_ITEMS) && "index" !in gaps && store.pending(1).isNotEmpty()
+                }
+                // Once the session's time is up no new item starts, but one already running may finish within the
+                // grace: on the Pixel 5a a background session needs about 6.5 minutes for a 120 s clip, and cutting it
+                // off at the limit sent it back to the front of the queue every session.
+                val stopForNext: suspend () -> Boolean = {
+                    SystemClock.elapsedRealtime() - started >= sessionTimeoutMillis || newMemesWaiting()
                 }
                 // Indexing, then enrichment; a meme shared or imported during enrichment sends the session back to
                 // indexing, so it becomes searchable now instead of waiting behind the transcript and caption backlog.
@@ -327,7 +334,7 @@ internal class IndexCoordinator(
                         }
                         // Captions wait until the queue is indexed; the enrichment pass below writes them. Transcripts
                         // of this batch wait too while more memes are queued: the enrichment pass picks them up.
-                        enrich(indexed, background, gaps, describe = false, yieldTo = newMemesWaiting)
+                        enrich(indexed, background, gaps, describe = false, yieldTo = stopForNext)
                     } finally {
                         withContext(NonCancellable + Dispatchers.IO) {
                             prepared.forEach(::cleanPrepared)
@@ -390,7 +397,7 @@ internal class IndexCoordinator(
                                     }
                                 }
                                 // One call per batch, so each model loads once per batch rather than once per meme.
-                                enrich(batch, background, gaps, describe = transcripts.isEmpty(), yieldTo = newMemesWaiting)
+                                enrich(batch, background, gaps, describe = transcripts.isEmpty(), yieldTo = stopForNext)
                             } finally {
                                 withContext(NonCancellable + Dispatchers.IO) { batch.forEach(::cleanPrepared) }
                             }
@@ -449,8 +456,8 @@ internal class IndexCoordinator(
         }
     }
 
-    private suspend fun <T> withSessionDeadline(block: suspend () -> T): T? {
-        return withTimeoutOrNull(sessionTimeoutMillis) {
+    private suspend fun <T> withSessionDeadline(limitMillis: Long, block: suspend () -> T): T? {
+        return withTimeoutOrNull(limitMillis) {
             @OptIn(InternalCoroutinesApi::class)
             val hook = currentCoroutineContext().job.invokeOnCompletion(
                 onCancelling = true,
@@ -812,6 +819,8 @@ internal class IndexCoordinator(
         private const val BATCH_SIZE = 8
         private const val BACKGROUND_ITEMS = 32
         private const val SESSION_MILLIS = 7L * 60 * 1000
+        /** How long the item running when [SESSION_MILLIS] ends may take; 9.5 minutes in all stays inside a regular job's 10-minute limit. */
+        private const val SESSION_GRACE_MILLIS = 150_000L
         private const val MAX_SOURCE_BYTES = 512L * 1024 * 1024
         private const val BATCH_DISK_BYTES = 256L * 1024 * 1024
         private const val MODEL_WAIT = "Work that needs it waits for the next session."
@@ -839,8 +848,8 @@ class IndexWorker(context: Context, parameters: WorkerParameters) : CoroutineWor
             throw cancelled
         } catch (refused: Exception) {
             // Android 12+ refuses a foreground service started while the app is in the background, which is how
-            // these runs usually start (phone locked on the charger). A session ends within 7 minutes, inside a
-            // regular job's 10-minute limit, so it runs without one.
+            // these runs usually start (phone locked on the charger). A session starts nothing new after 7 minutes
+            // and ends within 9.5, inside a regular job's 10-minute limit, so it runs without one.
             Log.i(IndexCoordinator.LOG_TAG, "Background session runs without a foreground service: ${refused.javaClass.simpleName}")
         }
         return try {
