@@ -714,6 +714,29 @@ class IndexCoordinatorTest {
     }
 
     @Test(timeout = 30_000)
+    fun anImageModelThatCannotBeDownloadedStillLetsTheSessionTranscribeIndexedVideos() = runBlocking {
+        // An indexed video waiting for its transcript, and a new meme waiting for the image model. Robolectric cannot
+        // decode video frames, so the poster stands in for them.
+        val poster = Uri.fromFile(createValidBitmapFile("poster.png")).toString()
+        val videoId = store.insertPending(Uri.fromFile(createValidBitmapFile("clip.mp4")).toString(), "clip.mp4", "video", 100L, "hashI1")
+        store.completeIndex(videoId, LocalAnalysis(FloatArray(512).apply { this[0] = 1f }, "", emptyList(), ""), ModelRegistry.PRIMARY_MODEL_FINGERPRINT, poster)
+        val newId = store.insertPending(Uri.fromFile(createValidBitmapFile("new.png")).toString(), "new.png", "image", 101L, "hashI2")
+        store.setSetting("audio.enabled", "1")
+        testEngine.onEmbedImage = {
+            throw ModelUnavailableException("mobileclip-s2-image", "Couldn't download mobileclip_s2_image_xnnpack_fp32.pte: timeout")
+        }
+        val coordinator = IndexCoordinator(context, store, files, testEngine, knowledge, cloud, sessionTimeoutMillis = 10_000L)
+
+        coordinator.runPending()
+
+        // The new meme waits for its model; the transcript needs only the speech model, so the session still does it
+        // and then ends, rather than going back to the waiting meme until its time runs out.
+        assertTrue(requireNotNull(store.meme(newId)).pending)
+        assertEquals("done", requireNotNull(store.meme(videoId)).audioState)
+        assertTrue(coordinator.progress.value.detail, coordinator.progress.value.detail.contains("timeout"))
+    }
+
+    @Test(timeout = 30_000)
     fun speechAndCaptionModelsThatCannotBeDownloadedPutTheirWorkBackInTheQueue() = runBlocking {
         // Two indexed videos waiting for transcripts and captions. Robolectric cannot decode video frames, so their
         // posters stand in for them.
