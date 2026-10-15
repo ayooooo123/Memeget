@@ -44,7 +44,9 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
+import org.robolectric.shadows.ShadowSystemClock
 import java.io.File
+import java.time.Duration
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -126,6 +128,7 @@ class IndexCoordinatorTest {
             knowledge = knowledge,
             cloud = cloud,
             sessionTimeoutMillis = 2_000L,
+            sessionGraceMillis = 1_000L,
         )
 
         coordinator.runPending()
@@ -415,6 +418,7 @@ class IndexCoordinatorTest {
             knowledge = knowledge,
             cloud = cloud,
             sessionTimeoutMillis = 4_000L,
+            sessionGraceMillis = 1_000L,
         )
 
         coordinator.runPending()
@@ -590,7 +594,7 @@ class IndexCoordinatorTest {
                 }
             }
         }
-        return IndexCoordinator(context, store, files, testEngine, knowledge, cloud, sessionTimeoutMillis = 4_000L)
+        return IndexCoordinator(context, store, files, testEngine, knowledge, cloud, sessionTimeoutMillis = 4_000L, sessionGraceMillis = 1_000L)
     }
 
     @Test(timeout = 30_000)
@@ -804,6 +808,44 @@ class IndexCoordinatorTest {
         assertEquals("indexed right after the clip in progress, not after the batch: $events",
             listOf("transcribe", "index", "transcribe", "transcribe"), events.toList())
         assertTrue("every clip still gets its transcript", videos.all { requireNotNull(store.meme(it)).audioState == "done" })
+    }
+
+    @Test(timeout = 30_000)
+    fun aTranscriptStillRunningWhenTheSessionTimeIsUpIsKeptAndNoNewClipStarts() = runBlocking {
+        // Two indexed videos waiting for transcripts. The first outlasts the session's time but not its grace, as a
+        // 120 s clip does in a background session on the Pixel 5a. Posters stand in for the frames.
+        val poster = Uri.fromFile(createValidBitmapFile("poster.png")).toString()
+        val videos = (1..2).map { n ->
+            store.insertPending(Uri.fromFile(createValidBitmapFile("long$n.mp4")).toString(), "long$n.mp4", "video", 100L + n, "hashL$n")
+                .also { id ->
+                    store.completeIndex(id, LocalAnalysis(FloatArray(512).apply { this[0] = 1f }, "", emptyList(), ""), ModelRegistry.PRIMARY_MODEL_FINGERPRINT, poster)
+                }
+        }
+        store.setSetting("audio.enabled", "1")
+        var transcribed = 0
+        testEngine.onTranscribe = {
+            transcribed++
+            // The session's clock (Robolectric's SystemClock) moves past the session's time while the clip runs...
+            ShadowSystemClock.advanceBy(Duration.ofSeconds(3))
+            withContext(Dispatchers.IO) {
+                // ...and, like the native runner, it keeps decoding in real time until done or cancel() stops it,
+                // past where the old 2 s limit cut it off.
+                val end = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(3_000)
+                while (System.nanoTime() < end) {
+                    if (testEngine.cancelled.get()) throw RuntimeException("Inference cancelled")
+                    Thread.sleep(10)
+                }
+            }
+            "the long clip's transcript"
+        }
+        val coordinator = IndexCoordinator(context, store, files, testEngine, knowledge, cloud, sessionTimeoutMillis = 2_000L, sessionGraceMillis = 10_000L)
+
+        coordinator.runPending()
+
+        val clips = videos.map { requireNotNull(store.meme(it)) }
+        assertEquals("no new clip starts once the time is up", 1, transcribed)
+        assertEquals("the clip in progress is kept: ${store.errors()}", listOf("done", "pending"), clips.map { it.audioState }.sorted())
+        assertEquals("the long clip's transcript", clips.single { it.audioState == "done" }.transcript)
     }
 
     private class TestInferenceEngine : InferenceEngine {
