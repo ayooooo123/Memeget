@@ -41,6 +41,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.memeget.nativeapp.data.TagMerge
+import com.memeget.nativeapp.inference.ModelArtifact
 import com.memeget.nativeapp.inference.ModelRegistry
 import com.memeget.nativeapp.storage.MediaIoUtils
 import kotlinx.coroutines.CoroutineStart
@@ -743,49 +744,67 @@ internal fun TeachingImportDialog(
 
 private data class RegisteredModelInfo(
     val feature: String,
+    /** Artifact id the engine reports while this file downloads. */
+    val id: String,
     val filename: String,
-    val fallbackFilename: String? = null,
+    /** The download a converted file is made from; it counts as downloaded until the conversion has run. */
+    val sourceFilename: String? = null,
     val expectedBytes: Long,
 )
 
+private fun registered(feature: String, artifact: ModelArtifact) =
+    RegisteredModelInfo(feature, artifact.id, artifact.filename, null, artifact.expectedSizeBytes ?: 0L)
+
 private val REGISTERED_MODELS = listOf(
-    RegisteredModelInfo("Search: Image Embedding", ModelRegistry.S2_IMAGE.filename, null, ModelRegistry.S2_IMAGE.expectedSizeBytes ?: 0L),
-    RegisteredModelInfo("Search: Text Embedding", ModelRegistry.S2_TEXT.filename, null, ModelRegistry.S2_TEXT.expectedSizeBytes ?: 0L),
-    RegisteredModelInfo("Search: Text Tokenizer", ModelRegistry.S2_TOKENIZER.filename, null, ModelRegistry.S2_TOKENIZER.expectedSizeBytes ?: 0L),
-    RegisteredModelInfo("Visual Similarity", ModelRegistry.DINO_MODEL.filename, null, ModelRegistry.DINO_MODEL.expectedSizeBytes ?: 0L),
-    RegisteredModelInfo("OCR: Text Detection", ModelRegistry.OCR_CRAFT.filename, null, ModelRegistry.OCR_CRAFT.expectedSizeBytes ?: 0L),
-    RegisteredModelInfo("OCR: Text Recognition", ModelRegistry.OCR_CRNN.filename, null, ModelRegistry.OCR_CRNN.expectedSizeBytes ?: 0L),
-    RegisteredModelInfo("Audio Transcription", ModelRegistry.WHISPER_MODEL.filename, null, ModelRegistry.WHISPER_MODEL.expectedSizeBytes ?: 0L),
-    RegisteredModelInfo("Audio Tokenizer", ModelRegistry.WHISPER_TOKENIZER.filename, null, ModelRegistry.WHISPER_TOKENIZER.expectedSizeBytes ?: 0L),
-    RegisteredModelInfo("Subject Cutout", ModelRegistry.FAST_SAM.filename, null, ModelRegistry.FAST_SAM.expectedSizeBytes ?: 0L),
-    RegisteredModelInfo("AI Captions", ModelRegistry.MINICPM_V47_MODEL.filename, null, ModelRegistry.MINICPM_V47_MODEL.expectedSizeBytes ?: 0L),
+    registered("Search: Image Embedding", ModelRegistry.S2_IMAGE),
+    registered("Search: Text Embedding", ModelRegistry.S2_TEXT),
+    registered("Search: Text Tokenizer", ModelRegistry.S2_TOKENIZER),
+    registered("Visual Similarity", ModelRegistry.DINO_MODEL),
+    registered("OCR: Text Detection", ModelRegistry.OCR_CRAFT),
+    registered("OCR: Text Recognition", ModelRegistry.OCR_CRNN),
+    registered("Audio Transcription", ModelRegistry.WHISPER_MODEL),
+    registered("Audio Tokenizer", ModelRegistry.WHISPER_TOKENIZER),
+    registered("Subject Cutout", ModelRegistry.FAST_SAM),
+    registered("AI Captions", ModelRegistry.MINICPM_V47_MODEL),
     RegisteredModelInfo(
         "AI Captions Visual Projector",
+        ModelRegistry.MINICPM_V47_PROJECTOR.id,
         ModelRegistry.MINICPM_V47_PROJECTOR_F16.filename,
         ModelRegistry.MINICPM_V47_PROJECTOR.filename,
         ModelRegistry.MINICPM_V47_PROJECTOR_F16.expectedSizeBytes,
     ),
 )
 
-@Composable
-internal fun ModelsSection() {
-    val context = LocalContext.current
-    var modelStatusList by remember { mutableStateOf<List<Pair<String, String>>>(emptyList()) }
+/** What one model has on disk: the finished file, or how far an unfinished download got. */
+private sealed interface ModelFileState {
+    data class Present(val bytes: Long) : ModelFileState
+    data class Partial(val fraction: Float) : ModelFileState
+    object Absent : ModelFileState
+}
 
-    LaunchedEffect(Unit) {
-        withContext(Dispatchers.IO) {
+private fun megabytes(bytes: Long): Long = (bytes + 524_288L) / (1024L * 1024L)
+
+@Composable
+internal fun ModelsSection(progress: ModelProgress) {
+    val context = LocalContext.current
+    var states by remember { mutableStateOf<List<ModelFileState>>(emptyList()) }
+
+    // Read again whenever a download starts, stops, finishes or fails; a running download's percentage comes from progress.
+    LaunchedEffect(progress.name, progress.loading, progress.error) {
+        states = withContext(Dispatchers.IO) {
             val modelsDir = File(context.filesDir, "memeget_models")
-            val list = REGISTERED_MODELS.map { info ->
-                val primaryFile = File(modelsDir, info.filename)
-                val fallbackFile = info.fallbackFilename?.let { File(modelsDir, it) }
-                val targetFile = if (primaryFile.isFile && primaryFile.length() > 0) primaryFile else fallbackFile
-                val isDownloaded = targetFile != null && targetFile.isFile && targetFile.length() > 0
-                val sizeBytes = if (isDownloaded) targetFile!!.length() else info.expectedBytes
-                val mb = (sizeBytes + 524_288L) / (1024L * 1024L)
-                val status = if (isDownloaded) "Downloaded ($mb MB)" else "Not downloaded ($mb MB)"
-                info.feature to status
+            REGISTERED_MODELS.map { info ->
+                val finished = listOfNotNull(info.filename, info.sourceFilename)
+                    .map { File(modelsDir, it) }
+                    .firstOrNull { it.isFile && it.length() > 0 }
+                val part = File(modelsDir, "${info.sourceFilename ?: info.filename}.part")
+                when {
+                    finished != null -> ModelFileState.Present(finished.length())
+                    part.isFile && part.length() > 0 && info.expectedBytes > 0 ->
+                        ModelFileState.Partial(part.length().toFloat() / info.expectedBytes)
+                    else -> ModelFileState.Absent
+                }
             }
-            modelStatusList = list
         }
     }
 
@@ -796,22 +815,35 @@ internal fun ModelsSection() {
             fontWeight = FontWeight.Bold,
             color = MemegetColors.TextPrimary,
         )
+        Text(
+            text = "Each model downloads the first time a feature needs it. A stopped download picks up where it left off.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MemegetColors.TextSecondary,
+        )
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            modelStatusList.forEach { (feature, status) ->
+            REGISTERED_MODELS.zip(states).forEach { (info, state) ->
+                val live = progress.name == info.id
+                val (status, color) = when {
+                    state is ModelFileState.Present -> "Downloaded (${megabytes(state.bytes)} MB)" to MemegetColors.Success
+                    live && progress.loading -> "Downloading ${(progress.fraction * 100).toInt()}%" to MemegetColors.Volt
+                    live && progress.error != null -> "Download failed" to MemegetColors.Danger
+                    state is ModelFileState.Partial -> "Paused at ${(state.fraction * 100).toInt()}%" to MemegetColors.TextSecondary
+                    else -> "Not downloaded yet (${megabytes(info.expectedBytes)} MB)" to MemegetColors.TextMuted
+                }
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text(
-                        text = feature,
+                        text = info.feature,
                         style = MaterialTheme.typography.bodyMedium,
                         color = MemegetColors.TextPrimary,
                     )
                     Text(
                         text = status,
                         style = MaterialTheme.typography.labelSmall,
-                        color = if (status.startsWith("Downloaded")) MemegetColors.Success else MemegetColors.TextMuted,
+                        color = color,
                     )
                 }
             }

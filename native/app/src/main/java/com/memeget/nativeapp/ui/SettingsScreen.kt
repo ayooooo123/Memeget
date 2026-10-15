@@ -329,7 +329,7 @@ internal fun SettingsScreen(
                 }
             }
 
-            ModelsSection()
+            ModelsSection(modelProgress)
 
             // Local ML Features Opt-in Toggles
             SettingsCard {
@@ -438,10 +438,9 @@ internal fun SettingsScreen(
 
                     OutlinedButton(
                         onClick = {
-                            scope.launch {
-                                coordinator.runPending()
-                                Toast.makeText(context, "Running pending queue", Toast.LENGTH_SHORT).show()
-                            }
+                            // The coordinator owns the session: leaving Settings stops neither it nor a model download.
+                            coordinator.start(emptyList())
+                            Toast.makeText(context, "Running pending queue", Toast.LENGTH_SHORT).show()
                         },
                         modifier = Modifier.weight(1f),
                     ) {
