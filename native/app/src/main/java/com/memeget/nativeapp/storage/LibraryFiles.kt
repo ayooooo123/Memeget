@@ -1056,24 +1056,34 @@ internal class LibraryFiles(
                     copyName = "${name.substringBeforeLast('.')}.mp4"
                     mime = MediaIoUtils.MIME_MP4
                 }
-                val readyFile = File.createTempFile("clip_", ".${MediaIoUtils.extForMime(mime)}", clipDir)
-                staged = readyFile
+                // One directory per copy, holding the file under the meme's own name: the URI then ends in that
+                // name with no query, as in the original app, for paste targets that read the name or extension
+                // from the URI instead of asking the provider.
+                val slot = File(clipDir, "c${System.nanoTime()}")
+                staged = slot
+                if (!slot.mkdirs()) throw IOException("Could not stage the copy")
+                val readyFile = File(slot, clipboardFileName(copyName, mime))
                 MediaIoUtils.copyUriToFile(context, source, readyFile)
                 ensureActive()
-                val contentUri = FileProvider.getUriForFile(
-                    context, "${context.packageName}.memegetclip", readyFile, copyName,
-                )
+                val contentUri = FileProvider.getUriForFile(context, "${context.packageName}.memegetclip", readyFile)
                 val clip = ClipData(copyName, arrayOf(mime), ClipData.Item(contentUri))
                 val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                 clipboard.setPrimaryClip(clip)
                 published = true
                 // Publish only complete files; failed copies must leave the previous clip readable.
-                clipDir.listFiles()?.forEach { if (it != readyFile) it.delete() }
+                clipDir.listFiles()?.forEach { if (it != slot) it.deleteRecursively() }
             } finally {
-                if (!published) staged?.delete()
+                if (!published) staged?.deleteRecursively()
                 converted?.delete()
             }
         }
+    }
+
+    /** A safe file name for a clipboard copy: the meme's name, with the extension its MIME type serves. */
+    private fun clipboardFileName(name: String, mime: String): String {
+        val ext = MediaIoUtils.extForMime(mime)
+        val stem = name.substringBeforeLast('.').replace(Regex("[^A-Za-z0-9._-]"), "_").trim('.', '_').take(120)
+        return "${stem.ifBlank { "meme" }}.$ext"
     }
 
     suspend fun thumbnail(meme: Meme): String = withContext(Dispatchers.IO) {
