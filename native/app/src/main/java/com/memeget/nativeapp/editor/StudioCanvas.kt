@@ -350,17 +350,24 @@ internal fun StudioCanvas(
             // 4. Canvas Tap Selection Hit-Testing
             // -----------------------------------------------------------------
             if (activeTool != "draw" && !beforeMode) {
+                // Read through state, not restart keys: playback moves the playhead every 33 ms, and restarting
+                // the detector that often cancelled taps made layers hard to select while the video played.
+                val layersState = rememberUpdatedState(project.layers)
+                val canvasSizeState = rememberUpdatedState(canvasWidth to canvasHeight)
+                val onSelectState = rememberUpdatedState(onSelectLayer)
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .pointerInput(project.layers, playheadUs) {
+                        .pointerInput(Unit) {
                             detectTapGestures { offset ->
                                 val tapX = offset.x
                                 val tapY = offset.y
+                                val playheadUs = playheadState.value
+                                val (canvasWidth, canvasHeight) = canvasSizeState.value
                                 var hitId: String? = null
 
                                 // Hit-test active layers in reverse order (topmost layer first)
-                                for (layer in project.layers.reversed()) {
+                                for (layer in layersState.value.reversed()) {
                                     if (!ProjectCore.isLayerActiveAt(layer, playheadUs)) continue
                                     when (layer) {
                                         is MemeEditLayer.Text -> {
@@ -416,7 +423,7 @@ internal fun StudioCanvas(
                                         else -> Unit
                                     }
                                 }
-                                onSelectLayer(hitId)
+                                onSelectState.value(hitId)
                             }
                         }
                 )
