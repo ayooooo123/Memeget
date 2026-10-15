@@ -72,6 +72,9 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import coil.compose.SubcomposeAsyncImage
 import coil.request.ImageRequest
 import com.memeget.nativeapp.data.TagMerge
@@ -1243,30 +1246,51 @@ internal fun ViewerModal(
 @Composable
 private fun VideoPlayerView(uri: String) {
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     val exoPlayer = remember(uri) {
         ExoPlayer.Builder(context).build().apply {
             setMediaItem(MediaItem.fromUri(Uri.parse(uri)))
             repeatMode = Player.REPEAT_MODE_ALL
+            // Unplugging headphones pauses instead of moving the sound to the speaker.
+            setHandleAudioBecomingNoisy(true)
             prepare()
             playWhenReady = true
         }
     }
 
     DisposableEffect(exoPlayer) {
-        onDispose {
-            exoPlayer.release()
+        onDispose { exoPlayer.release() }
+    }
+
+    // A looping meme must not keep playing once Memeget leaves the screen; it carries on when Memeget comes back.
+    DisposableEffect(exoPlayer, lifecycleOwner) {
+        var resumeOnStart = false
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_STOP -> {
+                    resumeOnStart = exoPlayer.playWhenReady
+                    exoPlayer.pause()
+                }
+                Lifecycle.Event.ON_START -> if (resumeOnStart) exoPlayer.play()
+                else -> Unit
+            }
         }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
     AndroidView(
         factory = { ctx ->
             PlayerView(ctx).apply {
-                player = exoPlayer
                 useController = true
                 setShowNextButton(false)
                 setShowPreviousButton(false)
             }
         },
+        // The view outlives one meme (a look-alike opens in place): give it each new player, or it keeps showing
+        // the released one while the new clip plays unseen.
+        update = { view -> view.player = exoPlayer },
+        onRelease = { view -> view.player = null },
         modifier = Modifier.fillMaxSize(),
     )
 }
