@@ -249,6 +249,12 @@ internal class IndexCoordinator(
             val sessionFinished = withSessionDeadline {
                 val tried = HashSet<Long>()
                 val triedSpeech = HashSet<Long>()
+                // Memes waiting to be indexed come first: transcripts and captions stop for them between clips. A
+                // background session stops counting them at its item cap, and none count while the image model is
+                // missing: those memes stay queued and indexing can't take them.
+                val newMemesWaiting: suspend () -> Boolean = {
+                    (!background || completed + failed < BACKGROUND_ITEMS) && "index" !in gaps && store.pending(1).isNotEmpty()
+                }
                 // Indexing, then enrichment; a meme shared or imported during enrichment sends the session back to
                 // indexing, so it becomes searchable now instead of waiting behind the transcript and caption backlog.
                 session@ while (true) {
@@ -319,8 +325,9 @@ internal class IndexCoordinator(
                                 store.markIndexFailed(item.meme.id, failure.message ?: "Text recognition failed")
                             }
                         }
-                        // Captions wait until the queue is indexed; the enrichment pass below writes them.
-                        enrich(indexed, background, gaps, describe = false)
+                        // Captions wait until the queue is indexed; the enrichment pass below writes them. Transcripts
+                        // of this batch wait too while more memes are queued: the enrichment pass picks them up.
+                        enrich(indexed, background, gaps, describe = false, yieldTo = newMemesWaiting)
                     } finally {
                         withContext(NonCancellable + Dispatchers.IO) {
                             prepared.forEach(::cleanPrepared)
@@ -337,10 +344,7 @@ internal class IndexCoordinator(
                     val audio = store.setting("audio.enabled") == "1"
                     val visual = store.setting("visual.enabled") == "1"
                     if (vision || audio || visual) {
-                        // Not while the image model is missing: those memes stay queued and indexing can't take them.
-                        val newMemesWaiting: suspend () -> Boolean = {
-                            (!background || completed + failed < BACKGROUND_ITEMS) && "index" !in gaps && store.pending(1).isNotEmpty()
-                        }
+
                         while (SystemClock.elapsedRealtime() - started < sessionTimeoutMillis && powerBlock(background) == null && !interactive) {
                             if (newMemesWaiting()) {
                                 // The batch this cut short goes back in the queue; failed items already left it.
@@ -669,7 +673,7 @@ internal class IndexCoordinator(
         }
         if (store.setting("visual.enabled") == "1" && "visual" !in gaps) {
             for (item in items) {
-                if (powerBlock(background) != null || interactive) break
+                if (powerBlock(background) != null || interactive || yieldTo()) break
                 if (store.vectors(item.meme.id)?.visual != null) continue
                 mutableProgress.value = WorkProgress("visual embedding", detail = item.meme.name, running = true, memeId = item.meme.id)
                 try { store.setVisual(item.meme.id, engine.embedVisual(item.frames.first()), ModelRegistry.DINOV2_MODEL_FINGERPRINT) }
