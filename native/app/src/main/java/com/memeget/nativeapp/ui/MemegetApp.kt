@@ -1,9 +1,6 @@
 package com.memeget.nativeapp
 
-import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.togetherWith
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -39,6 +36,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.layout.layout
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import kotlinx.coroutines.CancellationException
@@ -68,7 +67,17 @@ internal fun MemegetApp(
     var currentTab by remember { mutableStateOf(AppTab.Library) }
     var activeViewerMeme by remember { mutableStateOf<Meme?>(null) }
     var activeRemixMeme by remember { mutableStateOf<Meme?>(null) }
+    // Set by a tag tap in the viewer or Settings; the library clears it once applied, so the same tag twice works.
     var tagSearchRequest by remember { mutableStateOf<String?>(null) }
+    var deletedMemeIds by remember { mutableStateOf<Set<Long>>(emptySet()) }
+    val focusManager = LocalFocusManager.current
+    fun selectTab(tab: AppTab) {
+        // A search field focused on one tab must not bring its keyboard back on another.
+        focusManager.clearFocus()
+        currentTab = tab
+    }
+    // Back from Label or Settings returns to the library instead of leaving the app.
+    BackHandler(enabled = currentTab != AppTab.Library) { selectTab(AppTab.Library) }
     var searching by remember { mutableStateOf(false) }
     // Answers in the Label tab spread to look-alikes on a re-tag once the tab is left, and teachings in the viewer
     // once it closes, as the original app applies a teaching shortly after it. The app scope owns each save, so
@@ -140,24 +149,21 @@ internal fun MemegetApp(
                             label = "Library",
                             glyph = "▦",
                             selected = currentTab == AppTab.Library,
-                            onClick = {
-                                currentTab = AppTab.Library
-                                tagSearchRequest = null
-                            },
+                            onClick = { selectTab(AppTab.Library) },
                         )
 
                         TabItem(
                             label = "Label",
                             glyph = "✎",
                             selected = currentTab == AppTab.Label,
-                            onClick = { currentTab = AppTab.Label },
+                            onClick = { selectTab(AppTab.Label) },
                         )
 
                         TabItem(
                             label = "Settings",
                             glyph = "⚙",
                             selected = currentTab == AppTab.Settings,
-                            onClick = { currentTab = AppTab.Settings },
+                            onClick = { selectTab(AppTab.Settings) },
                         )
                     }
                 }
@@ -171,50 +177,52 @@ internal fun MemegetApp(
                     // Lets imePadding below add only the part of the keyboard the bottom bar doesn't cover.
                     .consumeWindowInsets(innerPadding),
             ) {
-                AnimatedContent(
-                    targetState = currentTab,
-                    transitionSpec = { fadeIn() togetherWith fadeOut() },
-                    label = "tab_transition",
-                ) { tab ->
-                    when (tab) {
-                        AppTab.Library -> {
-                            LibraryScreen(
-                                store = store,
-                                files = files,
-                                engine = engine,
-                                knowledge = knowledge,
-                                coordinator = coordinator,
-                                onOpenViewer = { meme -> activeViewerMeme = meme },
-                                onOpenRemix = { meme -> activeRemixMeme = meme },
-                                onOpenSettings = { currentTab = AppTab.Settings },
-                                tagSearchRequest = tagSearchRequest,
-                                onInteractionChange = { searching = it },
-                            )
-                        }
-                        AppTab.Label -> {
-                            LabelQueueScreen(
-                                store = store,
-                                knowledge = knowledge,
-                                onOpenViewer = { meme -> activeViewerMeme = meme },
-                                saveAnswer = saveAnswer,
-                            )
-                        }
-                        AppTab.Settings -> {
-                            SettingsScreen(
-                                store = store,
-                                files = files,
-                                engine = engine,
-                                knowledge = knowledge,
-                                cloud = cloud,
-                                coordinator = coordinator,
-                                onBack = { currentTab = AppTab.Library },
-                                onSearchTag = { tag ->
-                                    tagSearchRequest = tag
-                                    currentTab = AppTab.Library
-                                },
-                                lastBackupAt = backups.lastBackupAt,
-                            )
-                        }
+                // The library stays composed while Label or Settings shows, so its search, filters, loaded pages and
+                // scroll position are still there on return. Hidden, it is measured but not placed: not drawn, not
+                // touchable, and its Back handling is off.
+                val libraryActive = currentTab == AppTab.Library
+                Box(modifier = Modifier.fillMaxSize().placedOnlyWhen(libraryActive)) {
+                    LibraryScreen(
+                        store = store,
+                        files = files,
+                        engine = engine,
+                        knowledge = knowledge,
+                        coordinator = coordinator,
+                        onOpenViewer = { meme -> activeViewerMeme = meme },
+                        onOpenRemix = { meme -> activeRemixMeme = meme },
+                        onOpenSettings = { selectTab(AppTab.Settings) },
+                        active = libraryActive,
+                        tagSearchRequest = tagSearchRequest,
+                        onTagSearchApplied = { tagSearchRequest = null },
+                        deletedMemeIds = deletedMemeIds,
+                        onInteractionChange = { searching = it },
+                    )
+                }
+                when (currentTab) {
+                    AppTab.Library -> Unit
+                    AppTab.Label -> {
+                        LabelQueueScreen(
+                            store = store,
+                            knowledge = knowledge,
+                            onOpenViewer = { meme -> activeViewerMeme = meme },
+                            saveAnswer = saveAnswer,
+                        )
+                    }
+                    AppTab.Settings -> {
+                        SettingsScreen(
+                            store = store,
+                            files = files,
+                            engine = engine,
+                            knowledge = knowledge,
+                            cloud = cloud,
+                            coordinator = coordinator,
+                            onBack = { selectTab(AppTab.Library) },
+                            onSearchTag = { tag ->
+                                tagSearchRequest = tag
+                                selectTab(AppTab.Library)
+                            },
+                            lastBackupAt = backups.lastBackupAt,
+                        )
                     }
                 }
             }
@@ -236,13 +244,14 @@ internal fun MemegetApp(
                 onSearchTag = { tag ->
                     activeViewerMeme = null
                     tagSearchRequest = tag
-                    currentTab = AppTab.Library
+                    selectTab(AppTab.Library)
                 },
                 onNavigateToMeme = { nextMeme ->
                     activeViewerMeme = nextMeme
                 },
-                onMemeDeleted = {
+                onMemeDeleted = { id ->
                     activeViewerMeme = null
+                    deletedMemeIds = deletedMemeIds + id
                 },
                 onTaught = { labelsChanged = true },
             )
@@ -276,6 +285,14 @@ internal fun MemegetApp(
                 )
             }
         }
+    }
+}
+
+/** Measures the content but places it only when [visible]; unplaced, it is neither drawn nor hit-tested. */
+private fun Modifier.placedOnlyWhen(visible: Boolean): Modifier = layout { measurable, constraints ->
+    val placeable = measurable.measure(constraints)
+    layout(placeable.width, placeable.height) {
+        if (visible) placeable.place(0, 0)
     }
 }
 
