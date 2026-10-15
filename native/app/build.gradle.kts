@@ -23,6 +23,10 @@ val syncReusableFonts by tasks.registering(Sync::class) {
     from(File(mediaSource, "assets")) { include("fonts/**") }
     into(layout.buildDirectory.dir("generated/reusableAssets"))
 }
+// Every release says 1.0-native, so a release also names the commit it was built from (Settings shows it).
+val buildCommit: String = runCatching {
+    providers.exec { commandLine("git", "-C", rootDir.path, "rev-parse", "--short=7", "HEAD") }.standardOutput.asText.get().trim()
+}.getOrDefault("")
 
 android {
     namespace = "com.memeget.nativeapp"
@@ -56,6 +60,7 @@ android {
     buildTypes {
         release {
             signingConfig = signingConfigs.getByName("release")
+            if (buildCommit.isNotEmpty()) versionNameSuffix = "-$buildCommit"
         }
     }
     buildFeatures { compose = true; buildConfig = true }
