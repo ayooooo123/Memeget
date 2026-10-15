@@ -247,6 +247,11 @@ internal class IndexCoordinator(
             }
 
             val sessionFinished = withSessionDeadline {
+                val tried = HashSet<Long>()
+                val triedSpeech = HashSet<Long>()
+                // Indexing, then enrichment; a meme shared or imported during enrichment sends the session back to
+                // indexing, so it becomes searchable now instead of waiting behind the transcript and caption backlog.
+                session@ while (true) {
                 while (SystemClock.elapsedRealtime() - started < sessionTimeoutMillis) {
                     currentCoroutineContext().ensureActive()
                     pause = powerBlock(background)
@@ -332,9 +337,17 @@ internal class IndexCoordinator(
                     val audio = store.setting("audio.enabled") == "1"
                     val visual = store.setting("visual.enabled") == "1"
                     if (vision || audio || visual) {
-                        val tried = HashSet<Long>()
-                        val triedSpeech = HashSet<Long>()
+                        // Not while the image model is missing: those memes stay queued and indexing can't take them.
+                        val newMemesWaiting: suspend () -> Boolean = {
+                            (!background || completed + failed < BACKGROUND_ITEMS) && "index" !in gaps && store.pending(1).isNotEmpty()
+                        }
                         while (SystemClock.elapsedRealtime() - started < sessionTimeoutMillis && powerBlock(background) == null && !interactive) {
+                            if (newMemesWaiting()) {
+                                // The batch this cut short goes back in the queue; failed items already left it.
+                                tried.clear()
+                                triedSpeech.clear()
+                                continue@session
+                            }
                             // Work whose model could not be fetched this session is left for the next one.
                             val captions = vision && "vision" !in gaps
                             val speech = audio && "audio" !in gaps
@@ -373,12 +386,14 @@ internal class IndexCoordinator(
                                     }
                                 }
                                 // One call per batch, so each model loads once per batch rather than once per meme.
-                                enrich(batch, background, gaps, describe = transcripts.isEmpty())
+                                enrich(batch, background, gaps, describe = transcripts.isEmpty(), yieldTo = newMemesWaiting)
                             } finally {
                                 withContext(NonCancellable + Dispatchers.IO) { batch.forEach(::cleanPrepared) }
                             }
                         }
                     }
+                }
+                break
                 }
 
                 val remaining = store.pending(1).isNotEmpty()
@@ -544,13 +559,20 @@ internal class IndexCoordinator(
         }
     }
 
-    private suspend fun enrich(items: List<Prepared>, background: Boolean, gaps: ModelGaps, describe: Boolean = true) {
+    private suspend fun enrich(
+        items: List<Prepared>,
+        background: Boolean,
+        gaps: ModelGaps,
+        describe: Boolean = true,
+        // Checked before each caption and transcript: a long batch stops early for memes waiting to be indexed.
+        yieldTo: suspend () -> Boolean = { false },
+    ) {
         if (items.isEmpty() || powerBlock(background) != null || interactive) return
         val captions = ArrayList<Pair<Long, VisionDescription>>()
         if (describe && store.setting("vision.enabled") == "1" && "vision" !in gaps) {
             for (item in items) {
                 currentCoroutineContext().ensureActive()
-                if (powerBlock(background) != null || interactive) break
+                if (powerBlock(background) != null || interactive || yieldTo()) break
                 val meme = store.meme(item.meme.id) ?: continue
                 if (meme.visionState != "pending") continue
                 mutableProgress.value = WorkProgress("local description", detail = meme.name, running = true, memeId = meme.id)
@@ -617,7 +639,7 @@ internal class IndexCoordinator(
         if (store.setting("audio.enabled") == "1" && "audio" !in gaps) {
             for (item in items.filter { it.meme.kind == "video" }) {
                 currentCoroutineContext().ensureActive()
-                if (powerBlock(background) != null || interactive) break
+                if (powerBlock(background) != null || interactive || yieldTo()) break
                 val meme = store.meme(item.meme.id) ?: continue
                 if (meme.audioState == "done") continue
                 mutableProgress.value = WorkProgress("local transcription", detail = meme.name, running = true, memeId = meme.id)

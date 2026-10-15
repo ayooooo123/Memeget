@@ -773,6 +773,39 @@ class IndexCoordinatorTest {
         )
     }
 
+    @Test(timeout = 30_000)
+    fun memeSharedWhileTheSessionTranscribesIsIndexedBeforeTheRestOfTheBatch() = runBlocking {
+        // Three indexed videos waiting for transcripts: one batch, so the session goes straight to transcription.
+        val poster = Uri.fromFile(createValidBitmapFile("poster.png")).toString()
+        val videos = (1..3).map { n ->
+            store.insertPending(Uri.fromFile(createValidBitmapFile("clip$n.mp4")).toString(), "clip$n.mp4", "video", 100L + n, "hashS$n")
+                .also { id ->
+                    store.completeIndex(id, LocalAnalysis(FloatArray(512).apply { this[0] = 1f }, "", emptyList(), ""), ModelRegistry.PRIMARY_MODEL_FINGERPRINT, poster)
+                }
+        }
+        store.setSetting("audio.enabled", "1")
+        val events = java.util.Collections.synchronizedList(ArrayList<String>())
+        var sharedId = -1L
+        testEngine.onRecognize = { events += "index"; emptyList() }
+        testEngine.onTranscribe = {
+            events += "transcribe"
+            // A share lands while the first clip is being transcribed.
+            if (sharedId < 0) {
+                sharedId = store.insertPending(Uri.fromFile(createValidBitmapFile("shared.png")).toString(), "shared.png", "image", 200L, "hashShared")
+            }
+            "a transcript"
+        }
+        val coordinator = IndexCoordinator(context, store, files, testEngine, knowledge, cloud, sessionTimeoutMillis = 10_000L)
+
+        coordinator.runPending()
+
+        assertTrue("the session never transcribed: ${store.errors()}", sharedId > 0)
+        assertFalse("the shared meme was left for a later session", requireNotNull(store.meme(sharedId)).pending)
+        assertEquals("indexed right after the clip in progress, not after the batch: $events",
+            listOf("transcribe", "index", "transcribe", "transcribe"), events.toList())
+        assertTrue("every clip still gets its transcript", videos.all { requireNotNull(store.meme(it)).audioState == "done" })
+    }
+
     private class TestInferenceEngine : InferenceEngine {
         val cancelled = AtomicBoolean(false)
 
