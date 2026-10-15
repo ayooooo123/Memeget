@@ -22,6 +22,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -303,7 +304,12 @@ internal class NativeInferenceEngine(
         )
     }
 
-    private suspend fun ensureModel(artifact: ModelArtifact): File {
+    /**
+     * Downloads [artifact] or finds it verified on disk. A stop (Stop, the session limit, a screen closing) is not a
+     * model error: the partial file stays and the next call resumes it. A failure is a [ModelUnavailableException] that
+     * names the model, so callers wait for it instead of blaming the item that asked.
+     */
+    internal suspend fun ensureModel(artifact: ModelArtifact): File {
         _progress.value = ModelProgress(name = artifact.id, fraction = 0f, loading = true)
         return try {
             val file = downloader.ensureDownloaded(artifact, modelsDir) { fraction ->
@@ -312,12 +318,10 @@ internal class NativeInferenceEngine(
             _progress.value = ModelProgress(name = artifact.id, fraction = 1f, loading = false)
             file
         } catch (cancelled: CancellationException) {
-            _progress.value = ModelProgress(name = artifact.id, loading = false, error = "Cancelled")
+            settle(artifact.id)
             throw cancelled
         } catch (failure: Exception) {
-            val err = failure.message ?: "Failed to download model ${artifact.filename}"
-            _progress.value = ModelProgress(name = artifact.id, loading = false, error = err)
-            throw IOException(err, failure)
+            throw unavailable(artifact.id, "Couldn't download ${artifact.filename}", failure)
         }
     }
 
@@ -335,20 +339,31 @@ internal class NativeInferenceEngine(
                 }
             }
         } catch (failure: Exception) {
-            // A stopped conversion fails as an ordinary exception; report it as cancellation.
+            // A stopped conversion fails as an ordinary exception; it is a stop, not a model error.
             if (failure is CancellationException || !currentCoroutineContext().isActive) {
-                _progress.value = ModelProgress(name = artifact.id, loading = false, error = "Cancelled")
+                settle(artifact.id)
                 throw failure as? CancellationException
                     ?: CancellationException("Model preparation stopped").apply { initCause(failure) }
             }
-            val err = failure.message ?: "Failed to prepare model ${artifact.filename}"
-            _progress.value = ModelProgress(name = artifact.id, loading = false, error = err)
-            throw IOException(err, failure)
+            // A failed BF16 download has already reported itself.
+            if (failure is ModelUnavailableException) throw failure
+            throw unavailable(artifact.id, "Couldn't prepare ${artifact.filename}", failure)
         }
         _progress.value = ModelProgress(name = artifact.id, fraction = 1f, loading = false)
         // The BF16 download is only conversion input; the verified F16 copy replaces it on disk.
         File(modelsDir, artifact.source.filename).delete()
         return projector
+    }
+
+    /** A stopped download or conversion leaves no status behind, unless another model has reported since. */
+    private fun settle(id: String) {
+        _progress.update { if (it.name == id) ModelProgress() else it }
+    }
+
+    private fun unavailable(id: String, what: String, failure: Exception): ModelUnavailableException {
+        val error = "$what: ${failure.message ?: failure.javaClass.simpleName}"
+        _progress.value = ModelProgress(name = id, loading = false, error = error)
+        return ModelUnavailableException(id, error, failure)
     }
 
     /** Called under engineMutex on a worker dispatcher; browsing never loads the native runtime. */

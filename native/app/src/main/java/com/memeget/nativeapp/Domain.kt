@@ -285,3 +285,10 @@ internal interface InferenceEngine : AutoCloseable {
     fun cancel()
     override fun close()
 }
+
+/**
+ * A model a call needs could not be downloaded or prepared ([model] is its artifact id). The item that asked is not
+ * at fault: its work waits for a later session instead of failing, and a partial download resumes then.
+ */
+internal class ModelUnavailableException(val model: String, message: String, cause: Throwable? = null) :
+    java.io.IOException(message, cause)

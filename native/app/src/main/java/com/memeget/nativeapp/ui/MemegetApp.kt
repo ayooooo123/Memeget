@@ -42,10 +42,8 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import com.memeget.nativeapp.editor.RemixStudio
 
 internal enum class AppTab {
@@ -106,14 +104,10 @@ internal fun MemegetApp(
         onDispose { coordinator.setInteractive(false) }
     }
 
-    // Resume pending indexing if pending memes exist after activity cycle
+    // Resume pending indexing after an activity cycle. The session belongs to the coordinator, so a configuration
+    // change or closing the app's screen stops neither it nor a model download it started.
     LaunchedEffect(Unit) {
-        withContext(Dispatchers.IO) {
-            val pendingList = store.pending(limit = 1)
-            if (pendingList.isNotEmpty()) {
-                coordinator.runPending()
-            }
-        }
+        coordinator.resumePending()
     }
 
     MemegetTheme {

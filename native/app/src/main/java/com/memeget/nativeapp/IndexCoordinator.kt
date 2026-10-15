@@ -208,6 +208,22 @@ internal class IndexCoordinator(
         }
     }
     suspend fun runPending() = runSession(background = true)
+
+    /**
+     * [runPending] for a screen: the session runs in this coordinator's scope, so closing the screen or an activity
+     * restart neither stops it nor cuts off a model download it started.
+     */
+    fun resumePending() {
+        scope.launch {
+            try {
+                if (store.pending(1).isNotEmpty()) runSession(background = true)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                mutableProgress.value = WorkProgress(stage = "failed", error = failure.message ?: "Indexing failed")
+            }
+        }
+    }
     private suspend fun runSession(background: Boolean) {
         if (background && store.setting("background.enabled") != "1") return
         if (!session.tryLock()) return
@@ -218,6 +234,7 @@ internal class IndexCoordinator(
         var held = false
         var pause: String? = null
         var completedNaturally = false
+        val gaps = ModelGaps(store)
 
         try {
             mutableProgress.value = WorkProgress("indexing", running = true)
@@ -233,7 +250,7 @@ internal class IndexCoordinator(
                 while (SystemClock.elapsedRealtime() - started < sessionTimeoutMillis) {
                     currentCoroutineContext().ensureActive()
                     pause = powerBlock(background)
-                    if (pause != null || (background && interactive)) break
+                    if (pause != null || (background && interactive) || "index" in gaps) break
                     val pending = store.pending(BATCH_SIZE)
                     if (pending.isEmpty()) break
                     val prepared = ArrayList<Prepared>(pending.size)
@@ -254,6 +271,10 @@ internal class IndexCoordinator(
                                 stagedBytes += item.source.length()
                             } catch (cancelled: CancellationException) {
                                 throw cancelled
+                            } catch (unavailable: ModelUnavailableException) {
+                                // The model is missing, not this meme: it stays queued for the next session.
+                                gaps.note("index", unavailable)
+                                break
                             } catch (failure: Exception) {
                                 failed++
                                 store.markIndexFailed(meme.id, failure.message ?: "Media embedding failed")
@@ -285,13 +306,16 @@ internal class IndexCoordinator(
                                 completed++
                             } catch (cancelled: CancellationException) {
                                 throw cancelled
+                            } catch (unavailable: ModelUnavailableException) {
+                                gaps.note("index", unavailable)
+                                break
                             } catch (failure: Exception) {
                                 failed++
                                 store.markIndexFailed(item.meme.id, failure.message ?: "Text recognition failed")
                             }
                         }
                         // Captions wait until the queue is indexed; the enrichment pass below writes them.
-                        enrich(indexed, background, describe = false)
+                        enrich(indexed, background, gaps, describe = false)
                     } finally {
                         withContext(NonCancellable + Dispatchers.IO) {
                             prepared.forEach(::cleanPrepared)
@@ -311,19 +335,23 @@ internal class IndexCoordinator(
                         val tried = HashSet<Long>()
                         val triedSpeech = HashSet<Long>()
                         while (SystemClock.elapsedRealtime() - started < sessionTimeoutMillis && powerBlock(background) == null && !interactive) {
+                            // Work whose model could not be fetched this session is left for the next one.
+                            val captions = vision && "vision" !in gaps
+                            val speech = audio && "audio" !in gaps
+                            val appearance = visual && "visual" !in gaps
                             // Videos waiting for a transcript go first, in batches that skip captions: on the Pixel 5a
                             // small.en transcribes a 30 s clip in about 30 s, while captioning a video takes about a
                             // minute, and the caption backlog is several times longer.
-                            val speech = if (audio) {
+                            val transcripts = if (speech) {
                                 store.allMemes().filter { meme ->
                                     meme.id !in triedSpeech && !meme.pending && meme.kind == "video" && meme.audioState == "pending"
                                 }.take(BATCH_SIZE).toList()
                             } else emptyList()
-                            val candidates = speech.ifEmpty {
+                            val candidates = transcripts.ifEmpty {
                                 store.allMemes().filter { meme ->
-                                    meme.id !in tried && !meme.pending && (vision && meme.visionState == "pending" ||
-                                        audio && meme.kind == "video" && meme.audioState == "pending" ||
-                                        visual && store.vectors(meme.id)?.visual == null)
+                                    meme.id !in tried && !meme.pending && (captions && meme.visionState == "pending" ||
+                                        speech && meme.kind == "video" && meme.audioState == "pending" ||
+                                        appearance && store.vectors(meme.id)?.visual == null)
                                 }.take(BATCH_SIZE).toList()
                             }
                             if (candidates.isEmpty()) break
@@ -332,7 +360,7 @@ internal class IndexCoordinator(
                             try {
                                 for (meme in candidates) {
                                     if (batch.isNotEmpty() && stagedBytes >= BATCH_DISK_BYTES) break
-                                    if (speech.isEmpty()) tried += meme.id else triedSpeech += meme.id
+                                    if (transcripts.isEmpty()) tried += meme.id else triedSpeech += meme.id
                                     val vectors = store.vectors(meme.id)?.takeIf { it.model == engine.primaryModel } ?: continue
                                     mutableProgress.value = WorkProgress("preparing media", detail = meme.name, running = true, memeId = meme.id)
                                     try {
@@ -345,7 +373,7 @@ internal class IndexCoordinator(
                                     }
                                 }
                                 // One call per batch, so each model loads once per batch rather than once per meme.
-                                enrich(batch, background, describe = speech.isEmpty())
+                                enrich(batch, background, gaps, describe = transcripts.isEmpty())
                             } finally {
                                 withContext(NonCancellable + Dispatchers.IO) { batch.forEach(::cleanPrepared) }
                             }
@@ -354,10 +382,11 @@ internal class IndexCoordinator(
                 }
 
                 val remaining = store.pending(1).isNotEmpty()
+                val waiting = gaps.first?.let { "${it.message}. $MODEL_WAIT" }
                 mutableProgress.value = WorkProgress(
-                    stage = if (pause != null || remaining) "paused" else "complete",
+                    stage = if (pause != null || waiting != null || remaining) "paused" else "complete",
                     done = completed, total = completed + failed,
-                    detail = pause ?: if (remaining) "More items are saved and waiting. Resume indexing or enable background work." else "$completed indexed; $failed failed",
+                    detail = pause ?: waiting ?: if (remaining) "More items are saved and waiting. Resume indexing or enable background work." else "$completed indexed; $failed failed",
                     running = false,
                 )
                 completedNaturally = true
@@ -434,6 +463,26 @@ internal class IndexCoordinator(
     )
 
     /**
+     * Models a session could not download or prepare. The work that needs one ("index", "vision", "audio", "visual",
+     * "caption embedding") stops for the rest of the session and its items keep their place in the queue; each model
+     * is reported once, not once per item.
+     */
+    private class ModelGaps(private val store: LibraryStore) {
+        private val blocked = HashSet<String>()
+        private val reported = HashSet<String>()
+        var first: ModelUnavailableException? = null
+            private set
+
+        operator fun contains(work: String): Boolean = work in blocked
+
+        suspend fun note(work: String, failure: ModelUnavailableException) {
+            blocked += work
+            if (first == null) first = failure
+            if (reported.add(failure.model)) store.addError(failure.model, "model", "${failure.message}. $MODEL_WAIT")
+        }
+    }
+
+    /**
      * [knownVector] stands in for the image model. With [importedFor] it is a collection import's
      * vector for the bytes with that hash, reused (with the import's OCR) only while the file
      * still has those bytes.
@@ -495,10 +544,10 @@ internal class IndexCoordinator(
         }
     }
 
-    private suspend fun enrich(items: List<Prepared>, background: Boolean, describe: Boolean = true) {
+    private suspend fun enrich(items: List<Prepared>, background: Boolean, gaps: ModelGaps, describe: Boolean = true) {
         if (items.isEmpty() || powerBlock(background) != null || interactive) return
         val captions = ArrayList<Pair<Long, VisionDescription>>()
-        if (describe && store.setting("vision.enabled") == "1") {
+        if (describe && store.setting("vision.enabled") == "1" && "vision" !in gaps) {
             for (item in items) {
                 currentCoroutineContext().ensureActive()
                 if (powerBlock(background) != null || interactive) break
@@ -529,6 +578,14 @@ internal class IndexCoordinator(
                         throw failure as? CancellationException
                             ?: CancellationException("Local description stopped").apply { initCause(failure) }
                     }
+                    if (failure is ModelUnavailableException) {
+                        // Not this meme's fault: it goes back to the queue, and captions wait for a later session.
+                        withContext(NonCancellable + Dispatchers.IO) {
+                            store.setCaption(meme.id, meme.caption, emptyList(), null, "pending")
+                        }
+                        gaps.note("vision", failure)
+                        break
+                    }
                     store.addError(meme.name, "vision", failure.message ?: "Local description failed")
                     null
                 } ?: continue
@@ -550,10 +607,14 @@ internal class IndexCoordinator(
                     throw failure as? CancellationException
                         ?: CancellationException("Caption embedding stopped").apply { initCause(failure) }
                 }
+                if (failure is ModelUnavailableException) {
+                    gaps.note("caption embedding", failure)
+                    break
+                }
                 store.addError("item $id", "caption embedding", failure.message ?: "Caption vector failed; text remains searchable")
             }
         }
-        if (store.setting("audio.enabled") == "1") {
+        if (store.setting("audio.enabled") == "1" && "audio" !in gaps) {
             for (item in items.filter { it.meme.kind == "video" }) {
                 currentCoroutineContext().ensureActive()
                 if (powerBlock(background) != null || interactive) break
@@ -572,6 +633,11 @@ internal class IndexCoordinator(
                         throw failure as? CancellationException
                             ?: CancellationException("Local transcription stopped").apply { initCause(failure) }
                     }
+                    if (failure is ModelUnavailableException) {
+                        withContext(NonCancellable + Dispatchers.IO) { store.setAudioState(meme.id, "pending") }
+                        gaps.note("audio", failure)
+                        break
+                    }
                     store.addError(meme.name, "audio", failure.message ?: "Transcription failed")
                     null
                 } ?: continue
@@ -579,13 +645,14 @@ internal class IndexCoordinator(
                 withContext(NonCancellable) { store.setTranscript(meme.id, text) }
             }
         }
-        if (store.setting("visual.enabled") == "1") {
+        if (store.setting("visual.enabled") == "1" && "visual" !in gaps) {
             for (item in items) {
                 if (powerBlock(background) != null || interactive) break
                 if (store.vectors(item.meme.id)?.visual != null) continue
                 mutableProgress.value = WorkProgress("visual embedding", detail = item.meme.name, running = true, memeId = item.meme.id)
                 try { store.setVisual(item.meme.id, engine.embedVisual(item.frames.first()), ModelRegistry.DINOV2_MODEL_FINGERPRINT) }
                 catch (cancelled: CancellationException) { throw cancelled }
+                catch (unavailable: ModelUnavailableException) { gaps.note("visual", unavailable); break }
                 catch (failure: Exception) { store.addError(item.meme.name, "visual", failure.message ?: "Visual embedding failed") }
             }
         }
@@ -721,6 +788,7 @@ internal class IndexCoordinator(
         private const val SESSION_MILLIS = 7L * 60 * 1000
         private const val MAX_SOURCE_BYTES = 512L * 1024 * 1024
         private const val BATCH_DISK_BYTES = 256L * 1024 * 1024
+        private const val MODEL_WAIT = "Work that needs it waits for the next session."
         private const val IMMEDIATE_WORK = "memeget-native-index"
         private const val PERIODIC_WORK = "memeget-native-periodic"
         private const val CONTINUE_WORK = "memeget-native-continue"

@@ -689,9 +689,71 @@ class IndexCoordinatorTest {
         assertTrue(queuedHandovers().isEmpty())
     }
 
+    @Test(timeout = 30_000)
+    fun anImageModelThatCannotBeDownloadedLeavesTheQueueWaitingInsteadOfFailingEveryMeme() = runBlocking {
+        val ids = (1..3).map { n ->
+            store.insertPending(Uri.fromFile(createValidBitmapFile("d$n.png")).toString(), "d$n.png", "image", 100L + n, "hashD$n")
+        }
+        var attempts = 0
+        testEngine.onEmbedImage = {
+            attempts++
+            throw ModelUnavailableException("mobileclip-s2-image", "Couldn't download mobileclip_s2_image_xnnpack_fp32.pte: Unable to resolve host")
+        }
+        val coordinator = IndexCoordinator(context, store, files, testEngine, knowledge, cloud, sessionTimeoutMillis = 10_000L)
+
+        coordinator.runPending()
+
+        // A phone that can't reach the download says nothing about these memes: they stay queued, unmarked.
+        assertTrue(ids.map { requireNotNull(store.meme(it)) }.all { it.pending && it.indexError.isEmpty() })
+        // One attempt and one report per session, not one per meme.
+        assertEquals(1, attempts)
+        assertEquals(listOf("[model] mobileclip-s2-image"), store.errors().map { it.substringBefore(" - ") })
+        val progress = coordinator.progress.value
+        assertEquals("paused", progress.stage)
+        assertTrue(progress.detail, progress.detail.contains("Unable to resolve host"))
+    }
+
+    @Test(timeout = 30_000)
+    fun speechAndCaptionModelsThatCannotBeDownloadedPutTheirWorkBackInTheQueue() = runBlocking {
+        // Two indexed videos waiting for transcripts and captions. Robolectric cannot decode video frames, so their
+        // posters stand in for them.
+        val ids = (1..2).map { n ->
+            val poster = Uri.fromFile(createValidBitmapFile("poster$n.png")).toString()
+            val id = store.insertPending(Uri.fromFile(createValidBitmapFile("clip$n.mp4")).toString(), "clip$n.mp4", "video", 100L + n, "hashU$n")
+            store.completeIndex(id, LocalAnalysis(FloatArray(512).apply { this[0] = 1f }, "", emptyList(), ""), ModelRegistry.PRIMARY_MODEL_FINGERPRINT, poster)
+            id
+        }
+        store.setSetting("audio.enabled", "1")
+        store.setSetting("vision.enabled", "1")
+        var transcribeAttempts = 0
+        var describeAttempts = 0
+        testEngine.onTranscribe = {
+            transcribeAttempts++
+            throw ModelUnavailableException("whisper-small-en-int8", "Couldn't download whisper_small_en_xnnpack_int8.pte: timeout")
+        }
+        testEngine.onDescribe = { _, _ ->
+            describeAttempts++
+            throw ModelUnavailableException("minicpm-v-4.7-1b-q4km", "Couldn't download MiniCPM-V-4_7-1B-Q4_K_M.gguf: timeout")
+        }
+        val coordinator = IndexCoordinator(context, store, files, testEngine, knowledge, cloud, sessionTimeoutMillis = 10_000L)
+
+        coordinator.runPending()
+
+        val memes = ids.map { requireNotNull(store.meme(it)) }
+        assertTrue("transcripts must wait, not fail: ${memes.map { it.audioState }}", memes.all { it.audioState == "pending" })
+        assertTrue("captions must wait, not fail: ${memes.map { it.visionState }}", memes.all { it.visionState == "pending" })
+        assertEquals(1, transcribeAttempts)
+        assertEquals(1, describeAttempts)
+        assertEquals(
+            listOf("[model] minicpm-v-4.7-1b-q4km", "[model] whisper-small-en-int8"),
+            store.errors().map { it.substringBefore(" - ") }.sorted(),
+        )
+    }
+
     private class TestInferenceEngine : InferenceEngine {
         val cancelled = AtomicBoolean(false)
 
+        var onEmbedImage: (suspend (String) -> FloatArray)? = null
         var onRecognize: (suspend (String) -> List<TextRegion>)? = null
         var onDescribe: (suspend (String, String) -> String)? = null
         var onTranscribe: (suspend (String) -> String)? = null
@@ -704,6 +766,7 @@ class IndexCoordinatorTest {
 
         override suspend fun embedImage(uri: String): FloatArray {
             if (cancelled.get()) throw CancellationException("Cancelled")
+            onEmbedImage?.let { return it(uri) }
             return FloatArray(512).apply { this[0] = 1f }
         }
 
