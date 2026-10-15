@@ -848,6 +848,44 @@ class IndexCoordinatorTest {
         assertEquals("the long clip's transcript", clips.single { it.audioState == "done" }.transcript)
     }
 
+    @Test(timeout = 30_000)
+    fun aClipNoBackgroundSessionCanFinishWaitsForTheAppAndTheQueueMovesOn() = runBlocking {
+        // An indexed video waiting for a transcript and a caption, and an image waiting for a caption. The clip takes
+        // longer than a whole session plus its grace, as the library's 232 s clip did on the Pixel 5a.
+        val poster = Uri.fromFile(createValidBitmapFile("poster.png")).toString()
+        val clip = store.insertPending(Uri.fromFile(createValidBitmapFile("long.mp4")).toString(), "long.mp4", "video", 100L, "hashX1")
+        store.completeIndex(clip, LocalAnalysis(FloatArray(512).apply { this[0] = 1f }, "", emptyList(), ""), ModelRegistry.PRIMARY_MODEL_FINGERPRINT, poster)
+        val image = store.insertPending(Uri.fromFile(createValidBitmapFile("still.png")).toString(), "still.png", "image", 101L, "hashX2")
+        store.completeIndex(image, LocalAnalysis(FloatArray(512).apply { this[1] = 1f }, "", emptyList(), ""), ModelRegistry.PRIMARY_MODEL_FINGERPRINT, "")
+        store.setSetting("audio.enabled", "1")
+        store.setSetting("vision.enabled", "1")
+        var transcribed = 0
+        testEngine.onTranscribe = {
+            transcribed++
+            // A whole session passes on the session's clock, then the clip runs on until the hard stop cancels it.
+            ShadowSystemClock.advanceBy(Duration.ofSeconds(3))
+            withContext(Dispatchers.IO) {
+                while (!testEngine.cancelled.get()) Thread.sleep(10)
+                throw RuntimeException("Inference cancelled")
+            }
+        }
+        testEngine.onDescribe = { _, _ -> "CAPTION: a frog\nTAGS: frog" }
+        val coordinator = IndexCoordinator(context, store, files, testEngine, knowledge, cloud, sessionTimeoutMillis = 2_000L, sessionGraceMillis = 1_000L)
+
+        coordinator.runPending()
+        assertEquals(1, transcribed)
+        assertEquals("a cut-off clip goes back to waiting, not failed", "pending", requireNotNull(store.meme(clip)).audioState)
+
+        // The native runner clears its cancel flag at the next call; the fake keeps it until told.
+        testEngine.cancelled.set(false)
+        coordinator.runPending()
+
+        assertEquals("the next background session leaves the clip alone", 1, transcribed)
+        assertEquals("pending", requireNotNull(store.meme(clip)).audioState)
+        assertEquals("captions are not held up behind the clip", listOf("done", "done"),
+            listOf(clip, image).map { requireNotNull(store.meme(it)).visionState })
+    }
+
     private class TestInferenceEngine : InferenceEngine {
         val cancelled = AtomicBoolean(false)
 

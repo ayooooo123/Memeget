@@ -49,6 +49,7 @@ import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import java.io.IOException
@@ -74,6 +75,10 @@ internal class IndexCoordinator(
     private val mutableProgress = MutableStateFlow(WorkProgress())
     val progress: StateFlow<WorkProgress> = mutableProgress.asStateFlow()
     @Volatile private var activeJob: Job? = null
+    /** Set when a session's hard stop, not Stop, cancels it. */
+    @Volatile private var hardStop = false
+    /** Clips a background session can't finish in time; only a session started in the app transcribes them. */
+    @Volatile private var backgroundSkip: Set<Long> = emptySet()
     /**
      * Re-tags asked for, and how many of those a started pass or Stop has covered. Requests count
      * up before anyone tries the lock, so the session that holds it always sees them on unlock.
@@ -239,6 +244,8 @@ internal class IndexCoordinator(
 
         try {
             mutableProgress.value = WorkProgress("indexing", running = true)
+            hardStop = false
+            backgroundSkip = if (background) backgroundSkips() else emptySet()
             // Transcripts made by an earlier speech model (or imported from the original app's tiny.en) are redone once.
             if (store.setting("audio.enabled") == "1") store.requeueTranscripts(ModelRegistry.WHISPER_MODEL.id)
             val remainingBefore = if (background) remainingWork() else 0
@@ -368,13 +375,13 @@ internal class IndexCoordinator(
                             // minute, and the caption backlog is several times longer.
                             val transcripts = if (speech) {
                                 store.allMemes().filter { meme ->
-                                    meme.id !in triedSpeech && !meme.pending && meme.kind == "video" && meme.audioState == "pending"
+                                    meme.id !in triedSpeech && meme.id !in backgroundSkip && !meme.pending && meme.kind == "video" && meme.audioState == "pending"
                                 }.take(BATCH_SIZE).toList()
                             } else emptyList()
                             val candidates = transcripts.ifEmpty {
                                 store.allMemes().filter { meme ->
                                     meme.id !in tried && !meme.pending && (captions && meme.visionState == "pending" ||
-                                        speech && meme.kind == "video" && meme.audioState == "pending" ||
+                                        speech && meme.kind == "video" && meme.audioState == "pending" && meme.id !in backgroundSkip ||
                                         appearance && store.vectors(meme.id)?.visual == null)
                                 }.take(BATCH_SIZE).toList()
                             }
@@ -464,6 +471,7 @@ internal class IndexCoordinator(
                 invokeImmediately = true,
             ) { cause ->
                 if (cause != null) {
+                    if (cause is TimeoutCancellationException) hardStop = true
                     engine.cancel()
                     cloud.cancel()
                 }
@@ -652,8 +660,9 @@ internal class IndexCoordinator(
                 currentCoroutineContext().ensureActive()
                 if (powerBlock(background) != null || interactive || yieldTo()) break
                 val meme = store.meme(item.meme.id) ?: continue
-                if (meme.audioState == "done") continue
+                if (meme.audioState == "done" || meme.id in backgroundSkip) continue
                 mutableProgress.value = WorkProgress("local transcription", detail = meme.name, running = true, memeId = meme.id)
+                val began = SystemClock.elapsedRealtime()
                 val text = try {
                     // As for captions: a native crash must not loop, so the clip is marked failed while it runs, and
                     // the marker is set inside this try so a stop that lands as it commits returns the clip to the queue.
@@ -662,7 +671,13 @@ internal class IndexCoordinator(
                 } catch (failure: Exception) {
                     // A native call stopped by Stop or the session limit can fail as an ordinary exception.
                     if (failure is CancellationException || !currentCoroutineContext().isActive) {
-                        withContext(NonCancellable + Dispatchers.IO) { store.setAudioState(meme.id, "pending") }
+                        withContext(NonCancellable + Dispatchers.IO) {
+                            store.setAudioState(meme.id, "pending")
+                            // Still running when the hard stop came after a whole session's time: background
+                            // sessions can't finish this clip, so they leave it to one started in the app instead
+                            // of trying it first every time and never reaching the rest of the queue.
+                            if (background && hardStop && SystemClock.elapsedRealtime() - began >= sessionTimeoutMillis) skipInBackground(meme.id)
+                        }
                         throw failure as? CancellationException
                             ?: CancellationException("Local transcription stopped").apply { initCause(failure) }
                     }
@@ -751,6 +766,14 @@ internal class IndexCoordinator(
         }
     }
 
+    private suspend fun backgroundSkips(): Set<Long> =
+        store.setting(BACKGROUND_SKIP).orEmpty().split(',').mapNotNull { it.toLongOrNull() }.toSet()
+
+    private suspend fun skipInBackground(id: Long) {
+        store.setSetting(BACKGROUND_SKIP, (backgroundSkips() + id).joinToString(","))
+        Log.i(LOG_TAG, "Meme $id takes longer to transcribe than a background session allows; it waits for a session started in the app")
+    }
+
     private suspend fun keepGoingWhileCharging(remainingBefore: Int, indexed: Int): Boolean {
         if (store.setting("background.enabled") != "1" || interactive || !charging()) return false
         val remainingAfter = remainingWork()
@@ -829,6 +852,8 @@ internal class IndexCoordinator(
         private const val CONTINUE_WORK = "memeget-native-continue"
         private const val CONTINUE_DELAY_SECONDS = 30L
         private const val COOL_DOWN_SECONDS = 5L * 60
+        /** Setting: ids of clips background sessions leave to a session started in the app, comma-separated. */
+        private const val BACKGROUND_SKIP = "audio.backgroundSkip"
         internal const val LOG_TAG = "MemegetIndex"
     }
 }
