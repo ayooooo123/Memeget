@@ -116,6 +116,9 @@ internal fun LibraryScreen(
     var hasMore by remember { mutableStateOf(true) }
     var isLoadingMore by remember { mutableStateOf(false) }
     var isSearching by remember { mutableStateOf(false) }
+    // A search the person started (a new query), not a reload after a library write: only that pauses background
+    // work, and only while this tab is in front.
+    var userSearching by remember { mutableStateOf(false) }
     var searchError by remember { mutableStateOf<String?>(null) }
 
     var totalCount by remember { mutableStateOf(0) }
@@ -213,7 +216,8 @@ internal fun LibraryScreen(
     }
 
     // A load under way when a meme is deleted must not put it back.
-    val deletedIds by rememberUpdatedState(deletedMemeIds)
+    var locallyDeletedIds by remember { mutableStateOf<Set<Long>>(emptySet()) }
+    val deletedIds by rememberUpdatedState(deletedMemeIds + locallyDeletedIds)
     LaunchedEffect(deletedMemeIds) {
         if (deletedMemeIds.isNotEmpty()) memes = memes.filterNot { it.id in deletedMemeIds }
     }
@@ -224,7 +228,7 @@ internal fun LibraryScreen(
     var resultGeneration by remember { mutableStateOf(0L) }
     var pageJob by remember { mutableStateOf<Job?>(null) }
     var searchCursor by remember { mutableStateOf<SearchCursor?>(null) }
-    LaunchedEffect(isSearching) { onInteractionChange(isSearching) }
+    LaunchedEffect(userSearching, active) { onInteractionChange(active && userSearching) }
     DisposableEffect(Unit) { onDispose { onInteractionChange(false) } }
 
     // A library revision must not collapse the pages the user has already loaded.
@@ -236,6 +240,7 @@ internal fun LibraryScreen(
         pageJob?.cancel()
         isLoadingMore = false
         val key = Triple(query.trim(), kindFilter, selectedTag)
+        userSearching = resultKey != key && key.first.isNotEmpty()
         val previous = if (resultKey == key) memes else emptyList()
         val wanted = maxOf(PAGE_SIZE, previous.size)
         val previousById = previous.associateBy { it.id }
@@ -327,6 +332,7 @@ internal fun LibraryScreen(
         } finally {
             if (generation == resultGeneration) {
                 isSearching = false
+                userSearching = false
                 loadingFirstPage = false
                 loadInFlight = false
             }
@@ -915,6 +921,7 @@ internal fun LibraryScreen(
                     try {
                         val filesDeleted = files.deleteMemes(targets)
                         val gone = targets.mapTo(HashSet()) { it.id }
+                        locallyDeletedIds = locallyDeletedIds + gone
                         memes = memes.filterNot { it.id in gone }
                         val removed = if (targets.size == 1) "Deleted 1 meme" else "Deleted ${targets.size} memes"
                         // A file already gone, or one in a folder the app can no longer write, isn't deleted.
