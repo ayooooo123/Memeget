@@ -2,6 +2,7 @@ package com.memeget.nativeapp
 
 import android.content.Context
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
@@ -42,15 +43,20 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.State
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -63,8 +69,13 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.first
 
 private const val PAGE_SIZE = 90
+// Screen-only choices live outside the library database, so they never count as a library change.
+private const val UI_PREFS = "memeget_ui"
+private const val BANNER_DISMISSED = "libraryBannerDismissed"
 
 @Composable
 internal fun LibraryScreen(
@@ -76,14 +87,24 @@ internal fun LibraryScreen(
     onOpenViewer: (Meme) -> Unit,
     onOpenRemix: (Meme) -> Unit,
     onOpenSettings: () -> Unit,
+    // False while Label or Settings shows: the screen stays composed then, but must not take Back.
+    active: Boolean = true,
     tagSearchRequest: String? = null,
+    onTagSearchApplied: () -> Unit = {},
+    // Memes deleted elsewhere (the viewer): dropped from the grid at once instead of at the next reload.
+    deletedMemeIds: Set<Long> = emptySet(),
     modifier: Modifier = Modifier,
     onInteractionChange: (Boolean) -> Unit = {},
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val focusManager = LocalFocusManager.current
 
-    val revision by store.revision.collectAsState()
+    // Library writes come in bursts: an indexing session or a re-tag writes many times a second. Restarting the
+    // loads below on every write meant they never finished, so results went stale while work ran (a deleted meme
+    // stayed on screen). Reloads now follow writes after a short settle and never cancel a load under way.
+    var loadInFlight by remember { mutableStateOf(false) }
+    val revision by rememberSettledRevision(store.revision) { loadInFlight }
     val modelProgress by engine.progress.collectAsState()
     val indexProgress by coordinator.progress.collectAsState()
 
@@ -128,7 +149,8 @@ internal fun LibraryScreen(
         }
     }
 
-    var bannerDismissed by remember { mutableStateOf(false) }
+    val uiPrefs = remember { context.getSharedPreferences(UI_PREFS, Context.MODE_PRIVATE) }
+    var bannerDismissed by remember { mutableStateOf(uiPrefs.getBoolean(BANNER_DISMISSED, false)) }
 
     // Multi-select state
     var selectionMode by remember { mutableStateOf(false) }
@@ -137,6 +159,10 @@ internal fun LibraryScreen(
     var showBatchDeleteDialog by remember { mutableStateOf(false) }
     // A selection is of what's on screen: a new search or filter starts over, so Delete never reaches hidden memes.
     LaunchedEffect(query, kindFilter, selectedTag) {
+        selectionMode = false
+        selectedIds = emptySet()
+    }
+    BackHandler(enabled = active && selectionMode) {
         selectionMode = false
         selectedIds = emptySet()
     }
@@ -182,7 +208,14 @@ internal fun LibraryScreen(
             query = tagSearchRequest
             kindFilter = null
             selectedTag = null
+            onTagSearchApplied()
         }
+    }
+
+    // A load under way when a meme is deleted must not put it back.
+    val deletedIds by rememberUpdatedState(deletedMemeIds)
+    LaunchedEffect(deletedMemeIds) {
+        if (deletedMemeIds.isNotEmpty()) memes = memes.filterNot { it.id in deletedMemeIds }
     }
 
     var queryVector by remember { mutableStateOf<FloatArray?>(null) }
@@ -199,6 +232,7 @@ internal fun LibraryScreen(
     LaunchedEffect(query, kindFilter, selectedTag, revision) {
         resultGeneration++
         val generation = resultGeneration
+        loadInFlight = true
         pageJob?.cancel()
         isLoadingMore = false
         val key = Triple(query.trim(), kindFilter, selectedTag)
@@ -222,7 +256,7 @@ internal fun LibraryScreen(
         isSearching = key.first.isNotEmpty()
         searchError = null
         fun publish(rows: List<Meme>, more: Boolean) {
-            memes = rows.map { row -> previousById[row.id]?.takeIf { it == row } ?: row }
+            memes = rows.filterNot { it.id in deletedIds }.map { row -> previousById[row.id]?.takeIf { it == row } ?: row }
             hasMore = more
             loadingFirstPage = false
         }
@@ -294,6 +328,7 @@ internal fun LibraryScreen(
             if (generation == resultGeneration) {
                 isSearching = false
                 loadingFirstPage = false
+                loadInFlight = false
             }
         }
     }
@@ -321,7 +356,7 @@ internal fun LibraryScreen(
                     if (generation == resultGeneration && key == Triple(query.trim(), kindFilter, selectedTag)) {
                         searchCursor = page.second
                         val existing = memes.mapTo(HashSet()) { it.id }
-                        memes = memes + rows.filter { it.id !in existing }
+                        memes = memes + rows.filter { it.id !in existing && it.id !in deletedIds }
                         hasMore = rows.size >= PAGE_SIZE
                     }
                 } catch (cancelled: CancellationException) {
@@ -406,7 +441,10 @@ internal fun LibraryScreen(
                         style = MaterialTheme.typography.labelSmall,
                         color = MemegetColors.TextMuted,
                         modifier = Modifier
-                            .clickable { bannerDismissed = true }
+                            .clickable {
+                                bannerDismissed = true
+                                uiPrefs.edit().putBoolean(BANNER_DISMISSED, true).apply()
+                            }
                             .padding(4.dp),
                     )
                 }
@@ -687,6 +725,8 @@ internal fun LibraryScreen(
                         selectedIds + meme.id
                     }
                 } else {
+                    // Closing the viewer must not bring the search keyboard back over the results.
+                    focusManager.clearFocus()
                     onOpenViewer(meme)
                 }
             },
@@ -754,7 +794,7 @@ internal fun LibraryScreen(
                                 onClick = { linkFolderLauncher.launch(null) },
                                 contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
                             ) {
-                                Text("＋ Link", style = MaterialTheme.typography.labelSmall)
+                                Text("＋ Folder", style = MaterialTheme.typography.labelSmall)
                             }
                             Button(
                                 onClick = onStartIndex,
@@ -874,6 +914,8 @@ internal fun LibraryScreen(
                 scope.launch {
                     try {
                         val filesDeleted = files.deleteMemes(targets)
+                        val gone = targets.mapTo(HashSet()) { it.id }
+                        memes = memes.filterNot { it.id in gone }
                         val removed = if (targets.size == 1) "Deleted 1 meme" else "Deleted ${targets.size} memes"
                         // A file already gone, or one in a folder the app can no longer write, isn't deleted.
                         val kept = targets.size - filesDeleted
@@ -1063,4 +1105,22 @@ private fun StepRow(number: String, title: String, completed: Boolean) {
             color = if (completed) MemegetColors.TextPrimary else MemegetColors.TextSecondary,
         )
     }
+}
+
+/**
+ * [revision] once it settles: a change is passed on [settleMillis] after it, so a burst of writes becomes one
+ * reload, and only once [busy] is false, so the load the last change started finishes before the next begins.
+ */
+@Composable
+private fun rememberSettledRevision(revision: StateFlow<Long>, settleMillis: Long = 750L, busy: () -> Boolean): State<Long> {
+    val settled = remember(revision) { mutableLongStateOf(revision.value) }
+    LaunchedEffect(revision) {
+        while (true) {
+            revision.first { it != settled.longValue }
+            delay(settleMillis)
+            snapshotFlow { busy() }.first { !it }
+            settled.longValue = revision.value
+        }
+    }
+    return settled
 }
