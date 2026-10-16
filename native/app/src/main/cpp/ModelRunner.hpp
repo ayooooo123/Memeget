@@ -62,11 +62,11 @@ public:
         int inputSize,
         bool normalize);
 
-    std::vector<float> embedText(
+    // tokenIds: 77 MobileCLIP-S2 ids, tokenized in Kotlin (ClipTokenizer). The runtime's HFTokenizer doesn't
+    // reproduce CLIP's tokenizer: with its ids every text embedded as nearly the same vector.
+    std::vector<float> embedTextTokens(
         const std::string& modelPath,
-        const std::string& tokenizerPath,
-        const std::string& text,
-        int maxTokens);
+        const std::vector<int64_t>& tokenIds);
 
     std::vector<OcrItem> recognize(
         const std::string& detectorPath,
@@ -108,10 +108,8 @@ private:
     // Primary family (MobileCLIP-S2)
     std::unique_ptr<executorch::extension::module::Module> s2_image_module_;
     std::unique_ptr<executorch::extension::module::Module> s2_text_module_;
-    std::unique_ptr<tokenizers::HFTokenizer> s2_tokenizer_;
     std::string s2_image_path_;
     std::string s2_text_path_;
-    std::string s2_tokenizer_path_;
 
     // Visual family (DINOv2)
     std::unique_ptr<executorch::extension::module::Module> visual_module_;

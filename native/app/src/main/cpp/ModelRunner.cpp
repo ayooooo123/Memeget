@@ -68,10 +68,8 @@ void ModelRunner::unloadAll() {
 
     s2_image_module_.reset();
     s2_text_module_.reset();
-    s2_tokenizer_.reset();
     s2_image_path_.clear();
     s2_text_path_.clear();
-    s2_tokenizer_path_.clear();
 
     visual_module_.reset();
     visual_path_.clear();
@@ -123,10 +121,8 @@ void ModelRunner::ensureFamily(ModelFamily family) {
         if (current_family_ == ModelFamily::PRIMARY) {
             s2_image_module_.reset();
             s2_text_module_.reset();
-            s2_tokenizer_.reset();
             s2_image_path_.clear();
             s2_text_path_.clear();
-            s2_tokenizer_path_.clear();
         } else if (current_family_ == ModelFamily::VISUAL) {
             visual_module_.reset();
             visual_path_.clear();
@@ -256,11 +252,9 @@ std::vector<float> ModelRunner::embedImage(
 // ---------------------------------------------------------------------------
 // 2. MobileCLIP-S2 Text Embedding
 // ---------------------------------------------------------------------------
-std::vector<float> ModelRunner::embedText(
+std::vector<float> ModelRunner::embedTextTokens(
     const std::string& modelPath,
-    const std::string& tokenizerPath,
-    const std::string& text,
-    int maxTokens) {
+    const std::vector<int64_t>& tokenIds) {
 
     std::scoped_lock lock(mutex_);
     ensureFamily(ModelFamily::PRIMARY);
@@ -277,36 +271,19 @@ std::vector<float> ModelRunner::embedText(
         s2_text_path_ = modelPath;
     }
 
-    if (!s2_tokenizer_ || s2_tokenizer_path_ != tokenizerPath) {
-        s2_tokenizer_ = std::make_unique<tokenizers::HFTokenizer>();
-        auto err = s2_tokenizer_->load(tokenizerPath);
-        if (err != tokenizers::Error::Ok) {
-            s2_tokenizer_.reset();
-            s2_tokenizer_path_.clear();
-            throw std::runtime_error("Failed to load MobileCLIP-S2 tokenizer: " + tokenizerPath);
-        }
-        s2_tokenizer_path_ = tokenizerPath;
+    // The exported text tower takes exactly 77 int64 ids plus a mask; it pools on the end token.
+    constexpr size_t kS2TokenLen = 77;
+    if (tokenIds.size() != kS2TokenLen) {
+        throw std::runtime_error("MobileCLIP-S2 text needs " + std::to_string(kS2TokenLen) +
+            " token ids, got " + std::to_string(tokenIds.size()));
+    }
+    std::vector<int64_t> inputIds(tokenIds);
+    std::vector<int64_t> attentionMask(kS2TokenLen, 0);
+    for (size_t i = 0; i < kS2TokenLen; ++i) {
+        attentionMask[i] = (inputIds[i] != 0) ? 1 : 0;
     }
 
-    auto encodeResult = s2_tokenizer_->encode(text, 0, 0);
-    if (!encodeResult.ok()) {
-        throw std::runtime_error("Failed to tokenize text for embedding");
-    }
-    const std::vector<uint64_t>& tokenIds = *encodeResult;
-
-    // MobileCLIP-S2 text encoder expects exact 77 tokens with int64 IDs and attention mask
-    constexpr int kS2TokenLen = 77;
-    const int effectiveTokens = (maxTokens > 0) ? maxTokens : kS2TokenLen;
-    std::vector<int64_t> inputIds(effectiveTokens, 0);
-    std::vector<int64_t> attentionMask(effectiveTokens, 0);
-
-    size_t count = std::min(static_cast<size_t>(effectiveTokens), tokenIds.size());
-    for (size_t i = 0; i < count; ++i) {
-        inputIds[i] = static_cast<int64_t>(tokenIds[i]);
-        attentionMask[i] = (tokenIds[i] != 0) ? 1 : 0;
-    }
-
-    std::vector<int32_t> shape = {1, effectiveTokens};
+    std::vector<int32_t> shape = {1, static_cast<int32_t>(kS2TokenLen)};
     TensorPtr tokenTensor = from_blob(inputIds.data(), shape, ScalarType::Long);
     TensorPtr maskTensor = from_blob(attentionMask.data(), shape, ScalarType::Long);
 

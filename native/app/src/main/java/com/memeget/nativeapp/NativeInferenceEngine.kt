@@ -3,6 +3,7 @@ package com.memeget.nativeapp
 import android.content.Context
 import android.net.Uri
 import android.util.Base64
+import com.memeget.nativeapp.inference.ClipTokenizer
 import com.memeget.nativeapp.inference.CutoutSelector
 import com.memeget.nativeapp.inference.ModelArtifact
 import com.memeget.nativeapp.inference.ModelDownloader
@@ -80,22 +81,31 @@ internal class NativeInferenceEngine(
         currentCoroutineContext().ensureActive()
         val textModelFile = ensureModel(ModelRegistry.S2_TEXT)
         val tokenizerFile = ensureModel(ModelRegistry.S2_TOKENIZER)
+        val tokenIds = clipTokenizer(tokenizerFile).encode(text)
 
         engineMutex.withLock {
             val handle = activeHandle()
             NativeBridge.nativeResetCancel(handle)
 
-            val vec = NativeBridge.nativeEmbedText(
+            val vec = NativeBridge.nativeEmbedTextTokens(
                 handle = handle,
                 modelPath = textModelFile.absolutePath,
-                tokenizerPath = tokenizerFile.absolutePath,
-                text = text,
-                maxTokens = 77,
+                tokenIds = tokenIds,
             )
             if (vec.size != 512 || !vec.all(Float::isFinite)) {
                 throw IllegalStateException("Invalid MobileCLIP-S2 text embedding returned (size=${vec.size})")
             }
             vec
+        }
+    }
+
+    @Volatile private var loadedClipTokenizer: Pair<String, ClipTokenizer>? = null
+
+    private fun clipTokenizer(file: File): ClipTokenizer {
+        loadedClipTokenizer?.takeIf { it.first == file.absolutePath }?.let { return it.second }
+        synchronized(this) {
+            loadedClipTokenizer?.takeIf { it.first == file.absolutePath }?.let { return it.second }
+            return ClipTokenizer.load(file).also { loadedClipTokenizer = file.absolutePath to it }
         }
     }
 
