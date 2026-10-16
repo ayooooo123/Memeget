@@ -453,57 +453,89 @@ internal class LocalKnowledge(
         return ensureVote().index.examples.firstOrNull { it.label == norm }?.category ?: "topic"
     }
 
+    /** A re-tag pass that ended early (the session limit, a Stop): the label revision it used and the memes it finished. */
+    private class UnfinishedRetag(val labelRevision: Long, val finished: HashSet<Long>)
+    @Volatile private var unfinishedRetag: UnfinishedRetag? = null
+
+    /**
+     * Re-tags the library. A pass that ended early is resumed where it stopped while the labels and teachings behind
+     * it are unchanged; after a change it starts over. A change while the pass runs sends it round the library again
+     * for the memes it did with the older ones. A meme whose tags come out the same is not written. Passes run one at
+     * a time (IndexCoordinator holds its session lock), so the finished set has one writer.
+     */
     suspend fun retag(progress: (WorkProgress) -> Unit) = withContext(Dispatchers.Default) {
         progress(WorkProgress(stage = "retag", running = true, detail = "Preparing knowledge…"))
         var snapshot = prepareSnapshot()
         var expectedRevision = store.revision.value
         val total = store.countAll()
-        var done = 0
+        var pass = unfinishedRetag?.takeIf { it.labelRevision == snapshot.vote.labelRevision }
+            ?: UnfinishedRetag(snapshot.vote.labelRevision, HashSet())
+        // Kept while the pass runs, so a pass cut short leaves what it finished for the next one.
+        unfinishedRetag = pass
 
-        // Stream bounded rows without materializing the whole library
-        store.allMemes().collect { meme ->
-            currentCoroutineContext().ensureActive()
-            val currentRevision = store.revision.value
-            if (currentRevision != expectedRevision) {
-                // Store was mutated concurrently outside this pass's writes (e.g. user teach/correction)
-                snapshot = prepareSnapshot()
-                expectedRevision = store.revision.value
-            }
-
-            val vectors = store.vectors(meme.id)
-            if (vectors != null && vectors.image.isNotEmpty() && vectors.model == ModelRegistry.PRIMARY_MODEL_FINGERPRINT) {
-                val (freshTags, _) = classifyInternal(
-                    image = vectors.image,
-                    ocr = meme.ocr,
-                    snapshot = snapshot,
-                    memeId = meme.id,
-                )
-
-                // Machine tags classification can't regenerate stay unless a nearby "not X" vetoes
-                // them; human-confirmed tags always stay. Recomputed sources are replaced outright.
-                val vetoed = findVetoedLabelsFromMap(vectors.image, snapshot.negExemplarsByLabel)
-                val kept = meme.tags.filter {
-                    TagMerge.survivesReclassification(it) &&
-                        (TagMerge.isHumanTag(it) || !vetoed.contains(TagMerge.normalizeTagLabel(it.label)))
+        do {
+            var roundAgain = false
+            // Stream bounded rows without materializing the whole library
+            store.allMemes().collect { meme ->
+                currentCoroutineContext().ensureActive()
+                if (store.revision.value != expectedRevision) {
+                    // Store was mutated concurrently outside this pass's writes (e.g. user teach/correction)
+                    snapshot = prepareSnapshot()
+                    expectedRevision = store.revision.value
+                    if (snapshot.vote.labelRevision != pass.labelRevision) {
+                        // Memes done with the older labels are done again with these, in another round.
+                        pass = UnfinishedRetag(snapshot.vote.labelRevision, HashSet())
+                        unfinishedRetag = pass
+                        roundAgain = true
+                    }
                 }
-                val merged = TagMerge.mergeDurableTags(freshTags + kept, capAuto = 6)
-                store.updateTags(meme.id, merged, extraTermsFor(merged, snapshot.assocMap))
-                expectedRevision++
-            }
-            done++
-            if (done % 5 == 0 || done == total) {
-                progress(
-                    WorkProgress(
-                        stage = "retag",
-                        done = done,
-                        total = total,
-                        detail = "Re-tagging $done / $total",
-                        running = true,
-                    )
-                )
-            }
-        }
+                if (meme.id in pass.finished) return@collect
 
-        progress(WorkProgress(stage = "complete", done = done, total = total, running = false))
+                val vectors = store.vectors(meme.id)
+                if (vectors != null && vectors.image.isNotEmpty() && vectors.model == ModelRegistry.PRIMARY_MODEL_FINGERPRINT) {
+                    val (freshTags, _) = classifyInternal(
+                        image = vectors.image,
+                        ocr = meme.ocr,
+                        snapshot = snapshot,
+                        memeId = meme.id,
+                    )
+
+                    // Machine tags classification can't regenerate stay unless a nearby "not X" vetoes
+                    // them; human-confirmed tags always stay. Recomputed sources are replaced outright.
+                    val vetoed = findVetoedLabelsFromMap(vectors.image, snapshot.negExemplarsByLabel)
+                    val kept = meme.tags.filter {
+                        TagMerge.survivesReclassification(it) &&
+                            (TagMerge.isHumanTag(it) || !vetoed.contains(TagMerge.normalizeTagLabel(it.label)))
+                    }
+                    val merged = TagMerge.mergeDurableTags(freshTags + kept, capAuto = 6)
+                    val terms = extraTermsFor(merged, snapshot.assocMap)
+                    // Most memes come out unchanged on a later pass; skipping their writes is what lets a slow
+                    // phone finish one. Compared as the store keeps them: without the machine tags and search
+                    // words a person rejected on this meme.
+                    val rejected = meme.rejectedLabels.mapTo(HashSet()) { TagMerge.normalizeTagLabel(it) }
+                    val stored = merged.filter { TagMerge.isHumanTag(it) || TagMerge.normalizeTagLabel(it.label) !in rejected }
+                    if (stored.toSet() != meme.tags.toSet() || TagMerge.withoutRejectedTerms(terms, rejected) != meme.extraTerms) {
+                        store.updateTags(meme.id, merged, terms)
+                        expectedRevision++
+                    }
+                }
+                pass.finished += meme.id
+                val done = pass.finished.size
+                if (done % 5 == 0 || done == total) {
+                    progress(
+                        WorkProgress(
+                            stage = "retag",
+                            done = done,
+                            total = total,
+                            detail = "Re-tagging $done / $total",
+                            running = true,
+                        )
+                    )
+                }
+            }
+        } while (roundAgain)
+
+        unfinishedRetag = null
+        progress(WorkProgress(stage = "complete", done = pass.finished.size, total = total, running = false))
     }
 }
