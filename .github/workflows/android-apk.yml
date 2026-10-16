@@ -1,34 +1,24 @@
 name: Android APK
 
-# Builds a standalone, sideloadable APK. Two release channels:
+# Builds Memeget, the native Android app in native/ (Kotlin, Jetpack Compose),
+# as a standalone, sideloadable APK:
 #
-#   * Tag push  (v1.2.3)        -> a permanent, versioned GitHub Release tagged
-#                                  v1.2.3 with memeget-v1.2.3.apk. This is the
-#                                  "real" release history.
-#   * Push to main / manual run -> a single rolling "latest" pre-release that is
-#                                  overwritten each time, for grabbing the newest
-#                                  build without cutting a version.
+#   * Push to main / manual run on main -> a single rolling "latest" pre-release
+#                                          (memeget-latest.apk), replaced each time.
+#   * Tag push (v1.2.3)                  -> a permanent, versioned GitHub Release
+#                                          tagged v1.2.3 with memeget-v1.2.3.apk.
+#   * Manual run on any other branch     -> host tests and the APK as a short-lived
+#                                          workflow artifact; nothing is published.
 #
-# The RN Android "release" build type signs with the pinned debug keystore
-# (signing/debug.keystore), so updates retain the same signing identity.
-# The APK runs without a Metro dev server or EAS account.
+# The release build signs with the repository's pinned key
+# (signing/debug.keystore, the original app's key too), so every build installs
+# over the last one and keeps the library. The original React Native app has
+# its own manual workflow, android-apk-original.yml.
 
 on:
   push:
     branches:
       - main
-      # TEMPORARY: build this feature branch's APK for on-device testing of the
-      # Gemma VLM switch + teach/search overhaul. Remove before merging to main.
-      - claude/gemma-local-vl-model-7viqpi
-      # TEMPORARY: build this branch's APK for on-device testing of the search
-      # perf overhaul (in-memory search cache, scroll-jitter fix, loop
-      # contention) on top of the MobileCLIP-S2 + DINOv2 embedding swap. Remove
-      # before merging to main.
-      - claude/meme-id-performance-6d0565
-      # TEMPORARY: build this branch's APK to on-device test the ExoPlayer
-      # (media3) last-resort poster path for mp4-gif videos the platform
-      # decoders reject. Remove before merging to main.
-      - claude/mp4-gif-thumbnail-errors-ggjf4w
     tags:
       - 'v*'
   workflow_dispatch:
@@ -45,18 +35,10 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
-    # Custom embedding models (see docs/embedding-roadmap.md). These are inlined
-    # into the JS bundle at build time; the app downloads each file once on
-    # first launch from the models-v1 release (built + shape-verified by
-    # .github/workflows/export-models.yml). MobileCLIP-S2 replaces CLIP as the
-    # primary image/text space (Settings shows an index/model mismatch warning
-    # until the library is re-indexed); DINOv2 powers visual similarity.
-    env:
-      EXPO_PUBLIC_MEMEGET_MOBILECLIP_S2_IMAGE_MODEL_SOURCE: https://github.com/ayooooo123/Memeget/releases/download/models-v1/mobileclip_s2_image_xnnpack_fp32.pte
-      EXPO_PUBLIC_MEMEGET_MOBILECLIP_S2_TEXT_MODEL_SOURCE: https://github.com/ayooooo123/Memeget/releases/download/models-v1/mobileclip_s2_text_xnnpack_fp32.pte
-      EXPO_PUBLIC_MEMEGET_MOBILECLIP_S2_TOKENIZER_SOURCE: https://github.com/ayooooo123/Memeget/releases/download/models-v1/mobileclip_s2_tokenizer.json
-      EXPO_PUBLIC_MEMEGET_DINOV2_IMAGE_MODEL_SOURCE: https://github.com/ayooooo123/Memeget/releases/download/models-v1/dinov2_base_xnnpack_fp32.pte
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: native
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -65,134 +47,105 @@ jobs:
         id: meta
         run: |
           if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            VERSION_NAME="${GITHUB_REF_NAME#v}"
             RELEASE_TAG="${GITHUB_REF_NAME}"
             RELEASE_NAME="Memeget ${GITHUB_REF_NAME}"
             APK_NAME="memeget-${GITHUB_REF_NAME}.apk"
             PRERELEASE="false"
             MAKE_LATEST="true"
+            PUBLISH="true"
           else
-            VERSION_NAME="$(node -p "require('./app.json').expo.version")"
             RELEASE_TAG="latest"
             RELEASE_NAME="Memeget (latest build)"
             APK_NAME="memeget-latest.apk"
             PRERELEASE="true"
             MAKE_LATEST="false"
+            if [[ "${GITHUB_REF}" == refs/heads/main ]]; then PUBLISH="true"; else PUBLISH="false"; fi
           fi
-          # Use the checked-in local release version as the floor. The old fixed
-          # 1000 offset produced CI build 1168 after local builds reached 1170,
-          # so Android rejected the newer APK as a downgrade.
-          # Keep app.json's versionCode nondecreasing; the workflow run number
-          # then keeps successive CI builds increasing and above that floor.
-          LOCAL_VERSION_CODE="$(node -p "require('./app.json').expo.android.versionCode")"
-          VERSION_CODE="$((LOCAL_VERSION_CODE + GITHUB_RUN_NUMBER))"
           {
-            echo "version_name=${VERSION_NAME}"
-            echo "version_code=${VERSION_CODE}"
             echo "release_tag=${RELEASE_TAG}"
             echo "release_name=${RELEASE_NAME}"
             echo "apk_name=${APK_NAME}"
             echo "prerelease=${PRERELEASE}"
             echo "make_latest=${MAKE_LATEST}"
+            echo "publish=${PUBLISH}"
           } >> "$GITHUB_OUTPUT"
-          echo "Building ${RELEASE_NAME} -> ${APK_NAME} (versionName ${VERSION_NAME}, versionCode ${VERSION_CODE})"
-
-      # Android scopes an app's private storage to its package name, so shipping
-      # under a different applicationId does not rename the app — it installs an
-      # unrelated one with an empty sandbox, and the user's whole index and every
-      # taught example appear to be gone. This has happened. No APK leaves this
-      # workflow unless the id is exactly right.
-      - name: Verify Android applicationId
-        run: |
-          EXPECTED='com.memeget.app'
-          ACTUAL="$(node -p "require('./app.json').expo.android.package")"
-          if [ "$ACTUAL" != "$EXPECTED" ]; then
-            echo "::error::Refusing to build. applicationId is '$ACTUAL', must be '$EXPECTED'."
-            echo "Changing it strands every user's library in the old package's sandbox."
-            exit 1
-          fi
-          echo "applicationId OK: $ACTUAL"
-
-      - name: Stamp version into app config
-        env:
-          VERSION_NAME: ${{ steps.meta.outputs.version_name }}
-          VERSION_CODE: ${{ steps.meta.outputs.version_code }}
-        run: |
-          node -e '
-            const fs = require("fs");
-            const cfg = JSON.parse(fs.readFileSync("app.json", "utf8"));
-            cfg.expo.version = process.env.VERSION_NAME;
-            cfg.expo.android = cfg.expo.android || {};
-            cfg.expo.android.versionCode = Number(process.env.VERSION_CODE);
-            fs.writeFileSync("app.json", JSON.stringify(cfg, null, 2) + "\n");
-            console.log("app.json:", cfg.expo.version, "/", cfg.expo.android.versionCode);
-          '
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: npm
+          echo "Building ${RELEASE_NAME} -> ${APK_NAME} (publish: ${PUBLISH})"
 
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
+          cache: gradle
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
         with:
-          # The action's default also installs the legacy `tools` package, which
-          # current cmdline-tools no longer carry ("Failed to find package
-          # 'tools'" fails the step). Gradle fetches platforms/build-tools itself.
-          packages: platform-tools
+          # The NDK and CMake versions native/app/build.gradle.kts pins. Gradle
+          # fetches the platform and build tools itself.
+          packages: platform-tools ndk;27.1.12297006 cmake;3.22.1
 
-      - name: Install dependencies
-        run: npm install --legacy-peer-deps
-
-      - name: Align Expo-managed package versions
-        run: npx expo install --fix
-        continue-on-error: true
-
-      - name: Prebuild Android project
-        run: npx expo prebuild --platform android --no-install
-
-      - name: Build release APK
-        working-directory: android
+      # The host tests gate the APK: a failing test stops the build before
+      # anything is packaged or published.
+      - name: Host tests and release APK
         env:
-          GRADLE_OPTS: -Xmx5120m -XX:MaxMetaspaceSize=1024m -Dorg.gradle.daemon=false
-        run: ./gradlew assembleRelease --no-daemon --stacktrace
+          GRADLE_OPTS: -Dorg.gradle.daemon=false
+        run: ./gradlew :app:testDebugUnitTest :app:assembleRelease --no-daemon --stacktrace
 
-      - name: Locate and name APK
+      # Android scopes an app's private storage to its package name and only
+      # updates an install signed with the same key. An APK under another
+      # applicationId installs as an unrelated app with an empty library, and one
+      # signed with another key can't update the installed app at all. No APK
+      # leaves this workflow unless both are exactly right.
+      - name: Verify package and signing key
         id: apk
         run: |
-          SRC=$(find android/app/build/outputs/apk/release -name "*.apk" | head -n 1)
-          echo "Found APK: $SRC"
-          DEST="${{ steps.meta.outputs.apk_name }}"
-          cp "$SRC" "$DEST"
-          echo "path=$DEST" >> "$GITHUB_OUTPUT"
+          APK=app/build/outputs/apk/release/app-release.apk
+          BUILD_TOOLS="$(ls -d "${ANDROID_HOME}"/build-tools/* | sort -V | tail -n 1)"
+          PACKAGE="$("${BUILD_TOOLS}/aapt2" dump packagename "${APK}")"
+          if [ "${PACKAGE}" != "com.memeget.nativeapp" ]; then
+            echo "::error::Refusing to publish. applicationId is '${PACKAGE}', must be 'com.memeget.nativeapp'."
+            exit 1
+          fi
+          EXPECTED_CERT="$(keytool -exportcert -keystore ../signing/debug.keystore -storepass android -alias androiddebugkey | sha256sum | cut -d' ' -f1)"
+          # apksigner's wording varies by version ("Signer #1 certificate …",
+          # "V2 Signer: certificate …"); every scheme must name the one pinned key.
+          ACTUAL_CERT="$("${BUILD_TOOLS}/apksigner" verify --print-certs "${APK}" | sed -n 's/^.*certificate SHA-256 digest: //p' | sort -u)"
+          if [ "${ACTUAL_CERT}" != "${EXPECTED_CERT}" ]; then
+            echo "::error::Refusing to publish. The APK is signed with '${ACTUAL_CERT}', not the pinned key '${EXPECTED_CERT}'."
+            exit 1
+          fi
+          VERSION_NAME="$("${BUILD_TOOLS}/aapt2" dump badging "${APK}" | sed -n "s/^package: .*versionName='\([^']*\)'.*/\1/p")"
+          DEST="${GITHUB_WORKSPACE}/${{ steps.meta.outputs.apk_name }}"
+          cp "${APK}" "${DEST}"
+          echo "Verified ${PACKAGE} ${VERSION_NAME}, signer ${ACTUAL_CERT}"
+          {
+            echo "path=${DEST}"
+            echo "version_name=${VERSION_NAME}"
+          } >> "$GITHUB_OUTPUT"
 
       # Publish first: a GitHub Release stores the APK separately from Actions
       # artifact storage, so it does not consume (or get blocked by) the
       # artifact storage quota. This is the durable download source.
       - name: Publish to Release
+        if: steps.meta.outputs.publish == 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.meta.outputs.release_tag }}
           name: ${{ steps.meta.outputs.release_name }}
           body: |
-            Standalone debug-signed APK · version `${{ steps.meta.outputs.version_name }}` (build ${{ steps.meta.outputs.version_code }}) · commit `${{ github.sha }}`.
+            Memeget for Android (`com.memeget.nativeapp`) · version `${{ steps.apk.outputs.version_name }}` · commit `${{ github.sha }}`.
 
-            Install: download the `.apk`, enable "Install unknown apps" for your browser/files app, then open it.
+            Install: download the `.apk` on the phone and open it (allow "Install unknown apps" for your browser or Files app). It updates an earlier release install in place and keeps its library; don't uninstall first. It installs next to the original React Native app (`com.memeget.app`) and doesn't touch it.
 
             > The `latest` pre-release always tracks the newest build on `main`. For a pinned version, use a tagged release.
           files: ${{ steps.apk.outputs.path }}
           make_latest: ${{ steps.meta.outputs.make_latest }}
           prerelease: ${{ steps.meta.outputs.prerelease }}
 
-      # Artifact upload is a convenience copy. Keep it short-lived and never let
-      # a hit artifact-storage quota fail the build (the Release already has it).
+      # Artifact upload is a convenience copy (the only copy for branch runs).
+      # Keep it short-lived and never let a hit artifact-storage quota fail the
+      # build.
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         continue-on-error: true
@@ -200,4 +153,4 @@ jobs:
           name: ${{ steps.meta.outputs.apk_name }}
           path: ${{ steps.apk.outputs.path }}
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 3

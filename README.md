@@ -8,6 +8,15 @@ written on them, or by vibe.
 
 No accounts. No servers. No uploads.
 
+**The app is Memeget Native**: the Kotlin/Jetpack Compose Android app in
+[`native/`](native/README.md), which every release ships
+([download the latest APK](https://github.com/ayooooo123/Memeget/releases/download/latest/memeget-latest.apk)).
+The sections below, except "Getting the APK", describe the original React
+Native app in the repository root. That app is kept for moving a library to the
+native one; keep it installed until its folder backup and collection export are
+in the native app (see "Local use and migration" in
+[`native/README.md`](native/README.md)).
+
 ## How it works
 
 | Capability | What powers it (all on-device) |
@@ -185,8 +194,9 @@ does not change that import limitation.
 
 ## Getting the APK
 
-Every release is a standalone, sideloadable APK built by GitHub Actions
-(`.github/workflows/android-apk.yml`). Two channels:
+Every release is a standalone, sideloadable APK of the native app built by
+GitHub Actions (`.github/workflows/android-apk.yml`), which runs the host tests
+first. Two channels:
 
 - **Versioned releases** — tagged `vX.Y.Z` (e.g. `v0.2.0`), permanent, with a
   `memeget-vX.Y.Z.apk` you can always come back to. This is the real history.
@@ -197,51 +207,71 @@ Every release is a standalone, sideloadable APK built by GitHub Actions
 2. Download the `.apk` on your Android phone.
 3. Enable "Install unknown apps" for your browser/Files app, then open it.
 
-The APK is signed with the pinned `signing/debug.keystore` (fine for personal
-testing), so it installs without Metro or an EAS account and keeps the same
-signing identity across builds.
+The APK is `com.memeget.nativeapp` ("Memeget Native"). It installs next to the
+original app (`com.memeget.app`) and never replaces its package, database or
+files. It is signed with the pinned `signing/debug.keystore` (fine for personal
+use), the key the original app uses too, and the workflow refuses to publish an
+APK with another package name or key.
 
 **Updating an existing install:** open the new APK and update in place. Do not
-uninstall or clear app data: that deletes the private index and cached models.
-Android rejects an APK whose `versionCode` is lower than the installed build,
-even if the APK was built more recently. This affected CI build 1168 when local
-builds had already reached 1170. Use a corrected, higher-numbered APK rather
-than uninstalling to get past an "App cannot be updated" error.
+uninstall or clear app data: that deletes the library, its labels and the
+downloaded models. Every native build has version code 1, so any release
+installs over any other; the bottom of Settings names the commit a build came
+from (`1.0-native-<commit>`). A debug build from `./gradlew assembleDebug` is
+signed with that machine's own key and can't be updated by a release, or the
+other way round, without uninstalling first.
 
 ### Cutting a release
 
 Releases are driven entirely by git tags — no manual upload:
 
 ```bash
-# bump the version in app.json / package.json first, then:
 git tag v0.2.0
 git push origin v0.2.0
 ```
 
-The workflow stamps that version into the build (`versionName`/`versionCode`),
-builds the APK, and publishes the `v0.2.0` GitHub Release. Pushing to `main`
-(or running the workflow manually) refreshes the rolling `latest` pre-release
-instead. Keep `version` in `app.json` and `package.json` in sync with the tag.
+The workflow builds the APK and publishes the `v0.2.0` GitHub Release. Pushing
+to `main` (or running the workflow manually on `main`) refreshes the rolling
+`latest` pre-release instead. A manual run on any other branch builds and tests
+only: its APK is a workflow artifact for three days, and nothing is published.
 
-CI calculates `versionCode` as the checked-in `app.json` Android version code
-plus `GITHUB_RUN_NUMBER`, rather than using a fixed offset that local releases
-can overtake. Keep the checked-in code nondecreasing and record local release
-bumps there before publishing the next CI build. A hand-built release that
-replaces a CI install must also use at least that install's version code.
+### The original app's APK
+
+`.github/workflows/android-apk-original.yml` builds the original React Native
+app. It runs only when started by hand (Actions → "Android APK (original app)" →
+Run workflow) and replaces the rolling `original-latest` pre-release
+(`memeget-original-latest.apk`). Update the installed original app in place.
+Android rejects an APK whose `versionCode` is lower than the installed build,
+even if the APK was built more recently; this affected CI build 1168 when local
+builds had already reached 1170. CI calculates `versionCode` as the checked-in
+`app.json` Android version code plus that workflow's `GITHUB_RUN_NUMBER`. Keep
+the checked-in code nondecreasing and record local release bumps there before
+the next CI build. A hand-built release that replaces a CI install must also use
+at least that install's version code.
 
 ## Local development
+
+The native app (see [`native/README.md`](native/README.md) for requirements):
+
+```bash
+cd native
+./gradlew :app:assembleDebug :app:testDebugUnitTest
+```
+
+The original app:
 
 ```bash
 npm install
 npx expo run:android   # builds a dev client onto a connected device/emulator
 ```
 
-Requires a custom dev build (not Expo Go) because of the native ML modules.
+It requires a custom dev build (not Expo Go) because of the native ML modules.
 
 ## Project layout
 
 ```
-App.tsx                 # tab shell
+native/                 # the main app: Kotlin/Compose, SQLite, JNI inference (see native/README.md)
+App.tsx                 # original app: tab shell
 src/embeddings.tsx      # CLIP/custom primary hooks + optional DINO visual hook
 src/searchCore.ts       # Hybrid image/caption retrieval scoring
 src/indexer.ts          # SAF -> copy -> (thumbnail) -> embed -> OCR -> tag -> store
@@ -254,7 +284,8 @@ src/zipImport.ts        # .zip archive -> filter compatible media, skip dups, sa
 src/memeLabels.ts       # curated meme-format/character/emotion prompts
 src/screens/            # Library (index), Search, Settings
 modules/memeget-bg/     # native module: power/thermal, keep-alive, SAF mtime,
-                        #   video audio-track -> 16 kHz PCM decoder
+                        #   video audio-track -> 16 kHz PCM decoder; native/ also
+                        #   builds its Kotlin media utilities and fonts from here
 ```
 
 ## Culture layer (keeping up with new memes)
