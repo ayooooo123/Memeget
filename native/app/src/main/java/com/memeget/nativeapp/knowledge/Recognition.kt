@@ -8,15 +8,6 @@ internal object Recognition {
     const val MIN_LABEL_MARGIN = 0.13f
     const val RECOGNIZED_CONFIDENCE = 0.56f
 
-    /** Bundled TV shows and movies. They compete: a picture gets at most the one it matches best (LearnCore). */
-    const val SHOW_CATEGORY = "show"
-    /**
-     * The best title applies at this anchored margin or more, and only this far ahead of the next title: similar
-     * art styles and actors pull a picture toward several titles at once. Chosen offline on one library's vectors.
-     */
-    const val SHOW_MIN_MARGIN = 0.17f
-    const val SHOW_MIN_GAP = 0.02f
-
     private val CALIBRATION = arrayOf(
         0.115f to 0.05f,
         0.140f to 0.14f,

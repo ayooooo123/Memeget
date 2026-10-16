@@ -55,6 +55,7 @@ import androidx.compose.ui.unit.dp
 import coil.compose.SubcomposeAsyncImage
 import coil.request.ImageRequest
 import com.memeget.nativeapp.data.TagMerge
+import com.memeget.nativeapp.knowledge.Titles
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -190,7 +191,9 @@ internal fun LabelQueueScreen(
                 )
                 for (tag in suggestions) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(tag.label, style = MaterialTheme.typography.bodyLarge, color = MemegetColors.TextPrimary, modifier = Modifier.weight(1f))
+                        // A TV show or movie asks whether the meme is from it.
+                        val question = if (Titles.isTitleCategory(tag.category)) "From ${tag.label}? (${categoryName(tag.category)})" else tag.label
+                        Text(question, style = MaterialTheme.typography.bodyLarge, color = MemegetColors.TextPrimary, modifier = Modifier.weight(1f))
                         Button(
                             onClick = { answer(tag.label, tag.category, true) },
                             enabled = !busy,

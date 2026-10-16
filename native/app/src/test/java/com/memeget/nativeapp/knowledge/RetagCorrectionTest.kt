@@ -164,6 +164,30 @@ class RetagCorrectionTest {
         assertEquals("a pass over unchanged memes writes nothing", 0L, store.revision.value - before)
     }
 
+    @Test fun aPersonsTagThatNamesAShowStandsForItAndReadsAsTheShow() = runBlocking {
+        val sopranos = CuratedLabelDef(
+            "The Sopranos", "a scene from The Sopranos", Titles.TV, listOf("sopranos", "tony soprano"), unit(0 to 1f),
+            names = listOf("sopranos"),
+        )
+        LocalKnowledge::class.java.getDeclaredField("cachedLabels").apply { isAccessible = true }.set(knowledge, listOf(sopranos))
+        val byName = indexed("name.png", 'n', unit(0 to 0.3f, 1 to 1f))
+        val byCharacter = indexed("character.png", 'c', unit(0 to 0.3f, 2 to 1f))
+        val chosen = indexed("chosen.png", 'm', unit(0 to 0.3f, 3 to 1f))
+        store.manualTag(listOf(byName), "sopranos", "person")
+        store.manualTag(listOf(byCharacter), "tony soprano", "person")
+        store.manualTag(listOf(chosen), "sopranos", Titles.MOVIE)
+
+        knowledge.retag {}
+
+        suspend fun tags(id: Long) = requireNotNull(store.meme(id)).tags.mapTo(HashSet()) { Triple(it.label, it.category, it.source) }
+        assertEquals(setOf(Triple("sopranos", Titles.TV, "manual")), tags(byName))
+        assertEquals(
+            setOf(Triple("tony soprano", "person", "manual"), Triple("the sopranos", Titles.TV, Titles.SOURCE)),
+            tags(byCharacter),
+        )
+        assertEquals("a TV show or movie the person chose stays", setOf(Triple("sopranos", Titles.MOVIE, "manual")), tags(chosen))
+    }
+
     private class NoModelEngine : InferenceEngine {
         override val progress: StateFlow<ModelProgress> = MutableStateFlow(ModelProgress())
         override val primaryModel: String = ModelRegistry.PRIMARY_MODEL_FINGERPRINT

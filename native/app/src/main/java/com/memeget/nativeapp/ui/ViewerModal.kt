@@ -78,6 +78,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import coil.compose.SubcomposeAsyncImage
 import coil.request.ImageRequest
 import com.memeget.nativeapp.data.TagMerge
+import com.memeget.nativeapp.knowledge.Titles
 import com.memeget.nativeapp.storage.MediaIoUtils
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
@@ -1368,7 +1369,8 @@ private fun TagChip(
             color = MemegetColors.TextPrimary,
         )
         Text(
-            text = "(${tag.source})",
+            // A TV show or movie says which it is; other tags say where they came from.
+            text = "(${if (Titles.isTitleCategory(tag.category)) categoryName(tag.category) else tag.source})",
             style = MaterialTheme.typography.labelSmall,
             color = sourceColor,
             fontSize = 9.sp,

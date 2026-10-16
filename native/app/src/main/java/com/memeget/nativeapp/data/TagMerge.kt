@@ -8,6 +8,8 @@ internal object TagMerge {
         "manual" to 6,
         "exemplar" to 5,
         "propagated" to 4,
+        // A meme's TV show or movie (Titles): one per meme, kept ahead of generic machine tags.
+        "title" to 4,
         "ocr" to 3,
         "vision" to 2,
         "prompt" to 1,
@@ -17,7 +19,7 @@ internal object TagMerge {
 
     // Machine sources that classification recomputes from vectors and OCR on every
     // pass. A re-classification replaces their previous values instead of merging them.
-    private val RECOMPUTED_SOURCES = setOf("prompt", "exemplar", "ocr", "entity_pack")
+    private val RECOMPUTED_SOURCES = setOf("prompt", "exemplar", "ocr", "entity_pack", "title")
 
     fun normalizeTagLabel(label: String): String {
         return label.trim().lowercase()
