@@ -3,6 +3,8 @@ package com.memeget.nativeapp
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -39,6 +41,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 internal fun TagDialog(
     initialLabel: String = "",
@@ -51,7 +54,8 @@ internal fun TagDialog(
     var category by remember { mutableStateOf("topic") }
     var spread by remember { mutableStateOf(false) }
 
-    val categories = listOf("topic", "character", "format", "emotion")
+    // "show" covers TV shows and movies, the category of the bundled show and movie titles.
+    val categories = listOf("topic", "character", "format", "emotion", "show")
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -84,9 +88,10 @@ internal fun TagDialog(
                     color = MemegetColors.TextSecondary,
                 )
 
-                Row(
+                FlowRow(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     categories.forEach { cat ->
                         val selected = category == cat
@@ -100,7 +105,7 @@ internal fun TagDialog(
                                 .padding(horizontal = 10.dp, vertical = 6.dp),
                         ) {
                             Text(
-                                text = cat,
+                                text = if (cat == "show") "show/movie" else cat,
                                 style = MaterialTheme.typography.labelSmall,
                                 fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
                                 color = if (selected) MemegetColors.Volt else MemegetColors.TextSecondary,
