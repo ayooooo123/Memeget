@@ -1,10 +1,11 @@
 name: CI
 
-# Fast checks that must pass before merging: TypeScript type-checking and the
-# Jest unit tests (chiefly the shared-link → media resolver, so the X/Tenor/
-# generic download paths can't silently break). Runs on every PR and on pushes
-# to main and the working branches — keeps the repo green without needing the
-# full 60-min Android build.
+# Fast checks that must pass before merging: the native app's host tests
+# (native/, the main app) and, for the original React Native app, TypeScript
+# type-checking and the Jest unit tests (chiefly the shared-link → media
+# resolver, so the X/Tenor/generic download paths can't silently break). Runs
+# on every PR and on pushes to main and the working branches — keeps the repo
+# green without needing the full Android APK build.
 
 on:
   pull_request:
@@ -44,3 +45,28 @@ jobs:
 
       - name: Test
         run: npm test
+
+  native:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: native
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+          cache: gradle
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+
+      - name: Host tests
+        run: ./gradlew :app:testDebugUnitTest --no-daemon --stacktrace
