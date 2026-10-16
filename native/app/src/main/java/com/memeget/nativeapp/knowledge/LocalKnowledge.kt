@@ -29,6 +29,8 @@ internal class LocalKnowledge(
     private val kernels: LookalikeKernels = LookalikeKernels.Kotlin,
 ) {
     companion object {
+        // Shows stay out: the cloud question asks for a format or character, and a show's raw prompt score,
+        // ambiguous between titles, would otherwise count as a confident local answer and skip escalation.
         val IDENTITY_CANDIDATE_CATEGORIES = setOf("format", "character", "person", "object", "topic")
         /** Marks a tag that came from people's labels on a look-alike meme. */
         const val LOOKALIKE_SCORE_DOMAIN = "lookalike-cosine"
