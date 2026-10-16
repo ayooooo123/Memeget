@@ -14,6 +14,7 @@ import com.memeget.nativeapp.data.TagMerge
 import com.memeget.nativeapp.data.TagPropagation
 import com.memeget.nativeapp.inference.ModelRegistry
 import com.memeget.nativeapp.knowledge.LookalikeVote
+import com.memeget.nativeapp.knowledge.Titles
 import com.memeget.nativeapp.storage.TeachingPackIo
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.InternalCoroutinesApi
@@ -1893,10 +1894,17 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
                 val m = meme(id) ?: return@withLock
                 val rejected = m.rejectedLabels.map { TagMerge.normalizeTagLabel(it) }.toSet()
                 // Human tags come from the current row only: a caller's copy may predate a "not this".
-                // Callers supply the machine tags, which per-meme rejections veto.
+                // Callers supply the machine tags, which per-meme rejections veto. The one change a caller
+                // may make to a human tag is to file it as the TV show or movie it names (LocalKnowledge.retag),
+                // and only when the person hasn't chosen TV show or movie for it already.
+                val titled = tags.filter { TagMerge.isHumanTag(it) && Titles.isTitleCategory(it.category) }
+                    .associate { TagMerge.normalizeTagLabel(it.label) to it.category }
+                val human = m.tags.filter(TagMerge::isHumanTag).map { h ->
+                    val category = titled[TagMerge.normalizeTagLabel(h.label)]
+                    if (category == null || Titles.isTitleCategory(h.category)) h else h.copy(category = category)
+                }
                 val merged = TagMerge.mergeDurableTags(
-                    m.tags.filter(TagMerge::isHumanTag) +
-                        tags.filter { !TagMerge.isHumanTag(it) && !rejected.contains(TagMerge.normalizeTagLabel(it.label)) }
+                    human + tags.filter { !TagMerge.isHumanTag(it) && !rejected.contains(TagMerge.normalizeTagLabel(it.label)) }
                 )
                 val filteredTerms = TagMerge.withoutRejectedTerms(extraTerms, rejected)
 

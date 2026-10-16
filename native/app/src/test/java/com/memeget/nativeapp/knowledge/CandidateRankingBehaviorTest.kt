@@ -541,4 +541,80 @@ class CandidateRankingBehaviorTest {
         assertTrue(after.labelQueue().none { it.ask != null })
         assertTrue(after.classify(store.vectors.getValue(20).image, "", 20L).first.any { it.label == "pepe" })
     }
+
+    @Test fun aTitleTakesThePlaceOfTheOlderTopicLabelOfTheSameName() = runBlocking {
+        val knowledge = LocalKnowledge(TestStore(), TestEngine())
+        injectCuratedLabels(knowledge, listOf(
+            CuratedLabelDef("Spongebob", "a spongebob meme", "topic", emptyList(), unitVector(512, 0)),
+            CuratedLabelDef("SpongeBob", "a scene from SpongeBob", Titles.TV, emptyList(), unitVector(512, 1)),
+            CuratedLabelDef("Rugrats", "a scene from Rugrats", Titles.TV, emptyList(), unitVector(512, 2)),
+        ))
+        val (tags, _) = knowledge.classify(makeUnitProbe(512, 0.25f, 0.22f, 0.15f), "")
+        assertEquals(listOf("spongebob" to Titles.TV), tags.map { it.label to it.category })
+        assertEquals(Titles.SOURCE, tags.single().source)
+    }
+
+    @Test fun theLabelTabAsksAboutALikelyTitleAndAnAnswerGivesIt() = runBlocking {
+        val store = TestStore()
+        val picture = makeUnitProbe(512, 0.16f, 0f, 0f)
+        store.memes[1L] = Meme(id = 1L, uri = "file:///m1.jpg", name = "m1.jpg", kind = "image", ocr = "")
+        store.vectors[1L] = VectorRecord(id = 1L, image = picture, model = ModelRegistry.PRIMARY_MODEL_FINGERPRINT)
+        fun knowledge() = LocalKnowledge(store, TestEngine()).also {
+            injectCuratedLabels(it, listOf(CuratedLabelDef(
+                "The Sopranos", "a scene from The Sopranos", Titles.TV, listOf("sopranos", "tony soprano"), unitVector(512, 0),
+                names = listOf("sopranos"),
+            )))
+        }
+        val before = knowledge()
+        assertTrue("0.16 is not enough to tag", before.classify(picture, "", 1L).first.isEmpty())
+        assertEquals(listOf("the sopranos" to Titles.TV), before.suggestFor(store.memes.getValue(1L), picture).map { it.label to it.category })
+        assertEquals(Titles.TV, before.knownCategory("Sopranos"))
+        assertEquals("a character's name is not filed as the show", "topic", before.knownCategory("Tony Soprano"))
+
+        // A "Yes" on the card: the meme carries the title in the person's tag, and nobody asks about it again.
+        store.memes[1L] = store.memes.getValue(1L).copy(tags = listOf(Tag("the sopranos", Titles.TV, 1f, "exemplar", "user", "confirmed", "teaching")))
+        val after = knowledge()
+        assertTrue(after.suggestFor(store.memes.getValue(1L), picture).isEmpty())
+        assertTrue("the person's tag stands for the title", after.classify(picture, "", 1L).first.none { it.source == Titles.SOURCE })
+        assertTrue(after.classify(picture, "", 2L).first.any { it.label == "the sopranos" && it.category == Titles.TV })
+    }
+
+    @Test fun theLabelTabAsksWithoutWaitingForTheLabelVectors() = runBlocking {
+        val store = TestStore()
+        val labeled = makeUnitProbe(512, 0.9f, 0.3f, 0f)
+        val lookalike = makeUnitProbe(512, 0.9f, 0f, 0.3f)
+        store.memes[1L] = Meme(
+            id = 1L, uri = "file:///m1.jpg", name = "m1.jpg", kind = "image", ocr = "",
+            tags = listOf(Tag("pepe", "character", 1f, "manual", "user", "confirmed", "user")),
+        )
+        store.vectors[1L] = VectorRecord(id = 1L, image = labeled, model = ModelRegistry.PRIMARY_MODEL_FINGERPRINT)
+        store.memes[2L] = Meme(id = 2L, uri = "file:///m2.jpg", name = "m2.jpg", kind = "image", ocr = "")
+        store.vectors[2L] = VectorRecord(id = 2L, image = lookalike, model = ModelRegistry.PRIMARY_MODEL_FINGERPRINT)
+        // No label vectors in memory and none on disk: a title question would need the text model to encode them.
+        val knowledge = LocalKnowledge(store, TestEngine())
+        assertEquals(listOf("pepe"), knowledge.suggestFor(store.memes.getValue(2L), lookalike).map { it.label })
+    }
+
+    @Test fun aSuggestedLabelThatNamesAShowIsAskedAsTheShowAndOnlyOnce() = runBlocking {
+        val store = TestStore()
+        val labeled = makeUnitProbe(512, 0.5f, 0.5f, 0f)
+        val lookalike = makeUnitProbe(512, 0.5f, 0.4f, 0.3f)
+        store.memes[1L] = Meme(
+            id = 1L, uri = "file:///m1.jpg", name = "m1.jpg", kind = "image", ocr = "",
+            tags = listOf(Tag("sopranos", "person", 1f, "manual", "user", "confirmed", "user")),
+        )
+        store.vectors[1L] = VectorRecord(id = 1L, image = labeled, model = ModelRegistry.PRIMARY_MODEL_FINGERPRINT)
+        store.memes[2L] = Meme(id = 2L, uri = "file:///m2.jpg", name = "m2.jpg", kind = "image", ocr = "")
+        store.vectors[2L] = VectorRecord(id = 2L, image = lookalike, model = ModelRegistry.PRIMARY_MODEL_FINGERPRINT)
+        val knowledge = LocalKnowledge(store, TestEngine())
+        injectCuratedLabels(knowledge, listOf(CuratedLabelDef(
+            "The Sopranos", "a scene from The Sopranos", Titles.TV, listOf("sopranos"), unitVector(512, 0),
+            names = listOf("sopranos"),
+        )))
+        // The person's own word is asked about as the show; the bundled "the sopranos" question would repeat it.
+        assertEquals(
+            listOf("sopranos" to Titles.TV),
+            knowledge.suggestFor(store.memes.getValue(2L), lookalike).map { it.label to it.category },
+        )
+    }
 }

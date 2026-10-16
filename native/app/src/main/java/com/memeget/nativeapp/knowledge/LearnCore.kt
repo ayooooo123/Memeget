@@ -23,31 +23,12 @@ internal object LearnCore {
         val bias = if (anchorMax.isFinite()) Recognition.ANCHOR_BIAS * anchorMax else 0f
 
         val out = ArrayList<Tag>()
-        var show: CuratedLabelDef? = null
-        var showMargin = Float.NEGATIVE_INFINITY
-        var nextShowMargin = Float.NEGATIVE_INFINITY
         for (def in labels) {
+            // TV shows and movies compete for one title per meme (Titles), not each on its own margin.
+            if (Titles.isTitleCategory(def.category)) continue
             val margin = FloatBlob.dot(imageVec, def.vec) - bias
-            if (def.category == Recognition.SHOW_CATEGORY) {
-                if (margin > showMargin) {
-                    nextShowMargin = showMargin
-                    showMargin = margin
-                    show = def
-                } else if (margin > nextShowMargin) {
-                    nextShowMargin = margin
-                }
-                continue
-            }
             if (margin < Recognition.MIN_LABEL_MARGIN) continue
             out.add(promptTag(def, margin))
-        }
-        if (show != null && showMargin >= Recognition.SHOW_MIN_MARGIN && showMargin - nextShowMargin >= Recognition.SHOW_MIN_GAP) {
-            // A few titles ("spongebob", "star wars") are also older topic labels; the chosen title takes their place,
-            // keeping the better of the two scores, so the meme's tag says it is from a show.
-            val title = promptTag(show, showMargin)
-            val sameName = out.filter { it.label == title.label }
-            out.removeAll(sameName)
-            out.add(title.copy(score = (sameName.map { it.score } + title.score).max()))
         }
         return out
     }

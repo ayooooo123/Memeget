@@ -11,6 +11,7 @@ import com.memeget.nativeapp.knowledge.EntityRetrieve
 import com.memeget.nativeapp.knowledge.LearnCore
 import com.memeget.nativeapp.knowledge.LookalikeVote
 import com.memeget.nativeapp.knowledge.NegativeAnchorDef
+import com.memeget.nativeapp.knowledge.Titles
 import kotlinx.coroutines.Dispatchers
 import com.memeget.nativeapp.knowledge.LookalikeKernels
 import com.memeget.nativeapp.storage.TeachingPackIo
@@ -76,16 +77,45 @@ internal class LocalKnowledge(
             val curLabels = cachedLabels
             val curAnchors = cachedAnchors
             if (curLabels != null && curAnchors != null) return@withLock curLabels to curAnchors
-            val (loadedLabels, loadedAnchors) = CuratedLabels.loadLabelVectors(context, engine)
+            val (loadedLabels, loadedAnchors) = checkNotNull(CuratedLabels.loadLabelVectors(context, engine))
             cachedLabels = loadedLabels
             cachedAnchors = loadedAnchors
             loadedLabels to loadedAnchors
         }
 
+    /**
+     * The bundled labels when they are at hand without the text model: in memory or in the cache file. Null while
+     * they are being encoded or have yet to be, so a screen that only wants them never waits minutes for an encode.
+     */
+    private suspend fun curatedIfReady(): Pair<List<CuratedLabelDef>, List<NegativeAnchorDef>>? {
+        cachedLabels?.let { labels -> cachedAnchors?.let { return labels to it } }
+        val app = context ?: return null
+        if (!curatedMutex.tryLock()) return null
+        try {
+            cachedLabels?.let { labels -> cachedAnchors?.let { return labels to it } }
+            val loaded = CuratedLabels.loadLabelVectors(app, engine, encodeIfMissing = false) ?: return null
+            cachedLabels = loaded.first
+            cachedAnchors = loaded.second
+            return loaded
+        } finally {
+            curatedMutex.unlock()
+        }
+    }
+
+    /** Title names from the bundled labels, read without their vectors: an answer's category needs only names. */
+    @Volatile private var titleNames: Titles.Names? = null
+    private suspend fun titleNames(): Titles.Names? {
+        titleNames?.let { return it }
+        val defs = cachedLabels
+            ?: context?.let { app -> withContext(Dispatchers.IO) { CuratedLabels.loadDefinitions(app).first } }
+            ?: return null
+        return Titles.Names(defs.filter { Titles.isTitleCategory(it.category) }).also { titleNames = it }
+    }
+
     private class VoteState(
         val labelRevision: Long,
         val index: LookalikeVote.Index,
-        private val labeled: List<LookalikeVote.LabeledMeme>,
+        val labeled: List<LookalikeVote.LabeledMeme>,
         private val kernels: LookalikeKernels,
     ) {
         /** Each voted label's held-out record; measured once per label change, when first needed. */
@@ -152,12 +182,18 @@ internal class LocalKnowledge(
         val exemplars: List<Exemplar>,
         val negExemplarsByLabel: Map<String, List<FloatArray>>,
         val assocMap: Map<String, List<String>>,
+        val titles: Titles,
     )
 
     @Volatile private var cachedSnapshot: ClassificationSnapshot? = null
 
-    private suspend fun prepareSnapshot(): ClassificationSnapshot {
-        val (labels, anchors) = ensureCuratedLoaded()
+    private suspend fun prepareSnapshot(): ClassificationSnapshot = snapshotWith(ensureCuratedLoaded())
+
+    /** The snapshot when the label vectors are at hand without encoding them ([curatedIfReady]), else null. */
+    private suspend fun snapshotIfReady(): ClassificationSnapshot? = curatedIfReady()?.let { snapshotWith(it) }
+
+    private suspend fun snapshotWith(curated: Pair<List<CuratedLabelDef>, List<NegativeAnchorDef>>): ClassificationSnapshot {
+        val (labels, anchors) = curated
         val vote = ensureVote()
         // Teachings change only with the label revision, so their derived maps live as long as the vote.
         cachedSnapshot?.takeIf { it.vote === vote }?.let { return it }
@@ -184,6 +220,13 @@ internal class LocalKnowledge(
             }
         }
 
+        val titles = Titles(
+            labels,
+            negativeVecs,
+            vote.labeled,
+            allExemplars.map { Titles.Teaching(it.vector, it.label, it.positive) },
+        )
+
         return ClassificationSnapshot(
             labels = labels,
             negativeVecs = negativeVecs,
@@ -191,6 +234,7 @@ internal class LocalKnowledge(
             exemplars = allExemplars,
             negExemplarsByLabel = negExemplarsByLabel,
             assocMap = assocMap,
+            titles = titles,
         ).also { cachedSnapshot = it }
     }
 
@@ -224,7 +268,18 @@ internal class LocalKnowledge(
         // 3. OCR tags
         val ocrTags = CuratedLabels.ocrTags(ocr)
 
-        val visualMerged = LearnCore.mergeClassified(promptTags, lookalike.values.toList(), topK = 6)
+        var visualMerged = LearnCore.mergeClassified(promptTags, lookalike.values.toList(), topK = 6)
+        // 4. The meme's TV show or movie, carried once. A tag that names it by its name or another of its names
+        // stands for it: a person's own tag (re-tag gives that tag the title's category), or a person's label the
+        // vote spread, which takes the title's category. The older topic label of the same name ("spongebob")
+        // gives way to it. A character's name ("tony soprano") is a tag of its own.
+        snapshot.titles.identify(image, memeId)?.let { hit ->
+            val title = hit.tag
+            val sameName = visualMerged.filter { snapshot.titles.titleNamed(it.label) == hit.title }
+            val spread = sameName.filter { it.source == "exemplar" }.map { it.copy(category = title.category) }
+            visualMerged = visualMerged - sameName.toSet() + spread +
+                listOfNotNull(title.takeIf { spread.isEmpty() && !hit.personsTag })
+        }
         val durableMerged = TagMerge.mergeDurableTags(visualMerged + ocrTags, capAuto = 6)
         // Explicit negative veto eliminates vetoed labels across every branch
         val vetoFiltered = durableMerged.filter { !vetoedLabels.contains(TagMerge.normalizeTagLabel(it.label)) }
@@ -333,22 +388,32 @@ internal class LocalKnowledge(
     /**
      * Up to [limit] of people's labels to ask about for this meme: the look-alike vote's labels
      * first, then the nearest examples of other labels. Labels the meme already carries from a
-     * person, or rejected, and labels a closer "not X" contradicts are left out.
+     * person, or rejected, and labels a closer "not X" contradicts are left out. A label that names a
+     * TV show or movie is asked about as that title. When a title is a likely answer, no person gave
+     * the meme one and no label above asks about it, it takes the last place.
      */
     suspend fun suggestFor(meme: Meme, image: FloatArray, limit: Int = 3): List<Tag> = withContext(Dispatchers.Default) {
         val vote = ensureVote()
+        val names = titleNames()
         val settled = HashSet<String>()
         for (t in meme.tags) if (TagMerge.isHumanTag(t)) settled += TagMerge.normalizeTagLabel(t.label)
         for (label in meme.rejectedLabels) settled += TagMerge.normalizeTagLabel(label)
+        // Only while the label vectors are at hand: the Label tab never waits minutes for them to be encoded.
+        val title = snapshotIfReady()?.titles?.question(image, meme.id)
+            ?.let { Tag(it.label.lowercase(), it.category) }
+            ?.takeIf { it.label !in settled }
         val out = LinkedHashMap<String, Tag>()
         val ranked = LookalikeVote.rank(vote.index, image, excludeMeme = meme.id) +
             LookalikeVote.nearestPerLabel(vote.index, image, excludeMeme = meme.id)
         for (v in ranked) {
             if (out.size >= limit) break
-            if (v.label in settled || v.label in out || LookalikeVote.contradicted(vote.index, v, image)) continue
-            out[v.label] = lookalikeTag(v)
+            if (v.label in settled || v.label in out || v.label == title?.label || LookalikeVote.contradicted(vote.index, v, image)) continue
+            val named = names?.titleNamed(v.label)
+            out[v.label] = lookalikeTag(v).let { if (named != null) it.copy(category = named.category) else it }
         }
-        out.values.toList()
+        val asked = out.values.toList()
+        if (title == null || asked.any { names?.titleNamed(it.label)?.label?.lowercase() == title.label }) asked
+        else asked.take(limit - 1) + title
     }
 
     /**
@@ -433,10 +498,13 @@ internal class LocalKnowledge(
         val unnamed = vectors.keys.filter { it !in vote.named }.sorted()
         val wins = LookalikeVote.winners(vote.index, unnamed.map { vectors.getValue(it) }, kernels)
             .filterNotNull().groupingBy { it.label }.eachCount()
+        val names = titleNames()
         val out = ArrayList<QueueItem>()
         for (c in candidates.sortedWith(compareByDescending<Candidate> { wins[it.label] ?: 0 }.thenBy { it.needed }.thenBy { it.label })) {
             val unlocks = wins[c.label] ?: continue
-            val category = vote.index.examples.firstOrNull { it.label == c.label }?.category ?: "topic"
+            // A label that names a TV show or movie is asked about, and saved, as that title.
+            val category = names?.titleNamed(c.label)?.category
+                ?: vote.index.examples.firstOrNull { it.label == c.label }?.category ?: "topic"
             val cards = c.record.open.sortedByDescending { it.cosine }.mapNotNull { open ->
                 val meme = store.meme(open.memeId) ?: return@mapNotNull null // deleted since the vote
                 val image = vectors[open.memeId] ?: return@mapNotNull null
@@ -447,8 +515,9 @@ internal class LocalKnowledge(
         return out
     }
 
-    /** The category people's examples already give [label]; "topic" for a new label. */
+    /** The category for an answer [label]: a TV show's or movie's own, else what people's examples give it; "topic" for a new label. */
     suspend fun knownCategory(label: String): String {
+        titleNames()?.titleNamed(label)?.let { return it.category }
         val norm = TagMerge.normalizeTagLabel(label)
         return ensureVote().index.examples.firstOrNull { it.label == norm }?.category ?: "topic"
     }
@@ -506,6 +575,11 @@ internal class LocalKnowledge(
                     val kept = meme.tags.filter {
                         TagMerge.survivesReclassification(it) &&
                             (TagMerge.isHumanTag(it) || !vetoed.contains(TagMerge.normalizeTagLabel(it.label)))
+                    }.map { tag ->
+                        // A person's tag that names a TV show or movie by name reads as it ("sopranos" as a TV show),
+                        // unless the person already chose TV show or movie.
+                        if (!TagMerge.isHumanTag(tag) || Titles.isTitleCategory(tag.category)) tag
+                        else snapshot.titles.titleNamed(tag.label)?.let { tag.copy(category = it.category) } ?: tag
                     }
                     val merged = TagMerge.mergeDurableTags(freshTags + kept, capAuto = 6)
                     val terms = extraTermsFor(merged, snapshot.assocMap)

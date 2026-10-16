@@ -15,12 +15,17 @@ import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
 
+/**
+ * A bundled label. [associations] are its search words; for a TV show or movie they are also the names that give a
+ * meme the title, and [names] says which of them name the title itself, not a character (Titles.Names).
+ */
 internal data class CuratedLabelDef(
     val label: String,
     val prompt: String,
     val category: String,
     val associations: List<String>,
     val vec: FloatArray,
+    val names: List<String> = emptyList(),
 ) {
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
@@ -72,27 +77,46 @@ internal object CuratedLabels {
         return out
     }
 
-    suspend fun loadLabelVectors(context: Context?, engine: InferenceEngine): Pair<List<CuratedLabelDef>, List<NegativeAnchorDef>> =
+    /** The bundled labels and anchors as written, without vectors; reading them needs no model. */
+    fun loadDefinitions(context: Context): Pair<List<CuratedLabelDef>, List<NegativeAnchorDef>> =
+        parseDefinitions(context.assets.open("knowledge/label-prompts.json").use { it.readBytes() })
+
+    private fun parseDefinitions(source: ByteArray): Pair<List<CuratedLabelDef>, List<NegativeAnchorDef>> {
+        val root = JSONObject(source.toString(Charsets.UTF_8))
+        val labelRows = root.getJSONArray("labels")
+        val anchorRows = root.getJSONArray("anchors")
+        val labels = ArrayList<CuratedLabelDef>(labelRows.length())
+        val anchors = ArrayList<NegativeAnchorDef>(anchorRows.length())
+        for (index in 0 until labelRows.length()) {
+            val row = labelRows.getJSONObject(index)
+            val associations = row.optJSONArray("associations")
+            val names = row.optJSONArray("names")
+            labels += CuratedLabelDef(
+                row.getString("label"), row.getString("prompt"), row.optString("category", "topic"),
+                List(associations?.length() ?: 0) { associations!!.getString(it) }, FloatArray(0),
+                List(names?.length() ?: 0) { names!!.getString(it) },
+            )
+        }
+        for (index in 0 until anchorRows.length()) {
+            anchors += NegativeAnchorDef(anchorRows.getJSONObject(index).getString("text"), FloatArray(0))
+        }
+        return labels to anchors
+    }
+
+    /**
+     * The bundled labels and anchors with their text vectors: from the cache file when it matches this build's labels
+     * and text model, else encoded now with the text model, unless [encodeIfMissing] is false, which returns null then.
+     */
+    suspend fun loadLabelVectors(
+        context: Context?,
+        engine: InferenceEngine,
+        encodeIfMissing: Boolean = true,
+    ): Pair<List<CuratedLabelDef>, List<NegativeAnchorDef>>? =
         withContext(Dispatchers.IO) {
             val app = requireNotNull(context) { "Curated knowledge requires application assets" }
             val source = app.assets.open("knowledge/label-prompts.json").use { it.readBytes() }
             val sourceHash = MessageDigest.getInstance("SHA-256").digest(source).joinToString("") { "%02x".format(it) }
-            val root = JSONObject(source.toString(Charsets.UTF_8))
-            val labelRows = root.getJSONArray("labels")
-            val anchorRows = root.getJSONArray("anchors")
-            val labels = ArrayList<CuratedLabelDef>(labelRows.length())
-            val anchors = ArrayList<NegativeAnchorDef>(anchorRows.length())
-            for (index in 0 until labelRows.length()) {
-                val row = labelRows.getJSONObject(index)
-                val associations = row.optJSONArray("associations")
-                labels += CuratedLabelDef(
-                    row.getString("label"), row.getString("prompt"), row.optString("category", "topic"),
-                    List(associations?.length() ?: 0) { associations!!.getString(it) }, FloatArray(0),
-                )
-            }
-            for (index in 0 until anchorRows.length()) {
-                anchors += NegativeAnchorDef(anchorRows.getJSONObject(index).getString("text"), FloatArray(0))
-            }
+            val (labels, anchors) = parseDefinitions(source)
             // Encode with this adapter; legacy vectors cannot establish recipe compatibility.
             // Cache native prompts under both the complete recipe and source digest. The header's version
             // (MGL3) marks prompts tokenized by ClipTokenizer; MGL2 caches hold the old tokenizer's vectors.
@@ -123,6 +147,7 @@ internal object CuratedLabels {
                     // Header, dimensions, recipe or vector validation failed.
                 }
             }
+            if (!encodeIfMissing) return@withContext null
             val readyLabels = labels.map {
                 currentCoroutineContext().ensureActive()
                 it.copy(vec = engine.embedText(it.prompt).also { vector -> require(valid(vector)) })

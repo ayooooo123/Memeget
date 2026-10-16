@@ -40,6 +40,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.memeget.nativeapp.knowledge.Titles
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -54,8 +55,8 @@ internal fun TagDialog(
     var category by remember { mutableStateOf("topic") }
     var spread by remember { mutableStateOf(false) }
 
-    // "show" covers TV shows and movies, the category of the bundled show and movie titles.
-    val categories = listOf("topic", "character", "format", "emotion", "show")
+    // TV shows and movies are categories of their own, as the bundled titles are (Titles).
+    val categories = listOf("topic", "character", "format", "emotion", Titles.TV, Titles.MOVIE)
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -105,7 +106,7 @@ internal fun TagDialog(
                                 .padding(horizontal = 10.dp, vertical = 6.dp),
                         ) {
                             Text(
-                                text = if (cat == "show") "show/movie" else cat,
+                                text = categoryName(cat),
                                 style = MaterialTheme.typography.labelSmall,
                                 fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
                                 color = if (selected) MemegetColors.Volt else MemegetColors.TextSecondary,
@@ -164,6 +165,13 @@ internal fun TagDialog(
         },
         containerColor = MemegetColors.Surface,
     )
+}
+
+/** How a tag category reads in the app: the TV and movie categories by name, the others as they are. */
+internal fun categoryName(category: String): String = when (category.trim().lowercase()) {
+    Titles.TV -> "TV show"
+    Titles.MOVIE -> "movie"
+    else -> category
 }
 
 @Composable
