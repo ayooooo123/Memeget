@@ -41,12 +41,11 @@ internal object NativeBridge {
         normalize: Boolean,
     ): FloatArray
 
-    external fun nativeEmbedText(
+    /** [tokenIds]: [ClipTokenizer.CONTEXT_LENGTH] MobileCLIP-S2 ids from [ClipTokenizer.encode]. */
+    external fun nativeEmbedTextTokens(
         handle: Long,
         modelPath: String,
-        tokenizerPath: String,
-        text: String,
-        maxTokens: Int,
+        tokenIds: LongArray,
     ): FloatArray
 
     external fun nativeRecognize(

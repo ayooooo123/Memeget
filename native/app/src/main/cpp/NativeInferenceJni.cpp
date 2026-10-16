@@ -163,26 +163,30 @@ Java_com_memeget_nativeapp_inference_NativeBridge_nativeEmbedImage(
 }
 
 JNIEXPORT jfloatArray JNICALL
-Java_com_memeget_nativeapp_inference_NativeBridge_nativeEmbedText(
+Java_com_memeget_nativeapp_inference_NativeBridge_nativeEmbedTextTokens(
     JNIEnv* env,
     jobject /* thiz */,
     jlong handle,
     jstring modelPath,
-    jstring tokenizerPath,
-    jstring text,
-    jint maxTokens) {
+    jlongArray tokenIds) {
     try {
         auto runner = getRunner(handle);
         if (!runner) {
             throwJavaException(env, "ModelRunner instance is null");
             return nullptr;
         }
+        if (!tokenIds) {
+            throwJavaException(env, "Token ids are null");
+            return nullptr;
+        }
 
         std::string mPath = JStringUtf(env, modelPath).str();
-        std::string tPath = JStringUtf(env, tokenizerPath).str();
-        std::string txt = JStringUtf(env, text).str();
+        const jsize count = env->GetArrayLength(tokenIds);
+        std::vector<int64_t> ids(static_cast<size_t>(count));
+        static_assert(sizeof(jlong) == sizeof(int64_t), "jlong must be 64-bit");
+        env->GetLongArrayRegion(tokenIds, 0, count, reinterpret_cast<jlong*>(ids.data()));
 
-        std::vector<float> vec = runner->embedText(mPath, tPath, txt, maxTokens);
+        std::vector<float> vec = runner->embedTextTokens(mPath, ids);
 
         jfloatArray result = env->NewFloatArray(static_cast<jsize>(vec.size()));
         if (!result) return nullptr;

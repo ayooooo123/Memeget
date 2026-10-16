@@ -38,6 +38,9 @@ internal data class NegativeAnchorDef(
 
 internal object CuratedLabels {
 
+    /** "MGL3": prompt vectors from [com.memeget.nativeapp.inference.ClipTokenizer] ids. */
+    private const val CACHE_VERSION = 0x4D474C33
+
     data class OcrRule(val regex: Regex, val label: String, val category: String)
 
     val OCR_RULES = listOf(
@@ -91,7 +94,8 @@ internal object CuratedLabels {
                 anchors += NegativeAnchorDef(anchorRows.getJSONObject(index).getString("text"), FloatArray(0))
             }
             // Encode with this adapter; legacy vectors cannot establish recipe compatibility.
-            // Cache native prompts under both the complete recipe and source digest.
+            // Cache native prompts under both the complete recipe and source digest. The header's version
+            // (MGL3) marks prompts tokenized by ClipTokenizer; MGL2 caches hold the old tokenizer's vectors.
             val cache = File(app.filesDir, "native_label_vectors.bin")
             fun valid(vector: FloatArray): Boolean {
                 var norm = 0.0
@@ -104,7 +108,7 @@ internal object CuratedLabels {
             if (cache.isFile && cache.length() <= 4L * 1024 * 1024) {
                 try {
                     return@withContext DataInputStream(cache.inputStream().buffered()).use { input ->
-                        require(input.readInt() == 0x4D474C32)
+                        require(input.readInt() == CACHE_VERSION)
                         require(input.readUTF() == engine.primaryModel && input.readUTF() == sourceHash)
                         require(input.readInt() == labels.size && input.readInt() == anchors.size)
                         fun vector(): FloatArray = FloatArray(512) { input.readFloat() }.also { require(valid(it)) }
@@ -130,7 +134,7 @@ internal object CuratedLabels {
             val temporary = File.createTempFile("label_vectors_", ".tmp", app.filesDir)
             try {
                 DataOutputStream(temporary.outputStream().buffered()).use { output ->
-                    output.writeInt(0x4D474C32)
+                    output.writeInt(CACHE_VERSION)
                     output.writeUTF(engine.primaryModel)
                     output.writeUTF(sourceHash)
                     output.writeInt(readyLabels.size)
