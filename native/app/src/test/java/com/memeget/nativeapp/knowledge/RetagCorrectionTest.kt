@@ -9,9 +9,13 @@ import com.memeget.nativeapp.SqliteLibraryStore
 import com.memeget.nativeapp.Tag
 import com.memeget.nativeapp.TextRegion
 import com.memeget.nativeapp.inference.ModelRegistry
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -21,6 +25,8 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlin.math.sqrt
 
 @RunWith(RobolectricTestRunner::class)
@@ -95,6 +101,67 @@ class RetagCorrectionTest {
         assertTrue(after.tags.any { it.label == "milady" && it.confirmation == "confirmed" })
         assertFalse("the newer hand tag withdraws the older 'not this'", after.rejectedLabels.contains("milady"))
         assertEquals(listOf(id), store.search("milady", null).map { it.meme.id })
+    }
+
+    @Test fun aRetagCutShortResumesWhereItStoppedAndLeavesUnchangedMemesUnwritten() = runBlocking {
+        val taught = indexed("taught.png", 'a', unit(0 to 1f))
+        // Nine exact copies (cosine 0.99) of the taught picture: each carries its label after a re-tag.
+        val copies = (1..9).map { indexed("copy$it.png", 'a' + it, unit(0 to 1f, (10 + it) to 0.1f)) }
+        store.teach(taught, "bucket hat", "object", true)
+        fun writes() = store.revision.value
+
+        val beforeFirst = writes()
+        try {
+            knowledge.retag { if (it.done >= 5) throw CancellationException("session limit") }
+        } catch (_: CancellationException) {
+        }
+        assertEquals("the first pass stopped after five memes", 5L, writes() - beforeFirst)
+
+        val beforeSecond = writes()
+        knowledge.retag {}
+        assertTrue("the second pass did only the memes the first one left", writes() - beforeSecond in 4L..5L)
+        assertTrue(copies.all { id -> requireNotNull(store.meme(id)).tags.any { it.label == "bucket hat" } })
+
+        val beforeThird = writes()
+        knowledge.retag {}
+        assertEquals("a full pass over unchanged memes writes nothing", 0L, writes() - beforeThird)
+    }
+
+    @Test fun aLabelTaughtDuringARetagReachesTheMemesItHadAlreadyDone() = runBlocking {
+        val taught = indexed("taught.png", 'a', unit(0 to 1f))
+        // Nine exact copies (cosine 0.99) of the taught picture: each carries its labels after a re-tag.
+        val copies = (1..9).map { indexed("copy$it.png", 'a' + it, unit(0 to 1f, (10 + it) to 0.1f)) }
+        store.teach(taught, "bucket hat", "object", true)
+        // The pass waits after five memes while a person teaches another label.
+        val halfway = CountDownLatch(1)
+        val taughtMore = CountDownLatch(1)
+        val pass = launch {
+            knowledge.retag {
+                if (it.done >= 5 && halfway.count > 0) {
+                    halfway.countDown()
+                    taughtMore.await(30, TimeUnit.SECONDS)
+                }
+            }
+        }
+        assertTrue(withContext(Dispatchers.IO) { halfway.await(30, TimeUnit.SECONDS) })
+        store.teach(taught, "fishing hat", "object", true)
+        taughtMore.countDown()
+        pass.join()
+        assertTrue(copies.all { id -> requireNotNull(store.meme(id)).tags.any { it.label == "fishing hat" } })
+    }
+
+    @Test fun aMemeWithARejectedWordInItsSearchTermsIsNotRewrittenOnEveryPass() = runBlocking {
+        val taught = indexed("taught.png", 'a', unit(0 to 1f))
+        // An exact copy carries "bucket hat"; its "not hat" keeps the word "hat" out of its stored search terms.
+        val copy = indexed("copy.png", 'b', unit(0 to 1f, 11 to 0.1f))
+        store.teach(taught, "bucket hat", "object", true)
+        store.teach(copy, "hat", "object", false)
+        knowledge.retag {}
+        assertTrue(requireNotNull(store.meme(copy)).tags.any { it.label == "bucket hat" })
+
+        val before = store.revision.value
+        knowledge.retag {}
+        assertEquals("a pass over unchanged memes writes nothing", 0L, store.revision.value - before)
     }
 
     private class NoModelEngine : InferenceEngine {
