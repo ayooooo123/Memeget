@@ -17,9 +17,11 @@ import androidx.core.app.NotificationCompat
 // the JS runtime (react-native-executorch); this service + a partial wake lock
 // stop the OS from killing that work when the app isn't visible.
 //
-// NOTE: type `dataSync` foreground services are capped at ~6h / 24h on Android
-// 14+, and the budget only resets when the user reopens the app. A fully native
-// indexer (calling ExecuTorch's AAR directly) is the longer-term answer.
+// Type `dataSync` foreground services get six hours in the background per 24 hours on
+// Android 15 and later (apps targeting it), and the budget only resets when the user opens the
+// app. At the limit Android calls onTimeout and kills the app unless the service stops within
+// seconds; a start after it is refused. Either way the service stops and KeepAliveLease tells
+// its holders, so work that needs it can hand over to WorkManager.
 class KeepAliveService : Service() {
   private var wakeLock: PowerManager.WakeLock? = null
 
@@ -42,10 +44,18 @@ class KeepAliveService : Service() {
     // an intent instead of stopService: intents are ordered, so the stop cannot overtake the
     // start it is cancelling.
     val notification = buildNotification(title, text, progress, total)
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-      startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
-    } else {
-      startForeground(NOTIFICATION_ID, notification)
+    try {
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+        startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+      } else {
+        startForeground(NOTIFICATION_ID, notification)
+      }
+    } catch (refused: IllegalStateException) {
+      // ForegroundServiceStartNotAllowedException: the six-hour budget is spent, or a start from
+      // the background was refused. An uncaught one would crash the app.
+      stopSelf()
+      if (intent?.action != ACTION_STOP) KeepAliveLease.markLost()
+      return START_NOT_STICKY
     }
 
     if (intent?.action == ACTION_STOP) {
@@ -62,6 +72,13 @@ class KeepAliveService : Service() {
       }
     }
     return START_STICKY
+  }
+
+  // Android 15+: the six-hour `dataSync` budget ran out. The service must stop within seconds.
+  override fun onTimeout(startId: Int, fgsType: Int) {
+    stopForeground(STOP_FOREGROUND_REMOVE)
+    stopSelf()
+    KeepAliveLease.markLost()
   }
 
   override fun onDestroy() {

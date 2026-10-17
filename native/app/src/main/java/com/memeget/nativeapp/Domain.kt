@@ -52,10 +52,14 @@ internal data class EnrichmentCounts(
     /** Analysed memes whose local caption is waiting or failed. */
     val captionsWaiting: Int = 0,
     val captionsFailed: Int = 0,
+    /** Analysed memes with a local caption. */
+    val captionsDone: Int = 0,
     val videos: Int = 0,
     /** Analysed videos whose transcript is waiting or failed. */
     val transcriptsWaiting: Int = 0,
     val transcriptsFailed: Int = 0,
+    /** Analysed videos with a transcript. */
+    val transcriptsDone: Int = 0,
     /** Analysed videos without a poster frame. */
     val postersMissing: Int = 0,
 )
@@ -93,6 +97,10 @@ internal data class TextRegion(
     val width: Float,
     val height: Float,
 )
+/**
+ * While captioning or transcribing, [done] and [total] count the whole library's captions or transcripts, not this
+ * session's, so the bar shows how far the library has got.
+ */
 internal data class WorkProgress(
     val stage: String = "idle",
     val done: Int = 0,
@@ -102,6 +110,18 @@ internal data class WorkProgress(
     val error: String? = null,
     val memeId: Long? = null,
 )
+
+/** The line the progress card and Settings show for running work. */
+internal fun WorkProgress.headline(): String = when {
+    total > 0 && stage in CAPTION_STAGES -> "Captions: ${total - done} left"
+    total > 0 && stage == "local transcription" -> "Transcripts: ${total - done} left"
+    total > 0 -> "Indexing $done/$total · $stage"
+    else -> "Preparing index: $stage"
+}
+
+private val CAPTION_STAGES = setOf("local description", "caption embedding")
+/** An item the app was killed on: [retried] when it went back to the queue, false when it was its second kill. */
+internal data class KilledRecovery(val id: Long, val retried: Boolean)
 internal data class ModelProgress(
     val name: String = "",
     val fraction: Float = 0f,
@@ -196,6 +216,15 @@ internal interface LibraryStore {
     /** Changes only a meme's caption state; its caption and tags stay as they are. */
     suspend fun setVisionState(id: Long, state: String)
     suspend fun enrichmentCounts(): EnrichmentCounts
+    /** Captioned memes whose caption has no search vector under [model] yet, at most [limit]. */
+    suspend fun captionsWithoutVectors(model: String, limit: Int): List<Long>
+    /**
+     * After the app was killed mid-caption ([stage] "vision") or mid-transcript ("audio"): the item named by setting
+     * [inFlightKey], if its marker still says failed, goes back to pending unless setting [onceKey] already lists it.
+     * The state, the strike and the cleared in-flight setting are written in one transaction. Null when nothing was
+     * stranded.
+     */
+    suspend fun recoverKilled(stage: String, inFlightKey: String, onceKey: String): KilledRecovery?
     /**
      * Queues every analysed meme whose caption ([stage] "vision") or every video whose transcript ([stage] "audio")
      * failed for another attempt. Returns how many.

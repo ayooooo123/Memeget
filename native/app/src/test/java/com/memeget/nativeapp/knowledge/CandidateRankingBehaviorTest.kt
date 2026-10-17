@@ -2,6 +2,7 @@ package com.memeget.nativeapp.knowledge
 
 import com.memeget.nativeapp.CloudResult
 import com.memeget.nativeapp.EnrichmentCounts
+import com.memeget.nativeapp.KilledRecovery
 import com.memeget.nativeapp.Exemplar
 import com.memeget.nativeapp.Folder
 import com.memeget.nativeapp.InferenceEngine
@@ -136,6 +137,8 @@ class CandidateRankingBehaviorTest {
         override suspend fun setAudioState(id: Long, state: String) {}
         override suspend fun setVisionState(id: Long, state: String) {}
         override suspend fun enrichmentCounts(): EnrichmentCounts = EnrichmentCounts()
+        override suspend fun captionsWithoutVectors(model: String, limit: Int): List<Long> = emptyList()
+        override suspend fun recoverKilled(stage: String, inFlightKey: String, onceKey: String): KilledRecovery? = null
         override suspend fun requeueFailedEnrichment(stage: String): Int = 0
         override suspend fun requeueAllTranscripts(): Int = 0
         override suspend fun setVisual(id: Long, vector: FloatArray, model: String) {}

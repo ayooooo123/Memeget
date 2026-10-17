@@ -171,15 +171,18 @@ std::string LlamaVisionRunner::describe(const RgbImage& image,
     }
     if (maxTokens <= 0) throw std::invalid_argument("maxTokens must be positive");
     if (isCancelled()) throw std::runtime_error("Inference cancelled");
+    const auto describeStarted = Clock::now();
 
-    llama_memory_clear(llama_get_memory(context_), true);
+    const std::string marker = mtmd_default_marker();
+    const size_t markerAt = userPrompt.find(marker);
+    if (markerAt == std::string::npos || userPrompt.find(marker, markerAt + marker.size()) != std::string::npos) {
+        throw std::invalid_argument("The user prompt needs the image marker exactly once");
+    }
 
     // MiniCPM-V 4.7 chat template (ChatML) with enable_thinking=false: an empty think block opens the reply.
     std::string prompt;
     if (!systemPrompt.empty()) prompt += "<|im_start|>system\n" + systemPrompt + "<|im_end|>\n";
     prompt += "<|im_start|>user\n";
-    prompt += mtmd_default_marker();
-    prompt += "\n";
     prompt += userPrompt;
     prompt += "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n";
 
@@ -195,12 +198,32 @@ std::string LlamaVisionRunner::describe(const RgbImage& image,
     if (promptTokens + static_cast<size_t>(maxTokens) > llama_n_ctx(context_)) {
         throw std::runtime_error("MiniCPM-V prompt does not fit the context: " + std::to_string(promptTokens) + " tokens");
     }
+    const size_t chunkCount = mtmd_input_chunks_size(chunks.get());
+
+    // The text before the image (system prompt and fixed instructions) is the same for every meme, so the state
+    // after it is kept and restored instead of evaluating it again; on the Pixel 5a that text costs about 13 ms a
+    // token.
+    std::vector<int32_t> lead;
+    if (chunkCount > 1 && mtmd_input_chunk_get_type(mtmd_input_chunks_get(chunks.get(), 0)) == MTMD_INPUT_CHUNK_TYPE_TEXT) {
+        size_t count = 0;
+        const llama_token* tokens = mtmd_input_chunk_get_tokens_text(mtmd_input_chunks_get(chunks.get(), 0), &count);
+        lead.assign(tokens, tokens + count);
+    }
+    llama_memory_clear(llama_get_memory(context_), true);
+    llama_pos nPast = 0;
+    size_t from = 0;
+    if (!lead.empty() && lead == cachedPrefix_ &&
+        llama_state_seq_set_data(context_, cachedState_.data(), cachedState_.size(), 0) > 0) {
+        nPast = static_cast<llama_pos>(lead.size());
+        from = 1;
+    } else {
+        cachedPrefix_.clear();
+        cachedState_.clear();
+    }
 
     long long imageMs = 0;
     long long prefillMs = 0;
-    llama_pos nPast = 0;
-    const size_t chunkCount = mtmd_input_chunks_size(chunks.get());
-    for (size_t i = 0; i < chunkCount; ++i) {
+    for (size_t i = from; i < chunkCount; ++i) {
         const mtmd_input_chunk* chunk = mtmd_input_chunks_get(chunks.get(), i);
         const auto started = Clock::now();
         status = mtmd_helper_eval_chunk_single(vision_, context_, chunk, nPast, 0,
@@ -208,6 +231,13 @@ std::string LlamaVisionRunner::describe(const RgbImage& image,
         if (isCancelled()) throw std::runtime_error("Inference cancelled");
         if (status != 0) throw std::runtime_error("MiniCPM-V prompt evaluation failed: " + std::to_string(status));
         (mtmd_input_chunk_get_type(chunk) == MTMD_INPUT_CHUNK_TYPE_TEXT ? prefillMs : imageMs) += millisSince(started);
+        if (i == 0 && !lead.empty()) {
+            std::vector<uint8_t> state(llama_state_seq_get_size(context_, 0));
+            if (!state.empty() && llama_state_seq_get_data(context_, state.data(), state.size(), 0) == state.size()) {
+                cachedPrefix_ = lead;
+                cachedState_ = std::move(state);
+            }
+        }
     }
 
     const llama_vocab* vocab = llama_model_get_vocab(model_);
@@ -235,7 +265,10 @@ std::string LlamaVisionRunner::describe(const RgbImage& image,
     const long long decodeMs = millisSince(decodeStarted);
 
     std::ostringstream timings;
+    // total_ms covers everything here, including clearing, restoring and saving the prompt state.
+    timings << "total_ms=" << millisSince(describeStarted) << ";";
     timings << "image_ms=" << imageMs << ";prefill_ms=" << prefillMs << ";prompt_tokens=" << promptTokens
+            << ";reused_tokens=" << (from == 1 ? lead.size() : 0)
             << ";decode_ms=" << decodeMs << ";generated_tokens=" << generated
             << ";input=" << image.width << "x" << image.height;
     timings_ = timings.str();

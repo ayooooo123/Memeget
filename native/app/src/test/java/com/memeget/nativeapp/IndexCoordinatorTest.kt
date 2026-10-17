@@ -1,6 +1,8 @@
 package com.memeget.nativeapp
 
 import android.app.Application
+import android.app.ForegroundServiceStartNotAllowedException
+import android.content.ComponentName
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.Intent
@@ -12,6 +14,7 @@ import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import androidx.work.testing.WorkManagerTestInitHelper
 import com.memeget.nativeapp.inference.ModelRegistry
+import expo.modules.memegetbg.KeepAliveLease
 import expo.modules.memegetbg.SubjectCutoutResult
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -649,6 +652,189 @@ class IndexCoordinatorTest {
         // Work is left, but without a charger it waits for the regular schedule.
         assertTrue(ids.any { requireNotNull(store.meme(it)).visionState == "pending" })
         assertTrue(queuedHandovers().isEmpty())
+    }
+
+    private suspend fun indexedImagesWaitingForCaptions(count: Int): List<Long> {
+        store.setSetting("vision.enabled", "1")
+        return (1..count).map { n ->
+            store.insertPending(Uri.fromFile(createValidBitmapFile("still$n.png")).toString(), "still$n.png", "image", 100L + n, "hashU$n")
+                .also { id ->
+                    store.completeIndex(id, LocalAnalysis(FloatArray(512).apply { this[n] = 1f }, "", emptyList(), ""), ModelRegistry.PRIMARY_MODEL_FINGERPRINT, "")
+                }
+        }
+    }
+
+    /** Each caption uses up a whole session's time, so every session captions one meme. */
+    private fun oneCaptionPerSession(seen: MutableList<Pair<Int, Int>>, coordinator: () -> IndexCoordinator): IndexCoordinator {
+        testEngine.onDescribe = { _, _ ->
+            seen += coordinator().progress.value.let { it.done to it.total }
+            ShadowSystemClock.advanceBy(Duration.ofSeconds(3))
+            "CAPTION: a frog\nTAGS: frog"
+        }
+        return IndexCoordinator(context, store, files, testEngine, knowledge, cloud, sessionTimeoutMillis = 2_000L, sessionGraceMillis = 10_000L, longSessionMillis = 2_000L)
+    }
+
+    @Test(timeout = 30_000)
+    fun captionNowOnTheChargerKeepsGoingUntilEveryMemeIsCaptioned() = runBlocking {
+        val ids = indexedImagesWaitingForCaptions(3)
+        plugInCharger()
+        val seen = ArrayList<Pair<Int, Int>>()
+        lateinit var coordinator: IndexCoordinator
+        coordinator = oneCaptionPerSession(seen) { coordinator }
+
+        coordinator.start(emptyList(), untilDone = true).join()
+
+        assertEquals(listOf("done", "done", "done"), ids.map { requireNotNull(store.meme(it)).visionState })
+        // The progress counts the library's captions, so it shows how many are left, not how far this session got.
+        assertEquals(listOf(0 to 3, 1 to 3, 2 to 3), seen)
+    }
+
+    @Test(timeout = 30_000)
+    fun captionNowOnBatteryRunsOneSession() = runBlocking {
+        val ids = indexedImagesWaitingForCaptions(3)
+        val seen = ArrayList<Pair<Int, Int>>()
+        lateinit var coordinator: IndexCoordinator
+        coordinator = oneCaptionPerSession(seen) { coordinator }
+
+        coordinator.start(emptyList(), untilDone = true).join()
+
+        assertEquals(1, ids.count { requireNotNull(store.meme(it)).visionState == "done" })
+    }
+
+    @Test(timeout = 30_000)
+    fun captionVectorsWaitForTheEndOfTheSessionAndFillInOnesThatWereNeverMade() = runBlocking {
+        // Nine memes make two caption batches; a tenth was captioned by a session that never got to its vector.
+        val all = indexedImagesWaitingForCaptions(10)
+        val earlier = all.last()
+        store.setCaption(earlier, "a frog from an earlier session", emptyList(), null)
+        val calls = ArrayList<String>()
+        testEngine.onDescribe = { _, _ -> calls += "describe"; "CAPTION: a frog\nTAGS: frog" }
+        testEngine.onEmbedText = { calls += "embed"; FloatArray(512).apply { this[2] = 1f } }
+        val coordinator = IndexCoordinator(context, store, files, testEngine, knowledge, cloud, sessionTimeoutMillis = 20_000L)
+
+        coordinator.start(emptyList()).join()
+
+        // The text model would unload the caption model: it loads once, after every caption.
+        assertEquals(List(9) { "describe" } + List(10) { "embed" }, calls)
+        assertTrue(all.all { store.vectors(it)?.caption != null })
+    }
+
+    @Test(timeout = 30_000)
+    fun aMemeTheAppWasKilledOnGetsOneMoreTry() = runBlocking {
+        val id = indexedImagesWaitingForCaptions(1).single()
+        testEngine.onDescribe = { _, _ -> "CAPTION: a frog\nTAGS: frog" }
+        val coordinator = IndexCoordinator(context, store, files, testEngine, knowledge, cloud, sessionTimeoutMillis = 10_000L)
+        // What a kill mid-caption leaves behind: the crash marker and the meme it was on.
+        val killMidCaption: suspend () -> Unit = {
+            store.setCaption(id, "", emptyList(), null, "failed")
+            store.setSetting("vision.inFlight", id.toString())
+        }
+
+        killMidCaption()
+        coordinator.start(emptyList()).join()
+        assertEquals("done", requireNotNull(store.meme(id)).visionState)
+
+        killMidCaption()
+        coordinator.start(emptyList()).join()
+        assertEquals("killed twice, it stays failed", "failed", requireNotNull(store.meme(id)).visionState)
+        assertTrue(store.errors().any { it.contains("stopped twice") })
+    }
+
+    @Test(timeout = 30_000)
+    fun theInFlightRecordOutlivesTheWriteOfTheCaptionsOutcome() = runBlocking {
+        // A kill between the two writes must leave the record behind; the order of the writes is what decides that.
+        val ids = indexedImagesWaitingForCaptions(2)
+        val writes = ArrayList<String>()
+        val recording = object : LibraryStore by store {
+            override suspend fun setCaption(id: Long, caption: String, tags: List<Tag>, vector: FloatArray?, state: String) {
+                store.setCaption(id, caption, tags, vector, state)
+                if (vector == null) writes += "$id:$state"
+            }
+            override suspend fun setSetting(key: String, value: String) {
+                store.setSetting(key, value)
+                if (key == "vision.inFlight") writes += "in flight:$value"
+            }
+        }
+        val entered = CompletableDeferred<Unit>()
+        var calls = 0
+        testEngine.onDescribe = { _, _ ->
+            if (++calls == 1) "CAPTION: a frog\nTAGS: frog" else {
+                entered.complete(Unit)
+                withContext(Dispatchers.IO) { while (!testEngine.cancelled.get()) Thread.sleep(10) }
+                throw RuntimeException("Inference cancelled")
+            }
+        }
+        val coordinator = IndexCoordinator(context, recording, files, testEngine, knowledge, cloud, sessionTimeoutMillis = 10_000L)
+
+        val run = coordinator.start(emptyList())
+        awaitStage(entered, run, coordinator)
+        coordinator.cancel()
+        run.join()
+
+        // The session may take either meme first.
+        val first = writes.first().substringAfter(':').toLong()
+        val second = ids.single { it != first }
+        assertEquals(
+            listOf(
+                "in flight:$first", "$first:failed", "$first:done", "in flight:",
+                // Stopped mid-caption: back to waiting first, then the record goes.
+                "in flight:$second", "$second:failed", "$second:pending", "in flight:",
+            ),
+            writes,
+        )
+    }
+
+    @Test(timeout = 30_000)
+    fun captionNowHandsOverToBackgroundSessionsWhenAndroidEndsTheKeepAlive() = runBlocking {
+        val ids = indexedImagesWaitingForCaptions(2)
+        plugInCharger()
+        var described = 0
+        testEngine.onDescribe = { _, _ ->
+            described++
+            // Android 15's six-hour limit ends the foreground service mid-caption.
+            KeepAliveLease.markLost()
+            withContext(Dispatchers.IO) {
+                while (!testEngine.cancelled.get()) Thread.sleep(10)
+                throw RuntimeException("Inference cancelled")
+            }
+        }
+        val coordinator = IndexCoordinator(context, store, files, testEngine, knowledge, cloud, sessionTimeoutMillis = 10_000L)
+
+        val run = coordinator.start(emptyList(), untilDone = true)
+        run.join()
+
+        assertTrue(run.isCancelled)
+        assertEquals("no caption starts once the service is gone", 1, described)
+        assertEquals("the cut-off caption waits for the next session", listOf("pending", "pending"),
+            ids.map { requireNotNull(store.meme(it)).visionState })
+        assertEquals("paused", coordinator.progress.value.stage)
+        assertEquals(listOf(WorkInfo.State.ENQUEUED), queuedHandovers().map { it.state })
+    }
+
+    @Test(timeout = 30_000)
+    fun captionNowHandsOverWhenAndroidRefusesToStartTheKeepAlive() = runBlocking {
+        val ids = indexedImagesWaitingForCaptions(2)
+        plugInCharger()
+        // In the background, after the six-hour budget, Android refuses the start itself; the service never runs.
+        val refusing = object : ContextWrapper(context) {
+            override fun startForegroundService(service: Intent): ComponentName? =
+                throw ForegroundServiceStartNotAllowedException("Time limit already exhausted for foreground service type dataSync")
+        }
+        var described = 0
+        testEngine.onDescribe = { _, _ ->
+            described++
+            "CAPTION: a frog\nTAGS: frog"
+        }
+        val coordinator = IndexCoordinator(refusing, store, files, testEngine, knowledge, cloud, sessionTimeoutMillis = 10_000L)
+
+        val run = coordinator.start(emptyList(), untilDone = true)
+        run.join()
+
+        assertTrue(run.isCancelled)
+        assertEquals("nothing runs without the keep-alive", 0, described)
+        assertEquals(listOf("pending", "pending"), ids.map { requireNotNull(store.meme(it)).visionState })
+        assertEquals("paused", coordinator.progress.value.stage)
+        assertEquals(listOf(WorkInfo.State.ENQUEUED), queuedHandovers().map { it.state })
     }
 
     @Test(timeout = 30_000)

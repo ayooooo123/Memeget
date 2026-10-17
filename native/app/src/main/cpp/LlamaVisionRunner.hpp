@@ -34,7 +34,10 @@ public:
 
     bool matches(const std::string& modelPath, const std::string& projectorPath) const;
 
-    // Single-turn ChatML request with thinking disabled. Throws on failure or cancellation.
+    // Single-turn ChatML request with thinking disabled. `userPrompt` must contain the image marker
+    // (mtmd_default_marker()) exactly once, where the image goes. The text before the image is kept
+    // in the context between calls and reused while it stays the same, so put fixed instructions
+    // there. Throws on failure or cancellation.
     std::string describe(const RgbImage& image,
                          const std::string& systemPrompt,
                          const std::string& userPrompt,
@@ -54,6 +57,10 @@ private:
     llama_context* context_ = nullptr;
     mtmd_context* vision_ = nullptr;
     std::string timings_;
+    // The prompt before the image from an earlier call, and the context's state right after it: MiniCPM-V 4.7's
+    // language model has recurrent layers, so its state can be restored but not cut back to a position.
+    std::vector<int32_t> cachedPrefix_;
+    std::vector<uint8_t> cachedState_;
 };
 
 // Performance-core count (cores faster than the slowest cluster), clamped to [2, 4].

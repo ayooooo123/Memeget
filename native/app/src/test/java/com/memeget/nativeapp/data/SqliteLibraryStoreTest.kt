@@ -6,6 +6,7 @@ import com.memeget.nativeapp.CloudAssistant
 import com.memeget.nativeapp.CloudResult
 import com.memeget.nativeapp.Exemplar
 import com.memeget.nativeapp.ImportedAnalysis
+import com.memeget.nativeapp.KilledRecovery
 import com.memeget.nativeapp.LocalAnalysis
 import com.memeget.nativeapp.Meme
 import com.memeget.nativeapp.NativeInferenceEngine
@@ -350,5 +351,35 @@ class SqliteLibraryStoreTest {
         rawDatabase().use { it.execSQL("DROP TABLE meme_search_terms") }
         val reopened = SqliteLibraryStore(RuntimeEnvironment.getApplication())
         assertEquals(listOf(id), reopened.search("quarzite", null).map { it.meme.id })
+    }
+
+    @Test fun aMemeKilledMidCaptionGetsOneMoreTryAndTheRecordIsClearedWithIt() = runBlocking {
+        val id = insert("killed.png")
+        store.setVisionState(id, "failed")
+        store.setSetting("vision.inFlight", id.toString())
+
+        assertEquals(KilledRecovery(id, retried = true), store.recoverKilled("vision", "vision.inFlight", "vision.killedOnce"))
+        assertEquals("pending", requireNotNull(store.meme(id)).visionState)
+        assertEquals("", store.setting("vision.inFlight"))
+        assertEquals(id.toString(), store.setting("vision.killedOnce"))
+
+        // Killed on it again: it stays failed.
+        store.setVisionState(id, "failed")
+        store.setSetting("vision.inFlight", id.toString())
+        assertEquals(KilledRecovery(id, retried = false), store.recoverKilled("vision", "vision.inFlight", "vision.killedOnce"))
+        assertEquals("failed", requireNotNull(store.meme(id)).visionState)
+        assertEquals("", store.setting("vision.inFlight"))
+    }
+
+    @Test fun aRecordWhoseOutcomeWasSavedChangesNothing() = runBlocking {
+        // The app was killed after the caption was saved but before its in-flight record was cleared.
+        val id = insert("saved.png")
+        store.setVisionState(id, "done")
+        store.setSetting("vision.inFlight", id.toString())
+
+        assertNull(store.recoverKilled("vision", "vision.inFlight", "vision.killedOnce"))
+        assertEquals("done", requireNotNull(store.meme(id)).visionState)
+        assertEquals("", store.setting("vision.inFlight"))
+        assertNull(store.recoverKilled("vision", "vision.inFlight", "vision.killedOnce"))
     }
 }

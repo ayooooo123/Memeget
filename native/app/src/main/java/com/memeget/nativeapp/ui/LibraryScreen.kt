@@ -587,11 +587,7 @@ internal fun LibraryScreen(
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Text(
-                            text = if (indexProgress.total > 0) {
-                                "Indexing ${indexProgress.done}/${indexProgress.total} · ${indexProgress.stage}"
-                            } else {
-                                "Preparing index: ${indexProgress.stage}"
-                            },
+                            text = indexProgress.headline(),
                             style = MaterialTheme.typography.bodySmall,
                             fontWeight = FontWeight.SemiBold,
                             color = MemegetColors.TextPrimary,

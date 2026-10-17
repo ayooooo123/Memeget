@@ -24,6 +24,7 @@ import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import expo.modules.memegetbg.KeepAliveLease
 import com.memeget.nativeapp.inference.ModelRegistry
+import com.memeget.nativeapp.storage.FrameLikeness
 import com.memeget.nativeapp.storage.MediaIoUtils
 import com.memeget.nativeapp.storage.Mp4Repair
 import kotlinx.coroutines.CancellationException
@@ -56,6 +57,7 @@ import java.io.IOException
 import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.sqrt
 
@@ -69,6 +71,8 @@ internal class IndexCoordinator(
     private val cloud: CloudAssistant,
     private val sessionTimeoutMillis: Long = SESSION_MILLIS,
     private val sessionGraceMillis: Long = SESSION_GRACE_MILLIS,
+    /** Session length on the charger when a foreground service keeps the app alive; see [runSession]. */
+    private val longSessionMillis: Long = LONG_SESSION_MILLIS,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val session = Mutex()
@@ -88,18 +92,49 @@ internal class IndexCoordinator(
     @Volatile private var interactive = false
     fun setInteractive(value: Boolean) { interactive = value }
 
-    /** Indexes [ids] again, or with no ids everything pending plus items whose analysis failed. */
-    fun start(ids: List<Long>? = null) {
-        scope.launch {
+    /** Stop presses so far; a run started with untilDone ends at the first one after it started. */
+    private val stopRequests = AtomicLong()
+
+    /**
+     * Indexes [ids] again, or with no ids everything pending plus items whose analysis failed. With [untilDone], while
+     * the phone charges, each session that got something done hands straight over to the next until no work is left,
+     * the phone is unplugged, or Stop; on battery it is one session, as without it.
+     *
+     * These sessions keep the app alive with a `dataSync` foreground service, which Android 15 and later allow six
+     * hours in the background per day. When Android ends it, the session in progress stops as Stop would, and
+     * background sessions (WorkManager, which doesn't need it) take over while the phone charges.
+     */
+    fun start(ids: List<Long>? = null, untilDone: Boolean = false): Job {
+        val stopsBefore = stopRequests.get()
+        return scope.launch {
+            val run = coroutineContext.job
+            val keepAliveLost = AtomicBoolean(false)
+            val onKeepAliveLost: () -> Unit = {
+                keepAliveLost.set(true)
+                run.cancel()
+            }
+            KeepAliveLease.addLostListener(onKeepAliveLost)
             try {
                 if (ids == null) store.requeueFailed() else if (ids.isNotEmpty()) store.requeue(ids.distinct())
-                runSession(background = false)
+                var again = true
+                while (again && stopRequests.get() == stopsBefore) again = runSession(background = false, untilDone = untilDone)
             } catch (cancelled: CancellationException) {
+                if (keepAliveLost.get()) withContext(NonCancellable) { handOverAfterKeepAliveLost() }
                 throw cancelled
             } catch (failure: Exception) {
                 mutableProgress.value = WorkProgress(stage = "failed", error = failure.message ?: "Indexing failed")
+            } finally {
+                KeepAliveLease.removeLostListener(onKeepAliveLost)
             }
         }
+    }
+
+    private suspend fun handOverAfterKeepAliveLost() {
+        mutableProgress.value = WorkProgress(
+            stage = "paused",
+            detail = "Android's six-hour background limit stopped this session; unfinished items remain queued",
+        )
+        if (store.setting("background.enabled") == "1" && charging()) continueWhileCharging()
     }
 
     /**
@@ -122,6 +157,7 @@ internal class IndexCoordinator(
         found
     }.await()
     fun cancel() {
+        stopRequests.incrementAndGet()
         retagCovered.accumulateAndGet(retagRequests.get(), ::maxOf)
         activeJob?.cancel()
         engine.cancel()
@@ -213,7 +249,10 @@ internal class IndexCoordinator(
                 OneTimeWorkRequestBuilder<IndexWorker>().setConstraints(constraints).build())
         }
     }
-    suspend fun runPending() = runSession(background = true)
+    /** [longRunning]: WorkManager gave the session a foreground service, so it isn't held to a regular job's 10 minutes. */
+    suspend fun runPending(longRunning: Boolean = false) {
+        runSession(background = true, longRunning = longRunning)
+    }
 
     /**
      * [runPending] for a screen: the session runs in this coordinator's scope, so closing the screen or an activity
@@ -230,11 +269,22 @@ internal class IndexCoordinator(
             }
         }
     }
-    private suspend fun runSession(background: Boolean) {
-        if (background && store.setting("background.enabled") != "1") return
-        if (!session.tryLock()) return
+    /**
+     * Returns true when a session started with [untilDone] should be followed by another: the phone charges, work is
+     * left, and this one got something done. A background session queues its successor itself and returns false.
+     *
+     * Sessions last seven minutes, so a background one fits a regular job's ten. On the charger, a run started with
+     * [untilDone] or a background session that got a foreground service ([longRunning]) lasts [longSessionMillis]
+     * instead: every session start and end unloads and reloads the 1.7 GB caption model and costs about 75 s on the
+     * Pixel 5a between seven-minute sessions.
+     */
+    private suspend fun runSession(background: Boolean, untilDone: Boolean = false, longRunning: Boolean = false): Boolean {
+        if (background && store.setting("background.enabled") != "1") return false
+        if (!session.tryLock()) return false
+        var handOver = false
         activeJob = currentCoroutineContext()[Job]
         val started = SystemClock.elapsedRealtime()
+        val limit = if ((untilDone || longRunning) && charging()) longSessionMillis else sessionTimeoutMillis
         var completed = 0
         var failed = 0
         var held = false
@@ -248,14 +298,16 @@ internal class IndexCoordinator(
             backgroundSkip = if (background) backgroundSkips() else emptySet()
             // Transcripts made by an earlier speech model (or imported from the original app's tiny.en) are redone once.
             if (store.setting("audio.enabled") == "1") store.requeueTranscripts(ModelRegistry.WHISPER_MODEL.id)
-            val remainingBefore = if (background) remainingWork() else 0
+            recoverInterrupted()
+            val remainingBefore = if (background || untilDone) remainingWork() else 0
             if (!background) {
                 KeepAliveLease.acquire(context, "Memeget Native", "Indexing saved media")
                 held = true
             }
 
-            val sessionFinished = withSessionDeadline(sessionTimeoutMillis + sessionGraceMillis) {
+            val sessionFinished = withSessionDeadline(limit + sessionGraceMillis) {
                 val tried = HashSet<Long>()
+                val captionTexts = HashMap<Long, Pair<String, String>>()
                 val triedSpeech = HashSet<Long>()
                 // Memes waiting to be indexed come first: transcripts and captions stop for them between clips. A
                 // background session stops counting them at its item cap, and none count while the image model is
@@ -267,12 +319,12 @@ internal class IndexCoordinator(
                 // grace: on the Pixel 5a a background session needs about 6.5 minutes for a 120 s clip, and cutting it
                 // off at the limit sent it back to the front of the queue every session.
                 val stopForNext: suspend () -> Boolean = {
-                    SystemClock.elapsedRealtime() - started >= sessionTimeoutMillis || newMemesWaiting()
+                    SystemClock.elapsedRealtime() - started >= limit || newMemesWaiting()
                 }
                 // Indexing, then enrichment; a meme shared or imported during enrichment sends the session back to
                 // indexing, so it becomes searchable now instead of waiting behind the transcript and caption backlog.
                 session@ while (true) {
-                while (SystemClock.elapsedRealtime() - started < sessionTimeoutMillis) {
+                while (SystemClock.elapsedRealtime() - started < limit) {
                     currentCoroutineContext().ensureActive()
                     pause = powerBlock(background)
                     if (pause != null || (background && interactive) || "index" in gaps) break
@@ -341,7 +393,7 @@ internal class IndexCoordinator(
                         }
                         // Captions wait until the queue is indexed; the enrichment pass below writes them. Transcripts
                         // of this batch wait too while more memes are queued: the enrichment pass picks them up.
-                        enrich(indexed, background, gaps, describe = false, yieldTo = stopForNext)
+                        enrich(indexed, background, gaps, captionTexts, describe = false, yieldTo = stopForNext)
                     } finally {
                         withContext(NonCancellable + Dispatchers.IO) {
                             prepared.forEach(::cleanPrepared)
@@ -353,13 +405,13 @@ internal class IndexCoordinator(
 
                 // Already-indexed items need optional enrichment too. Captions only happen here, after the queue is
                 // indexed, and keep going until the session ends.
-                if (pause == null && SystemClock.elapsedRealtime() - started < sessionTimeoutMillis && !interactive) {
+                if (pause == null && SystemClock.elapsedRealtime() - started < limit && !interactive) {
                     val vision = store.setting("vision.enabled") == "1"
                     val audio = store.setting("audio.enabled") == "1"
                     val visual = store.setting("visual.enabled") == "1"
                     if (vision || audio || visual) {
 
-                        while (SystemClock.elapsedRealtime() - started < sessionTimeoutMillis && powerBlock(background) == null && !interactive) {
+                        while (SystemClock.elapsedRealtime() - started < limit && powerBlock(background) == null && !interactive) {
                             if (newMemesWaiting()) {
                                 // The batch this cut short goes back in the queue; failed items already left it.
                                 tried.clear()
@@ -404,7 +456,7 @@ internal class IndexCoordinator(
                                     }
                                 }
                                 // One call per batch, so each model loads once per batch rather than once per meme.
-                                enrich(batch, background, gaps, describe = transcripts.isEmpty(), yieldTo = stopForNext)
+                                enrich(batch, background, gaps, captionTexts, describe = transcripts.isEmpty(), yieldTo = stopForNext)
                             } finally {
                                 withContext(NonCancellable + Dispatchers.IO) { batch.forEach(::cleanPrepared) }
                             }
@@ -413,6 +465,7 @@ internal class IndexCoordinator(
                 }
                 break
                 }
+                if (store.setting("vision.enabled") == "1") embedCaptions(captionTexts, gaps)
 
                 val remaining = store.pending(1).isNotEmpty()
                 val waiting = gaps.first?.let { "${it.message}. $MODEL_WAIT" }
@@ -440,9 +493,12 @@ internal class IndexCoordinator(
                     running = false,
                 )
             }
-            // While the phone charges, a background session that made progress hands over to the next one instead
-            // of leaving the rest for the periodic run 30 minutes later.
-            if (background && keepGoingWhileCharging(remainingBefore, completed)) continueWhileCharging()
+            // While the phone charges, a session that made progress hands over to the next one: a background session
+            // queues it instead of leaving the rest for the periodic run 30 minutes later, and a run started with
+            // untilDone (Caption or Transcribe now) starts it as soon as this one has let go of the engine.
+            if ((background || untilDone) && keepGoingWhileCharging(background, remainingBefore, completed)) {
+                if (background) continueWhileCharging() else handOver = true
+            }
         } catch (cancelled: CancellationException) {
             mutableProgress.value = mutableProgress.value.copy(
                 stage = "cancelled",
@@ -461,6 +517,7 @@ internal class IndexCoordinator(
                 launchOwedRetag()
             }
         }
+        return handOver
     }
 
     private suspend fun <T> withSessionDeadline(limitMillis: Long, block: suspend () -> T): T? {
@@ -553,7 +610,8 @@ internal class IndexCoordinator(
             val frames = ArrayList<String>(inputs.size)
             val vectors = ArrayList<FloatArray>(inputs.size)
             if (reused != null) {
-                frames += inputs
+                // Without the image model there is nothing to compare frames with, so look-alikes go by their pixels.
+                frames += if (meme.kind == "video") withContext(Dispatchers.IO) { FrameLikeness.distinct(inputs) } else inputs
                 vectors += reused
             } else {
                 for (uri in inputs) {
@@ -582,19 +640,23 @@ internal class IndexCoordinator(
         items: List<Prepared>,
         background: Boolean,
         gaps: ModelGaps,
+        /** Captions written in this session: caption → the text its search vector is made from; see [embedCaptions]. */
+        captionTexts: MutableMap<Long, Pair<String, String>>,
         describe: Boolean = true,
         // Checked before each caption and transcript: a long batch stops early for memes waiting to be indexed.
         yieldTo: suspend () -> Boolean = { false },
     ) {
         if (items.isEmpty() || powerBlock(background) != null || interactive) return
-        val captions = ArrayList<Pair<Long, VisionDescription>>()
         if (describe && store.setting("vision.enabled") == "1" && "vision" !in gaps) {
             for (item in items) {
                 currentCoroutineContext().ensureActive()
                 if (powerBlock(background) != null || interactive || yieldTo()) break
                 val meme = store.meme(item.meme.id) ?: continue
                 if (meme.visionState != "pending") continue
-                mutableProgress.value = WorkProgress("local description", detail = meme.name, running = true, memeId = meme.id)
+                val counts = store.enrichmentCounts()
+                mutableProgress.value = WorkProgress("local description", counts.captionsDone, counts.captionsDone + counts.captionsWaiting, meme.name, true, memeId = meme.id)
+                // Recorded first, so a session after the app was killed mid-caption knows which meme it was on.
+                store.setSetting(VISION_IN_FLIGHT, meme.id.toString())
                 val result = try {
                     // A process-killing native failure must not create an automatic crash loop. The marker is set
                     // inside this try so a stop that lands as it commits still returns the meme to pending.
@@ -611,10 +673,13 @@ internal class IndexCoordinator(
                         descriptions.flatMap { it.tags }.distinctBy { it.label },
                     )
                 } catch (failure: Exception) {
-                    // A native call stopped by Stop or the session limit can fail as an ordinary exception.
+                    // A native call stopped by Stop or the session limit can fail as an ordinary
+                    // exception. Each path writes the meme's state before it drops the in-flight record, so a kill in
+                    // between still leaves the record for the next session to find.
                     if (failure is CancellationException || !currentCoroutineContext().isActive) {
                         withContext(NonCancellable + Dispatchers.IO) {
                             store.setCaption(meme.id, meme.caption, emptyList(), null, "pending")
+                            store.setSetting(VISION_IN_FLIGHT, "")
                         }
                         throw failure as? CancellationException
                             ?: CancellationException("Local description stopped").apply { initCause(failure) }
@@ -623,36 +688,23 @@ internal class IndexCoordinator(
                         // Not this meme's fault: it goes back to the queue, and captions wait for a later session.
                         withContext(NonCancellable + Dispatchers.IO) {
                             store.setCaption(meme.id, meme.caption, emptyList(), null, "pending")
+                            store.setSetting(VISION_IN_FLIGHT, "")
                         }
                         gaps.note("vision", failure)
                         break
                     }
+                    // A real failure: the crash marker stays as the meme's state.
                     store.addError(meme.name, "vision", failure.message ?: "Local description failed")
+                    withContext(NonCancellable) { store.setSetting(VISION_IN_FLIGHT, "") }
                     null
                 } ?: continue
-                // Keep each caption as soon as it exists, so a later stop cannot discard finished work.
-                withContext(NonCancellable) { store.setCaption(meme.id, result.caption, result.tags, null) }
-                captions += meme.id to result
-                delay(1200)
-            }
-        }
-        // The captions are saved; this adds their search vectors. Their text stays searchable if it stops or fails.
-        for ((id, result) in captions) {
-            currentCoroutineContext().ensureActive()
-            mutableProgress.value = mutableProgress.value.copy(stage = "caption embedding", detail = "", memeId = id)
-            val searchable = listOf(result.caption, result.text, result.tags.joinToString(" ") { it.label }).joinToString(" ").trim()
-            try {
-                store.setCaption(id, result.caption, result.tags, engine.embedText(searchable))
-            } catch (failure: Exception) {
-                if (failure is CancellationException || !currentCoroutineContext().isActive) {
-                    throw failure as? CancellationException
-                        ?: CancellationException("Caption embedding stopped").apply { initCause(failure) }
+                // Keep each caption as soon as it exists, so a later stop cannot discard finished work. Its search
+                // vector comes at the end of the session: the text model would unload the caption model.
+                withContext(NonCancellable) {
+                    store.setCaption(meme.id, result.caption, result.tags, null)
+                    store.setSetting(VISION_IN_FLIGHT, "")
                 }
-                if (failure is ModelUnavailableException) {
-                    gaps.note("caption embedding", failure)
-                    break
-                }
-                store.addError("item $id", "caption embedding", failure.message ?: "Caption vector failed; text remains searchable")
+                captionTexts[meme.id] = result.caption to listOf(result.caption, result.text, result.tags.joinToString(" ") { it.label }).joinToString(" ").trim()
             }
         }
         if (store.setting("audio.enabled") == "1" && "audio" !in gaps) {
@@ -661,15 +713,17 @@ internal class IndexCoordinator(
                 if (powerBlock(background) != null || interactive || yieldTo()) break
                 val meme = store.meme(item.meme.id) ?: continue
                 if (meme.audioState == "done" || meme.id in backgroundSkip) continue
-                mutableProgress.value = WorkProgress("local transcription", detail = meme.name, running = true, memeId = meme.id)
+                val counts = store.enrichmentCounts()
+                mutableProgress.value = WorkProgress("local transcription", counts.transcriptsDone, counts.transcriptsDone + counts.transcriptsWaiting, meme.name, true, memeId = meme.id)
                 val began = SystemClock.elapsedRealtime()
+                store.setSetting(AUDIO_IN_FLIGHT, meme.id.toString())
                 val text = try {
                     // As for captions: a native crash must not loop, so the clip is marked failed while it runs, and
                     // the marker is set inside this try so a stop that lands as it commits returns the clip to the queue.
                     store.setAudioState(meme.id, "failed")
                     engine.transcribe(Uri.fromFile(item.source).toString())
                 } catch (failure: Exception) {
-                    // A native call stopped by Stop or the session limit can fail as an ordinary exception.
+                    // As for captions, the clip's state is written before the in-flight record is dropped.
                     if (failure is CancellationException || !currentCoroutineContext().isActive) {
                         withContext(NonCancellable + Dispatchers.IO) {
                             store.setAudioState(meme.id, "pending")
@@ -677,20 +731,28 @@ internal class IndexCoordinator(
                             // sessions can't finish this clip, so they leave it to one started in the app instead
                             // of trying it first every time and never reaching the rest of the queue.
                             if (background && hardStop && SystemClock.elapsedRealtime() - began >= sessionTimeoutMillis) skipInBackground(meme.id)
+                            store.setSetting(AUDIO_IN_FLIGHT, "")
                         }
                         throw failure as? CancellationException
                             ?: CancellationException("Local transcription stopped").apply { initCause(failure) }
                     }
                     if (failure is ModelUnavailableException) {
-                        withContext(NonCancellable + Dispatchers.IO) { store.setAudioState(meme.id, "pending") }
+                        withContext(NonCancellable + Dispatchers.IO) {
+                            store.setAudioState(meme.id, "pending")
+                            store.setSetting(AUDIO_IN_FLIGHT, "")
+                        }
                         gaps.note("audio", failure)
                         break
                     }
                     store.addError(meme.name, "audio", failure.message ?: "Transcription failed")
+                    withContext(NonCancellable) { store.setSetting(AUDIO_IN_FLIGHT, "") }
                     null
                 } ?: continue
                 // Keep the transcript as soon as it exists, so a later stop cannot discard it.
-                withContext(NonCancellable) { store.setTranscript(meme.id, text) }
+                withContext(NonCancellable) {
+                    store.setTranscript(meme.id, text)
+                    store.setSetting(AUDIO_IN_FLIGHT, "")
+                }
             }
         }
         if (store.setting("visual.enabled") == "1" && "visual" !in gaps) {
@@ -701,7 +763,9 @@ internal class IndexCoordinator(
                 try { store.setVisual(item.meme.id, engine.embedVisual(item.frames.first()), ModelRegistry.DINOV2_MODEL_FINGERPRINT) }
                 catch (cancelled: CancellationException) { throw cancelled }
                 catch (unavailable: ModelUnavailableException) { gaps.note("visual", unavailable); break }
-                catch (failure: Exception) { store.addError(item.meme.name, "visual", failure.message ?: "Visual embedding failed") }
+                catch (failure: Exception) {
+                    store.addError(item.meme.name, "visual", failure.message ?: "Visual embedding failed")
+                }
             }
         }
         for (item in items) {
@@ -711,6 +775,61 @@ internal class IndexCoordinator(
             try { cloud.consider(meme) { knowledge.candidateLabels(item.image, 12) } }
             catch (cancelled: CancellationException) { throw cancelled }
             catch (failure: Exception) { store.addError(meme.name, "cloud", failure.message ?: "Optional cloud analysis unavailable") }
+        }
+    }
+
+    /**
+     * Search vectors for the session's captions, all at the end: the text model and the caption model can't be
+     * loaded together, and making them after each batch of eight unloaded and reloaded the 1.7 GB caption model every
+     * time (about 29 s a batch on the Pixel 5a). Also makes up to [CAPTION_VECTOR_BACKLOG] vectors that an earlier
+     * session never wrote because it was stopped or killed; their reply's TEXT line is gone, so those are made from
+     * the caption and the tags the caption added.
+     */
+    private suspend fun embedCaptions(captionTexts: Map<Long, Pair<String, String>>, gaps: ModelGaps) {
+        if ("caption embedding" in gaps) return
+        val due = LinkedHashMap(captionTexts)
+        for (id in store.captionsWithoutVectors(engine.primaryModel, CAPTION_VECTOR_BACKLOG)) {
+            if (id in due) continue
+            val meme = store.meme(id) ?: continue
+            due[id] = meme.caption to listOf(meme.caption, meme.tags.filter { it.source == "vision" }.joinToString(" ") { it.label }).joinToString(" ").trim()
+        }
+        for ((id, texts) in due) {
+            currentCoroutineContext().ensureActive()
+            val (caption, searchable) = texts
+            // A caption replaced since (Re-analyze) must not get this text's vector.
+            if (store.meme(id)?.caption != caption || store.vectors(id)?.caption != null) continue
+            mutableProgress.value = WorkProgress("caption embedding", running = true, memeId = id)
+            try {
+                store.setCaption(id, caption, emptyList(), engine.embedText(searchable))
+            } catch (failure: Exception) {
+                if (failure is CancellationException || !currentCoroutineContext().isActive) {
+                    throw failure as? CancellationException
+                        ?: CancellationException("Caption embedding stopped").apply { initCause(failure) }
+                }
+                if (failure is ModelUnavailableException) {
+                    gaps.note("caption embedding", failure)
+                    return
+                }
+                store.addError("item $id", "caption embedding", failure.message ?: "Caption vector failed; text remains searchable")
+            }
+        }
+    }
+
+    /**
+     * A caption or transcript is marked failed while it runs, so a native crash can't loop. When the app was killed
+     * instead (an install, a force-stop, Android reclaiming memory), that marker would leave the meme failed for good:
+     * 45 of 46 failed captions on the Pixel 5a had no error. Each meme gets one more try; killed a second time it
+     * stays failed. The store makes the change in one transaction, so a kill during it can't strand the meme.
+     */
+    private suspend fun recoverInterrupted() {
+        for ((stage, inFlightKey, onceKey) in listOf(
+            Triple("vision", VISION_IN_FLIGHT, VISION_KILLED_ONCE),
+            Triple("audio", AUDIO_IN_FLIGHT, AUDIO_KILLED_ONCE),
+        )) {
+            val recovery = store.recoverKilled(stage, inFlightKey, onceKey) ?: continue
+            if (!recovery.retried) {
+                store.meme(recovery.id)?.let { store.addError(it.name, stage, "The app stopped twice while working on this item") }
+            }
         }
     }
 
@@ -774,8 +893,8 @@ internal class IndexCoordinator(
         Log.i(LOG_TAG, "Meme $id takes longer to transcribe than a background session allows; it waits for a session started in the app")
     }
 
-    private suspend fun keepGoingWhileCharging(remainingBefore: Int, indexed: Int): Boolean {
-        if (store.setting("background.enabled") != "1" || interactive || !charging()) return false
+    private suspend fun keepGoingWhileCharging(background: Boolean, remainingBefore: Int, indexed: Int): Boolean {
+        if ((background && store.setting("background.enabled") != "1") || interactive || !charging()) return false
         val remainingAfter = remainingWork()
         // Only after progress, so items that fail every time can't keep the phone busy all night.
         return remainingAfter > 0 && (indexed > 0 || remainingAfter < remainingBefore)
@@ -842,6 +961,8 @@ internal class IndexCoordinator(
         private const val BATCH_SIZE = 8
         private const val BACKGROUND_ITEMS = 32
         private const val SESSION_MILLIS = 7L * 60 * 1000
+        /** A session on the charger with a foreground service: about seven captions' worth of reload per hour. */
+        private const val LONG_SESSION_MILLIS = 60L * 60 * 1000
         /** How long the item running when [SESSION_MILLIS] ends may take; 9.5 minutes in all stays inside a regular job's 10-minute limit. */
         private const val SESSION_GRACE_MILLIS = 150_000L
         private const val MAX_SOURCE_BYTES = 512L * 1024 * 1024
@@ -854,6 +975,14 @@ internal class IndexCoordinator(
         private const val COOL_DOWN_SECONDS = 5L * 60
         /** Setting: ids of clips background sessions leave to a session started in the app, comma-separated. */
         private const val BACKGROUND_SKIP = "audio.backgroundSkip"
+        /** Settings: the meme whose caption or transcript is running, so a session after a kill can tell. */
+        private const val VISION_IN_FLIGHT = "vision.inFlight"
+        private const val AUDIO_IN_FLIGHT = "audio.inFlight"
+        /** Settings: memes already given another try after a kill, comma-separated. */
+        private const val VISION_KILLED_ONCE = "vision.killedOnce"
+        private const val AUDIO_KILLED_ONCE = "audio.killedOnce"
+        /** Missing caption vectors made at the end of a session, beyond its own captions. */
+        private const val CAPTION_VECTOR_BACKLOG = 200
         internal const val LOG_TAG = "MemegetIndex"
     }
 }
@@ -867,8 +996,9 @@ class IndexWorker(context: Context, parameters: WorkerParameters) : CoroutineWor
         val notification = NotificationCompat.Builder(applicationContext, "native-index")
             .setSmallIcon(android.R.drawable.ic_menu_search).setContentTitle("Memeget Native")
             .setContentText("Processing saved items locally").setOngoing(true).build()
-        try {
+        val foreground = try {
             setForeground(if (Build.VERSION.SDK_INT >= 29) ForegroundInfo(7240, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC) else ForegroundInfo(7240, notification))
+            true
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (refused: Exception) {
@@ -876,9 +1006,10 @@ class IndexWorker(context: Context, parameters: WorkerParameters) : CoroutineWor
             // these runs usually start (phone locked on the charger). A session starts nothing new after 7 minutes
             // and ends within 9.5, inside a regular job's 10-minute limit, so it runs without one.
             Log.i(IndexCoordinator.LOG_TAG, "Background session runs without a foreground service: ${refused.javaClass.simpleName}")
+            false
         }
         return try {
-            graph.coordinator.runPending()
+            graph.coordinator.runPending(longRunning = foreground)
             Result.success()
         } catch (cancelled: CancellationException) { throw cancelled }
         catch (failure: Exception) {
