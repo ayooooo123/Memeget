@@ -99,7 +99,7 @@ internal fun EnrichmentSection(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    text = "Working: ${progress.stage} ${progress.done}/${progress.total}",
+                    text = "Working: ${progress.headline()}",
                     style = MaterialTheme.typography.bodySmall,
                     color = MemegetColors.Volt,
                 )
@@ -124,7 +124,7 @@ internal fun EnrichmentSection(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     Button(
-                        onClick = { coordinator.start(emptyList()) },
+                        onClick = { coordinator.start(emptyList(), untilDone = true) },
                         enabled = enrichmentCounts.captionsWaiting > 0 && !progress.running,
                         modifier = Modifier.weight(1f),
                         colors = ButtonDefaults.buttonColors(
@@ -141,7 +141,7 @@ internal fun EnrichmentSection(
                         onClick = {
                             scope.launch {
                                 store.requeueFailedEnrichment("vision")
-                                coordinator.start(emptyList())
+                                coordinator.start(emptyList(), untilDone = true)
                             }
                         },
                         enabled = !progress.running,
@@ -155,7 +155,7 @@ internal fun EnrichmentSection(
                 }
             } else {
                 Button(
-                    onClick = { coordinator.start(emptyList()) },
+                    onClick = { coordinator.start(emptyList(), untilDone = true) },
                     enabled = enrichmentCounts.captionsWaiting > 0 && !progress.running,
                     modifier = Modifier.fillMaxWidth(),
                     colors = ButtonDefaults.buttonColors(
@@ -186,7 +186,7 @@ internal fun EnrichmentSection(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     Button(
-                        onClick = { coordinator.start(emptyList()) },
+                        onClick = { coordinator.start(emptyList(), untilDone = true) },
                         enabled = enrichmentCounts.transcriptsWaiting > 0 && !progress.running,
                         modifier = Modifier.weight(1f),
                         colors = ButtonDefaults.buttonColors(
@@ -203,7 +203,7 @@ internal fun EnrichmentSection(
                         onClick = {
                             scope.launch {
                                 store.requeueFailedEnrichment("audio")
-                                coordinator.start(emptyList())
+                                coordinator.start(emptyList(), untilDone = true)
                             }
                         },
                         enabled = !progress.running,
@@ -217,7 +217,7 @@ internal fun EnrichmentSection(
                 }
             } else {
                 Button(
-                    onClick = { coordinator.start(emptyList()) },
+                    onClick = { coordinator.start(emptyList(), untilDone = true) },
                     enabled = enrichmentCounts.transcriptsWaiting > 0 && !progress.running,
                     modifier = Modifier.fillMaxWidth(),
                     colors = ButtonDefaults.buttonColors(
@@ -311,7 +311,7 @@ internal fun EnrichmentSection(
                 showRedoTranscriptsDialog = false
                 scope.launch {
                     store.requeueAllTranscripts()
-                    coordinator.start(emptyList())
+                    coordinator.start(emptyList(), untilDone = true)
                 }
             },
         )

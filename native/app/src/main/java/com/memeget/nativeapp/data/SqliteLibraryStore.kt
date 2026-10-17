@@ -1267,7 +1267,9 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
                    SUM(kind = 'video'),
                    SUM(kind = 'video' AND pending = 0 AND index_error = '' AND audio_state = 'pending'),
                    SUM(kind = 'video' AND audio_state = 'failed'),
-                   SUM(kind = 'video' AND pending = 0 AND index_error = '' AND thumb_uri = '')
+                   SUM(kind = 'video' AND pending = 0 AND index_error = '' AND thumb_uri = ''),
+                   SUM(pending = 0 AND index_error = '' AND vision_state = 'done'),
+                   SUM(kind = 'video' AND pending = 0 AND index_error = '' AND audio_state = 'done')
             FROM memes
             """.trimIndent(),
             null,
@@ -1284,9 +1286,63 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
                 transcriptsWaiting = c.getInt(7),
                 transcriptsFailed = c.getInt(8),
                 postersMissing = c.getInt(9),
+                captionsDone = c.getInt(10),
+                transcriptsDone = c.getInt(11),
             )
         }
     }
+
+    override suspend fun captionsWithoutVectors(model: String, limit: Int): List<Long> = withContext(Dispatchers.IO) {
+        getReadableDb().rawQuery(
+            """
+            SELECT m.id FROM memes m JOIN vectors v ON v.id = m.id AND v.model = ?
+            WHERE m.vision_state = 'done' AND m.caption <> '' AND v.caption IS NULL
+            ORDER BY m.id LIMIT ?
+            """.trimIndent(),
+            arrayOf(model, limit.toString()),
+        ).use { c -> buildList { while (c.moveToNext()) add(c.getLong(0)) } }
+    }
+
+    override suspend fun recoverKilled(stage: String, inFlightKey: String, onceKey: String): KilledRecovery? =
+        withContext(Dispatchers.IO) {
+            val column = when (stage) {
+                "vision" -> "vision_state"
+                "audio" -> "audio_state"
+                else -> throw IllegalArgumentException("No enrichment stage named $stage")
+            }
+            writeMutex.withLock {
+                val db = getWritableDb()
+                fun read(key: String): String? =
+                    db.rawQuery("SELECT value FROM settings WHERE key = ?", arrayOf(key)).use { if (it.moveToNext()) it.getString(0) else null }
+                fun write(key: String, value: String) {
+                    db.insertWithOnConflict("settings", null, ContentValues().apply { put("key", key); put("value", value) }, SQLiteDatabase.CONFLICT_REPLACE)
+                }
+                db.beginTransaction()
+                val outcome = try {
+                    val id = read(inFlightKey)?.toLongOrNull()
+                    val recovery = if (id == null) null else {
+                        write(inFlightKey, "")
+                        val stranded = db.rawQuery("SELECT 1 FROM memes WHERE id = ? AND $column = 'failed'", arrayOf(id.toString())).use { it.moveToNext() }
+                        val once = read(onceKey).orEmpty().split(',').mapNotNull(String::toLongOrNull).toSet()
+                        when {
+                            !stranded -> null
+                            id in once -> KilledRecovery(id, retried = false)
+                            else -> {
+                                db.execSQL("UPDATE memes SET $column = 'pending' WHERE id = ?", arrayOf<Any>(id))
+                                write(onceKey, (once + id).joinToString(","))
+                                KilledRecovery(id, retried = true)
+                            }
+                        }
+                    }
+                    db.setTransactionSuccessful()
+                    recovery
+                } finally {
+                    db.endTransaction()
+                }
+                if (outcome?.retried == true) bumpRevision()
+                outcome
+            }
+        }
 
     override suspend fun requeueFailedEnrichment(stage: String): Int = withContext(Dispatchers.IO) {
         val sql = when (stage) {
