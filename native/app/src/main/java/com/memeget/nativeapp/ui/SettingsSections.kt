@@ -110,6 +110,16 @@ internal fun EnrichmentSection(
                     Text("Stop", color = MemegetColors.Danger)
                 }
             }
+        } else if (progress.stage in setOf("paused", "failed", "cancelled")) {
+            // A tap that stops at once (low battery, a warm phone, a model that can't be fetched) says why.
+            val reason = progress.error ?: progress.detail
+            if (reason.isNotBlank()) {
+                Text(
+                    text = "Last run stopped: $reason",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MemegetColors.Warning,
+                )
+            }
         }
 
         if (visionEnabled) {

@@ -796,11 +796,12 @@ internal class IndexCoordinator(
         for ((id, texts) in due) {
             currentCoroutineContext().ensureActive()
             val (caption, searchable) = texts
-            // A caption replaced since (Re-analyze) must not get this text's vector.
-            if (store.meme(id)?.caption != caption || store.vectors(id)?.caption != null) continue
+            if (store.vectors(id)?.caption != null) continue
             mutableProgress.value = WorkProgress("caption embedding", running = true, memeId = id)
             try {
-                store.setCaption(id, caption, emptyList(), engine.embedText(searchable))
+                // Written only while the meme still has this caption and isn't waiting for a new one: a re-caption
+                // asked for meanwhile (or Re-analyze) keeps its place in the queue.
+                store.setCaptionVector(id, caption, engine.embedText(searchable))
             } catch (failure: Exception) {
                 if (failure is CancellationException || !currentCoroutineContext().isActive) {
                     throw failure as? CancellationException

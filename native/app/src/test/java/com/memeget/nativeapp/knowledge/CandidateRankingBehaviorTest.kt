@@ -138,6 +138,7 @@ class CandidateRankingBehaviorTest {
         override suspend fun setVisionState(id: Long, state: String) {}
         override suspend fun enrichmentCounts(): EnrichmentCounts = EnrichmentCounts()
         override suspend fun captionsWithoutVectors(model: String, limit: Int): List<Long> = emptyList()
+        override suspend fun setCaptionVector(id: Long, caption: String, vector: FloatArray): Boolean = false
         override suspend fun recoverKilled(stage: String, inFlightKey: String, onceKey: String): KilledRecovery? = null
         override suspend fun requeueFailedEnrichment(stage: String): Int = 0
         override suspend fun requeueAllTranscripts(): Int = 0
