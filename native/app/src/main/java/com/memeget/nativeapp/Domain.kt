@@ -219,6 +219,11 @@ internal interface LibraryStore {
     /** Captioned memes whose caption has no search vector under [model] yet, at most [limit]. */
     suspend fun captionsWithoutVectors(model: String, limit: Int): List<Long>
     /**
+     * Stores [vector] as the search vector of the caption [caption], only while the meme still has that caption and
+     * its caption state is done; false when either changed (a re-caption request, Re-analyze) and nothing was written.
+     */
+    suspend fun setCaptionVector(id: Long, caption: String, vector: FloatArray): Boolean
+    /**
      * After the app was killed mid-caption ([stage] "vision") or mid-transcript ("audio"): the item named by setting
      * [inFlightKey], if its marker still says failed, goes back to pending unless setting [onceKey] already lists it.
      * The state, the strike and the cleared in-flight setting are written in one transaction. Null when nothing was

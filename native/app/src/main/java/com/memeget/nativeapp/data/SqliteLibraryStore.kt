@@ -1303,6 +1303,26 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
         ).use { c -> buildList { while (c.moveToNext()) add(c.getLong(0)) } }
     }
 
+    override suspend fun setCaptionVector(id: Long, caption: String, vector: FloatArray): Boolean = withContext(Dispatchers.IO) {
+        writeMutex.withLock {
+            val written = getWritableDb().compileStatement(
+                """
+                UPDATE vectors SET caption = ? WHERE id = ? AND model = ?
+                AND EXISTS (SELECT 1 FROM memes WHERE id = ? AND caption = ? AND vision_state = 'done')
+                """.trimIndent(),
+            ).use {
+                it.bindBlob(1, FloatBlob.toBytes(vector))
+                it.bindLong(2, id)
+                it.bindString(3, ModelRegistry.PRIMARY_MODEL_FINGERPRINT)
+                it.bindLong(4, id)
+                it.bindString(5, caption)
+                it.executeUpdateDelete() > 0
+            }
+            if (written) bumpRevision()
+            written
+        }
+    }
+
     override suspend fun recoverKilled(stage: String, inFlightKey: String, onceKey: String): KilledRecovery? =
         withContext(Dispatchers.IO) {
             val column = when (stage) {

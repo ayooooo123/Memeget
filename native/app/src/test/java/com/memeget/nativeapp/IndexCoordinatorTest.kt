@@ -720,6 +720,20 @@ class IndexCoordinatorTest {
     }
 
     @Test(timeout = 30_000)
+    fun aReCaptionAskedForWhileTheVectorIsMadeKeepsItsPlaceInTheQueue() = runBlocking {
+        val id = indexedImagesWaitingForCaptions(1).single()
+        testEngine.onDescribe = { _, _ -> "CAPTION: a frog\nTAGS: frog" }
+        // The viewer's re-caption lands while the session makes this caption's search vector.
+        testEngine.onEmbedText = { store.setVisionState(id, "pending"); FloatArray(512).apply { this[2] = 1f } }
+        val coordinator = IndexCoordinator(context, store, files, testEngine, knowledge, cloud, sessionTimeoutMillis = 10_000L)
+
+        coordinator.start(emptyList()).join()
+
+        assertEquals("pending", requireNotNull(store.meme(id)).visionState)
+        assertNull("the old caption's vector isn't kept for a caption about to be replaced", store.vectors(id)?.caption)
+    }
+
+    @Test(timeout = 30_000)
     fun aMemeTheAppWasKilledOnGetsOneMoreTry() = runBlocking {
         val id = indexedImagesWaitingForCaptions(1).single()
         testEngine.onDescribe = { _, _ -> "CAPTION: a frog\nTAGS: frog" }
