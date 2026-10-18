@@ -2,6 +2,8 @@ package com.memeget.nativeapp.storage
 
 import com.memeget.nativeapp.Exemplar
 import org.json.JSONArray
+import com.memeget.nativeapp.Tag
+import com.memeget.nativeapp.data.TagMerge
 import org.json.JSONObject
 
 internal object TeachingPackIo {
@@ -194,5 +196,45 @@ internal object TeachingPackIo {
             )
         }
         return result
+    }
+
+    /**
+     * Optional unreviewed machine tags carried alongside a native teaching file. Always parsed with
+     * confirmation="unreviewed" and source="propagated" so model predictions never enter exemplars or
+     * override a person's confirmed tags or rejections.
+     */
+    fun parseNativeMachineTags(jsonText: String): Map<Long, List<Tag>> {
+        val root = try {
+            JSONObject(jsonText)
+        } catch (_: Exception) {
+            return emptyMap()
+        }
+        if (root.optString("format") != NATIVE_TEACHING_FORMAT) return emptyMap()
+        val arr = root.optJSONArray("machineTags") ?: return emptyMap()
+        val out = LinkedHashMap<Long, List<Tag>>()
+        for (i in 0 until arr.length()) {
+            val entry = arr.optJSONObject(i) ?: continue
+            val id = entry.optLong("id", -1L)
+            if (id <= 0L) continue
+            val tagsArr = entry.optJSONArray("tags") ?: continue
+            val list = ArrayList<Tag>()
+            for (j in 0 until tagsArr.length()) {
+                val t = tagsArr.optJSONObject(j) ?: continue
+                val label = TagMerge.normalizeTagLabel(t.optString("label"))
+                if (label.isEmpty()) continue
+                val score = t.optDouble("score", 0.85).toFloat().coerceIn(0f, 1f)
+                list += Tag(
+                    label = label,
+                    category = t.optString("category", "topic").ifBlank { "topic" },
+                    score = score,
+                    source = "propagated",
+                    scoreDomain = t.optString("scoreDomain", "d1-omni-600m-r2").ifBlank { "d1-omni-600m-r2" },
+                    confirmation = "unreviewed",
+                    provenance = t.optString("provenance", "d1-omni-600m-r2").ifBlank { "d1-omni-600m-r2" },
+                )
+            }
+            if (list.isNotEmpty()) out[id] = list
+        }
+        return out
     }
 }

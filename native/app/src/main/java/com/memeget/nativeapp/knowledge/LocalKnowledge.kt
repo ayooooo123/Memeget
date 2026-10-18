@@ -13,6 +13,10 @@ import com.memeget.nativeapp.knowledge.LookalikeVote
 import com.memeget.nativeapp.knowledge.NegativeAnchorDef
 import com.memeget.nativeapp.knowledge.Titles
 import kotlinx.coroutines.Dispatchers
+import com.memeget.nativeapp.inference.NativeBridge
+import com.memeget.nativeapp.knowledge.OnDeviceDecisionHead
+import java.io.File
+import com.memeget.nativeapp.knowledge.OpenVocabConcepts
 import com.memeget.nativeapp.knowledge.LookalikeKernels
 import com.memeget.nativeapp.storage.TeachingPackIo
 import kotlinx.coroutines.currentCoroutineContext
@@ -36,6 +40,8 @@ internal class LocalKnowledge(
         /** Marks a tag that came from people's labels on a look-alike meme. */
         const val LOOKALIKE_SCORE_DOMAIN = "lookalike-cosine"
         private const val VECTOR_DIM = 512
+        /** Broader template/character cluster cosine once 0.80 near-copy clusters are covered. */
+        const val CLUSTER_MIN_COS = 0.68f
 
         /**
          * The queue after its first card was dealt with: [yes] true for "Yes" to an ask card's label,
@@ -70,6 +76,23 @@ internal class LocalKnowledge(
 
     // People's labels as a look-alike vote index, rebuilt only when labels or teachings change.
     private val voteMutex = Mutex()
+    private val decisionHeadMutex = Mutex()
+    private var cachedDecisionHead: OnDeviceDecisionHead? = null
+    private val evalSampleCache = object : LinkedHashMap<Long, OnDeviceDecisionHead.EvalSample>(64, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Long, OnDeviceDecisionHead.EvalSample>?): Boolean = size > 128
+    }
+    private fun decisionHeadFile(): File? = context?.let { File(it.filesDir, "d1_omni_head.bin") }
+
+    private fun d1ModelFile(): File? =
+        context?.let { File(it.filesDir, "models/${ModelRegistry.D1_OMNI_DECISION_MODEL.filename}") }?.takeIf(File::isFile)
+
+    private fun ensureDecisionHeadLocked(): OnDeviceDecisionHead {
+        cachedDecisionHead?.let { return it }
+        return OnDeviceDecisionHead().also { head ->
+            decisionHeadFile()?.let { file -> head.loadFrom(file) }
+            cachedDecisionHead = head
+        }
+    }
     private var cachedVote: VoteState? = null
     private val curatedMutex = Mutex()
     private suspend fun ensureCuratedLoaded(): Pair<List<CuratedLabelDef>, List<NegativeAnchorDef>> =
@@ -114,8 +137,11 @@ internal class LocalKnowledge(
 
     private class VoteState(
         val labelRevision: Long,
+        var machineRevision: Long,
         val index: LookalikeVote.Index,
+        var d1Index: LookalikeVote.Index,
         val labeled: List<LookalikeVote.LabeledMeme>,
+        val exemplars: List<Exemplar>,
         private val kernels: LookalikeKernels,
     ) {
         /** Each voted label's held-out record; measured once per label change, when first needed. */
@@ -131,14 +157,54 @@ internal class LocalKnowledge(
     private fun compatibleTeachingModel(model: String): Boolean =
         model == ModelRegistry.PRIMARY_MODEL_FINGERPRINT || model == TeachingPackIo.PACK_MODEL
 
+    private suspend fun buildD1Index(
+        humanExamples: List<LookalikeVote.Example>,
+        negatives: Map<String, List<FloatArray>>,
+        archiveExemplars: List<Exemplar> = emptyList(),
+    ): LookalikeVote.Index {
+        val d1Examples = ArrayList<LookalikeVote.Example>(humanExamples.size + archiveExemplars.size + 1024)
+        d1Examples.addAll(humanExamples)
+        val humanPairs = humanExamples.mapTo(HashSet()) { "${it.memeId}:${it.label}" }
+        val machineCountByLabel = HashMap<String, Int>()
+        for (ae in archiveExemplars) {
+            if (ae.vector.size != 512 || !ae.positive) continue
+            val label = TagMerge.normalizeTagLabel(ae.label)
+            val curCnt = machineCountByLabel[label] ?: 0
+            if (label.isEmpty() || curCnt >= 4) continue
+            machineCountByLabel[label] = curCnt + 1
+            d1Examples += LookalikeVote.Example(ae.vector, label, ae.category, LookalikeVote.NO_MEME)
+        }
+        for (mRef in store.machineReferenceLabels()) {
+            for (t in mRef.labels) {
+                val label = TagMerge.normalizeTagLabel(t.label)
+                val curCnt = machineCountByLabel[label] ?: 0
+                if (label.isEmpty() || curCnt >= 4 || !humanPairs.add("${mRef.memeId}:$label")) continue
+                machineCountByLabel[label] = curCnt + 1
+                d1Examples += LookalikeVote.Example(mRef.image, label, t.category, mRef.memeId)
+            }
+        }
+        return LookalikeVote.Index(d1Examples, negatives)
+    }
+
     private suspend fun ensureVote(): VoteState = voteMutex.withLock {
         val revision = store.labelRevision.value
-        cachedVote?.takeIf { it.labelRevision == revision }?.let { return@withLock it }
+        val curMachineRev = store.revision.value
+        cachedVote?.takeIf { it.labelRevision == revision }?.let { cached ->
+            if (cached.machineRevision != curMachineRev) {
+                val archEx = store.exemplars().filter { compatibleTeachingModel(it.model) && it.origin == "archive-d1" }
+                cached.d1Index = buildD1Index(cached.index.examples, cached.index.negatives, archEx)
+                cached.machineRevision = curMachineRev
+            }
+            return@withLock cached
+        }
         val examples = ArrayList<LookalikeVote.Example>()
         val negatives = LinkedHashMap<String, MutableList<FloatArray>>()
         val taught = HashMap<String, MutableList<FloatArray>>()
-        for (e in store.exemplars()) {
-            if (!compatibleTeachingModel(e.model) || e.vector.size != 512) continue
+        val allCompatible = store.exemplars().filter { compatibleTeachingModel(it.model) }
+        val compatibleExemplars = allCompatible.filter { it.origin != "archive-d1" }
+        val archiveExemplars = allCompatible.filter { it.origin == "archive-d1" }
+        for (e in compatibleExemplars) {
+            if (e.vector.size != 512) continue
             val label = TagMerge.normalizeTagLabel(e.label)
             if (e.positive) {
                 examples += LookalikeVote.Example(e.vector, label, e.category, LookalikeVote.NO_MEME)
@@ -161,7 +227,9 @@ internal class LocalKnowledge(
             for (label in rejected) negatives.getOrPut(label) { ArrayList() } += h.image
             labeled += LookalikeVote.LabeledMeme(h.memeId, h.image, labels, rejected)
         }
-        VoteState(revision, LookalikeVote.Index(examples, negatives), labeled, kernels).also { cachedVote = it }
+        val humanIndex = LookalikeVote.Index(examples, negatives)
+        val d1Idx = buildD1Index(examples, negatives, archiveExemplars)
+        VoteState(revision, curMachineRev, humanIndex, d1Idx, labeled, compatibleExemplars, kernels).also { cachedVote = it }
     }
 
     private fun findVetoedLabelsFromMap(image: FloatArray, negByLabel: Map<String, List<FloatArray>>): Set<String> {
@@ -197,7 +265,7 @@ internal class LocalKnowledge(
         val vote = ensureVote()
         // Teachings change only with the label revision, so their derived maps live as long as the vote.
         cachedSnapshot?.takeIf { it.vote === vote }?.let { return it }
-        val allExemplars = store.exemplars().filter { compatibleTeachingModel(it.model) }
+        val allExemplars = vote.exemplars
         val negativeVecs = anchors.map { it.vec }
 
         val negExemplarsByLabel = LinkedHashMap<String, MutableList<FloatArray>>()
@@ -403,17 +471,243 @@ internal class LocalKnowledge(
             ?.let { Tag(it.label.lowercase(), it.category) }
             ?.takeIf { it.label !in settled }
         val out = LinkedHashMap<String, Tag>()
-        val ranked = LookalikeVote.rank(vote.index, image, excludeMeme = meme.id) +
-            LookalikeVote.nearestPerLabel(vote.index, image, excludeMeme = meme.id)
+        val d1Active = d1ModelFile() != null
+        val retrievalIndex = if (d1Active) vote.d1Index else vote.index
+        val memeText = "${meme.ocr} ${meme.transcript}".trim()
+        val openVotes = if (d1Active) {
+            OpenVocabConcepts.load(context)?.retrieveCandidates(image, ocrAndText = memeText, limit = 6).orEmpty().map {
+                LookalikeVote.Vote(it.label, it.category, it.posCos, it.posCos, maxOf(1, it.voteCount))
+            }
+        } else emptyList()
+        val combinedByLabel = LinkedHashMap<String, LookalikeVote.Vote>()
+        for (v in openVotes + LookalikeVote.rank(retrievalIndex, image, excludeMeme = meme.id) +
+            LookalikeVote.nearestPerLabel(retrievalIndex, image, excludeMeme = meme.id)) {
+            val prev = combinedByLabel[v.label]
+            if (prev == null || v.cosine > prev.cosine) combinedByLabel[v.label] = v
+        }
+        if (d1Active) {
+            val implied = ArrayList<LookalikeVote.Vote>()
+            for (v in combinedByLabel.values) {
+                if (v.cosine < 0.90f) continue
+                val parents = OpenVocabConcepts.PARENT_IMPLICATIONS[v.label] ?: continue
+                for ((pLbl, pCat) in parents) {
+                    val impCos = (v.cosine - 0.02f).coerceAtLeast(0.76f)
+                    val prev = combinedByLabel[pLbl]
+                    if (prev == null || impCos > prev.cosine) {
+                        implied += LookalikeVote.Vote(pLbl, pCat, impCos, impCos, maxOf(1, v.count))
+                    }
+                }
+            }
+            for (iv in implied) {
+                val prev = combinedByLabel[iv.label]
+                if (prev == null || iv.cosine > prev.cosine) combinedByLabel[iv.label] = iv
+            }
+        }
+        val ranked = combinedByLabel.values.sortedByDescending { it.cosine }
+        val candidatePoolLimit = if (d1Active) maxOf(limit, 6) else limit
+        val familyCounts = HashMap<String, Int>()
         for (v in ranked) {
-            if (out.size >= limit) break
-            if (v.label in settled || v.label in out || v.label == title?.label || LookalikeVote.contradicted(vote.index, v, image)) continue
+            if (out.size >= candidatePoolLimit) break
+            if (v.label in settled || v.label in out || LookalikeVote.contradicted(vote.index, v, image)) continue
+            if (d1Active) {
+                val fam = OpenVocabConcepts.rootFamily(v.label)
+                val cnt = familyCounts[fam] ?: 0
+                if (cnt >= 2) continue
+                familyCounts[fam] = cnt + 1
+            }
             val named = names?.titleNamed(v.label)
             out[v.label] = lookalikeTag(v).let { if (named != null) it.copy(category = named.category) else it }
         }
-        val asked = out.values.toList()
-        if (title == null || asked.any { names?.titleNamed(it.label)?.label?.lowercase() == title.label }) asked
-        else asked.take(limit - 1) + title
+        val mustIncludeSet = if (title != null) out.keys + title.label else out.keys
+        val d1Scores = if (d1Active && mustIncludeSet.isNotEmpty()) {
+            runCatching { scoreWithD1Omni(meme, image, mustInclude = mustIncludeSet) }.getOrNull()
+        } else null
+        val scoredTitle = title?.let { t -> d1Scores?.get(t.label)?.let { p -> t.copy(score = p) } ?: t }
+        val asked = if (!d1Scores.isNullOrEmpty()) {
+            out.values.map { t -> d1Scores[t.label]?.let { p -> t.copy(score = p) } ?: t }
+                .sortedByDescending { it.score }
+                .take(limit)
+        } else {
+            out.values.take(limit)
+        }
+        if (scoredTitle == null || asked.any { it.label == scoredTitle.label || names?.titleNamed(it.label)?.label?.lowercase() == scoredTitle.label }) asked
+        else if (d1Active && scoredTitle.score < (asked.lastOrNull()?.score ?: 0f)) asked
+        else asked.take(limit - 1) + scoredTitle
+    }
+
+    /**
+     * Builds live candidate inputs from [vote] for `d1-omni-600M`, leaving out [memeId]'s own examples so
+     * training and evaluation see the same leave-one-out similarity distribution.
+     */
+    private fun buildD1Candidates(
+        vote: VoteState,
+        image: FloatArray,
+        memeId: Long,
+        mustInclude: Set<String> = emptySet(),
+        limit: Int = 6,
+        ocrAndText: String = "",
+    ): List<OnDeviceDecisionHead.CandidateInput> {
+        val topRank = LookalikeVote.rank(vote.d1Index, image, excludeMeme = memeId, skipSamePicture = false)
+        val voteCounts = HashMap<String, Int>()
+        for (v in topRank) voteCounts[v.label] = v.count
+        val nearestAll = LookalikeVote.nearestPerLabel(vote.d1Index, image, excludeMeme = memeId)
+        val byLabel = LinkedHashMap<String, LookalikeVote.Vote>()
+        for (v in topRank + nearestAll) byLabel.putIfAbsent(v.label, v)
+        val openByLabel = HashMap<String, OpenVocabConcepts.Hit>()
+        for (oh in OpenVocabConcepts.load(context)?.retrieveCandidates(image, ocrAndText = ocrAndText, limit = 8).orEmpty()) {
+            openByLabel[oh.label] = oh
+            val prev = byLabel[oh.label]
+            if (prev == null || oh.posCos > prev.cosine) {
+                byLabel[oh.label] = LookalikeVote.Vote(oh.label, oh.category, oh.posCos, oh.posCos, maxOf(prev?.count ?: 0, oh.voteCount))
+            }
+        }
+        val impliedVotes = ArrayList<LookalikeVote.Vote>()
+        for (v in byLabel.values) {
+            if (v.cosine < 0.90f) continue
+            val parents = OpenVocabConcepts.PARENT_IMPLICATIONS[v.label] ?: continue
+            for ((pLbl, pCat) in parents) {
+                val impCos = (v.cosine - 0.02f).coerceAtLeast(0.76f)
+                val prev = byLabel[pLbl]
+                if (prev == null || impCos > prev.cosine) {
+                    impliedVotes += LookalikeVote.Vote(pLbl, pCat, impCos, impCos, maxOf(1, v.count))
+                }
+            }
+        }
+        for (iv in impliedVotes) {
+            val prev = byLabel[iv.label]
+            if (prev == null || iv.cosine > prev.cosine) byLabel[iv.label] = iv
+        }
+        val sortedLabels = byLabel.values.sortedByDescending { it.cosine }.map { it.label }
+
+        val orderedLabels = ArrayList<String>()
+        val familyCounts = HashMap<String, Int>()
+        for (req in mustInclude) {
+            val norm = TagMerge.normalizeTagLabel(req)
+            if (norm.isNotEmpty() && norm !in orderedLabels) {
+                orderedLabels += norm
+                val fam = OpenVocabConcepts.rootFamily(norm)
+                familyCounts[fam] = (familyCounts[fam] ?: 0) + 1
+            }
+        }
+        for (label in sortedLabels) {
+            if (orderedLabels.size >= limit) break
+            if (label in orderedLabels) continue
+            val fam = OpenVocabConcepts.rootFamily(label)
+            val cnt = familyCounts[fam] ?: 0
+            if (cnt >= 2) continue
+            familyCounts[fam] = cnt + 1
+            orderedLabels += label
+        }
+
+        return orderedLabels.take(limit).map { label ->
+            val v = byLabel[label]
+            val oh = openByLabel[label]
+            val hasSelfExemplar = v == null && vote.d1Index.examples.any { it.label == label && it.memeId == memeId }
+            val posCos = maxOf(v?.cosine ?: 0f, oh?.posCos ?: 0f).let { if (it > 0f) it else if (hasSelfExemplar) 0.78f else 0.50f }
+            val cat = oh?.category ?: v?.category ?: vote.d1Index.examples.firstOrNull { it.label == label }?.category ?: "topic"
+            val otherSup70 = vote.d1Index.examples.count {
+                it.label == label && it.memeId != memeId && FloatBlob.dot(it.vector, image) >= 0.70f
+            }
+            val sup70 = maxOf(otherSup70, oh?.support70 ?: 0).let { if (it > 0) it else if (hasSelfExemplar) 1 else 0 }
+            val vCnt = maxOf(voteCounts[label] ?: 0, oh?.voteCount ?: 0).let { if (it > 0) it else if (hasSelfExemplar) 1 else 0 }
+            val negVecs = vote.index.negatives[label].orEmpty()
+            var maxNeg = -1f
+            for (nv in negVecs) {
+                val c = FloatBlob.dot(nv, image)
+                if (c < LookalikeVote.SAME_IMAGE_COS && c > maxNeg) maxNeg = c
+            }
+            OnDeviceDecisionHead.CandidateInput(
+                label = label,
+                category = cat,
+                posCos = posCos,
+                seedCos = posCos,
+                voteCount = vCnt,
+                support70 = sup70,
+                negCos = maxNeg,
+            )
+        }
+    }
+
+    /**
+     * Scores [meme]'s candidate labels using the on-device `d1-omni-600M` GGUF runner plus the persisted
+     * `OnDeviceDecisionHead` (`deltaW`, `deltaB`). Returns null when the GGUF model is not present on disk.
+     */
+    suspend fun scoreWithD1Omni(
+        meme: Meme,
+        image: FloatArray,
+        mustInclude: Set<String> = emptySet(),
+    ): Map<String, Float>? = withContext(Dispatchers.Default) {
+        val modelFile = d1ModelFile() ?: return@withContext null
+        val vote = ensureVote()
+        val cands = buildD1Candidates(vote, image, meme.id, mustInclude = mustInclude, limit = 6, ocrAndText = "${meme.ocr} ${meme.transcript}".trim())
+        if (cands.isEmpty()) return@withContext emptyMap()
+        decisionHeadMutex.withLock {
+            val head = ensureDecisionHeadLocked()
+            val cues = meme.tags.filter { !TagMerge.isHumanTag(it) && it.source in setOf("prompt", "vision", "title") }.map { it.label }
+            val (prompt, keys) = head.renderPrompt(meme.ocr, meme.transcript, meme.caption, cands, visualCues = cues)
+            val pHash = prompt.hashCode()
+            val sample = head.cachedExample(meme.id)?.sample?.takeIf { it.optionKeys == keys && it.promptHash == pHash }
+                ?: evalSampleCache[meme.id]?.takeIf { it.optionKeys == keys && it.promptHash == pHash }
+                ?: head.unpackNativeOutput(NativeBridge.nativeDecide(modelFile.absolutePath, prompt, 2), keys, pHash)
+                    .also { evalSampleCache[meme.id] = it }
+            head.scoreCandidates(sample)
+        }
+    }
+
+    /**
+     * Extracts `<|mask|>` scorer features for [memeId] via `LlamaDecisionRunner`, refits the on-device
+     * residual scorer head (`deltaW`, `deltaB`) across all cached taught memes, and persists `d1_omni_head.bin`.
+     */
+    suspend fun recordD1Teaching(memeId: Long): Float? = withContext(Dispatchers.Default) {
+        val modelFile = d1ModelFile() ?: return@withContext null
+        val meme = store.meme(memeId) ?: return@withContext null
+        val vec = store.vectors(memeId)?.image?.takeIf { it.size == VECTOR_DIM } ?: return@withContext null
+        val confirmedPos = meme.tags.filter(TagMerge::isHumanTag).mapTo(LinkedHashSet()) { TagMerge.normalizeTagLabel(it.label) }
+        val confirmedRej = meme.rejectedLabels.mapTo(LinkedHashSet()) { TagMerge.normalizeTagLabel(it) }
+        val vote = ensureVote()
+        val cands = buildD1Candidates(vote, vec, memeId, mustInclude = confirmedPos + confirmedRej, limit = 6, ocrAndText = "${meme.ocr} ${meme.transcript}".trim())
+        if (cands.isEmpty()) return@withContext null
+        val hasConfirmedTitle = cands.any { it.label in confirmedPos && (it.category == "tv" || it.category == "movie") }
+        if (hasConfirmedTitle) {
+            for (c in cands) {
+                if ((c.category == "tv" || c.category == "movie") && c.label !in confirmedPos) {
+                    confirmedRej += c.label
+                }
+            }
+        }
+        decisionHeadMutex.withLock {
+            val head = ensureDecisionHeadLocked()
+            if (confirmedPos.isEmpty() && confirmedRej.isEmpty()) {
+                val loss = head.upsertAndFit(memeId, null)
+                decisionHeadFile()?.let { head.saveTo(it) }
+                return@withLock loss
+            }
+            val cues = meme.tags.filter { !TagMerge.isHumanTag(it) && it.source in setOf("prompt", "vision", "title") }.map { it.label }
+            val (prompt, keys) = head.renderPrompt(meme.ocr, meme.transcript, meme.caption, cands, visualCues = cues)
+            val pHash = prompt.hashCode()
+            val sample = head.cachedExample(memeId)?.sample?.takeIf { it.optionKeys == keys && it.promptHash == pHash }
+                ?: evalSampleCache[memeId]?.takeIf { it.optionKeys == keys && it.promptHash == pHash }
+                ?: head.unpackNativeOutput(NativeBridge.nativeDecide(modelFile.absolutePath, prompt, 2), keys, pHash)
+                    .also { evalSampleCache[memeId] = it }
+            val ex = OnDeviceDecisionHead.TrainingExample(
+                sample = sample,
+                confirmedPositives = confirmedPos,
+                confirmedRejections = confirmedRej,
+            )
+            val loss = head.upsertAndFit(memeId, ex)
+            decisionHeadFile()?.let { head.saveTo(it) }
+            loss
+        }
+    }
+
+    /**
+     * Loads `d1_omni_head.bin` from disk on startup; if not yet initialized and `d1-omni-600M` is installed,
+     * adapts the head on the most recent human-labeled meme so the persisted head is ready immediately.
+     */
+    suspend fun loadPersistedD1Head(): Int = withContext(Dispatchers.IO) {
+        decisionHeadMutex.withLock {
+            ensureDecisionHeadLocked().exampleCount()
+        }
     }
 
     /**
@@ -451,32 +745,38 @@ internal class LocalKnowledge(
         val flat = FloatArray(n * VECTOR_DIM)
         for (i in 0 until n) System.arraycopy(images[i], 0, flat, i * VECTOR_DIM, VECTOR_DIM)
         currentCoroutineContext().ensureActive()
-        // Each look-alike count bounds what picking that meme can cover.
-        val counts = kernels.counts(flat, VECTOR_DIM, LookalikeVote.MIN_COS)
-        val bound = IntArray(n) { 1 + counts[it] }
-        val order = PriorityQueue<Int>(maxOf(1, n), compareByDescending<Int> { bound[it] }.thenBy { it })
-        for (i in 0 until n) order += i
         val covered = BooleanArray(n)
         val picked = ArrayList<QueueItem>()
-        while (picked.size < limit) {
-            currentCoroutineContext().ensureActive()
-            val i = order.poll() ?: break
-            if (covered[i]) continue
-            val found = kernels.lookalikesOf(flat, VECTOR_DIM, i, covered, LookalikeVote.MIN_COS)
-            while (order.peek()?.let { covered[it] } == true) order.poll()
-            val next = order.peek()
-            // Accept only if the exact gain still wins the heap's order, ties going to the lower index.
-            val gain = 1 + found.size
-            if (next != null && (gain < bound[next] || gain == bound[next] && next < i)) {
-                bound[i] = gain
-                order += i
-                continue
+        suspend fun pickClusters(minCos: Float, includeSingletons: Boolean) {
+            if (picked.size >= limit || n == 0) return
+            // Each look-alike count bounds what picking that meme can cover.
+            val counts = kernels.counts(flat, VECTOR_DIM, minCos)
+            val bound = IntArray(n) { if (covered[it]) 0 else 1 + counts[it] }
+            val order = PriorityQueue<Int>(maxOf(1, n), compareByDescending<Int> { bound[it] }.thenBy { it })
+            for (i in 0 until n) if (!covered[i] && (includeSingletons || bound[i] > 1)) order += i
+            while (picked.size < limit) {
+                currentCoroutineContext().ensureActive()
+                val i = order.poll() ?: break
+                if (covered[i]) continue
+                val found = kernels.lookalikesOf(flat, VECTOR_DIM, i, covered, minCos)
+                val gain = 1 + found.size
+                if (!includeSingletons && gain <= 1) continue
+                while (order.peek()?.let { covered[it] } == true) order.poll()
+                val next = order.peek()
+                // Accept only if the exact gain still wins the heap's order, ties going to the lower index.
+                if (next != null && (gain < bound[next] || gain == bound[next] && next < i)) {
+                    bound[i] = gain
+                    order += i
+                    continue
+                }
+                covered[i] = true
+                for (j in found) covered[j] = true
+                val meme = store.meme(ids[i]) ?: continue // deleted since the read
+                picked += QueueItem(meme, images[i], found.size)
             }
-            covered[i] = true
-            for (j in found) covered[j] = true
-            val meme = store.meme(ids[i]) ?: continue // deleted since the read
-            picked += QueueItem(meme, images[i], found.size)
         }
+        pickClusters(LookalikeVote.MIN_COS, includeSingletons = false)
+        pickClusters(CLUSTER_MIN_COS, includeSingletons = true)
         asks + picked
     }
 
@@ -519,7 +819,8 @@ internal class LocalKnowledge(
     suspend fun knownCategory(label: String): String {
         titleNames()?.titleNamed(label)?.let { return it.category }
         val norm = TagMerge.normalizeTagLabel(label)
-        return ensureVote().index.examples.firstOrNull { it.label == norm }?.category ?: "topic"
+        val vote = cachedVote ?: ensureVote()
+        return vote.index.examples.firstOrNull { it.label == norm }?.category ?: "topic"
     }
 
     /** A re-tag pass that ended early (the session limit, a Stop): the label revision it used and the memes it finished. */

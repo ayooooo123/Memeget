@@ -912,24 +912,31 @@ internal class LibraryFiles(
      */
     suspend fun importTeaching(uri: Uri, replace: Boolean = false): TeachingImport = withContext(Dispatchers.IO) {
         // Read the whole file first: a file that can't be used must not cost the teachings already here.
-        val exemplars = readTeaching(uri)
+        val text = readTeachingText(uri)
+        val exemplars = TeachingPackIo.parseNativeTeachings(text)
+        val machineTags = TeachingPackIo.parseNativeMachineTags(text)
         if (replace && exemplars.isEmpty()) throw IllegalArgumentException("The teaching file holds no examples to replace yours with")
         val packName = MediaIoUtils.getDisplayName(context, uri).substringBeforeLast(".")
         val (removed, added) = if (replace) {
             store.replaceExemplars(exemplars, pack = packName)
-        } else {
+        } else if (exemplars.isNotEmpty()) {
             0 to store.importExemplars(exemplars, pack = packName, asSelf = false)
+        } else {
+            0 to 0
         }
-        store.relinkTeachings()
+        if (exemplars.any { it.origin != "archive-d1" } || replace) {
+            store.relinkTeachings()
+        }
+        store.importMachineTags(machineTags)
         TeachingImport(added = added, removed = removed)
     }
 
-    private fun readTeaching(uri: Uri): List<Exemplar> {
-        val text = context.contentResolver.openInputStream(uri)?.use {
+    private fun readTeaching(uri: Uri): List<Exemplar> = TeachingPackIo.parseNativeTeachings(readTeachingText(uri))
+
+    private fun readTeachingText(uri: Uri): String =
+        context.contentResolver.openInputStream(uri)?.use {
             it.bufferedReader().readText()
         } ?: throw IllegalArgumentException("Could not read teaching pack file")
-        return TeachingPackIo.parseNativeTeachings(text)
-    }
 
     suspend fun exportTeaching(destination: Uri): Unit = withContext(Dispatchers.IO) {
         val exemplars = store.exemplars()

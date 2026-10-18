@@ -353,6 +353,34 @@ class SqliteLibraryStoreTest {
         assertEquals(listOf(id), reopened.search("quarzite", null).map { it.meme.id })
     }
 
+    @Test fun removingATaughtTagAlsoDeletesItsPositiveExemplarAndSearchTerms() = runBlocking {
+        val id = insert("misclick.png")
+        store.completeIndex(id, LocalAnalysis(axis(9), "", emptyList(), ""), model, "")
+        store.teach(id, "hulk", "character", true)
+        assertEquals(1, store.exemplars().count { it.label == "hulk" && it.positive })
+        assertEquals(listOf(id), store.search("hulk", null).map { it.meme.id })
+
+        store.removeTag(id, "hulk")
+
+        val after = requireNotNull(store.meme(id))
+        assertFalse(after.tags.any { it.label == "hulk" })
+        assertFalse(after.extraTerms.split(' ').contains("hulk"))
+        assertTrue(store.exemplars().none { it.label == "hulk" })
+        assertTrue(store.search("hulk", null).isEmpty())
+    }
+
+    @Test fun teachingNegativeReplacesPriorPositiveExemplarOnTheSameMeme() = runBlocking {
+        val id = insert("corrected-exemplar.png")
+        store.completeIndex(id, LocalAnalysis(axis(11), "", emptyList(), ""), model, "")
+        store.teach(id, "hulk", "character", true)
+        assertEquals(listOf(true), store.exemplars().filter { it.label == "hulk" }.map { it.positive })
+
+        store.teach(id, "hulk", "character", false)
+
+        assertEquals(listOf(false), store.exemplars().filter { it.label == "hulk" }.map { it.positive })
+        assertTrue(requireNotNull(store.meme(id)).rejectedLabels.contains("hulk"))
+    }
+
     @Test fun aMemeKilledMidCaptionGetsOneMoreTryAndTheRecordIsClearedWithIt() = runBlocking {
         val id = insert("killed.png")
         store.setVisionState(id, "failed")

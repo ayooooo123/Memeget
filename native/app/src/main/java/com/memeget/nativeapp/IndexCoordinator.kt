@@ -661,9 +661,12 @@ internal class IndexCoordinator(
                     // A process-killing native failure must not create an automatic crash loop. The marker is set
                     // inside this try so a stop that lands as it commits still returns the meme to pending.
                     store.setCaption(meme.id, meme.caption, emptyList(), null, "failed")
+                    val openHints = store.vectors(meme.id)?.image?.let { vec ->
+                        runCatching { knowledge.suggestFor(meme, vec, limit = 5).filter { it.score >= 0.74f } }.getOrDefault(emptyList())
+                    }.orEmpty()
                     val descriptions = ArrayList<VisionDescription>()
                     for (frame in item.frames.take(3)) {
-                        val parsed = VisionText.parse(engine.describe(frame, VisionText.grounding(meme)))
+                        val parsed = VisionText.parse(engine.describe(frame, VisionText.grounding(meme, openHints)))
                         require(parsed.caption.isNotBlank() || parsed.tags.isNotEmpty()) { "The local model returned no usable description" }
                         if (descriptions.none { it.caption.equals(parsed.caption, ignoreCase = true) }) descriptions += parsed
                     }
