@@ -128,7 +128,11 @@ internal object TagMerge {
             provenance = if (tag.provenance.isNotBlank()) tag.provenance else "user",
         )
 
-        val filtered = tags.filter { normalizeTagLabel(it.label) != label }
+        val filtered = if (isHumanTag(next)) {
+            tags.filter { normalizeTagLabel(it.label) != label }
+        } else {
+            tags.filter { normalizeTagLabel(it.label) != label || isHumanTag(it) }
+        }
         val merged = mergeDurableTags(filtered + next)
         val updatedTerms = termsWithLabel(extraTerms, label)
         return Pair(merged, updatedTerms)

@@ -42,7 +42,7 @@ internal object LookalikeVote {
     /** A meme a person labeled, for measuring which labels hold up on memes the vote has not seen. */
     class LabeledMeme(val memeId: Long, val image: FloatArray, val labels: Set<String>, val rejected: Set<String>)
 
-    data class Vote(val label: String, val category: String, val cosine: Float, val weight: Float)
+    data class Vote(val label: String, val category: String, val cosine: Float, val weight: Float, val count: Int = 1)
 
     /**
      * Labels among the [NEIGHBORS] nearest examples, by summed cosine; no cutoff. [cosine] is
@@ -72,19 +72,21 @@ internal object LookalikeVote {
     /** Labels among the neighbours at [from] in [topIndex]/[topCos], by summed cosine, as [rank] returns them. */
     private fun votesFrom(index: Index, topIndex: IntArray, topCos: FloatArray, from: Int): List<Vote> {
         val weight = LinkedHashMap<String, Float>()
+        val counts = HashMap<String, Int>()
         val nearest = HashMap<String, Example>()
         val nearestCos = HashMap<String, Float>()
         for (k in 0 until NEIGHBORS) {
             val example = index.examples.getOrNull(topIndex[from + k]) ?: break
             val c = topCos[from + k]
             weight[example.label] = (weight[example.label] ?: 0f) + c
+            counts[example.label] = (counts[example.label] ?: 0) + 1
             if (c > (nearestCos[example.label] ?: Float.NEGATIVE_INFINITY)) {
                 nearestCos[example.label] = c
                 nearest[example.label] = example
             }
         }
         return weight.entries.sortedByDescending { it.value }.map { (label, w) ->
-            Vote(label, nearest.getValue(label).category, nearestCos.getValue(label), w)
+            Vote(label, nearest.getValue(label).category, nearestCos.getValue(label), w, counts.getValue(label))
         }
     }
 

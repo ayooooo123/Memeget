@@ -130,4 +130,13 @@ internal object ModelRegistry {
         sha256Hex = "204a7993d345456fb36d19892dbfd4ab6b5ce09026c7bc0bd3fec1e4831834b7",
         expectedSizeBytes = 1110117984L,
     )
+
+    // Fine-tuned LiquidAI/d1-omni-600M decision model (Q8_0 GGUF, llama.cpp b11588 COMMON_DECISION_TYPE_LFM2_D1_OMNI).
+    val D1_OMNI_DECISION_MODEL = ModelArtifact(
+        id = "d1-omni-600m-memeget-q8_0",
+        filename = "d1-omni-600M-memeget-Q8_0.gguf",
+        url = "https://github.com/ayooooo123/Memeget/releases/download/models-v1/d1-omni-600M-memeget-Q8_0.gguf",
+        sha256Hex = "ed64250aecb7bf62ebd5a655ac68012e9d5af859c968a648184c6f5bcea6d88d",
+        expectedSizeBytes = 407203808L,
+    )
 }

@@ -87,6 +87,8 @@ class MainActivity : ComponentActivity() {
                     val added = graph.store.countAll() - before
                     Toast.makeText(this@MainActivity, intakeMessage(added, ids.distinct().size - added), Toast.LENGTH_LONG).show()
                     graph.coordinator.start(ids)
+                } else {
+                    runCatching { graph.knowledge.recordD1Teaching(221L) }
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled

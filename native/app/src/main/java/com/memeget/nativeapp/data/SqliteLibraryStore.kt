@@ -70,9 +70,9 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
         teachingCache?.let { (cachedAt, teachings) -> if (cachedAt == generation) return teachings }
         val teachings = exemplars().filter {
             it.vector.size == 512 &&
+                it.origin != "archive-d1" &&
                 (it.model == ModelRegistry.PRIMARY_MODEL_FINGERPRINT || it.model == TeachingPackIo.PACK_MODEL)
         }
-        teachingCache = generation to teachings
         return teachings
     }
 
@@ -418,6 +418,33 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
                 }
                 val rejected = deserializeStrings(c.getString(2))
                 if (labels.isNotEmpty() || rejected.isNotEmpty()) out += HumanLabeled(c.getLong(0), image, labels, rejected)
+            }
+        }
+        out
+    }
+
+    override suspend fun machineReferenceLabels(): List<HumanLabeled> = withContext(Dispatchers.IO) {
+        val out = ArrayList<HumanLabeled>()
+        getReadableDb().rawQuery(
+            """
+            SELECT m.id, m.tags, v.image
+            FROM memes m
+            JOIN vectors v ON m.id = v.id
+            WHERE v.model = ? AND m.tags LIKE '%"provenance":"d1-omni%'
+            ORDER BY m.id ASC
+            """.trimIndent(),
+            arrayOf(ModelRegistry.PRIMARY_MODEL_FINGERPRINT)
+        ).use { c ->
+            while (c.moveToNext()) {
+                val image = FloatBlob.fromBytes(c.getBlob(2) ?: continue)
+                if (image.size != 512) continue
+                val labels = deserializeTags(c.getString(1)).filter {
+                    it.label.isNotBlank() &&
+                        it.provenance.startsWith("d1-omni") &&
+                        it.category in setOf("person", "character", "tv", "movie", "format") &&
+                        it.label !in setOf("reaction image", "screenshot", "photo", "drawing", "portrait", "cartoon", "text meme", "image macro", "caption meme", "illustration", "selfie", "viral video", "parody", "quote")
+                }
+                if (labels.isNotEmpty()) out += HumanLabeled(c.getLong(0), image, labels, emptyList())
             }
         }
         out
@@ -1669,15 +1696,27 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
     override suspend fun removeTag(id: Long, label: String) = withContext(Dispatchers.IO) {
         val normLabel = TagMerge.normalizeTagLabel(label)
         writeMutex.withLock {
+            var removedExemplar = false
             val db = getWritableDb()
             db.beginTransaction()
             try {
                 val m = meme(id) ?: return@withLock
                 val filtered = m.tags.filter { TagMerge.normalizeTagLabel(it.label) != normLabel }
+                val updatedRejected = m.rejectedLabels.filter { TagMerge.normalizeTagLabel(it) != normLabel }
+                val cleanedExtraTerms = TagMerge.withoutRejectedTerms(m.extraTerms, listOf(normLabel))
                 val cv = ContentValues().apply {
                     put("tags", serializeTags(filtered))
+                    put("extra_terms", cleanedExtraTerms)
+                    put("rejected_labels", serializeStrings(updatedRejected))
                 }
                 db.update("memes", cv, "id = ?", arrayOf(id.toString()))
+                if (m.uri.isNotBlank()) {
+                    removedExemplar = db.delete(
+                        "exemplars",
+                        "source_uri = ? AND label = ?",
+                        arrayOf(m.uri, normLabel),
+                    ) > 0
+                }
                 updateFtsRow(
                     db = db,
                     id = id,
@@ -1686,7 +1725,7 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
                     caption = m.caption,
                     transcript = m.transcript,
                     tags = filtered,
-                    extraTerms = m.extraTerms,
+                    extraTerms = cleanedExtraTerms,
                     cloudCaption = m.cloudCaption,
                     cloudTerms = m.cloudTerms,
                 )
@@ -1696,6 +1735,7 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
             }
             bumpRevision()
             bumpLabels()
+            if (removedExemplar) bumpTeachings()
         }
     }
 
@@ -1725,6 +1765,10 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
                         "The cloud suggestion changed before confirmation"
                     }
                     observed.copy(label = normLabel, confirmation = "confirmed")
+                }
+
+                if (currentMeme.uri.isNotBlank()) {
+                    db.delete("exemplars", "source_uri = ? AND label = ?", arrayOf(currentMeme.uri, normLabel))
                 }
 
                 if (positive) {
@@ -1876,12 +1920,12 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
 
     /** One transaction: removed first when [replace], then inserted. Returns (removed, added). */
     private suspend fun writeExemplarsLocked(items: List<Exemplar>, pack: String, asSelf: Boolean, replace: Boolean): Pair<Int, Int> {
+        val existing = if (replace) emptyList() else exemplars()
         val db = getWritableDb()
         db.beginTransaction()
         val written = try {
             val removed = if (replace) db.delete("exemplars", null, null) else 0
             // Deduplication set built from existing exemplars
-            val existing = if (replace) emptyList() else exemplars()
             val seen = HashSet<String>()
             for (e in existing) {
                 val norm = TagMerge.normalizeTagLabel(e.label)
@@ -2001,6 +2045,53 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
                     cloudCaption = m.cloudCaption,
                     cloudTerms = m.cloudTerms,
                 )
+                db.setTransactionSuccessful()
+            } finally {
+                db.endTransaction()
+            }
+            bumpRevision()
+        }
+    }
+
+    override suspend fun importMachineTags(machineTags: Map<Long, List<Tag>>) = withContext(Dispatchers.IO) {
+        if (machineTags.isEmpty()) return@withContext
+        writeMutex.withLock {
+            val db = getWritableDb()
+            db.beginTransaction()
+            try {
+                for ((id, incoming) in machineTags) {
+                    val m = db.rawQuery("SELECT * FROM memes WHERE id = ?", arrayOf(id.toString())).use { c ->
+                        if (c.moveToNext()) cursorToMeme(c) else null
+                    } ?: continue
+                    val rejected = m.rejectedLabels.map { TagMerge.normalizeTagLabel(it) }.toSet()
+                    val human = m.tags.filter(TagMerge::isHumanTag)
+                    val existingMachine = m.tags.filter { !TagMerge.isHumanTag(it) }
+                    val merged = TagMerge.mergeDurableTags(
+                        human + (existingMachine + incoming).filter { !TagMerge.isHumanTag(it) && !rejected.contains(TagMerge.normalizeTagLabel(it.label)) }
+                    )
+                    var terms = m.extraTerms
+                    for (t in incoming) {
+                        terms = TagMerge.termsWithLabel(terms, t.label)
+                    }
+                    val filteredTerms = TagMerge.withoutRejectedTerms(terms, rejected)
+                    val cv = ContentValues().apply {
+                        put("tags", serializeTags(merged))
+                        put("extra_terms", filteredTerms)
+                    }
+                    db.update("memes", cv, "id = ?", arrayOf(id.toString()))
+                    updateFtsRow(
+                        db = db,
+                        id = id,
+                        name = m.name,
+                        ocr = m.ocr,
+                        caption = m.caption,
+                        transcript = m.transcript,
+                        tags = merged,
+                        extraTerms = filteredTerms,
+                        cloudCaption = m.cloudCaption,
+                        cloudTerms = m.cloudTerms,
+                    )
+                }
                 db.setTransactionSuccessful()
             } finally {
                 db.endTransaction()

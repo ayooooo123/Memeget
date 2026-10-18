@@ -125,6 +125,7 @@ add_library(memeget_inference SHARED
   NativeInferenceJni.cpp
   ModelRunner.cpp
   LlamaVisionRunner.cpp
+  LlamaDecisionRunner.cpp
   ProjectorConversion.cpp
   ImageProcessing.cpp
   VectorKernels.cpp
@@ -137,7 +138,7 @@ add_library(memeget_inference SHARED
   ${ET_COMMON_DIR}/rnexecutorch/utils/computer_vision/Processing.cpp
 )
 # The Label queue's kernels run on the UI's wait path, so debug APKs need them optimized too.
-set_source_files_properties(VectorKernels.cpp PROPERTIES COMPILE_OPTIONS "-O3")
+set_source_files_properties(VectorKernels.cpp LlamaDecisionRunner.cpp PROPERTIES COMPILE_OPTIONS "-O3")
 
 # The prebuilt OpenCV archives require OpenMP; keep its runtime private to this JNI library.
 target_link_options(memeget_inference PRIVATE

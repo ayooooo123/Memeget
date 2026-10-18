@@ -67,8 +67,11 @@ internal object VisionText {
         return VisionDescription(clean(fields["caption"].orEmpty()).take(1000), text.take(2000), tags)
     }
 
-    fun grounding(meme: Meme): String {
-        val candidates = meme.tags.filter { it.source !in setOf("cloud", "propagated") && it.confirmation != "rejected" }
+    fun grounding(meme: Meme, extraCandidates: List<Tag> = emptyList()): String {
+        val rejected = meme.rejectedLabels.mapTo(HashSet()) { it.lowercase(Locale.ROOT) }
+        val candidates = (meme.tags.filter { it.source !in setOf("cloud", "propagated") && it.confirmation != "rejected" } +
+            extraCandidates.filter { it.label.lowercase(Locale.ROOT) !in rejected })
+            .distinctBy { it.label.lowercase(Locale.ROOT) }
             .take(8).joinToString("; ") { "${it.category}: ${it.label}" }
         return buildString {
             append("These are uncertain local suggestions, not facts. Use a name only if it matches the image. ")

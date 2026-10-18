@@ -191,6 +191,7 @@ internal interface LibraryStore {
     /** Changes when people's labels, teachings or the vectors behind them may have changed. */
     val labelRevision: StateFlow<Long>
     suspend fun humanLabels(): List<HumanLabeled>
+    suspend fun machineReferenceLabels(): List<HumanLabeled> = emptyList()
     /** Every meme's primary-model image vector, in one read. */
     suspend fun imageVectors(): Map<Long, FloatArray>
     /** Ids of memes holding a tag from [scoreDomain], read without parsing every meme's tags. */
@@ -277,6 +278,17 @@ internal interface LibraryStore {
      * matching tags and terms.
      */
     suspend fun updateTags(id: Long, tags: List<Tag>, extraTerms: String)
+    suspend fun importMachineTags(machineTags: Map<Long, List<Tag>>) {
+        for ((id, incoming) in machineTags) {
+            val current = meme(id) ?: continue
+            val existingMachine = current.tags.filter { !com.memeget.nativeapp.data.TagMerge.isHumanTag(it) }
+            var terms = current.extraTerms
+            for (t in incoming) {
+                terms = com.memeget.nativeapp.data.TagMerge.termsWithLabel(terms, t.label)
+            }
+            updateTags(id, existingMachine + incoming, terms)
+        }
+    }
     /** Adds imported human tags and fills OCR, transcript and a missing vector. */
     suspend fun applyImportedAnalysis(id: Long, analysis: ImportedAnalysis)
     /**
