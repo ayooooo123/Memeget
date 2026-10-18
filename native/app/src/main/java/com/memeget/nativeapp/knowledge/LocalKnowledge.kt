@@ -83,8 +83,11 @@ internal class LocalKnowledge(
     }
     private fun decisionHeadFile(): File? = context?.let { File(it.filesDir, "d1_omni_head.bin") }
 
-    private fun d1ModelFile(): File? =
-        context?.let { File(it.filesDir, "models/${ModelRegistry.D1_OMNI_DECISION_MODEL.filename}") }?.takeIf(File::isFile)
+    private fun d1ModelFile(): File? = context?.let { app ->
+        val fname = ModelRegistry.D1_OMNI_DECISION_MODEL.filename
+        File(app.filesDir, "memeget_models/$fname").takeIf(File::isFile)
+            ?: File(app.filesDir, "models/$fname").takeIf(File::isFile)
+    }
 
     private fun ensureDecisionHeadLocked(): OnDeviceDecisionHead {
         cachedDecisionHead?.let { return it }
@@ -472,20 +475,20 @@ internal class LocalKnowledge(
             ?.takeIf { it.label !in settled }
         val out = LinkedHashMap<String, Tag>()
         val d1Active = d1ModelFile() != null
-        val retrievalIndex = if (d1Active) vote.d1Index else vote.index
+        val openConcepts = OpenVocabConcepts.load(context)
+        val openActive = d1Active || openConcepts != null
+        val retrievalIndex = if (openActive) vote.d1Index else vote.index
         val memeText = "${meme.ocr} ${meme.transcript}".trim()
-        val openVotes = if (d1Active) {
-            OpenVocabConcepts.load(context)?.retrieveCandidates(image, ocrAndText = memeText, limit = 6).orEmpty().map {
-                LookalikeVote.Vote(it.label, it.category, it.posCos, it.posCos, maxOf(1, it.voteCount))
-            }
-        } else emptyList()
+        val openVotes = openConcepts?.retrieveCandidates(image, ocrAndText = memeText, limit = 6).orEmpty().map {
+            LookalikeVote.Vote(it.label, it.category, it.posCos, it.posCos, maxOf(1, it.voteCount))
+        }
         val combinedByLabel = LinkedHashMap<String, LookalikeVote.Vote>()
         for (v in openVotes + LookalikeVote.rank(retrievalIndex, image, excludeMeme = meme.id) +
             LookalikeVote.nearestPerLabel(retrievalIndex, image, excludeMeme = meme.id)) {
             val prev = combinedByLabel[v.label]
             if (prev == null || v.cosine > prev.cosine) combinedByLabel[v.label] = v
         }
-        if (d1Active) {
+        if (openActive) {
             val implied = ArrayList<LookalikeVote.Vote>()
             for (v in combinedByLabel.values) {
                 if (v.cosine < 0.90f) continue
@@ -509,7 +512,7 @@ internal class LocalKnowledge(
         for (v in ranked) {
             if (out.size >= candidatePoolLimit) break
             if (v.label in settled || v.label in out || LookalikeVote.contradicted(vote.index, v, image)) continue
-            if (d1Active) {
+            if (openActive) {
                 val fam = OpenVocabConcepts.rootFamily(v.label)
                 val cnt = familyCounts[fam] ?: 0
                 if (cnt >= 2) continue
@@ -705,9 +708,13 @@ internal class LocalKnowledge(
      * adapts the head on the most recent human-labeled meme so the persisted head is ready immediately.
      */
     suspend fun loadPersistedD1Head(): Int = withContext(Dispatchers.IO) {
-        decisionHeadMutex.withLock {
+        val count = decisionHeadMutex.withLock {
             ensureDecisionHeadLocked().exampleCount()
         }
+        if (d1ModelFile() == null) {
+            runCatching { (engine as? NativeInferenceEngine)?.ensureModel(ModelRegistry.D1_OMNI_DECISION_MODEL) }
+        }
+        count
     }
 
     /**
