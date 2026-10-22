@@ -728,7 +728,7 @@ internal class LocalKnowledge(
      */
     suspend fun loadPersistedD1Head(): Int = withContext(Dispatchers.IO) {
         runCatching {
-            if (store.setting("knowledge.clean_sota_sync") != "v3") {
+            if (store.setting("knowledge.clean_sota_sync") != "v4") {
                 val concepts = OpenVocabConcepts.load(context)
                 if (concepts != null && concepts.refMemes.isNotEmpty()) {
                     val vecMap = store.imageVectors()
@@ -739,7 +739,7 @@ internal class LocalKnowledge(
                     }
                     if (cleanMap.isNotEmpty()) {
                         store.importMachineTags(cleanMap)
-                        store.setSetting("knowledge.clean_sota_sync", "v3")
+                        store.setSetting("knowledge.clean_sota_sync", "v4")
                     }
                 }
             }
