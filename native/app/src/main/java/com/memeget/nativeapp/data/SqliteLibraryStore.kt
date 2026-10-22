@@ -2065,12 +2065,12 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
                     } ?: continue
                     val rejected = m.rejectedLabels.map { TagMerge.normalizeTagLabel(it) }.toSet()
                     val human = m.tags.filter(TagMerge::isHumanTag)
-                    val existingMachine = m.tags.filter { !TagMerge.isHumanTag(it) }
                     val merged = TagMerge.mergeDurableTags(
-                        human + (existingMachine + incoming).filter { !TagMerge.isHumanTag(it) && !rejected.contains(TagMerge.normalizeTagLabel(it.label)) }
+                        human + incoming.filter { !TagMerge.isHumanTag(it) && !rejected.contains(TagMerge.normalizeTagLabel(it.label)) },
+                        capAuto = 12,
                     )
-                    var terms = m.extraTerms
-                    for (t in incoming) {
+                    var terms = ""
+                    for (t in merged) {
                         terms = TagMerge.termsWithLabel(terms, t.label)
                     }
                     val filteredTerms = TagMerge.withoutRejectedTerms(terms, rejected)

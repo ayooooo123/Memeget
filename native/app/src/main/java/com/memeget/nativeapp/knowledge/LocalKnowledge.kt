@@ -324,8 +324,9 @@ internal class LocalKnowledge(
         memeId: Long,
     ): Pair<List<Tag>, String> {
         val vetoedLabels = findVetoedLabelsFromMap(image, snapshot.negExemplarsByLabel)
-        // 1. Zero-shot prompt tags with anchor bias
-        val promptTags = LearnCore.classifyPrompts(image, snapshot.labels, snapshot.negativeVecs)
+        val openTags = OpenVocabConcepts.load(context)?.classifyLibraryMeme(image, ocr, memeId).orEmpty()
+        // 1. Zero-shot prompt tags with anchor bias (used when open_vocab has no direct match)
+        val promptTags = if (openTags.isNotEmpty()) emptyList() else LearnCore.classifyPrompts(image, snapshot.labels, snapshot.negativeVecs)
 
         // 2. People's labels on look-alikes: copies of a labeled picture always; otherwise the vote
         // winner once its label has held up on held-out examples. Unproven labels stay suggestions.
@@ -339,19 +340,24 @@ internal class LocalKnowledge(
         // 3. OCR tags
         val ocrTags = CuratedLabels.ocrTags(ocr)
 
-        var visualMerged = LearnCore.mergeClassified(promptTags, lookalike.values.toList(), topK = 6)
-        // 4. The meme's TV show or movie, carried once. A tag that names it by its name or another of its names
-        // stands for it: a person's own tag (re-tag gives that tag the title's category), or a person's label the
-        // vote spread, which takes the title's category. The older topic label of the same name ("spongebob")
-        // gives way to it. A character's name ("tony soprano") is a tag of its own.
-        snapshot.titles.identify(image, memeId)?.let { hit ->
-            val title = hit.tag
-            val sameName = visualMerged.filter { snapshot.titles.titleNamed(it.label) == hit.title }
-            val spread = sameName.filter { it.source == "exemplar" }.map { it.copy(category = title.category) }
-            visualMerged = visualMerged - sameName.toSet() + spread +
-                listOfNotNull(title.takeIf { spread.isEmpty() && !hit.personsTag })
+        var visualMerged = if (openTags.isNotEmpty()) {
+            openTags + lookalike.values.toList()
+        } else {
+            LearnCore.mergeClassified(promptTags, lookalike.values.toList(), topK = 6)
         }
-        val durableMerged = TagMerge.mergeDurableTags(visualMerged + ocrTags, capAuto = 6)
+        // 4. The meme's TV show or movie, carried once.
+        val hasOpenTitle = openTags.any { Titles.isTitleCategory(it.category) }
+        if (!hasOpenTitle) {
+            snapshot.titles.identify(image, memeId)?.let { hit ->
+                val title = hit.tag
+                val sameName = visualMerged.filter { snapshot.titles.titleNamed(it.label) == hit.title }
+                val spread = sameName.filter { it.source == "exemplar" }.map { it.copy(category = title.category) }
+                visualMerged = visualMerged - sameName.toSet() + spread +
+                    listOfNotNull(title.takeIf { spread.isEmpty() && !hit.personsTag })
+            }
+        }
+        val cap = if (openTags.isNotEmpty()) 12 else 6
+        val durableMerged = TagMerge.mergeDurableTags(visualMerged + ocrTags, capAuto = cap)
         // Explicit negative veto eliminates vetoed labels across every branch
         val vetoFiltered = durableMerged.filter { !vetoedLabels.contains(TagMerge.normalizeTagLabel(it.label)) }
         return Pair(vetoFiltered, extraTermsFor(vetoFiltered, snapshot.assocMap))
@@ -708,6 +714,23 @@ internal class LocalKnowledge(
      * adapts the head on the most recent human-labeled meme so the persisted head is ready immediately.
      */
     suspend fun loadPersistedD1Head(): Int = withContext(Dispatchers.IO) {
+        runCatching {
+            if (store.setting("knowledge.clean_sota_sync") != "v2") {
+                val concepts = OpenVocabConcepts.load(context)
+                if (concepts != null && concepts.refMemes.isNotEmpty()) {
+                    val vecMap = store.imageVectors()
+                    val cleanMap = LinkedHashMap<Long, List<Tag>>(vecMap.size)
+                    for ((id, vec) in vecMap) {
+                        val cTags = concepts.classifyLibraryMeme(vec, memeId = id, allowReferenceMatch = true)
+                        if (cTags.isNotEmpty()) cleanMap[id] = cTags
+                    }
+                    if (cleanMap.isNotEmpty()) {
+                        store.importMachineTags(cleanMap)
+                        store.setSetting("knowledge.clean_sota_sync", "v2")
+                    }
+                }
+            }
+        }
         val count = decisionHeadMutex.withLock {
             ensureDecisionHeadLocked().exampleCount()
         }
@@ -880,16 +903,15 @@ internal class LocalKnowledge(
                     // Machine tags classification can't regenerate stay unless a nearby "not X" vetoes
                     // them; human-confirmed tags always stay. Recomputed sources are replaced outright.
                     val vetoed = findVetoedLabelsFromMap(vectors.image, snapshot.negExemplarsByLabel)
+                    val hasOpen = freshTags.any { it.source == "open_vocab" }
                     val kept = meme.tags.filter {
-                        TagMerge.survivesReclassification(it) &&
+                        (if (hasOpen) TagMerge.isHumanTag(it) || it.source == "manual" else TagMerge.survivesReclassification(it)) &&
                             (TagMerge.isHumanTag(it) || !vetoed.contains(TagMerge.normalizeTagLabel(it.label)))
                     }.map { tag ->
-                        // A person's tag that names a TV show or movie by name reads as it ("sopranos" as a TV show),
-                        // unless the person already chose TV show or movie.
                         if (!TagMerge.isHumanTag(tag) || Titles.isTitleCategory(tag.category)) tag
                         else snapshot.titles.titleNamed(tag.label)?.let { tag.copy(category = it.category) } ?: tag
                     }
-                    val merged = TagMerge.mergeDurableTags(freshTags + kept, capAuto = 6)
+                    val merged = TagMerge.mergeDurableTags(freshTags + kept, capAuto = if (hasOpen) 12 else 6)
                     val terms = extraTermsFor(merged, snapshot.assocMap)
                     // Most memes come out unchanged on a later pass; skipping their writes is what lets a slow
                     // phone finish one. Compared as the store keeps them: without the machine tags and search
