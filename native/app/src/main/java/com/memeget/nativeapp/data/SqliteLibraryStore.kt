@@ -977,7 +977,8 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
                 // tags. Human tags come from the current row and always stay (tagging one by hand
                 // withdraws a matching rejection).
                 val rejected = currentMeme.rejectedLabels.map { TagMerge.normalizeTagLabel(it) }.toSet()
-                val machine = (currentMeme.tags.filter { !TagMerge.isHumanTag(it) && TagMerge.survivesReclassification(it) } +
+                val hasOpenIncoming = analysis.tags.any { it.source == "open_vocab" }
+                val machine = ((if (hasOpenIncoming) emptyList() else currentMeme.tags.filter { !TagMerge.isHumanTag(it) && TagMerge.survivesReclassification(it) }) +
                     analysis.tags.filterNot(TagMerge::isHumanTag))
                     .filter { !rejected.contains(TagMerge.normalizeTagLabel(it.label)) }
                 val classified = Labeled(
@@ -1065,7 +1066,10 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
             try {
                 val currentMeme = meme(id) ?: return@withLock
                 val rejected = currentMeme.rejectedLabels.map { TagMerge.normalizeTagLabel(it) }.toSet()
-                val validTags = tags.filter { !rejected.contains(TagMerge.normalizeTagLabel(it.label)) }
+                val hasOpenVocab = currentMeme.tags.any { it.source == "open_vocab" }
+                val validTags = tags.filter {
+                    (!hasOpenVocab || it.source != "vision") && !rejected.contains(TagMerge.normalizeTagLabel(it.label))
+                }
                 val mergedTags = TagMerge.mergeDurableTags(currentMeme.tags + validTags)
 
                 val cv = ContentValues().apply {
