@@ -314,7 +314,12 @@ internal class LocalKnowledge(
         withContext(Dispatchers.Default) {
             currentCoroutineContext().ensureActive()
             val snapshot = prepareSnapshot()
-            classifyInternal(image, ocr, snapshot, memeId)
+            val d1Scores = if (d1ModelFile() != null) {
+                val stubMeme = (if (memeId > 0L) runCatching { store.meme(memeId) }.getOrNull() else null)
+                    ?: Meme(id = memeId, uri = "", name = "", kind = "image", ocr = ocr)
+                runCatching { scoreWithD1Omni(stubMeme, image) }.getOrNull()
+            } else null
+            classifyInternal(image, ocr, snapshot, memeId, d1Scores)
         }
 
     private fun classifyInternal(
@@ -322,12 +327,20 @@ internal class LocalKnowledge(
         ocr: String,
         snapshot: ClassificationSnapshot,
         memeId: Long,
+        d1Scores: Map<String, Float>? = null,
     ): Pair<List<Tag>, String> {
         val vetoedLabels = findVetoedLabelsFromMap(image, snapshot.negExemplarsByLabel)
-        val openTags = OpenVocabConcepts.load(context)?.classifyLibraryMeme(image, ocr, memeId).orEmpty()
+        val rawOpenTags = OpenVocabConcepts.load(context)?.classifyLibraryMeme(image, ocr, memeId).orEmpty()
+        val openTags = if (!d1Scores.isNullOrEmpty()) {
+            rawOpenTags.mapNotNull { t ->
+                if (t.scoreDomain == "open-vocab-verified") t
+                else d1Scores[t.label]?.takeIf { it >= 0.78f }?.let { p -> t.copy(score = p) }
+            }
+        } else {
+            rawOpenTags
+        }
         // 1. Zero-shot prompt tags with anchor bias (used when open_vocab has no direct match)
         val promptTags = if (openTags.isNotEmpty()) emptyList() else LearnCore.classifyPrompts(image, snapshot.labels, snapshot.negativeVecs)
-
         // 2. People's labels on look-alikes: copies of a labeled picture always; otherwise the vote
         // winner once its label has held up on held-out examples. Unproven labels stay suggestions.
         val index = snapshot.vote.index
@@ -715,7 +728,7 @@ internal class LocalKnowledge(
      */
     suspend fun loadPersistedD1Head(): Int = withContext(Dispatchers.IO) {
         runCatching {
-            if (store.setting("knowledge.clean_sota_sync") != "v2") {
+            if (store.setting("knowledge.clean_sota_sync") != "v3") {
                 val concepts = OpenVocabConcepts.load(context)
                 if (concepts != null && concepts.refMemes.isNotEmpty()) {
                     val vecMap = store.imageVectors()
@@ -726,7 +739,7 @@ internal class LocalKnowledge(
                     }
                     if (cleanMap.isNotEmpty()) {
                         store.importMachineTags(cleanMap)
-                        store.setSetting("knowledge.clean_sota_sync", "v2")
+                        store.setSetting("knowledge.clean_sota_sync", "v3")
                     }
                 }
             }
