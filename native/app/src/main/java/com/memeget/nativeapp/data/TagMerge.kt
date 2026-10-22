@@ -62,7 +62,7 @@ internal object TagMerge {
         }
     }
 
-    fun mergeDurableTags(tags: List<Tag>, capAuto: Int = 6): List<Tag> {
+    fun mergeDurableTags(tags: List<Tag>, capAuto: Int? = null): List<Tag> {
         val best = LinkedHashMap<String, Tag>()
         for (t in tags) {
             val label = normalizeTagLabel(t.label)
@@ -79,8 +79,9 @@ internal object TagMerge {
             else auto.add(t)
         }
 
+        val effectiveCap = capAuto ?: if (auto.any { it.source.lowercase() == "open_vocab" }) 12 else 6
         val sortedDurable = sortTags(durable)
-        val sortedAuto = sortTags(auto).take(capAuto)
+        val sortedAuto = sortTags(auto).take(effectiveCap)
         return sortedDurable + sortedAuto
     }
 

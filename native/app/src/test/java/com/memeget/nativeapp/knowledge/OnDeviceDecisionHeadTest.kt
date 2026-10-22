@@ -198,4 +198,29 @@ class OnDeviceDecisionHeadTest {
         assertTrue("Expected blue partyhat in selected candidates: $selected", "blue partyhat" in selected)
         assertTrue("Expected implied runescape in selected candidates: $selected", "runescape" in selected)
     }
+
+    @Test
+    fun mergeDurableTagsPreservesUpTo12OpenVocabTagsByDefaultWhileCappingLegacyPromptTagsAt6() {
+        val openTags = (1..11).map {
+            com.memeget.nativeapp.Tag(
+                label = "tag_$it",
+                category = "topic",
+                score = 0.95f - it * 0.01f,
+                source = "open_vocab",
+            )
+        }
+        val mergedOpen = com.memeget.nativeapp.data.TagMerge.mergeDurableTags(openTags)
+        assertEquals("All 11 open_vocab tags must survive default mergeDurableTags call (e.g. setCaption/updateTags)", 11, mergedOpen.size)
+
+        val promptTags = (1..10).map {
+            com.memeget.nativeapp.Tag(
+                label = "prompt_$it",
+                category = "topic",
+                score = 0.95f - it * 0.01f,
+                source = "prompt",
+            )
+        }
+        val mergedPrompt = com.memeget.nativeapp.data.TagMerge.mergeDurableTags(promptTags)
+        assertEquals("Legacy prompt tags without open_vocab stay capped at 6 by default", 6, mergedPrompt.size)
+    }
 }
