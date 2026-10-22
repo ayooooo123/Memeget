@@ -7,6 +7,7 @@ internal object TagMerge {
     private val TAG_RANK = mapOf(
         "manual" to 6,
         "exemplar" to 5,
+        "open_vocab" to 5,
         "propagated" to 4,
         // A meme's TV show or movie (Titles): one per meme, kept ahead of generic machine tags.
         "title" to 4,
@@ -19,8 +20,7 @@ internal object TagMerge {
 
     // Machine sources that classification recomputes from vectors and OCR on every
     // pass. A re-classification replaces their previous values instead of merging them.
-    private val RECOMPUTED_SOURCES = setOf("prompt", "exemplar", "ocr", "entity_pack", "title")
-
+    private val RECOMPUTED_SOURCES = setOf("prompt", "exemplar", "ocr", "entity_pack", "title", "open_vocab")
     fun normalizeTagLabel(label: String): String {
         return label.trim().lowercase()
     }
