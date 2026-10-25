@@ -16,6 +16,7 @@ import com.memeget.nativeapp.knowledge.Titles
 import kotlinx.coroutines.Dispatchers
 import com.memeget.nativeapp.inference.NativeBridge
 import com.memeget.nativeapp.knowledge.OnDeviceDecisionHead
+import com.memeget.nativeapp.knowledge.PairwiseVisualVerifier
 import java.io.File
 import com.memeget.nativeapp.knowledge.OpenVocabConcepts
 import com.memeget.nativeapp.knowledge.LookalikeKernels
@@ -79,21 +80,18 @@ internal class LocalKnowledge(
     private val voteMutex = Mutex()
     private val decisionHeadMutex = Mutex()
     private var cachedDecisionHead: OnDeviceDecisionHead? = null
-    private val evalSampleCache = object : LinkedHashMap<Long, OnDeviceDecisionHead.EvalSample>(64, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Long, OnDeviceDecisionHead.EvalSample>?): Boolean = size > 128
-    }
-    private fun decisionHeadFile(): File? = context?.let { File(it.filesDir, "d1_omni_head.bin") }
-
-    private fun d1ModelFile(): File? = context?.let { app ->
-        val fname = ModelRegistry.D1_OMNI_DECISION_MODEL.filename
-        File(app.filesDir, "memeget_models/$fname").takeIf(File::isFile)
-            ?: File(app.filesDir, "models/$fname").takeIf(File::isFile)
+    private fun verifierHeadFile(): File? = context?.let { app ->
+        // Clean up legacy 1024-d d1-omni head file if left behind by an older install.
+        File(app.filesDir, "d1_omni_head.bin").delete()
+        File(app.filesDir, "verifier_head.bin")
     }
 
-    private fun ensureDecisionHeadLocked(): OnDeviceDecisionHead {
-        cachedDecisionHead?.let { return it }
-        return OnDeviceDecisionHead().also { head ->
-            decisionHeadFile()?.let { file -> head.loadFrom(file) }
+    private fun verifier(): PairwiseVisualVerifier? = PairwiseVisualVerifier.load(context)
+
+    private fun ensureDecisionHeadLocked(dim: Int = OnDeviceDecisionHead.HIDDEN_DIM): OnDeviceDecisionHead {
+        cachedDecisionHead?.takeIf { it.hiddenDim == dim }?.let { return it }
+        return OnDeviceDecisionHead(hiddenDim = dim).also { head ->
+            verifierHeadFile()?.let { file -> head.loadFrom(file) }
             cachedDecisionHead = head
         }
     }
@@ -315,12 +313,8 @@ internal class LocalKnowledge(
         withContext(Dispatchers.Default) {
             currentCoroutineContext().ensureActive()
             val snapshot = prepareSnapshot()
-            val d1Scores = if (d1ModelFile() != null) {
-                val stubMeme = (if (memeId > 0L) runCatching { store.meme(memeId) }.getOrNull() else null)
-                    ?: Meme(id = memeId, uri = "", name = "", kind = "image", ocr = ocr)
-                runCatching { scoreWithD1Omni(stubMeme, image) }.getOrNull()
-            } else null
-            classifyInternal(image, ocr, snapshot, memeId, d1Scores)
+            val verifierScores = scoreWithVerifier(image = image, ocrAndText = ocr, snapshot = snapshot, memeId = memeId)
+            classifyInternal(image, ocr, snapshot, memeId, verifierScores)
         }
 
     private fun classifyInternal(
@@ -328,20 +322,55 @@ internal class LocalKnowledge(
         ocr: String,
         snapshot: ClassificationSnapshot,
         memeId: Long,
-        d1Scores: Map<String, Float>? = null,
+        verifierScores: Map<String, Float>? = null,
     ): Pair<List<Tag>, String> {
         val vetoedLabels = findVetoedLabelsFromMap(image, snapshot.negExemplarsByLabel)
-        val rawOpenTags = OpenVocabConcepts.load(context)?.classifyLibraryMeme(image, ocr, memeId).orEmpty()
-        val openTags = if (!d1Scores.isNullOrEmpty()) {
-            rawOpenTags.mapNotNull { t ->
-                if (t.scoreDomain == "open-vocab-verified") t
-                else d1Scores[t.label]?.takeIf { it >= 0.78f }?.let { p -> t.copy(score = p) }
+        val openConcepts = OpenVocabConcepts.load(context)
+        val candidateHits = openConcepts?.retrieveCandidates(image, ocrAndText = ocr, limit = 8).orEmpty()
+        val rawOpenTags = candidateHits
+            .filter { it.source == "z_top1" || it.posCos >= 0.78f }
+            .map {
+                Tag(
+                    label = it.label,
+                    category = it.category,
+                    score = it.posCos,
+                    source = "open_vocab",
+                    scoreDomain = "open-vocab",
+                    confirmation = "unreviewed",
+                    provenance = "open-vocab",
+                )
             }
+        val openTags = if (!verifierScores.isNullOrEmpty()) {
+            val hitByLabel = candidateHits.associateBy { it.label }
+            val verified = rawOpenTags.mapNotNull { t ->
+                val p = verifierScores[t.label] ?: return@mapNotNull t
+                val isStrongZ = hitByLabel[t.label]?.source == "z_top1" || t.score >= 0.86f
+                if (isStrongZ && p >= 0.25f) t.copy(score = maxOf(t.score, 0.5f * t.score + 0.5f * p))
+                else if (p >= 0.52f) t.copy(score = 0.5f * t.score + 0.5f * p)
+                else null
+            }.toMutableList()
+            val existing = verified.mapTo(HashSet()) { it.label }
+            // Promote borderline visual/taught candidates when the pairwise visual verifier + live PU head strongly back them.
+            for (h in candidateHits) {
+                if (h.label in existing || h.posCos < 0.68f) continue
+                val p = verifierScores[h.label] ?: continue
+                if (p >= 0.82f) {
+                    verified += Tag(
+                        label = h.label,
+                        category = h.category,
+                        score = p,
+                        source = "open_vocab",
+                        scoreDomain = "pairwise-verified",
+                        confirmation = "unreviewed",
+                        provenance = "pairwise-verifier",
+                    )
+                    existing += h.label
+                }
+            }
+            verified
         } else {
             rawOpenTags
         }
-        // 1. Zero-shot prompt tags with anchor bias: full prompt set when open_vocab abstains,
-        //    plus high-confidence reaction/emotion/vibe facets even when open_vocab names an entity.
         val allPromptTags = LearnCore.classifyPrompts(image, snapshot.labels, snapshot.negativeVecs)
         val promptTags = if (openTags.isEmpty()) {
             allPromptTags
@@ -504,9 +533,9 @@ internal class LocalKnowledge(
             ?.let { Tag(it.label.lowercase(), it.category) }
             ?.takeIf { it.label !in settled }
         val out = LinkedHashMap<String, Tag>()
-        val d1Active = d1ModelFile() != null
+        val pvActive = verifier() != null
         val openConcepts = OpenVocabConcepts.load(context)
-        val openActive = d1Active || openConcepts != null
+        val openActive = pvActive || openConcepts != null
         val retrievalIndex = if (openActive) vote.d1Index else vote.index
         val memeText = "${meme.ocr} ${meme.transcript}".trim()
         val openVotes = openConcepts?.retrieveCandidates(image, ocrAndText = memeText, limit = 6).orEmpty().map {
@@ -537,7 +566,7 @@ internal class LocalKnowledge(
             }
         }
         val ranked = combinedByLabel.values.sortedByDescending { it.cosine }
-        val candidatePoolLimit = if (d1Active) maxOf(limit, 6) else limit
+        val candidatePoolLimit = if (pvActive) maxOf(limit, 8) else limit
         val familyCounts = HashMap<String, Int>()
         for (v in ranked) {
             if (out.size >= candidatePoolLimit) break
@@ -552,34 +581,47 @@ internal class LocalKnowledge(
             out[v.label] = lookalikeTag(v).let { if (named != null) it.copy(category = named.category) else it }
         }
         val mustIncludeSet = if (title != null) out.keys + title.label else out.keys
-        val d1Scores = if (d1Active && mustIncludeSet.isNotEmpty()) {
-            runCatching { scoreWithD1Omni(meme, image, mustInclude = mustIncludeSet) }.getOrNull()
+        val pvScores = if (pvActive && mustIncludeSet.isNotEmpty()) {
+            val snap = snapshotIfReady()
+            runCatching {
+                scoreWithVerifier(
+                    image = image,
+                    ocrAndText = memeText,
+                    snapshot = snap,
+                    voteOverride = vote,
+                    memeId = meme.id,
+                    mustInclude = mustIncludeSet,
+                )
+            }.getOrNull()
         } else null
-        val scoredTitle = title?.let { t -> d1Scores?.get(t.label)?.let { p -> t.copy(score = p) } ?: t }
-        val asked = if (!d1Scores.isNullOrEmpty()) {
-            out.values.map { t -> d1Scores[t.label]?.let { p -> t.copy(score = p) } ?: t }
+        val scoredTitle = title?.let { t -> pvScores?.get(t.label)?.let { p -> t.copy(score = p) } ?: t }
+        val asked = if (!pvScores.isNullOrEmpty()) {
+            out.values.map { t -> pvScores[t.label]?.let { p -> t.copy(score = p) } ?: t }
                 .sortedByDescending { it.score }
                 .take(limit)
         } else {
             out.values.take(limit)
         }
         if (scoredTitle == null || asked.any { it.label == scoredTitle.label || names?.titleNamed(it.label)?.label?.lowercase() == scoredTitle.label }) asked
-        else if (d1Active && scoredTitle.score < (asked.lastOrNull()?.score ?: 0f)) asked
+        else if (pvActive && scoredTitle.score < (asked.lastOrNull()?.score ?: 0f)) asked
         else asked.take(limit - 1) + scoredTitle
     }
 
     /**
-     * Builds live candidate inputs from [vote] for `d1-omni-600M`, leaving out [memeId]'s own examples so
-     * training and evaluation see the same leave-one-out similarity distribution.
+     * Builds pairwise visual-verifier inputs from [vote], blending leave-one-out human/archive exemplar
+     * centroids with [OpenVocabConcepts] prototypes so brand-new 1-shot taught labels and 6,000+ bundled
+     * concepts share one fast (<0.1 ms) visual subspace.
      */
-    private fun buildD1Candidates(
+    private fun buildVerifierCandidates(
         vote: VoteState,
         image: FloatArray,
         memeId: Long,
+        curatedByNormLabel: Map<String, CuratedLabelDef> = emptyMap(),
         mustInclude: Set<String> = emptySet(),
-        limit: Int = 6,
+        limit: Int = 12,
         ocrAndText: String = "",
-    ): List<OnDeviceDecisionHead.CandidateInput> {
+    ): List<PairwiseVisualVerifier.VerifierCandidate> {
+        val openConcepts = OpenVocabConcepts.load(context)
         val topRank = LookalikeVote.rank(vote.d1Index, image, excludeMeme = memeId, skipSamePicture = false)
         val voteCounts = HashMap<String, Int>()
         for (v in topRank) voteCounts[v.label] = v.count
@@ -587,7 +629,7 @@ internal class LocalKnowledge(
         val byLabel = LinkedHashMap<String, LookalikeVote.Vote>()
         for (v in topRank + nearestAll) byLabel.putIfAbsent(v.label, v)
         val openByLabel = HashMap<String, OpenVocabConcepts.Hit>()
-        for (oh in OpenVocabConcepts.load(context)?.retrieveCandidates(image, ocrAndText = ocrAndText, limit = 8).orEmpty()) {
+        for (oh in openConcepts?.retrieveCandidates(image, ocrAndText = ocrAndText, limit = 10).orEmpty()) {
             openByLabel[oh.label] = oh
             val prev = byLabel[oh.label]
             if (prev == null || oh.posCos > prev.cosine) {
@@ -610,7 +652,6 @@ internal class LocalKnowledge(
             val prev = byLabel[iv.label]
             if (prev == null || iv.cosine > prev.cosine) byLabel[iv.label] = iv
         }
-        val sortedLabels = byLabel.values.sortedByDescending { it.cosine }.map { it.label }
 
         val orderedLabels = ArrayList<String>()
         val familyCounts = HashMap<String, Int>()
@@ -622,7 +663,7 @@ internal class LocalKnowledge(
                 familyCounts[fam] = (familyCounts[fam] ?: 0) + 1
             }
         }
-        for (label in sortedLabels) {
+        for (label in byLabel.values.sortedByDescending { it.cosine }.map { it.label }) {
             if (orderedLabels.size >= limit) break
             if (label in orderedLabels) continue
             val fam = OpenVocabConcepts.rootFamily(label)
@@ -632,136 +673,189 @@ internal class LocalKnowledge(
             orderedLabels += label
         }
 
-        return orderedLabels.take(limit).map { label ->
+        val entityCats = setOf("person", "character", "movie", "tv", "format")
+        val out = ArrayList<PairwiseVisualVerifier.VerifierCandidate>(orderedLabels.size)
+        for (label in orderedLabels.take(maxOf(limit, mustInclude.size))) {
             val v = byLabel[label]
             val oh = openByLabel[label]
-            val hasSelfExemplar = v == null && vote.d1Index.examples.any { it.label == label && it.memeId == memeId }
-            val posCos = maxOf(v?.cosine ?: 0f, oh?.posCos ?: 0f).let { if (it > 0f) it else if (hasSelfExemplar) 0.78f else 0.50f }
-            val cat = oh?.category ?: v?.category ?: vote.d1Index.examples.firstOrNull { it.label == label }?.category ?: "topic"
-            val otherSup70 = vote.d1Index.examples.count {
-                it.label == label && it.memeId != memeId && FloatBlob.dot(it.vector, image) >= 0.70f
+            val ovEntry = openConcepts?.entryFor(label)
+            val curated = curatedByNormLabel[label]
+
+            // Leave-one-out exemplar centroid for labels with taught/human examples
+            val exVecs = vote.d1Index.examples.filter { it.label == label && it.memeId != memeId }
+            val selfEx = if (exVecs.isEmpty()) vote.d1Index.examples.firstOrNull { it.label == label && it.memeId == memeId } else null
+            val protoVec: FloatArray
+            val cacheKey: String?
+            when {
+                exVecs.isNotEmpty() -> {
+                    val sum = FloatArray(VECTOR_DIM)
+                    for (ex in exVecs) {
+                        for (d in 0 until VECTOR_DIM) sum[d] += ex.vector[d]
+                    }
+                    if (ovEntry != null) {
+                        val scale = 0.35f * exVecs.size
+                        for (d in 0 until VECTOR_DIM) sum[d] = 0.65f * sum[d] + scale * ovEntry.cHybrid[d]
+                    }
+                    protoVec = normalizeVec(sum) ?: continue
+                    cacheKey = null
+                }
+                ovEntry != null -> {
+                    protoVec = ovEntry.cHybrid
+                    cacheKey = "ov:${ovEntry.label}"
+                }
+                selfEx != null -> {
+                    protoVec = selfEx.vector
+                    cacheKey = null
+                }
+                curated != null && curated.vec.size == VECTOR_DIM -> {
+                    protoVec = curated.vec
+                    cacheKey = "cur:$label"
+                }
+                else -> continue
             }
-            val sup70 = maxOf(otherSup70, oh?.support70 ?: 0).let { if (it > 0) it else if (hasSelfExemplar) 1 else 0 }
-            val vCnt = maxOf(voteCounts[label] ?: 0, oh?.voteCount ?: 0).let { if (it > 0) it else if (hasSelfExemplar) 1 else 0 }
-            val negVecs = vote.index.negatives[label].orEmpty()
+
+            val posCos = maxOf(v?.cosine ?: 0f, oh?.posCos ?: 0f).let {
+                if (it > 0f) it else if (selfEx != null) 0.78f else FloatBlob.dot(image, protoVec).coerceAtLeast(0f)
+            }
+            val cat = (oh?.category ?: ovEntry?.category ?: v?.category ?: curated?.category ?: "topic").lowercase()
+            val otherSup70 = exVecs.count { FloatBlob.dot(it.vector, image) >= 0.70f }
+            val sup70 = maxOf(otherSup70, oh?.support70 ?: 0).let { if (it > 0) it else if (selfEx != null) 1 else 0 }
+            val vCnt = maxOf(voteCounts[label] ?: 0, oh?.voteCount ?: 0).let { if (it > 0) it else if (selfEx != null) 1 else 0 }
             var maxNeg = -1f
-            for (nv in negVecs) {
+            for (nv in vote.index.negatives[label].orEmpty()) {
                 val c = FloatBlob.dot(nv, image)
                 if (c < LookalikeVote.SAME_IMAGE_COS && c > maxNeg) maxNeg = c
             }
-            OnDeviceDecisionHead.CandidateInput(
-                label = label,
-                category = cat,
-                posCos = posCos,
-                seedCos = posCos,
+            val isEnt = ovEntry?.isEntity ?: (cat in entityCats)
+            val ocrHit = openConcepts?.matchesOcr(label, isEnt, ocrAndText) == true
+            out += PairwiseVisualVerifier.VerifierCandidate(
+                key = label,
+                protoVec = protoVec,
+                textVec = ovEntry?.tStock ?: curated?.vec?.takeIf { it.size == VECTOR_DIM },
+                cacheKey = cacheKey,
+                calPosCos = posCos,
+                tagMean = ovEntry?.tagMean ?: 0.20f,
+                tagStd = ovEntry?.tagStd ?: 0.045f,
+                hasStats = ovEntry != null,
+                negCos = maxNeg,
                 voteCount = vCnt,
                 support70 = sup70,
-                negCos = maxNeg,
+                ocrHit = ocrHit,
+                isEntity = isEnt,
             )
         }
+        return out
+    }
+
+    private fun normalizeVec(v: FloatArray): FloatArray? {
+        var sq = 0.0
+        for (x in v) sq += x.toDouble() * x
+        val n = kotlin.math.sqrt(sq).toFloat()
+        if (!n.isFinite() || n <= 1e-9f) return null
+        return FloatArray(v.size) { i -> v[i] / n }
     }
 
     /**
-     * Scores [meme]'s candidate labels using the on-device `d1-omni-600M` GGUF runner plus the persisted
-     * `OnDeviceDecisionHead` (`deltaW`, `deltaB`). Returns null when the GGUF model is not present on disk.
+     * Scores candidate labels in <0.1 ms using the bundled ~543 KB [PairwiseVisualVerifier] plus
+     * the persisted [OnDeviceDecisionHead] (`deltaW`). Zero external GGUF download or native RAM pin.
      */
-    suspend fun scoreWithD1Omni(
-        meme: Meme,
+    private suspend fun scoreWithVerifier(
         image: FloatArray,
+        ocrAndText: String,
+        snapshot: ClassificationSnapshot? = null,
+        voteOverride: VoteState? = null,
+        memeId: Long = LookalikeVote.NO_MEME,
         mustInclude: Set<String> = emptySet(),
-    ): Map<String, Float>? = withContext(Dispatchers.Default) {
-        val modelFile = d1ModelFile() ?: return@withContext null
-        val vote = ensureVote()
-        val cands = buildD1Candidates(vote, image, meme.id, mustInclude = mustInclude, limit = 6, ocrAndText = "${meme.ocr} ${meme.transcript}".trim())
-        if (cands.isEmpty()) return@withContext emptyMap()
-        decisionHeadMutex.withLock {
-            val head = ensureDecisionHeadLocked()
-            val cues = meme.tags.filter { !TagMerge.isHumanTag(it) && it.source in setOf("prompt", "vision", "title") }.map { it.label }
-            val (prompt, keys) = head.renderPrompt(meme.ocr, meme.transcript, meme.caption, cands, visualCues = cues)
-            val pHash = prompt.hashCode()
-            val sample = head.cachedExample(meme.id)?.sample?.takeIf { it.optionKeys == keys && it.promptHash == pHash }
-                ?: evalSampleCache[meme.id]?.takeIf { it.optionKeys == keys && it.promptHash == pHash }
-                ?: head.unpackNativeOutput(NativeBridge.nativeDecide(modelFile.absolutePath, prompt, 2), keys, pHash)
-                    .also { evalSampleCache[meme.id] = it }
+    ): Map<String, Float>? {
+        val pv = verifier() ?: return null
+        if (image.size != VECTOR_DIM) return null
+        val vote = voteOverride ?: snapshot?.vote ?: ensureVote()
+        val curatedMap = snapshot?.labels?.associateBy { TagMerge.normalizeTagLabel(it.label) }.orEmpty()
+        val cands = buildVerifierCandidates(
+            vote = vote,
+            image = image,
+            memeId = memeId,
+            curatedByNormLabel = curatedMap,
+            mustInclude = mustInclude,
+            limit = 12,
+            ocrAndText = ocrAndText,
+        )
+        if (cands.isEmpty()) return emptyMap()
+        return decisionHeadMutex.withLock {
+            val head = ensureDecisionHeadLocked(pv.headDim)
+            val sample = pv.evaluate(image, cands)
             head.scoreCandidates(sample)
         }
     }
 
     /**
-     * Extracts `<|mask|>` scorer features for [memeId] via `LlamaDecisionRunner`, refits the on-device
-     * residual scorer head (`deltaW`, `deltaB`) across all cached taught memes, and persists `d1_omni_head.bin`.
+     * Extracts 64-d penultimate visual-verifier features for [memeId], refits the live residual
+     * PU scorer (`deltaW`) across all taught memes in <0.5 ms, and persists `verifier_head.bin`.
      */
-    suspend fun recordD1Teaching(memeId: Long): Float? = withContext(Dispatchers.Default) {
-        val modelFile = d1ModelFile() ?: return@withContext null
+    suspend fun recordVerifierTeaching(memeId: Long): Float? = withContext(Dispatchers.Default) {
+        val pv = verifier() ?: return@withContext null
         val meme = store.meme(memeId) ?: return@withContext null
         val vec = store.vectors(memeId)?.image?.takeIf { it.size == VECTOR_DIM } ?: return@withContext null
         val confirmedPos = meme.tags.filter(TagMerge::isHumanTag).mapTo(LinkedHashSet()) { TagMerge.normalizeTagLabel(it.label) }
         val confirmedRej = meme.rejectedLabels.mapTo(LinkedHashSet()) { TagMerge.normalizeTagLabel(it) }
-        val vote = ensureVote()
-        val cands = buildD1Candidates(vote, vec, memeId, mustInclude = confirmedPos + confirmedRej, limit = 6, ocrAndText = "${meme.ocr} ${meme.transcript}".trim())
+        val snap = snapshotIfReady()
+        val vote = snap?.vote ?: ensureVote()
+        val curatedMap = snap?.labels?.associateBy { TagMerge.normalizeTagLabel(it.label) }.orEmpty()
+        val cands = buildVerifierCandidates(
+            vote = vote,
+            image = vec,
+            memeId = memeId,
+            curatedByNormLabel = curatedMap,
+            mustInclude = confirmedPos + confirmedRej,
+            limit = 12,
+            ocrAndText = "${meme.ocr} ${meme.transcript}".trim(),
+        )
         if (cands.isEmpty()) return@withContext null
-        val hasConfirmedTitle = cands.any { it.label in confirmedPos && (it.category == "tv" || it.category == "movie") }
-        if (hasConfirmedTitle) {
+        val hasConfirmedTitle = cands.any { label ->
+            val norm = label.key
+            norm in confirmedPos && snap?.titles?.titleNamed(norm) != null
+        }
+        if (hasConfirmedTitle && snap != null) {
             for (c in cands) {
-                if ((c.category == "tv" || c.category == "movie") && c.label !in confirmedPos) {
-                    confirmedRej += c.label
+                if (snap.titles.titleNamed(c.key) != null && c.key !in confirmedPos) {
+                    confirmedRej += c.key
                 }
             }
         }
         decisionHeadMutex.withLock {
-            val head = ensureDecisionHeadLocked()
+            val head = ensureDecisionHeadLocked(pv.headDim)
             if (confirmedPos.isEmpty() && confirmedRej.isEmpty()) {
                 val loss = head.upsertAndFit(memeId, null)
-                decisionHeadFile()?.let { head.saveTo(it) }
+                verifierHeadFile()?.let { head.saveTo(it) }
                 return@withLock loss
             }
-            val cues = meme.tags.filter { !TagMerge.isHumanTag(it) && it.source in setOf("prompt", "vision", "title") }.map { it.label }
-            val (prompt, keys) = head.renderPrompt(meme.ocr, meme.transcript, meme.caption, cands, visualCues = cues)
-            val pHash = prompt.hashCode()
-            val sample = head.cachedExample(memeId)?.sample?.takeIf { it.optionKeys == keys && it.promptHash == pHash }
-                ?: evalSampleCache[memeId]?.takeIf { it.optionKeys == keys && it.promptHash == pHash }
-                ?: head.unpackNativeOutput(NativeBridge.nativeDecide(modelFile.absolutePath, prompt, 2), keys, pHash)
-                    .also { evalSampleCache[memeId] = it }
+            val sample = pv.evaluate(vec, cands)
             val ex = OnDeviceDecisionHead.TrainingExample(
                 sample = sample,
                 confirmedPositives = confirmedPos,
                 confirmedRejections = confirmedRej,
             )
             val loss = head.upsertAndFit(memeId, ex)
-            decisionHeadFile()?.let { head.saveTo(it) }
+            verifierHeadFile()?.let { head.saveTo(it) }
             loss
         }
     }
 
     /**
-     * Loads `d1_omni_head.bin` from disk on startup; if not yet initialized and `d1-omni-600M` is installed,
-     * adapts the head on the most recent human-labeled meme so the persisted head is ready immediately.
+     * Warms `verifier_head.bin` and cleans up any retired 407 MB `d1-omni` GGUF artifact on disk —
+     * never initiates a network download.
      */
-    suspend fun loadPersistedD1Head(): Int = withContext(Dispatchers.IO) {
-        runCatching {
-            if (store.setting("knowledge.clean_sota_sync") != "v4") {
-                val concepts = OpenVocabConcepts.load(context)
-                if (concepts != null && concepts.refMemes.isNotEmpty()) {
-                    val vecMap = store.imageVectors()
-                    val cleanMap = LinkedHashMap<Long, List<Tag>>(vecMap.size)
-                    for ((id, vec) in vecMap) {
-                        val cTags = concepts.classifyLibraryMeme(vec, memeId = id, allowReferenceMatch = true)
-                        if (cTags.isNotEmpty()) cleanMap[id] = cTags
-                    }
-                    if (cleanMap.isNotEmpty()) {
-                        store.importMachineTags(cleanMap)
-                        store.setSetting("knowledge.clean_sota_sync", "v4")
-                    }
-                }
+    suspend fun loadPersistedVerifierHead(): Int = withContext(Dispatchers.IO) {
+        context?.let { app ->
+            for (dirName in listOf("memeget_models", "models")) {
+                val dir = File(app.filesDir, dirName)
+                ModelRegistry.RETIRED_DECISION_FILES.forEach { File(dir, it).delete() }
             }
         }
-        val count = decisionHeadMutex.withLock {
-            ensureDecisionHeadLocked().exampleCount()
+        val dim = verifier()?.headDim ?: OnDeviceDecisionHead.HIDDEN_DIM
+        decisionHeadMutex.withLock {
+            ensureDecisionHeadLocked(dim).exampleCount()
         }
-        if (d1ModelFile() == null) {
-            runCatching { (engine as? NativeInferenceEngine)?.ensureModel(ModelRegistry.D1_OMNI_DECISION_MODEL) }
-        }
-        count
     }
 
     /**
@@ -917,11 +1011,19 @@ internal class LocalKnowledge(
 
                 val vectors = store.vectors(meme.id)
                 if (vectors != null && vectors.image.isNotEmpty() && vectors.model == ModelRegistry.PRIMARY_MODEL_FINGERPRINT) {
+                    val memeText = "${meme.ocr} ${meme.transcript}".trim()
+                    val verifierScores = scoreWithVerifier(
+                        image = vectors.image,
+                        ocrAndText = memeText,
+                        snapshot = snapshot,
+                        memeId = meme.id,
+                    )
                     val (freshTags, _) = classifyInternal(
                         image = vectors.image,
                         ocr = meme.ocr,
                         snapshot = snapshot,
                         memeId = meme.id,
+                        verifierScores = verifierScores,
                     )
 
                     // Machine tags classification can't regenerate stay unless a nearby "not X" vetoes

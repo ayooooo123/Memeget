@@ -1130,33 +1130,40 @@ internal class LibraryFiles(
         val results = mutableListOf<String>()
 
         if (meme.kind == "image") {
-            val uprightFile = File(context.cacheDir, "frame_${meme.id}_${System.currentTimeMillis()}_0.jpg")
-            val success = MediaIoUtils.writeUprightJpeg(context, Uri.parse(meme.uri), uprightFile)
-            if (success && uprightFile.exists()) {
-                results.add(Uri.fromFile(uprightFile).toString())
-            } else {
-                results.add(meme.uri)
-            }
+            // Skip the redundant full-res JPEG round-trip: writeModelInputJpeg already decodes EXIF-upright once.
+            results.add(meme.uri)
             return@withContext results
         }
 
-        // Video: extract frames at bounded distinct timestamps
+        // Video: sweep one MediaCodec forward across bounded timestamps, falling back per-timestamp only on broken containers.
         try {
             val probe = MemeMediaProbe.probe(context, meme.uri)
             val durSec = (probe.durationUs ?: 1_000_000L) / 1_000_000.0
-
-            for (i in 1..boundedCount) {
-                val t = (durSec * i) / (boundedCount + 1)
-                try {
-                    val extractedPath = VideoFrameExtractor.extract(context, meme.uri, t)
+            val timestamps = (1..boundedCount).map { i -> (durSec * i) / (boundedCount + 1) }
+            val batchPaths = runCatching { VideoFrameExtractor.extractMultiple(context, meme.uri, timestamps) }.getOrNull()
+            if (!batchPaths.isNullOrEmpty()) {
+                for ((idx, extractedPath) in batchPaths.withIndex()) {
                     val temp = File(extractedPath.removePrefix("file://"))
                     if (temp.exists()) {
-                        val ownedFile = File(context.cacheDir, "frame_${meme.id}_${System.currentTimeMillis()}_$i.jpg")
+                        val ownedFile = File(context.cacheDir, "frame_${meme.id}_${System.nanoTime()}_$idx.jpg")
                         temp.copyTo(ownedFile, overwrite = true)
                         temp.delete()
                         results.add(Uri.fromFile(ownedFile).toString())
                     }
-                } catch (_: Exception) {}
+                }
+            } else {
+                for ((idx, t) in timestamps.withIndex()) {
+                    try {
+                        val extractedPath = VideoFrameExtractor.extract(context, meme.uri, t)
+                        val temp = File(extractedPath.removePrefix("file://"))
+                        if (temp.exists()) {
+                            val ownedFile = File(context.cacheDir, "frame_${meme.id}_${System.nanoTime()}_$idx.jpg")
+                            temp.copyTo(ownedFile, overwrite = true)
+                            temp.delete()
+                            results.add(Uri.fromFile(ownedFile).toString())
+                        }
+                    } catch (_: Exception) {}
+                }
             }
         } catch (_: Exception) {}
 

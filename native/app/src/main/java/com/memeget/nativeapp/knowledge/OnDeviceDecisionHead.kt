@@ -13,22 +13,18 @@ import java.io.FileOutputStream
 import kotlin.math.exp
 
 /**
- * Layer 1 + Layer 2 on-device decision head for `LiquidAI/d1-omni-600M` (`COMMON_DECISION_TYPE_LFM2_D1_OMNI`):
- *
- * - Layer 1 (Prompt builder): renders a meme's OCR, speech transcript, caption, and live top-K candidate
- *   exemplar evidence (`cos`, `seed_cos`, `vote`, `sup70`, `neg_cos`) into the exact `d1-omni` token layout
- *   so new labels work immediately without retraining the trunk.
- * - Layer 2 (On-device residual scorer): adapts a 1024-float residual weight vector `deltaW` and bias `deltaB`
- *   on top of the `<|mask|>` pre-`cls_out` scorer hidden vectors (`h_k - h_none`) using Positive-Unlabeled +
- *   explicit rejection BCE loss, persisting both the learned head and cached `<|mask|>` features across restarts.
+ * Live on-device Positive-Unlabeled + explicit-rejection residual scorer head (`deltaW`, `deltaB`).
+ * Sits directly atop the 64-d penultimate identity features of [PairwiseVisualVerifier] (zero 407 MB
+ * `d1-omni` GGUF bloat), adapting in <0.1 ms whenever Master confirms or rejects a label and persisting
+ * across restarts.
  */
 internal class OnDeviceDecisionHead(
     val hiddenDim: Int = HIDDEN_DIM,
 ) {
     companion object {
-        const val HIDDEN_DIM = 1024
+        const val HIDDEN_DIM = 64
         private const val FILE_MAGIC = 0x44314844 // "D1HD"
-        private const val FILE_VERSION = 2
+        private const val FILE_VERSION = 3
 
         private const val DELIM_BOS = "<|startoftext|>"
         private const val DELIM_STATE = "<|reserved_7|>"
@@ -37,7 +33,6 @@ internal class OnDeviceDecisionHead(
         private const val DELIM_OPT_END = "<|reserved_10|>"
         private const val DELIM_DECIDE = "<|reserved_11|>"
         private const val MARKER = "<|mask|>"
-
         private val SPECIAL_TOKEN_REGEX = Regex("<\\|([A-Za-z0-9_]+)\\|>")
 
         const val DEFAULT_INSTRUCTIONS =

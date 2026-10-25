@@ -131,8 +131,20 @@ def main() -> int:
     val_caps = [primary_caption(r.tags) for r in val]
     print(f"  usable train {len(train)}   val {len(val)}")
 
-    # Pre-tokenize a pool of text views per training image for cheap augmentation.
+    # Pre-tokenize a pool of text views per training image plus generic everyday English anchors
+    # so tuning on meme slang cannot catastrophically warp ordinary photo queries.
     views = [training_views(r.tags) or [primary_caption(r.tags)] for r in train]
+    generic_anchors = [
+        "a photo of a dog running on the grass", "a cat sleeping on a sunny windowsill",
+        "a red car parked on a city street", "two friends laughing over coffee",
+        "a person crying in the rain", "a chef cooking over a hot stove",
+        "a man in a business suit talking on the phone", "sunset over ocean waves",
+        "a group of coworkers in an office meeting", "a child riding a bicycle in the park",
+        "a bowl of noodles on a table", "an astronaut floating in outer space",
+    ]
+    anchor_toks = tokenizer(generic_anchors).to(device)
+    with torch.no_grad():
+        anchor_ref = F.normalize(model.encode_text(anchor_toks).float(), dim=-1)
     scale = model.logit_scale.exp().clamp(max=100).detach()
 
     opt = torch.optim.AdamW((p for p in model.parameters() if p.requires_grad), lr=a.lr, weight_decay=a.wd)
@@ -156,8 +168,16 @@ def main() -> int:
             T = F.normalize(model.encode_text(toks).float(), dim=-1)
             I = tr_feats[b]  # frozen, already normalized
             logits = scale * T @ I.T
+            # Mask false in-batch negatives when two rows show near-identical meme templates (cos >= 0.96).
+            dup_mask = (I @ I.T) >= 0.96
+            dup_mask.fill_diagonal_(False)
+            logits_masked = logits.masked_fill(dup_mask, -1e4)
+            logits_t_masked = logits.T.masked_fill(dup_mask, -1e4)
             labels = torch.arange(len(b), device=device)
-            loss = 0.5 * (F.cross_entropy(logits, labels) + F.cross_entropy(logits.T, labels))
+            infonce = 0.5 * (F.cross_entropy(logits_masked, labels) + F.cross_entropy(logits_t_masked, labels))
+            anchor_cur = F.normalize(model.encode_text(anchor_toks).float(), dim=-1)
+            anchor_loss = (1.0 - (anchor_cur * anchor_ref).sum(dim=-1)).mean()
+            loss = infonce + 4.0 * anchor_loss
             opt.zero_grad()
             loss.backward()
             opt.step()

@@ -1086,6 +1086,92 @@ class IndexCoordinatorTest {
             listOf(clip, image).map { requireNotNull(store.meme(it)).visionState })
     }
 
+    @Test(timeout = 30_000)
+    fun interactiveModeCancelsInFlightCaptionAndResumesEvenAfterRapidToggleBack() = runBlocking {
+        val memeId = store.insertPending(Uri.fromFile(createValidBitmapFile("interactive.png")).toString(), "interactive.png", "image", 100L, "hashInt")
+        store.setSetting("vision.enabled", "1")
+        plugInCharger()
+        val enteredVision = CompletableDeferred<Unit>()
+        val observedCancel = CompletableDeferred<Unit>()
+        val allowUnwind = CompletableDeferred<Unit>()
+        val resumedVision = CompletableDeferred<Unit>()
+        var describeCalls = 0
+        testEngine.onDescribe = { _, _ ->
+            if (++describeCalls == 1) {
+                enteredVision.complete(Unit)
+                withContext(Dispatchers.IO) {
+                    while (!testEngine.cancelled.get()) Thread.sleep(10)
+                }
+                observedCancel.complete(Unit)
+                allowUnwind.await()
+                throw RuntimeException("Inference cancelled")
+            } else {
+                resumedVision.complete(Unit)
+                "CAPTION: resumed frog\nTAGS: frog"
+            }
+        }
+        val coordinator = IndexCoordinator(context, store, files, testEngine, knowledge, cloud, sessionTimeoutMillis = 10_000L)
+
+        val job = launch { coordinator.runPending() }
+        awaitStage(enteredVision, job, coordinator)
+        // User switches to Label (true) and back to Library (false) before the native call unwinds.
+        coordinator.setInteractive(true)
+        withTimeout(5_000L) { observedCancel.await() }
+        coordinator.setInteractive(false)
+        testEngine.cancelled.set(false)
+        allowUnwind.complete(Unit)
+        job.join()
+
+        withTimeout(10_000L) { resumedVision.await() }
+        withTimeout(10_000L) { coordinator.progress.first { !it.running } }
+        assertEquals("done", requireNotNull(store.meme(memeId)).visionState)
+        assertTrue(store.errors().none { it.startsWith("[vision]") })
+    }
+
+    @Test(timeout = 30_000)
+    fun speechBatchesSkipVideoFrameExtractionAndCaptionsReuseIndexedSceneCacheWithoutRestagingSource() = runBlocking {
+        // 1. Speech-only batch: raw non-image bytes with no poster still transcribe because prepare() skips frame extraction.
+        val rawAudioOnlyClip = File(context.cacheDir, "speech_only.mp4").apply { writeBytes(ByteArray(256) { 0x42 }) }
+        val speechClipId = store.insertPending(Uri.fromFile(rawAudioOnlyClip).toString(), "speech_only.mp4", "video", 200L, "hashSpeechOnly0001")
+        store.completeIndex(
+            speechClipId,
+            LocalAnalysis(FloatArray(512).apply { this[0] = 1f }, "", emptyList(), ""),
+            ModelRegistry.PRIMARY_MODEL_FINGERPRINT,
+            thumbUri = "",
+        )
+        store.setSetting("audio.enabled", "1")
+        store.setSetting("vision.enabled", "0")
+        testEngine.onTranscribe = { "spoken punchline" }
+        val coordinator = IndexCoordinator(context, store, files, testEngine, knowledge, cloud, sessionTimeoutMillis = 10_000L)
+        coordinator.runPending()
+        assertEquals("done", requireNotNull(store.meme(speechClipId)).audioState)
+        assertEquals("spoken punchline", requireNotNull(store.meme(speechClipId)).transcript)
+
+        // 2. Video indexing caches upright scene frames; captioning reuses them without re-opening the source MP4, then cleans cache.
+        store.setSetting("audio.enabled", "0")
+        store.setSetting("vision.enabled", "0")
+        val videoPosterSrc = createValidBitmapFile("vid_scene.png")
+        val posterCopy = createValidBitmapFile("vid_poster.png")
+        val vidId = store.insertPending(Uri.fromFile(videoPosterSrc).toString(), "vid_scene.mp4", "video", 201L, "")
+        store.setThumb(vidId, Uri.fromFile(posterCopy).toString())
+        coordinator.runPending()
+        val indexedVid = requireNotNull(store.meme(vidId))
+        assertFalse("Expected video to finish indexing, errors=${store.errors()}", indexedVid.pending)
+        val sceneDir = File(context.cacheDir, "scene_cache/${vidId}_${indexedVid.contentHash.take(16)}")
+        assertTrue("Expected indexed video scene cache to exist before captioning", sceneDir.isDirectory)
+
+        // Delete original source file to prove caption enrichment reads cached scene frames without calling stage(meme.uri)!
+        assertTrue(videoPosterSrc.delete())
+        store.setSetting("vision.enabled", "1")
+        testEngine.onDescribe = { _, _ -> "CAPTION: cached scene frog\nTAGS: frog" }
+        coordinator.runPending()
+
+        val captionedVid = requireNotNull(store.meme(vidId))
+        assertEquals("done", captionedVid.visionState)
+        assertEquals("cached scene frog", captionedVid.caption)
+        assertFalse("Expected scene cache directory to be pruned once vision/visual enrichment settled", sceneDir.exists())
+    }
+
     private class TestInferenceEngine : InferenceEngine {
         val cancelled = AtomicBoolean(false)
 

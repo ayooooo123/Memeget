@@ -63,7 +63,7 @@ class MainActivity : ComponentActivity() {
         if (!handled) receive(intent)
         graph.coordinator.schedule()
         lifecycleScope.launch {
-            runCatching { graph.knowledge.loadPersistedD1Head() }
+            runCatching { graph.knowledge.loadPersistedVerifierHead() }
         }
         // Android 13 hides the indexing notification until the app may post one. Ask the first time there is work
         // to show, as the original app does; once refused twice, Android stops showing the prompt.

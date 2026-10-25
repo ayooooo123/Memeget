@@ -9,7 +9,6 @@
 
 #include "ModelRunner.hpp"
 #include "JniStrings.hpp"
-#include "LlamaDecisionRunner.hpp"
 
 #define LOG_TAG "MemegetInferenceJni"
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
@@ -32,9 +31,6 @@ static std::shared_ptr<memeget::ModelRunner> getRunner(jlong handle) {
     return found == runners.end() ? nullptr : found->second;
 }
 
-static std::mutex decisionMutex;
-static std::unique_ptr<memeget::LlamaDecisionRunner> cachedDecisionRunner;
-static std::atomic<bool> decisionCancelled{false};
 
 extern "C" {
 
@@ -404,79 +400,5 @@ Java_com_memeget_nativeapp_inference_NativeBridge_nativeConvertProjector(
     }
 }
 
-JNIEXPORT jfloatArray JNICALL
-Java_com_memeget_nativeapp_inference_NativeBridge_nativeDecide(
-    JNIEnv* env,
-    jobject /* thiz */,
-    jstring modelPath,
-    jstring renderedPrompt,
-    jint threads) {
-    try {
-        std::string mPath = JStringUtf(env, modelPath).str();
-        std::string prompt = JStringUtf(env, renderedPrompt).str();
-        std::scoped_lock lock(decisionMutex);
-        decisionCancelled.store(false, std::memory_order_relaxed);
-        if (!cachedDecisionRunner || !cachedDecisionRunner->matches(mPath)) {
-            cachedDecisionRunner = std::make_unique<memeget::LlamaDecisionRunner>(mPath, threads, &decisionCancelled);
-        }
-        memeget::DecisionEvalOutput res = cachedDecisionRunner->evaluate(prompt);
-        std::vector<float> flat;
-        flat.reserve(2 + res.baseLogits.size() + res.scorerHidden.size());
-        flat.push_back(static_cast<float>(res.numOptions));
-        flat.push_back(static_cast<float>(res.evalMs));
-        flat.insert(flat.end(), res.baseLogits.begin(), res.baseLogits.end());
-        flat.insert(flat.end(), res.scorerHidden.begin(), res.scorerHidden.end());
-        jfloatArray out = env->NewFloatArray(static_cast<jsize>(flat.size()));
-        if (out != nullptr) {
-            env->SetFloatArrayRegion(out, 0, static_cast<jsize>(flat.size()), flat.data());
-        }
-        return out;
-    } catch (const std::exception& e) {
-        throwJavaException(env, e.what());
-        return nullptr;
-    }
-}
-
-JNIEXPORT void JNICALL
-Java_com_memeget_nativeapp_inference_NativeBridge_nativeFitDecisionHead(
-    JNIEnv* env,
-    jobject /* thiz */,
-    jfloatArray baseLogits,
-    jfloatArray scorerHidden,
-    jintArray noneIndices,
-    jfloatArray targets,
-    jfloatArray weights,
-    jint numExamples,
-    jint numOptions,
-    jint hiddenDim,
-    jint epochs,
-    jfloat learningRate,
-    jfloat l2Decay,
-    jfloatArray deltaW,
-    jfloatArray outDeltaBAndLoss) {
-    std::vector<float> logitsVec(static_cast<size_t>(numExamples) * numOptions);
-    std::vector<float> hiddenVec(static_cast<size_t>(numExamples) * numOptions * hiddenDim);
-    std::vector<jint> noneVec(numExamples);
-    std::vector<float> targetVec(static_cast<size_t>(numExamples) * numOptions);
-    std::vector<float> weightVec(static_cast<size_t>(numExamples) * numOptions);
-    std::vector<float> wVec(hiddenDim);
-    float bLoss[2] = {0.0f, 0.0f};
-
-    env->GetFloatArrayRegion(baseLogits, 0, static_cast<jsize>(logitsVec.size()), logitsVec.data());
-    env->GetFloatArrayRegion(scorerHidden, 0, static_cast<jsize>(hiddenVec.size()), hiddenVec.data());
-    env->GetIntArrayRegion(noneIndices, 0, numExamples, noneVec.data());
-    env->GetFloatArrayRegion(targets, 0, static_cast<jsize>(targetVec.size()), targetVec.data());
-    env->GetFloatArrayRegion(weights, 0, static_cast<jsize>(weightVec.size()), weightVec.data());
-    env->GetFloatArrayRegion(deltaW, 0, hiddenDim, wVec.data());
-    env->GetFloatArrayRegion(outDeltaBAndLoss, 0, 2, bLoss);
-
-    memeget::fitDecisionHeadNative(
-        logitsVec.data(), hiddenVec.data(), noneVec.data(), targetVec.data(), weightVec.data(),
-        numExamples, numOptions, hiddenDim, epochs, learningRate, l2Decay, wVec.data(), bLoss
-    );
-
-    env->SetFloatArrayRegion(deltaW, 0, hiddenDim, wVec.data());
-    env->SetFloatArrayRegion(outDeltaBAndLoss, 0, 2, bLoss);
-}
 
 } // extern "C"

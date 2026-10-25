@@ -15,7 +15,12 @@ internal object PromptBuilder {
      * instructions' state from one meme to the next instead of reading them again (about 3 s a frame on the Pixel
      * 5a). Captioned both ways on a Mac with the app's model files, 16 memes came out no worse in this order.
      */
-    fun buildUserPrompt(grounding: String): String {
+    fun hasSubstantialOcr(text: String): Boolean {
+        val lettersOrDigits = text.count { it.isLetterOrDigit() }
+        return lettersOrDigits >= 14 && text.trim().contains(' ')
+    }
+
+    fun buildUserPrompt(grounding: String, skipVerbatimText: Boolean = false): String {
         return buildString {
             append("Describe this meme so it can be found later by search. People search with a SINGLE ")
             append("word for any aspect — a feeling, an action, a character, a format, or the situation ")
@@ -28,6 +33,10 @@ internal object PromptBuilder {
             append('\n').append(IMAGE_MARKER)
             if (grounding.isNotBlank()) {
                 append("\nContext hints:\n").append(grounding).append("\n")
+            }
+            // Sits after IMAGE_MARKER so the 234-token prefix state before the image stays 100% reusable across frames.
+            if (skipVerbatimText) {
+                append("\nOn-screen text is already captured above; write `TEXT: none` instead of repeating it, and focus on CAPTION, SUBJECTS, and TAGS.")
             }
             append("\nNow describe the image. Be concise.")
         }
