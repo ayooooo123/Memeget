@@ -115,6 +115,19 @@ Java_com_memeget_nativeapp_inference_NativeBridge_nativeUnload(
     }
 }
 
+JNIEXPORT void JNICALL
+Java_com_memeget_nativeapp_inference_NativeBridge_nativeUnloadHeavy(
+    JNIEnv* env,
+    jobject /* thiz */,
+    jlong handle) {
+    try {
+        auto runner = getRunner(handle);
+        if (runner) runner->unloadHeavy();
+    } catch (const std::exception& e) {
+        throwJavaException(env, e.what());
+    }
+}
+
 JNIEXPORT jstring JNICALL
 Java_com_memeget_nativeapp_inference_NativeBridge_nativeDiagnostics(
     JNIEnv* env,

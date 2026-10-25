@@ -86,9 +86,38 @@ internal class NativeInferenceEngine(
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, FloatArray>?): Boolean = size > 64
     }
 
+    private fun normalizeQueryKey(text: String): String =
+        text.trim().lowercase(java.util.Locale.ROOT).replace(Regex("\\s+"), " ")
+
+    override fun cachedTextVector(text: String): FloatArray? {
+        val cacheKey = normalizeQueryKey(text)
+        if (cacheKey.isEmpty() || cacheKey.length > 160) return null
+        return synchronized(queryVectorCache) { queryVectorCache[cacheKey]?.copyOf() }
+    }
+
+    override suspend fun warmTextEncoder() = withContext(Dispatchers.Default) {
+        val textModelFile = File(modelsDir, ModelRegistry.S2_TEXT.filename).takeIf {
+            it.isFile && it.length() == ModelRegistry.S2_TEXT.expectedSizeBytes
+        } ?: return@withContext
+        val tokenizerFile = File(modelsDir, ModelRegistry.S2_TOKENIZER.filename).takeIf {
+            it.isFile && it.length() == ModelRegistry.S2_TOKENIZER.expectedSizeBytes
+        } ?: return@withContext
+        val tokenIds = runCatching { clipTokenizer(tokenizerFile).encode("meme") }.getOrNull() ?: return@withContext
+        // Never block behind an active background caption/OCR pass; warm only while the engine is free.
+        if (!engineMutex.tryLock()) return@withContext
+        try {
+            val handle = activeHandle()
+            NativeBridge.nativeResetCancel(handle)
+            NativeBridge.nativeEmbedTextTokens(handle, textModelFile.absolutePath, tokenIds)
+        } catch (_: Throwable) {
+        } finally {
+            engineMutex.unlock()
+        }
+    }
+
     override suspend fun embedText(text: String): FloatArray = withContext(Dispatchers.Default) {
         currentCoroutineContext().ensureActive()
-        val cacheKey = text.trim().lowercase(java.util.Locale.ROOT).replace(Regex("\\s+"), " ")
+        val cacheKey = normalizeQueryKey(text)
         if (cacheKey.isNotEmpty() && cacheKey.length <= 160) {
             synchronized(queryVectorCache) { queryVectorCache[cacheKey] }?.let { return@withContext it.copyOf() }
         }
@@ -329,6 +358,13 @@ internal class NativeInferenceEngine(
         engineMutex.withLock {
             val handle = nativeHandle.get()
             if (handle > 0L) NativeBridge.nativeUnload(handle)
+        }
+    }
+
+    override suspend fun unloadHeavy() = withContext(Dispatchers.Default) {
+        engineMutex.withLock {
+            val handle = nativeHandle.get()
+            if (handle > 0L) NativeBridge.nativeUnloadHeavy(handle)
         }
     }
 

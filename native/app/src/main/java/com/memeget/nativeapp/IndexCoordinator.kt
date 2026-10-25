@@ -237,7 +237,7 @@ internal class IndexCoordinator(
             )
         } finally {
             try {
-                withContext(NonCancellable) { engine.unload() }
+                withContext(NonCancellable) { engine.unloadHeavy() }
             } finally {
                 activeJob = null
                 mutableProgress.value = mutableProgress.value.copy(running = false)
@@ -543,7 +543,7 @@ internal class IndexCoordinator(
             throw cancelled
         } finally {
             try {
-                withContext(NonCancellable) { engine.unload() }
+                withContext(NonCancellable) { engine.unloadHeavy() }
             } finally {
                 if (held) KeepAliveLease.release(context)
                 activeJob = null

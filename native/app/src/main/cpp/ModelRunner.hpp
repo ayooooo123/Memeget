@@ -54,6 +54,7 @@ public:
     void resetCancel();
     bool isCancelled() const;
     void unloadAll();
+    void unloadHeavy();
     std::string getDiagnostics();
 
     std::vector<float> embedImage(

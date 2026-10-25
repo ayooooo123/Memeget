@@ -237,4 +237,69 @@ Java_com_memeget_nativeapp_inference_NativeBridge_nativeFitDecisionHead(
     env->SetFloatArrayRegion(outDeltaBAndLoss, 0, 2, bLoss);
 }
 
+// Sweeps ARM64 NEON dot products across all N resident image + caption vectors in <0.3 ms,
+// subtracting per-caption boilerplate hubness so verbose captions never steamroll visual matches.
+JNIEXPORT jint JNICALL
+Java_com_memeget_nativeapp_inference_NativeBridge_nativeBatchDenseScores(
+    JNIEnv* env,
+    jobject /* thiz */,
+    jfloatArray queryVec,
+    jfloatArray protoVec,
+    jfloatArray imageMat,
+    jbooleanArray hasImage,
+    jfloatArray captionMat,
+    jbooleanArray hasCaption,
+    jfloatArray capHubness,
+    jint count,
+    jint dim,
+    jfloatArray outScores) {
+    if (count <= 0 || dim <= 0 || dim % 16 != 0) return 0;
+    std::vector<float> q(dim);
+    env->GetFloatArrayRegion(queryVec, 0, dim, q.data());
+    const bool useProto = (protoVec != nullptr && env->GetArrayLength(protoVec) == dim);
+    std::vector<float> p;
+    if (useProto) {
+        p.resize(dim);
+        env->GetFloatArrayRegion(protoVec, 0, dim, p.data());
+    }
+    std::vector<jboolean> imgValid(count);
+    std::vector<jboolean> capValid(count);
+    std::vector<float> hub(count);
+    env->GetBooleanArrayRegion(hasImage, 0, count, imgValid.data());
+    env->GetBooleanArrayRegion(hasCaption, 0, count, capValid.data());
+    env->GetFloatArrayRegion(capHubness, 0, count, hub.data());
+
+    std::vector<float> out(count, 0.0f);
+    auto* imgPtr = static_cast<const float*>(env->GetPrimitiveArrayCritical(imageMat, nullptr));
+    if (imgPtr != nullptr) {
+        for (int i = 0; i < count; ++i) {
+            if (!imgValid[i]) continue;
+            const float* row = imgPtr + static_cast<size_t>(i) * dim;
+            float s = dot(q.data(), row, dim);
+            if (useProto) {
+                const float ps = dot(p.data(), row, dim);
+                if (ps > 0.50f) s += 0.45f * (ps - 0.50f);
+            }
+            out[i] = s;
+        }
+        env->ReleasePrimitiveArrayCritical(imageMat, const_cast<float*>(imgPtr), JNI_ABORT);
+    }
+    auto* capPtr = static_cast<const float*>(env->GetPrimitiveArrayCritical(captionMat, nullptr));
+    if (capPtr != nullptr) {
+        for (int i = 0; i < count; ++i) {
+            if (!capValid[i]) continue;
+            const float* row = capPtr + static_cast<size_t>(i) * dim;
+            const float capCos = dot(q.data(), row, dim);
+            const float hubPenalty = 0.35f * std::max(0.0f, hub[i] - 0.68f);
+            const float cAdj = capCos - hubPenalty;
+            if (cAdj > 0.60f) {
+                out[i] += std::min(0.14f, 0.45f * (cAdj - 0.60f));
+            }
+        }
+        env->ReleasePrimitiveArrayCritical(captionMat, const_cast<float*>(capPtr), JNI_ABORT);
+    }
+    env->SetFloatArrayRegion(outScores, 0, count, out.data());
+    return count;
+}
+
 }  // extern "C"

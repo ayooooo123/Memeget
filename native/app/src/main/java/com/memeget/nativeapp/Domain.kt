@@ -224,6 +224,9 @@ internal interface LibraryStore {
     }
     suspend fun recordCopy(id: Long) {}
     suspend fun recentlyCopied(limit: Int = 90, kind: String? = null): List<Meme> = emptyList()
+    suspend fun copiedCount(): Int = recentlyCopied(limit = 256).size
+    suspend fun taughtLabelNames(): List<String> = exemplars().map { it.label }.distinct()
+    suspend fun warmSearchIndex() {}
     suspend fun setTranscript(id: Long, text: String, state: String = "done")
     /** Changes only a video's transcription state; its transcript stays as it is. */
     suspend fun setAudioState(id: Long, state: String)
@@ -341,6 +344,9 @@ internal interface InferenceEngine : AutoCloseable {
     suspend fun transcribe(uri: String): String
     suspend fun segment(uri: String, requestId: String): expo.modules.memegetbg.SubjectCutoutResult
     suspend fun unload()
+    suspend fun unloadHeavy() { unload() }
+    fun cachedTextVector(text: String): FloatArray? = null
+    suspend fun warmTextEncoder() {}
     fun cancel()
     override fun close()
 }

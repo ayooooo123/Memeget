@@ -261,6 +261,244 @@ internal object SearchRanking {
         return score
     }
 
+    @Volatile private var nativeBatchAvailable = true
+
+    fun batchDenseScores(
+        queryVec: FloatArray,
+        protoVec: FloatArray?,
+        imageMat: FloatArray,
+        hasImage: BooleanArray,
+        captionMat: FloatArray,
+        hasCaption: BooleanArray,
+        capHubness: FloatArray,
+        count: Int,
+        dim: Int = 512,
+    ): FloatArray {
+        val out = FloatArray(count)
+        if (count <= 0 || queryVec.size < dim) return out
+        if (nativeBatchAvailable) {
+            try {
+                val computed = com.memeget.nativeapp.inference.NativeBridge.nativeBatchDenseScores(
+                    queryVec = queryVec,
+                    protoVec = protoVec?.takeIf { it.size == dim },
+                    imageMat = imageMat,
+                    hasImage = hasImage,
+                    captionMat = captionMat,
+                    hasCaption = hasCaption,
+                    capHubness = capHubness,
+                    count = count,
+                    dim = dim,
+                    outScores = out,
+                )
+                if (computed == count) return out
+                nativeBatchAvailable = false
+            } catch (_: LinkageError) {
+                nativeBatchAvailable = false
+            }
+        }
+        run {
+            // Pure-Kotlin mirror for JVM unit tests without libmemeget_inference.so loaded.
+            val validProto = protoVec?.takeIf { it.size == dim }
+            for (i in 0 until count) {
+                val off = i * dim
+                var s = 0f
+                if (hasImage[i]) {
+                    var dotImg = 0f
+                    for (d in 0 until dim) dotImg += queryVec[d] * imageMat[off + d]
+                    s = dotImg
+                    if (validProto != null) {
+                        var dotP = 0f
+                        for (d in 0 until dim) dotP += validProto[d] * imageMat[off + d]
+                        if (dotP > CONCEPT_PROTO_FLOOR) s += CONCEPT_PROTO_WEIGHT * (dotP - CONCEPT_PROTO_FLOOR)
+                    }
+                }
+                if (hasCaption[i]) {
+                    var dotCap = 0f
+                    for (d in 0 until dim) dotCap += queryVec[d] * captionMat[off + d]
+                    val cAdj = dotCap - 0.35f * max(0f, capHubness[i] - 0.68f)
+                    if (cAdj > 0.60f) {
+                        s += min(0.14f, 0.45f * (cAdj - 0.60f))
+                    }
+                }
+                out[i] = s
+            }
+            return out
+        }
+    }
+
+    /**
+     * Field-tiered resident scorer separating confirmed human tags, machine tags, verbatim OCR/speech quotes,
+     * VLM captions, and noisy association `extraWords` with smooth convex IDF coverage — zero SQLite/FTS I/O.
+     */
+    fun calibratedResidentScore(
+        semantic: Boolean,
+        baseDenseScore: Float,
+        queryVec: FloatArray?,
+        conceptProto: FloatArray?,
+        scenesFlat: FloatArray?,
+        imageCos: Float,
+        exactTerms: List<String>,
+        exactTermWeights: FloatArray,
+        totalExactWeight: Float,
+        semanticTerms: Set<String>,
+        typoTerms: List<String>,
+        prefixTerms: List<String>,
+        humanTagWords: Set<String>,
+        tagWords: Set<String>,
+        quoteWords: Set<String>,
+        captionWords: Set<String>,
+        extraWords: Set<String>,
+        allDocWords: Set<String>,
+        phraseMatched: Boolean,
+        pureSlangReaction: Boolean,
+        copyCount: Int,
+    ): Float {
+        val usageTiebreak = if (copyCount > 0) min(0.045f, 0.016f * ln(1f + copyCount.toFloat())) else 0f
+
+        if (!semantic) {
+            var lexScore = 0f
+            var tagMatchedW = 0f
+            var coreMatchedW = 0f
+            var anyMatchedW = 0f
+            var matchedCount = 0
+            for (i in exactTerms.indices) {
+                val t = exactTerms[i]
+                val w = if (i < exactTermWeights.size) exactTermWeights[i] else 1f
+                val inHt = t in humanTagWords
+                val inT = t in tagWords
+                val inQ = t in quoteWords
+                val inC = t in captionWords
+                val inAll = t in allDocWords
+                if (!pureSlangReaction || inHt || inT) {
+                    if (inHt) { tagMatchedW += w * 1.2f; coreMatchedW += w; anyMatchedW += w; matchedCount++ }
+                    else if (inT) { tagMatchedW += w; coreMatchedW += w; anyMatchedW += w; matchedCount++ }
+                    else if (inQ) { coreMatchedW += w * 0.95f; anyMatchedW += w; matchedCount++ }
+                    else if (inC) { coreMatchedW += w * 0.85f; anyMatchedW += w * 0.85f; matchedCount++ }
+                    else if (inAll) { anyMatchedW += w * 0.45f; matchedCount++ }
+                }
+            }
+            val denom = max(1e-4f, totalExactWeight)
+            if (matchedCount > 0) {
+                val covCore = min(1f, coreMatchedW / denom)
+                val covTag = min(1f, tagMatchedW / denom)
+                val covAny = min(1f, anyMatchedW / denom)
+                lexScore += 0.40f * covAny + 1.10f * covCore * covCore + 2.80f * covTag
+                if (matchedCount == exactTerms.size && covCore >= 0.85f) lexScore += ALL_TERMS_BOOST
+                if (matchedCount == exactTerms.size && covTag >= 0.85f) lexScore += TAG_ALL_TERMS_BOOST
+            }
+            if (phraseMatched && !pureSlangReaction) lexScore += 10f
+            if (lexScore == 0f || pureSlangReaction) {
+                val socialCoreHits = semanticTerms.count { it in tagWords || it in captionWords || it in quoteWords }
+                val socialAnyHits = if (socialCoreHits > 0) socialCoreHits else semanticTerms.count { it in allDocWords }
+                if (socialCoreHits > 0) {
+                    lexScore = max(lexScore, 0.45f * min(1.5f, socialCoreHits.toFloat() / 1.5f))
+                } else if (socialAnyHits > 0) {
+                    lexScore = max(lexScore, 0.25f * min(1.0f, socialAnyHits.toFloat() / 2f))
+                } else if (lexScore == 0f) {
+                    val typoHits = typoTerms.count { it in allDocWords }
+                    if (typoHits > 0) {
+                        lexScore += EXPANDED_LEXICAL_WEIGHT * min(1.0f, typoHits.toFloat())
+                    } else {
+                        val prefixHits = prefixTerms.count { it in allDocWords }
+                        if (prefixHits > 0) lexScore += 0.08f * min(1.0f, prefixHits.toFloat())
+                    }
+                }
+            }
+            if (lexScore > 0f && usageTiebreak > 0f) lexScore += usageTiebreak
+            return lexScore
+        }
+
+        var score = baseDenseScore
+        if (scenesFlat != null && queryVec != null && scenesFlat.size >= queryVec.size) {
+            val bestScene = maxSceneCosine(queryVec, scenesFlat, queryVec.size)
+            if (bestScene.isFinite() && bestScene > imageCos) {
+                score += (0.75f * (bestScene - imageCos))
+            }
+            if (conceptProto != null && conceptProto.size == queryVec.size) {
+                val bestProtoScene = maxSceneCosine(conceptProto, scenesFlat, queryVec.size)
+                if (bestProtoScene.isFinite() && bestProtoScene > CONCEPT_PROTO_FLOOR) {
+                    score += 0.20f * (bestProtoScene - CONCEPT_PROTO_FLOOR)
+                }
+            }
+        }
+
+        var matchedLexicalOrExpansion = false
+        if (exactTerms.isNotEmpty() && !pureSlangReaction) {
+            var coreW = 0f
+            var tagW = 0f
+            var quoteW = 0f
+            var anyW = 0f
+            for (i in exactTerms.indices) {
+                val t = exactTerms[i]
+                val w = if (i < exactTermWeights.size) exactTermWeights[i] else 1f
+                val inHt = t in humanTagWords
+                val inT = t in tagWords
+                val inQ = t in quoteWords
+                val inC = t in captionWords
+                val inE = t in extraWords
+                val inAll = t in allDocWords
+                if (inHt) tagW += w * 1.15f else if (inT) tagW += w
+                if (inQ) quoteW += w
+                if (inHt || inT || inQ) {
+                    coreW += w
+                    anyW += w
+                } else if (inC) {
+                    coreW += w * 0.92f
+                    anyW += w
+                } else if (inE || inAll) {
+                    anyW += w
+                }
+            }
+            val denom = max(1e-4f, totalExactWeight)
+            if (anyW > 0f) {
+                matchedLexicalOrExpansion = true
+                val covCore = min(1f, coreW / denom)
+                val covTag = min(1f, tagW / denom)
+                val covAny = min(1f, anyW / denom)
+                val approxBm25 = min(3.6f, tagW * 1.4f + coreW * 0.8f + max(0f, anyW - coreW) * 0.6f)
+                score += DENSE_DOC_COV_WEIGHT * covAny + DENSE_TAG_COV_WEIGHT * covTag + 0.022f * approxBm25
+                if (covCore >= 0.985f) score += DENSE_DOC_FULL_BOOST
+                else if (covAny >= 0.985f) score += DENSE_DOC_FULL_BOOST
+                if (covTag >= 0.985f) score += DENSE_TAG_FULL_BOOST
+                if (quoteW >= 0.985f * denom) score += 0.08f
+            } else {
+                if (semanticTerms.isNotEmpty() && semanticTerms.any { it in allDocWords }) {
+                    matchedLexicalOrExpansion = true
+                    score += DENSE_SEMANTIC_EXPAND_BOOST
+                    if (semanticTerms.any { it in tagWords || it in humanTagWords }) score += 0.035f
+                }
+                if (typoTerms.isNotEmpty() && typoTerms.any { it in allDocWords }) {
+                    matchedLexicalOrExpansion = true
+                    score += DENSE_TYPO_FALLBACK_BOOST
+                } else if (prefixTerms.isNotEmpty() && prefixTerms.any { it in allDocWords }) {
+                    score += DENSE_PREFIX_TIEBREAK
+                }
+            }
+        } else if (pureSlangReaction) {
+            // On standalone slang ("cooked", "joever", "celebrating too early"), reward true reaction tags/captions,
+            // plus exact tag matches if Master explicitly taught the slang word itself as a tag.
+            val taughtSlangHit = exactTerms.any { it in humanTagWords || it in tagWords }
+            if (taughtSlangHit) {
+                matchedLexicalOrExpansion = true
+                score += 0.42f
+            }
+            val socHits = semanticTerms.count { it in tagWords || it in humanTagWords || it in captionWords }
+            if (socHits > 0) {
+                matchedLexicalOrExpansion = true
+                score += 0.14f * min(1.0f, socHits / 2.0f)
+            }
+        }
+
+        if (phraseMatched && !pureSlangReaction) {
+            matchedLexicalOrExpansion = true
+            score += DENSE_PHRASE_BOOST
+        }
+        if (usageTiebreak > 0f && (matchedLexicalOrExpansion || score >= 0.20f)) {
+            score += usageTiebreak
+        }
+        return score
+    }
+
     fun calculateFts4Bm25(
         matchinfoBlob: ByteArray?,
         weights: FloatArray = FTS_COLUMN_WEIGHTS,

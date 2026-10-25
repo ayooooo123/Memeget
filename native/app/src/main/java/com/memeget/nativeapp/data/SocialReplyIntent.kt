@@ -19,6 +19,7 @@ internal object SocialReplyIntent {
         val exactTerms: List<String>,
         val socialTerms: Set<String>,
         val isPastedPost: Boolean,
+        val pureSlangReaction: Boolean = false,
     )
 
     private val URL_REGEX = Regex("""https?://\S+|www\.\S+|\b(?:x|twitter|t|reddit|tiktok|instagram)\.com/\S+""", RegexOption.IGNORE_CASE)
@@ -45,14 +46,49 @@ internal object SocialReplyIntent {
         "lol", "omg", "ngl", "tbh", "imo", "imho", "idk", "smh", "irl",
     )
 
+    // Pure visual-action filler participles humans type ("looking at phone disgusted") whose IDF weight is
+    // lightly discounted (* 0.22) so payload nouns/adjectives ("phone", "disgusted") clear the 0.82 coverage bar,
+    // without ever discounting identity nouns like "man" or "guy" ("family guy", "florida man", "chainsaw man").
+    val SCAFFOLD_WORDS = setOf(
+        "looking", "reacting", "feeling", "trying", "getting", "making", "doing", "being", "having", "showing",
+    )
+
+    // 1-word cues that also appear inside ordinary proper nouns/phrases ("real estate", "twin peaks", "no cap");
+    // only allowed to fire as reaction slang on short 1-2 word reaction searches.
+    private val SHORT_QUERY_ONLY_UNIGRAMS = setOf("real", "cap", "peak", "drama", "waiting", "based", "clown", "doubt")
+
+    // Opaque internet idioms whose literal tokens ("cooked", "too early") mean something unrelated in dictionary English.
+    private val OPAQUE_SLANG_PHRASES = setOf(
+        "cooked", "im cooked", "we are cooked", "were cooked",
+        "joever", "its joever", "its over",
+        "celebrating too early", "premature celebration",
+        "yap", "yapping", "glazing", "mald", "seethe",
+    )
+
     // Maps online reply slang & conversational moments to caption/tag vocabulary + optional CLIP visual scene prompt.
     private val REACTION_CUES: Map<String, ReactionCue> = mapOf(
         "cooked" to ReactionCue(
-            setOf("defeated", "doomed", "despair", "exhausted", "crying", "sad", "finished", "over", "burnt"),
+            setOf("defeated", "doomed", "despair", "exhausted", "crying", "sad", "finished", "over", "stressed", "head in hands"),
+            "exhausted defeated person holding head in hands in despair",
+        ),
+        "im cooked" to ReactionCue(
+            setOf("defeated", "doomed", "despair", "exhausted", "crying", "sad", "stressed"),
+            "exhausted defeated person holding head in hands in despair",
+        ),
+        "we are cooked" to ReactionCue(
+            setOf("defeated", "doomed", "despair", "exhausted", "crying", "sad", "stressed"),
+            "exhausted defeated person holding head in hands in despair",
+        ),
+        "were cooked" to ReactionCue(
+            setOf("defeated", "doomed", "despair", "exhausted", "crying", "sad", "stressed"),
             "exhausted defeated person holding head in hands in despair",
         ),
         "joever" to ReactionCue(
             setOf("over", "defeated", "doomed", "despair", "sad", "crying", "finished", "doomer"),
+            "sad defeated person looking down in despair",
+        ),
+        "its joever" to ReactionCue(
+            setOf("over", "defeated", "doomed", "despair", "sad", "crying", "doomer"),
             "sad defeated person looking down in despair",
         ),
         "its over" to ReactionCue(
@@ -234,6 +270,22 @@ internal object SocialReplyIntent {
         "live reaction" to ReactionCue(
             setOf("staring", "camera", "blank", "reaction", "portrait"),
         ),
+        "celebrating too early" to ReactionCue(
+            setOf("champagne", "medal", "award", "celebrating", "toast", "cheering", "tuxedo"),
+            "over the top champagne celebration medal cheering",
+        ),
+        "premature celebration" to ReactionCue(
+            setOf("champagne", "medal", "award", "celebrating", "toast", "cheering"),
+            "over the top champagne celebration medal cheering",
+        ),
+        "locked in" to ReactionCue(
+            setOf("leaning", "focused", "gamer", "serious", "staring", "intense"),
+            "gamer leaning forward intensely focused",
+        ),
+        "thousand yard stare" to ReactionCue(
+            setOf("traumatized", "stare", "staring", "soldier", "haunted", "shocked"),
+            "traumatized soldier thousand yard stare",
+        ),
     )
 
     fun distill(rawQuery: String, keepShort: Boolean = false): DistilledQuery {
@@ -259,27 +311,31 @@ internal object SocialReplyIntent {
         // Collect social slang & reaction intent cues (full query + 2/3-grams + individual slang tokens).
         val socialWords = LinkedHashSet<String>()
         var visualBridge: String? = null
-
+        var pureSlang = false
         REACTION_CUES[normPhrase]?.let { cue ->
             socialWords.addAll(cue.synonyms)
             if (rawWords.size <= 3 && cue.visualBridge != null) {
                 visualBridge = cue.visualBridge
+                pureSlang = normPhrase in OPAQUE_SLANG_PHRASES
             }
         }
+        val covered = BooleanArray(rawWords.size)
         for (n in 3 downTo 1) {
             if (rawWords.size < n) continue
             for (i in 0..rawWords.size - n) {
+                if ((0 until n).any { covered[i + it] }) continue
                 val sub = rawWords.subList(i, i + n).joinToString(" ")
+                if (n == 1 && sub in SHORT_QUERY_ONLY_UNIGRAMS && rawWords.size > 2) continue
                 val cue = REACTION_CUES[sub] ?: continue
+                for (k in 0 until n) covered[i + k] = true
                 socialWords.addAll(cue.synonyms)
-                if (visualBridge == null && rawWords.size <= 3 && cue.visualBridge != null) {
+                if (visualBridge == null && rawWords.size <= 2 && cue.visualBridge != null) {
                     visualBridge = cue.visualBridge
                 }
             }
         }
 
         val exactTerms = if (isPastedPost) {
-            // Distill long pasted tweets/messages down to their sharpest topical & emotional words (<= 8 terms).
             val salient = rawWords
                 .filter { it.length >= 2 && it !in POST_FLUFF_WORDS }
                 .distinct()
@@ -291,7 +347,10 @@ internal object SocialReplyIntent {
 
         socialWords.removeAll(exactTerms.toSet())
 
+        // When the entire short query IS a reaction idiom ("cooked", "joever", "celebrating too early"),
+        // embed the clean visual scene bridge directly so literal homographs ("cooked dinner", "too late") don't hijack CLIP!
         val embedText = when {
+            pureSlang && visualBridge != null -> "$cleaned, $visualBridge".takeIf { normPhrase in setOf("this is fine", "side eye", "absolute cinema") } ?: visualBridge!!
             visualBridge != null -> "$cleaned, $visualBridge"
             isPastedPost && exactTerms.isNotEmpty() -> exactTerms.joinToString(" ")
             else -> cleaned
@@ -303,6 +362,7 @@ internal object SocialReplyIntent {
             exactTerms = exactTerms,
             socialTerms = socialWords,
             isPastedPost = isPastedPost,
+            pureSlangReaction = pureSlang,
         )
     }
 }
