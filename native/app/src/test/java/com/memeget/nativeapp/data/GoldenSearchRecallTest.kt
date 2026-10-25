@@ -15,6 +15,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.runBlocking
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -391,6 +392,60 @@ class GoldenSearchRecallTest {
         // Among visually identical Wojaks, Master's battle-tested go-to reaction rises to #1
         val hits = store.search("wojak", unitVec(30 to 1f), limit = 5)
         assertEquals("Frequently copied reaction meme must break ties to #1", goToWojak, hits.first().meme.id)
+    }
+
+    @Test
+    fun fieldTieredCoverageAndSlangGuardsBeatCaptionHubDistractorsAndPreserveResidentIndex() = runBlocking {
+        // 1. Multi-term query with scaffolding word ("looking at phone disgusted"):
+        // Meme A has real tags ['disgusted', 'cell phone'] + caption; Meme B is a mirror selfie whose captionVec has higher raw text-text cosine!
+        val disgustedPhone = store.insertPending("file:///disgust.png", "disgust.png", "image", 50L, "7".repeat(64))
+        store.completeIndex(
+            disgustedPhone,
+            LocalAnalysis(
+                image = unitVec(40 to 0.24f, 41 to 0.97f),
+                ocr = "",
+                tags = listOf(Tag("cell phone", "object", 0.9f, "open_vocab")),
+                extraTerms = "cell phone",
+            ),
+            model,
+            "",
+        )
+        store.manualTag(listOf(disgustedPhone), "disgusted", "emotion")
+        store.setCaption(disgustedPhone, "man talking on phone reacts to cringe", emptyList(), unitVec(40 to 0.72f, 42 to 0.69f))
+        val selfieDistractor = store.insertPending("file:///selfie.png", "selfie.png", "image", 60L, "4".repeat(64))
+        store.completeIndex(
+            selfieDistractor,
+            LocalAnalysis(
+                image = unitVec(40 to 0.25f, 43 to 0.968f),
+                ocr = "",
+                tags = listOf(Tag("mirror selfie", "topic", 0.9f, "open_vocab"), Tag("cell phone", "object", 0.9f, "open_vocab")),
+                extraTerms = "mirror selfie cell phone",
+            ),
+            model,
+            "",
+        )
+        store.setCaption(selfieDistractor, "man using phone in mirror", emptyList(), unitVec(40 to 0.84f, 44 to 0.54f))
+
+        val qVec = unitVec(40 to 1f)
+        val hits = store.search("looking at phone disgusted", qVec, limit = 5)
+        assertEquals("True disgusted + phone meme must outrank single-noun phone selfie caption hub", disgustedPhone, hits.first().meme.id)
+        // 2. N-gram overlap & short-query unigram guards:
+        val noCap = SocialReplyIntent.distill("no cap")
+        assertFalse("'no cap' must NOT trigger 'cap' lying/bullshit synonyms: ${noCap.socialTerms}", "liar" in noCap.socialTerms || "bullshit" in noCap.socialTerms)
+        assertTrue("'no cap' keeps agreement synonyms", "facts" in noCap.socialTerms || "truth" in noCap.socialTerms)
+
+        val realEstate = SocialReplyIntent.distill("its free real estate")
+        assertFalse("Multi-word proper phrase 'its free real estate' must NOT trigger 1-gram 'real' -> gosling: ${realEstate.socialTerms}", "gosling" in realEstate.socialTerms)
+
+        // 3. Surgical resident index maintenance across setSetting and recordCopy:
+        store.warmSearchIndex()
+        val residentField = SqliteLibraryStore::class.java.getDeclaredField("cachedResidentIndex").apply { isAccessible = true }
+        val indexBefore = requireNotNull(residentField.get(store))
+        store.setSetting("vision.inFlight", "42")
+        assertTrue("Background setSetting must NOT evict the resident search index", residentField.get(store) === indexBefore)
+        store.recordCopy(disgustedPhone)
+        assertTrue("recordCopy must patch copyCount in-place without dropping resident search index", residentField.get(store) === indexBefore)
+        assertEquals(1, store.copiedCount())
     }
 
     private class StubEngine : InferenceEngine {

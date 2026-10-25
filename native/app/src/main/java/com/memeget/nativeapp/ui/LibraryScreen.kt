@@ -189,17 +189,27 @@ internal fun LibraryScreen(
         }
     }
 
-    // Refresh counts and labels on revision or mount
+    // Pre-warm the resident search index + MobileCLIP-S2 text encoder on mount so the very first keystroke
+    // lands in <3 ms without stalling behind a 40 MB SQLite scan or a cold 254 MB .pte load.
+    LaunchedEffect(Unit) {
+        withContext(Dispatchers.IO) {
+            runCatching { store.warmSearchIndex() }
+            if (!coordinator.progress.value.running) {
+                runCatching { engine.warmTextEncoder() }
+            }
+        }
+    }
+
+    // Refresh counts and labels on revision or mount without deserializing 1,433 float blobs or 256 full rows.
     LaunchedEffect(revision, active) {
         if (!active) return@LaunchedEffect
         withContext(Dispatchers.IO) {
             val count = store.count()
             val all = store.countAll()
             val folders = store.folders()
-            val exemplars = store.exemplars()
+            val taught = store.taughtLabelNames()
             val tags = store.tagLabels()
-            val used = store.recentlyCopied(limit = 256).size
-            val taught = exemplars.map { it.label }.distinct()
+            val used = store.copiedCount()
             withContext(Dispatchers.Main) {
                 totalCount = count
                 libraryCount = all
@@ -259,9 +269,9 @@ internal fun LibraryScreen(
         if (resultKey != key) relaxedFromKind = null
         val searchKind = if (relaxedFromKind != null) null else key.second
         resultKey = key
-        if (previous.isEmpty()) {
-            memes = emptyList()
-            // Until the first rows arrive an empty grid means "still loading", not "nothing here".
+        // Never blank `memes = emptyList()` on keystroke changes: keep existing tiles mounted with zero flicker
+        // while the <2 ms resident lexical pass updates on the next frame.
+        if (memes.isEmpty()) {
             loadingFirstPage = true
         }
         if (vectorText != key.first) {
@@ -275,14 +285,14 @@ internal fun LibraryScreen(
             hasMore = more
             loadingFirstPage = false
         }
-        // One row past the window tells whether more exist, so the count doesn't flip to "N+" on every write.
+        // Fetch `wanted + 1` in ONE call (`<= 256`) instead of clamping at `PAGE_SIZE = 90` and scanning the whole library twice!
         suspend fun searchWindow(vector: FloatArray?, effectiveKind: String?): Triple<List<Meme>, SearchCursor?, Boolean> = withContext(Dispatchers.IO) {
             val hits = ArrayList<SearchHit>(wanted + 1)
             var cursor: SearchCursor? = null
             while (hits.size <= wanted) {
-                val page = store.search(key.first, vector, effectiveKind, selectedTag, minOf(PAGE_SIZE, wanted + 1 - hits.size), cursor)
+                val page = store.search(key.first, vector, effectiveKind, selectedTag, minOf(256, wanted + 1 - hits.size), cursor)
                 hits.addAll(page)
-                if (page.isEmpty()) break
+                if (page.isEmpty() || hits.size > wanted) break
                 val last = page.last()
                 cursor = SearchCursor(last.score, last.meme.modifiedAt, last.meme.id)
             }
@@ -301,9 +311,9 @@ internal fun LibraryScreen(
                         val loaded = ArrayList<Meme>(wanted + 1)
                         var cursor: PageCursor? = null
                         while (loaded.size <= wanted) {
-                            val page = store.page(minOf(PAGE_SIZE, wanted + 1 - loaded.size), cursor, key.second, selectedTag)
+                            val page = store.page(minOf(256, wanted + 1 - loaded.size), cursor, key.second, selectedTag)
                             loaded.addAll(page)
-                            if (page.isEmpty()) break
+                            if (page.isEmpty() || loaded.size > wanted) break
                             val last = page.last()
                             cursor = PageCursor(last.modifiedAt, last.id)
                         }
@@ -312,13 +322,15 @@ internal fun LibraryScreen(
                 }
                 publish(rows, more)
             } else {
-                // Instant 0ms lexical + social-slang pass from the resident RAM index; debounce only the neural text tower.
+                // Instant <2 ms lexical + social-slang pass from the resident RAM index.
                 val lexical = searchWindow(null, searchKind)
                 searchCursor = lexical.second
                 publish(lexical.first, lexical.third)
-                val vector = queryVector ?: try {
-                    delay(75)
-                    val distilled = SocialReplyIntent.distill(key.first)
+                val distilled = SocialReplyIntent.distill(key.first)
+                val cachedVec = queryVector ?: engine.cachedTextVector(distilled.embedText)
+                val vector = cachedVec ?: try {
+                    // Wait for a brief thumb pause so typing a 12-letter query doesn't queue 10 neural CPU forwards.
+                    delay(150)
                     engine.embedText(distilled.embedText)
                 } catch (failure: Exception) {
                     if (failure is CancellationException) throw failure

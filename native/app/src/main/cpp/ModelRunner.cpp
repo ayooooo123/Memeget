@@ -93,6 +93,36 @@ void ModelRunner::unloadAll() {
     current_family_ = ModelFamily::NONE;
 }
 
+void ModelRunner::unloadHeavy() {
+    // Free every bulky image/audio/VLM module while leaving s2_text_module_ hot in RAM for instant search.
+    cancel();
+    std::scoped_lock lock(mutex_);
+
+    s2_image_module_.reset();
+    s2_image_path_.clear();
+
+    visual_module_.reset();
+    visual_path_.clear();
+
+    craft_module_.reset();
+    crnn_module_.reset();
+    ocr_converter_.reset();
+    craft_path_.clear();
+    crnn_path_.clear();
+
+    whisper_module_.reset();
+    whisper_tokenizer_.reset();
+    whisper_model_path_.clear();
+    whisper_tokenizer_path_.clear();
+
+    fastsam_module_.reset();
+    fastsam_path_.clear();
+
+    vlm_runner_.reset();
+
+    current_family_ = s2_text_module_ ? ModelFamily::PRIMARY : ModelFamily::NONE;
+}
+
 std::string ModelRunner::getDiagnostics() {
     std::scoped_lock lock(mutex_);
     std::ostringstream oss;

@@ -31,6 +31,7 @@ internal object NativeBridge {
     external fun nativeCancel(handle: Long)
     external fun nativeResetCancel(handle: Long)
     external fun nativeUnload(handle: Long)
+    external fun nativeUnloadHeavy(handle: Long)
     external fun nativeDiagnostics(handle: Long): String
 
     external fun nativeEmbedImage(
@@ -117,4 +118,17 @@ internal object NativeBridge {
         deltaW: FloatArray,
         outDeltaBAndLoss: FloatArray,
     )
+
+    external fun nativeBatchDenseScores(
+        queryVec: FloatArray,
+        protoVec: FloatArray?,
+        imageMat: FloatArray,
+        hasImage: BooleanArray,
+        captionMat: FloatArray,
+        hasCaption: BooleanArray,
+        capHubness: FloatArray,
+        count: Int,
+        dim: Int,
+        outScores: FloatArray,
+    ): Int
 }

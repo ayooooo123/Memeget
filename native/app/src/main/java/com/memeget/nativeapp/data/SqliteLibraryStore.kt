@@ -358,6 +358,20 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
             )
         }
 
+        private val dirtySearchByDb = java.util.WeakHashMap<SQLiteDatabase, LinkedHashSet<Long>>()
+
+        private fun markSearchDirty(db: SQLiteDatabase, id: Long) {
+            if (id <= 0L) return
+            synchronized(dirtySearchByDb) {
+                dirtySearchByDb.getOrPut(db) { LinkedHashSet() }.add(id)
+            }
+        }
+
+        private fun drainDirtySearchIds(db: SQLiteDatabase): Set<Long> = synchronized(dirtySearchByDb) {
+            val cur = dirtySearchByDb.remove(db) ?: return emptySet()
+            LinkedHashSet(cur)
+        }
+
         fun updateFtsRow(
             db: SQLiteDatabase,
             id: Long,
@@ -385,6 +399,7 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
                 "INSERT INTO meme_search_fts (rowid, name, ocr, caption, transcript, tags, extra_terms) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 arrayOf(id, name, fullOcr, fullCaption, transcript, tagLabels, fullExtra)
             )
+            markSearchDirty(db, id)
         }
     }
 
@@ -405,9 +420,10 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
         return vocab
     }
 
-    // Pre-decoded, pre-tokenized resident index kept wet in RAM for libraries <= 6,000 memes so every keystroke scores in <2ms.
+    // Field-tiered, contiguous-matrix resident RAM index for libraries <= 6,000 memes:
+    // scores every keystroke in <2 ms with zero SQLite queries, zero FTS segment merges, and surgical 1-row updates.
     private class ResidentSearchEntry(
-        val meme: Meme,
+        var meme: Meme,
         val labels: List<String>,
         val normalizedTagSet: Set<String>,
         val compatibleModel: Boolean,
@@ -415,59 +431,278 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
         val caption: FloatArray?,
         val scenes: FloatArray?,
         val document: String,
-        val docWords: Set<String>,
+        val humanTagWords: Set<String>,
         val tagWords: Set<String>,
-        val phraseDoc: String,
+        val quoteWords: Set<String>,
+        val captionWords: Set<String>,
+        val extraWords: Set<String>,
+        val docWords: Set<String>,
+        val realPhraseDoc: String,
     )
 
-    @Volatile private var cachedResidentEntries: List<ResidentSearchEntry>? = null
-    @Volatile private var cachedResidentRevision: Long = -1L
+    private class ResidentSearchIndex(
+        val byId: LinkedHashMap<Long, ResidentSearchEntry>,
+        val entries: List<ResidentSearchEntry>,
+        val vocab: SearchVocab,
+        val docFreq: Map<String, Int>,
+        val tagLabels: List<String>,
+        val imageMat: FloatArray,
+        val hasImage: BooleanArray,
+        val captionMat: FloatArray,
+        val hasCaption: BooleanArray,
+        val capHubness: FloatArray,
+    )
 
-    private fun residentEntriesIfEligible(db: SQLiteDatabase, totalDocs: Int, signal: CancellationSignal): List<ResidentSearchEntry>? {
-        if (totalDocs <= 0 || totalDocs > 6_000) return null
-        val rev = _revision.value
-        cachedResidentEntries?.takeIf { cachedResidentRevision == rev }?.let { return it }
+    private val residentLock = Any()
+    @Volatile private var cachedResidentIndex: ResidentSearchIndex? = null
+    @Volatile private var ftsCompactedOnce = false
+
+    override suspend fun warmSearchIndex() = withContext(Dispatchers.IO) {
+        val db = getReadableDb()
+        if (!ftsCompactedOnce) {
+            ftsCompactedOnce = true
+            runCatching {
+                getWritableDb().execSQL("INSERT INTO meme_search_fts(meme_search_fts) VALUES('merge=300,6')")
+            }
+        }
+        residentIndexIfEligible(db, CancellationSignal())
+        Unit
+    }
+
+    override suspend fun copiedCount(): Int = withContext(Dispatchers.IO) {
+        cachedResidentIndex?.let { idx -> return@withContext idx.entries.count { it.meme.copyCount > 0 } }
+        getReadableDb().rawQuery("SELECT COUNT(*) FROM memes WHERE copy_count > 0", null).use { c ->
+            if (c.moveToNext()) c.getInt(0) else 0
+        }
+    }
+
+    override suspend fun taughtLabelNames(): List<String> = withContext(Dispatchers.IO) {
+        val out = LinkedHashSet<String>()
+        getReadableDb().rawQuery("SELECT DISTINCT label FROM exemplars WHERE positive = 1 ORDER BY id DESC", null).use { c ->
+            while (c.moveToNext()) {
+                val l = c.getString(0)?.trim().orEmpty()
+                if (l.isNotEmpty()) out += l
+            }
+        }
+        out.toList()
+    }
+
+    private fun patchResidentCopyCount(id: Long, now: Long) {
+        synchronized(residentLock) {
+            val idx = cachedResidentIndex ?: return
+            val entry = idx.byId[id] ?: return
+            entry.meme = entry.meme.copy(copyCount = entry.meme.copyCount + 1, lastCopiedAt = now)
+        }
+    }
+
+    private fun evictResidentIds(ids: List<Long>) {
+        if (ids.isEmpty()) return
+        synchronized(residentLock) {
+            val idx = cachedResidentIndex ?: return
+            var removed = false
+            for (id in ids) if (idx.byId.remove(id) != null) removed = true
+            if (removed) {
+                cachedResidentIndex = if (idx.byId.isEmpty()) null else packResidentIndex(idx.byId)
+            }
+        }
+    }
+
+    private fun clearResidentIndex() {
+        synchronized(residentLock) {
+            cachedResidentIndex = null
+        }
+    }
+
+    private fun buildResidentEntry(meme: Meme, img: FloatArray, cap: FloatArray?, scn: FloatArray?, compat: Boolean): ResidentSearchEntry {
+        val labels = meme.tags.map { it.label }
+        val humanLabels = meme.tags.filter(TagMerge::isHumanTag).map { it.label }
+        val normTags = labels.mapTo(HashSet(labels.size * 2)) { TagMerge.normalizeTagLabel(it) }
+        val doc = SearchText.assembleSearchText(
+            meme.ocr, meme.name, meme.caption, meme.transcript, labels, meme.extraTerms,
+            meme.cloudCaption, meme.cloudTerms, meme.vlmOcr,
+        )
+        val humanTagW = if (humanLabels.isNotEmpty()) SearchText.wordTokenSet(humanLabels.joinToString(" ")) else emptySet()
+        val tagW = if (labels.isNotEmpty()) SearchText.wordTokenSet(labels.joinToString(" ")) else emptySet()
+        val quoteW = SearchText.wordTokenSet("${meme.ocr} ${meme.vlmOcr} ${meme.transcript}")
+        val capW = SearchText.wordTokenSet("${meme.caption} ${meme.cloudCaption}")
+        val extraW = SearchText.wordTokenSet("${meme.extraTerms} ${meme.cloudTerms} ${meme.name}")
+        val allW = HashSet<String>(tagW.size + quoteW.size + capW.size + extraW.size + 4).apply {
+            addAll(tagW); addAll(quoteW); addAll(capW); addAll(extraW)
+        }
+        val realPhrase = SearchText.phraseKey(doc)
+        return ResidentSearchEntry(
+            meme = meme,
+            labels = labels,
+            normalizedTagSet = normTags,
+            compatibleModel = compat,
+            image = img,
+            caption = cap,
+            scenes = scn,
+            document = doc,
+            humanTagWords = humanTagW,
+            tagWords = tagW,
+            quoteWords = quoteW,
+            captionWords = capW,
+            extraWords = extraW,
+            docWords = allW,
+            realPhraseDoc = realPhrase,
+        )
+    }
+
+    private fun packResidentIndex(byId: LinkedHashMap<Long, ResidentSearchEntry>): ResidentSearchIndex {
+        val list = ArrayList(byId.values)
+        val n = list.size
+        val dim = 512
+        val imgMat = FloatArray(n * dim)
+        val hasImg = BooleanArray(n)
+        val capMat = FloatArray(n * dim)
+        val hasCap = BooleanArray(n)
+        val capMean = FloatArray(dim)
+        var capCount = 0
+        val df = HashMap<String, Int>(4096)
+        val allTagLabels = LinkedHashSet<String>()
+
+        for ((i, e) in list.withIndex()) {
+            for (l in e.labels) if (l.isNotBlank()) allTagLabels.add(l)
+            for (w in e.docWords) df[w] = (df[w] ?: 0) + 1
+            if (e.compatibleModel && e.image.size == dim) {
+                System.arraycopy(e.image, 0, imgMat, i * dim, dim)
+                hasImg[i] = true
+            }
+            val cv = e.caption
+            if (e.compatibleModel && cv != null && cv.size == dim) {
+                System.arraycopy(cv, 0, capMat, i * dim, dim)
+                hasCap[i] = true
+                for (d in 0 until dim) capMean[d] += cv[d]
+                capCount++
+            }
+        }
+        val capHub = FloatArray(n)
+        if (capCount > 0) {
+            var normSq = 0.0
+            for (d in 0 until dim) normSq += capMean[d].toDouble() * capMean[d]
+            val inv = if (normSq > 1e-12) (1.0 / kotlin.math.sqrt(normSq)).toFloat() else 0f
+            if (inv > 0f) {
+                for (d in 0 until dim) capMean[d] *= inv
+                for (i in 0 until n) {
+                    if (!hasCap[i]) continue
+                    val off = i * dim
+                    var dot = 0f
+                    for (d in 0 until dim) dot += capMat[off + d] * capMean[d]
+                    capHub[i] = dot
+                }
+            }
+        }
+        return ResidentSearchIndex(
+            byId = byId,
+            entries = list,
+            vocab = SearchVocab.fromCounts(df),
+            docFreq = df,
+            tagLabels = allTagLabels.sorted(),
+            imageMat = imgMat,
+            hasImage = hasImg,
+            captionMat = capMat,
+            hasCaption = hasCap,
+            capHubness = capHub,
+        )
+    }
+
+    private fun loadRowsIntoMap(
+        db: SQLiteDatabase,
+        target: LinkedHashMap<Long, ResidentSearchEntry>,
+        onlyIds: Set<Long>?,
+        signal: CancellationSignal?,
+    ) {
         val emptyVec = FloatArray(0)
-        val loaded = ArrayList<ResidentSearchEntry>(totalDocs)
+        val whereSql = if (onlyIds != null) {
+            if (onlyIds.isEmpty()) return
+            " WHERE id IN (${onlyIds.joinToString(",")})"
+        } else ""
+
+        // Pass 1: compact metadata columns only (omitting large cloud_observation JSON to avoid 2 MB CursorWindow faults).
+        val memesById = LinkedHashMap<Long, Meme>(onlyIds?.size ?: 2500)
         db.rawQuery(
-            "SELECT m.*, v.image, v.caption AS caption_vec, v.scenes AS scenes_vec, v.model AS vec_model FROM memes m LEFT JOIN vectors v ON m.id = v.id",
+            """
+            SELECT id, uri, name, kind, ocr_text, vlm_ocr, caption, transcript, tags, extra_terms,
+                   thumb_uri, modified_at, pending, vision_state, audio_state, content_hash,
+                   cloud_caption, cloud_terms, legacy_imported, rejected_labels, index_error,
+                   analysis_imported, indexed_at, copy_count, last_copied_at
+            FROM memes$whereSql
+            """.trimIndent(),
             null,
             signal,
         ).use { cursor ->
-            val imageCol = cursor.getColumnIndexOrThrow("image")
-            val captionCol = cursor.getColumnIndexOrThrow("caption_vec")
-            val scenesCol = cursor.getColumnIndexOrThrow("scenes_vec")
-            val modelCol = cursor.getColumnIndexOrThrow("vec_model")
             while (cursor.moveToNext()) {
-                val meme = cursorToMeme(cursor)
-                val labels = meme.tags.map { it.label }
-                val normTags = labels.mapTo(HashSet(labels.size * 2)) { TagMerge.normalizeTagLabel(it) }
-                val compat = cursor.getString(modelCol) == ModelRegistry.PRIMARY_MODEL_FINGERPRINT
-                val img = if (compat && !cursor.isNull(imageCol)) FloatBlob.fromBytes(cursor.getBlob(imageCol)) else emptyVec
-                val cap = if (compat && !cursor.isNull(captionCol)) FloatBlob.fromBytes(cursor.getBlob(captionCol)) else null
-                val scn = if (compat && !cursor.isNull(scenesCol)) FloatBlob.fromBytes(cursor.getBlob(scenesCol)) else null
-                val doc = SearchText.assembleSearchText(
-                    meme.ocr, meme.name, meme.caption, meme.transcript, labels, meme.extraTerms,
-                    meme.cloudCaption, meme.cloudTerms, meme.vlmOcr,
-                )
-                loaded += ResidentSearchEntry(
-                    meme = meme,
-                    labels = labels,
-                    normalizedTagSet = normTags,
-                    compatibleModel = compat,
-                    image = img,
-                    caption = cap,
-                    scenes = scn,
-                    document = doc,
-                    docWords = SearchText.wordTokenSet(doc),
-                    tagWords = if (labels.isNotEmpty()) SearchText.wordTokenSet(labels.joinToString(" ")) else emptySet(),
-                    phraseDoc = SearchText.phraseKey(doc),
-                )
+                val m = cursorToMeme(cursor)
+                memesById[m.id] = m
             }
         }
-        cachedResidentEntries = loaded
-        cachedResidentRevision = rev
-        return loaded
+        if (onlyIds != null) {
+            for (id in onlyIds) if (id !in memesById) target.remove(id)
+        }
+        if (memesById.isEmpty()) return
+
+        // Pass 2: primary search vectors only (skipping 768-d DINO visual blobs cuts cursor transfer in half!).
+        val vecWhere = if (onlyIds != null) {
+            "WHERE model = ? AND id IN (${onlyIds.joinToString(",")})"
+        } else {
+            "WHERE model = ?"
+        }
+        val vecsById = HashMap<Long, Triple<FloatArray, FloatArray?, FloatArray?>>(memesById.size * 2)
+        db.rawQuery(
+            "SELECT id, image, caption, scenes FROM vectors $vecWhere",
+            arrayOf(ModelRegistry.PRIMARY_MODEL_FINGERPRINT),
+            signal,
+        ).use { vc ->
+            while (vc.moveToNext()) {
+                val id = vc.getLong(0)
+                val img = if (!vc.isNull(1)) FloatBlob.fromBytes(vc.getBlob(1)) else emptyVec
+                val cap = if (!vc.isNull(2)) FloatBlob.fromBytes(vc.getBlob(2)) else null
+                val scn = if (!vc.isNull(3)) FloatBlob.fromBytes(vc.getBlob(3)) else null
+                vecsById[id] = Triple(img, cap, scn)
+            }
+        }
+
+        for ((id, m) in memesById) {
+            val v = vecsById[id]
+            target[id] = buildResidentEntry(
+                meme = m,
+                img = v?.first ?: emptyVec,
+                cap = v?.second,
+                scn = v?.third,
+                compat = v != null && v.first.size == 512,
+            )
+        }
+    }
+
+    private fun residentIndexIfEligible(db: SQLiteDatabase, signal: CancellationSignal?): ResidentSearchIndex? {
+        synchronized(residentLock) {
+            val dirty = drainDirtySearchIds(db)
+            val existing = cachedResidentIndex
+            if (existing != null) {
+                if (dirty.isEmpty()) return existing
+                if (existing.byId.size + dirty.size <= 6_000 && dirty.size <= 128) {
+                    loadRowsIntoMap(db, existing.byId, dirty, signal)
+                    return if (existing.byId.isEmpty() || existing.byId.size > 6_000) {
+                        cachedResidentIndex = null
+                        null
+                    } else {
+                        packResidentIndex(existing.byId).also { cachedResidentIndex = it }
+                    }
+                }
+            }
+            val total = db.rawQuery("SELECT COUNT(*) FROM memes", null).use { c ->
+                if (c.moveToNext()) c.getInt(0) else 0
+            }
+            if (total <= 0 || total > 6_000) {
+                cachedResidentIndex = null
+                return null
+            }
+            val freshMap = LinkedHashMap<Long, ResidentSearchEntry>(total * 2)
+            loadRowsIntoMap(db, freshMap, onlyIds = null, signal = signal)
+            if (freshMap.isEmpty()) return null
+            return packResidentIndex(freshMap).also { cachedResidentIndex = it }
+        }
     }
 
     @Volatile private var cachedCuratedAssoc: Map<String, Set<String>>? = null
@@ -653,6 +888,7 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
                         }
                         db.insertWithOnConflict("content_hashes", null, hashCv, SQLiteDatabase.CONFLICT_REPLACE)
                     }
+                    markSearchDirty(db, existingId)
                     db.setTransactionSuccessful()
                     return@withLock existingId
                 }
@@ -678,6 +914,7 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
                     }
                     db.insertWithOnConflict("content_hashes", null, hashCv, SQLiteDatabase.CONFLICT_IGNORE)
                 }
+                if (id > 0L) markSearchDirty(db, id)
                 db.setTransactionSuccessful()
                 id
             } finally {
@@ -763,18 +1000,6 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
         val coroutine = currentCoroutineContext()
         val distilled = SocialReplyIntent.distill(cleanQuery, keepShort = !semantic)
         val exactTerms = distilled.exactTerms
-        val vocab = if (exactTerms.isEmpty()) null else getSearchVocab()
-        val expanded = if (vocab == null) SearchVocab.ExpandedQueryTerms(emptyList(), emptyList())
-            else vocab.expandSeparated(exactTerms, lastIsPrefix = !distilled.isPastedPost && !text.endsWith(" "))
-        val ftsExactQuery = SearchRanking.buildFtsMatchQuery(exactTerms)
-        val ftsLexicalQuery = SearchRanking.buildFtsMatchQuery(exactTerms, (distilled.socialTerms + expanded.all).toList())
-        val totalDocs = db.rawQuery("SELECT COUNT(*) FROM memes", null).use { c ->
-            if (c.moveToNext()) c.getInt(0).coerceAtLeast(1) else 1
-        }
-        val exactWeights = FloatArray(exactTerms.size) { idx ->
-            val df = vocab?.frequency(exactTerms[idx]) ?: 0
-            kotlin.math.ln(1.0 + (totalDocs + 1.0) / (df + 1.0)).toFloat()
-        }
         val openConcepts = if (semantic) OpenVocabConcepts.load(context) else null
         val conceptProto = openConcepts?.conceptPrototype(distilled.cleanedText)
         val semanticTerms = if (semantic && vector != null) {
@@ -783,7 +1008,7 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
             (distilled.socialTerms + curatedAliasesForQuery(exactTerms)) - exactTerms.toSet()
         }
         val phrase = SearchText.phraseKey(distilled.cleanedText)
-        val hasPhrase = !distilled.isPastedPost && SearchText.phraseTokenCount(phrase) >= 2
+        val hasPhrase = !distilled.isPastedPost && !distilled.pureSlangReaction && SearchText.phraseTokenCount(phrase) >= 2
         val comparator = compareBy<SearchHit>({ it.score }, { it.meme.modifiedAt }, { it.meme.id })
         val top = PriorityQueue(limit, comparator)
         val signal = CancellationSignal()
@@ -793,19 +1018,40 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
         val emptyVector = FloatArray(0)
         val tagKey = tag?.takeIf { it.isNotBlank() }?.let(TagMerge::normalizeTagLabel)
         try {
-            val resident = residentEntriesIfEligible(db, totalDocs, signal)
+            val resident = residentIndexIfEligible(db, signal)
             if (resident != null) {
-                val ftsRanks: Map<Long, ByteArray>? = if (ftsExactQuery.isNotBlank()) {
-                    HashMap<Long, ByteArray>().also { ranks ->
-                        db.rawQuery(
-                            "SELECT rowid, matchinfo(meme_search_fts, 'pcx') FROM meme_search_fts WHERE meme_search_fts MATCH ?",
-                            arrayOf(ftsExactQuery), signal,
-                        ).use { c -> while (c.moveToNext()) ranks[c.getLong(0)] = c.getBlob(1) }
-                    }
+                // 100% RAM-only fast path: zero SQLite queries, zero FTS segment merges, NEON batch dense cosines!
+                val rEntries = resident.entries
+                val totalDocs = rEntries.size.coerceAtLeast(1)
+                val expanded = if (exactTerms.isEmpty()) SearchVocab.ExpandedQueryTerms(emptyList(), emptyList())
+                    else resident.vocab.expandSeparated(exactTerms, lastIsPrefix = !distilled.isPastedPost && !text.endsWith(" "))
+                val hasNonScaffold = exactTerms.size >= 2 && exactTerms.any { it !in SocialReplyIntent.SCAFFOLD_WORDS }
+                var totalExactW = 0f
+                val exactWeights = FloatArray(exactTerms.size) { idx ->
+                    val term = exactTerms[idx]
+                    val df = resident.docFreq[term] ?: 0
+                    var w = kotlin.math.ln(1.0 + (totalDocs + 1.0) / (df + 1.0)).toFloat()
+                    if (hasNonScaffold && term in SocialReplyIntent.SCAFFOLD_WORDS) w = 0.005f
+                    totalExactW += w
+                    w
+                }
+                val denseScores = if (semantic && vector != null) {
+                    SearchRanking.batchDenseScores(
+                        queryVec = vector,
+                        protoVec = conceptProto,
+                        imageMat = resident.imageMat,
+                        hasImage = resident.hasImage,
+                        captionMat = resident.captionMat,
+                        hasCaption = resident.hasCaption,
+                        capHubness = resident.capHubness,
+                        count = rEntries.size,
+                        dim = vector.size.coerceAtLeast(1),
+                    )
                 } else null
+
                 var anyWholeOrFuzzyMatch = false
                 if (!semantic) {
-                    for (entry in resident) {
+                    for (entry in rEntries) {
                         if (!kind.isNullOrBlank() && entry.meme.kind != kind) continue
                         if (tagKey != null && tagKey !in entry.normalizedTagSet) continue
                         if (exactTerms.any { it in entry.docWords } ||
@@ -818,31 +1064,36 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
                         }
                     }
                 }
-                for ((idx, entry) in resident.withIndex()) {
-                    if ((idx and 63) == 63) coroutine.ensureActive()
+                for (idx in rEntries.indices) {
+                    if ((idx and 127) == 127) coroutine.ensureActive()
+                    val entry = rEntries[idx]
                     val meme = entry.meme
                     if (!kind.isNullOrBlank() && meme.kind != kind) continue
                     if (tagKey != null && tagKey !in entry.normalizedTagSet) continue
-                    val rankBlob = ftsRanks?.get(meme.id)
-                    val bm25 = if (rankBlob != null) SearchRanking.calculateFts4Bm25(rankBlob, totalDocs = totalDocs) else 0f
-                    val phraseHit = hasPhrase && SearchText.containsPhrase(entry.phraseDoc, phrase)
-                    val score = SearchRanking.calibratedSearchScore(
+                    val phraseHit = hasPhrase && SearchText.containsPhrase(entry.realPhraseDoc, phrase)
+                    val baseDense = if (denseScores != null) denseScores[idx] else 0f
+                    val imgCos = if (semantic && vector != null && resident.hasImage[idx]) FloatBlob.dot(vector, entry.image) else 0f
+                    val score = SearchRanking.calibratedResidentScore(
+                        semantic = semantic,
+                        baseDenseScore = baseDense,
                         queryVec = vector,
                         conceptProto = conceptProto,
+                        scenesFlat = if (semantic && entry.compatibleModel) entry.scenes else null,
+                        imageCos = imgCos,
                         exactTerms = exactTerms,
                         exactTermWeights = exactWeights,
+                        totalExactWeight = totalExactW,
                         semanticTerms = semanticTerms,
                         typoTerms = expanded.typoCorrections,
                         prefixTerms = expanded.prefixCompletions,
-                        imageVec = if (semantic && entry.compatibleModel) entry.image else emptyVector,
-                        captionVec = if (semantic && entry.compatibleModel) entry.caption else null,
-                        scenesFlat = if (semantic && entry.compatibleModel) entry.scenes else null,
-                        document = entry.document,
-                        tagLabels = entry.labels,
-                        bm25Exact = bm25,
+                        humanTagWords = entry.humanTagWords,
+                        tagWords = entry.tagWords,
+                        quoteWords = entry.quoteWords,
+                        captionWords = entry.captionWords,
+                        extraWords = entry.extraWords,
+                        allDocWords = entry.docWords,
                         phraseMatched = phraseHit,
-                        precomputedDocWords = entry.docWords,
-                        precomputedTagWords = entry.tagWords,
+                        pureSlangReaction = distilled.pureSlangReaction,
                         copyCount = meme.copyCount,
                     )
                     if (!score.isFinite()) continue
@@ -866,6 +1117,23 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
                 while (top.isNotEmpty()) rows.add(top.poll())
                 rows.reverse()
                 return@withContext rows
+            }
+
+            // Fallback streaming SQLite path for libraries > 6,000 items
+            val vocab = if (exactTerms.isEmpty()) null else getSearchVocab()
+            val expanded = if (vocab == null) SearchVocab.ExpandedQueryTerms(emptyList(), emptyList())
+                else vocab.expandSeparated(exactTerms, lastIsPrefix = !distilled.isPastedPost && !text.endsWith(" "))
+            val ftsExactQuery = SearchRanking.buildFtsMatchQuery(exactTerms)
+            val ftsLexicalQuery = SearchRanking.buildFtsMatchQuery(exactTerms, (distilled.socialTerms + expanded.all).toList())
+            val totalDocs = db.rawQuery("SELECT COUNT(*) FROM memes", null).use { c ->
+                if (c.moveToNext()) c.getInt(0).coerceAtLeast(1) else 1
+            }
+            val exactWeights = FloatArray(exactTerms.size) { idx ->
+                val term = exactTerms[idx]
+                val df = vocab?.frequency(term) ?: 0
+                var w = kotlin.math.ln(1.0 + (totalDocs + 1.0) / (df + 1.0)).toFloat()
+                if (term in SocialReplyIntent.SCAFFOLD_WORDS && exactTerms.size >= 2) w *= 0.22f
+                w
             }
             fun scan(useFts: Boolean) {
                 val args = ArrayList<String>()
@@ -1335,7 +1603,10 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
             ).use {
                 it.bindLong(1, now)
                 it.bindLong(2, id)
-                if (it.executeUpdateDelete() > 0) bumpRevision()
+                if (it.executeUpdateDelete() > 0) {
+                    patchResidentCopyCount(id, now)
+                    bumpRevision()
+                }
             }
         }
     }
@@ -1523,6 +1794,7 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
                     put("thumb_uri", uri)
                 }
                 db.update("memes", cv, "id = ?", arrayOf(id.toString()))
+                markSearchDirty(db, id)
                 db.setTransactionSuccessful()
             } finally {
                 db.endTransaction()
@@ -1678,7 +1950,10 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
                 it.bindString(5, caption)
                 it.executeUpdateDelete() > 0
             }
-            if (written) bumpRevision()
+            if (written) {
+                markSearchDirty(getWritableDb(), id)
+                bumpRevision()
+            }
             written
         }
     }
@@ -2543,6 +2818,7 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
             } finally {
                 db.endTransaction()
             }
+            evictResidentIds(ids)
             bumpRevision()
             bumpLabels()
         }
@@ -2575,6 +2851,7 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
             } finally {
                 db.endTransaction()
             }
+            clearResidentIndex()
             bumpRevision()
             bumpLabels()
         }
@@ -2666,9 +2943,9 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
     }
 
     override suspend fun tagLabels(): List<String> = withContext(Dispatchers.IO) {
+        cachedResidentIndex?.let { return@withContext it.tagLabels }
         val db = getReadableDb()
         val set = LinkedHashSet<String>()
-        // Pending rows count too: an imported collection's labels sit on rows still waiting for analysis.
         val cursor = db.rawQuery("SELECT tags FROM memes WHERE tags != '[]'", null)
         cursor.use { c ->
             while (c.moveToNext()) {

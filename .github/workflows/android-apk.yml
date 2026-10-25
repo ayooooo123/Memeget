@@ -127,11 +127,20 @@ jobs:
       # Publish first: a GitHub Release stores the APK separately from Actions
       # artifact storage, so it does not consume (or get blocked by) the
       # artifact storage quota. This is the durable download source.
+      # Move the rolling `latest` git tag to the new commit before updating the release so GitHub's
+      # release header always displays this push's timestamp and SHA instead of an older commit's age.
+      - name: Advance rolling latest git tag
+        if: steps.meta.outputs.publish == 'true' && steps.meta.outputs.release_tag == 'latest'
+        run: |
+          git tag -f latest "${GITHUB_SHA}"
+          git push -f origin refs/tags/latest
+
       - name: Publish to Release
         if: steps.meta.outputs.publish == 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.meta.outputs.release_tag }}
+          target_commitish: ${{ github.sha }}
           name: ${{ steps.meta.outputs.release_name }}
           body: |
             Memeget for Android (`com.memeget.nativeapp`) · version `${{ steps.apk.outputs.version_name }}` · commit `${{ github.sha }}`.
