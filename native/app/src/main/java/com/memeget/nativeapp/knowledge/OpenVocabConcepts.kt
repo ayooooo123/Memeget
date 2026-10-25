@@ -19,22 +19,15 @@ import kotlin.math.max
  */
 internal class OpenVocabConcepts private constructor(
     val entries: List<Entry>,
-    val tagPairs: List<Pair<String, String>> = emptyList(),
-    val refMemes: List<RefMeme> = emptyList(),
 ) {
-    class RefMeme(
-        val memeId: Int,
-        val qVec: ByteArray,
-        val tagIds: ShortArray,
-    )
-
-    private val refById: Map<Int, RefMeme> = refMemes.associateBy { it.memeId }
     private val entryByNormLabel: Map<String, Entry> = HashMap<String, Entry>(entries.size * 2).also { map ->
         for (e in entries) {
             val norm = normalizeConceptKey(e.label)
             if (norm.isNotEmpty()) map.putIfAbsent(norm, e)
         }
     }
+
+    fun entryFor(label: String): Entry? = entryByNormLabel[normalizeConceptKey(label)]
 
     class Entry(
         val label: String,
@@ -59,28 +52,9 @@ internal class OpenVocabConcepts private constructor(
         image: FloatArray,
         ocrAndText: String = "",
         memeId: Long = -1L,
-        allowReferenceMatch: Boolean = true,
+        allowReferenceMatch: Boolean = false,
     ): List<Tag> {
         if (image.size != DIM || FloatBlob.dot(image, image) < 0.5f) return emptyList()
-        if (allowReferenceMatch && refMemes.isNotEmpty()) {
-            val fastHit = if (memeId > 0L) refById[memeId.toInt()]?.takeIf { dotInt8(it.qVec, image) >= 0.975f } else null
-            val matched = fastHit ?: refMemes.firstOrNull { dotInt8(it.qVec, image) >= 0.980f }
-            if (matched != null) {
-                return matched.tagIds.indices.mapNotNull { i ->
-                    val tid = matched.tagIds[i]
-                    val pair = tagPairs.getOrNull(tid.toInt() and 0xFFFF) ?: return@mapNotNull null
-                    Tag(
-                        label = pair.first,
-                        category = pair.second,
-                        score = 0.95f,
-                        source = "open_vocab",
-                        scoreDomain = "open-vocab-verified",
-                        confirmation = "unreviewed",
-                        provenance = "open-vocab",
-                    )
-                }
-            }
-        }
         return retrieveCandidates(image, ocrAndText = ocrAndText, limit = 6)
             .filter { it.source == "z_top1" || it.posCos >= 0.78f }
             .map {
@@ -94,17 +68,6 @@ internal class OpenVocabConcepts private constructor(
                     provenance = "open-vocab",
                 )
             }
-    }
-
-    private fun dotInt8(qVec: ByteArray, image: FloatArray): Float {
-        var sum = 0f
-        var qNormSq = 0
-        for (i in 0 until DIM) {
-            val qi = qVec[i].toInt()
-            sum += qi * image[i]
-            qNormSq += qi * qi
-        }
-        return if (qNormSq > 0) sum / kotlin.math.sqrt(qNormSq.toFloat()) else 0f
     }
 
     /** Hands back the wet 92k-meme `cHybrid` visual prototype when Master's 1-3 word query names a known concept. */
@@ -271,6 +234,12 @@ internal class OpenVocabConcepts private constructor(
             out += h
         }
         return out
+    }
+
+    internal fun matchesOcr(label: String, isEntity: Boolean, ocrAndText: String): Boolean {
+        if (ocrAndText.isBlank()) return false
+        val normOcr = " " + ocrAndText.lowercase(java.util.Locale.ROOT).replace(Regex("[^a-z0-9]+"), " ").trim() + " "
+        return matchesOcrConcept(label, isEntity, normOcr)
     }
 
     private fun matchesOcrConcept(label: String, isEntity: Boolean, normOcr: String): Boolean {
@@ -465,30 +434,7 @@ internal class OpenVocabConcepts private constructor(
                         tStock = tStock,
                     )
                 }
-                val tagPairs = ArrayList<Pair<String, String>>()
-                val refMemes = ArrayList<RefMeme>()
-                runCatching {
-                    val trailerMagic = input.readInt()
-                    if (trailerMagic == 0x4D475246) { // 'MGRF'
-                        val numPairs = input.readInt()
-                        val numRefs = input.readInt()
-                        for (i in 0 until numPairs) {
-                            val ll = input.readUnsignedShort()
-                            val cl = input.readUnsignedShort()
-                            val lb = ByteArray(ll).also { input.readFully(it) }
-                            val cb = ByteArray(cl).also { input.readFully(it) }
-                            tagPairs += String(lb, Charsets.UTF_8) to String(cb, Charsets.UTF_8)
-                        }
-                        for (i in 0 until numRefs) {
-                            val mid = input.readInt()
-                            val tCnt = input.readUnsignedShort()
-                            val qv = ByteArray(DIM).also { input.readFully(it) }
-                            val tids = ShortArray(tCnt) { input.readShort() }
-                            refMemes += RefMeme(mid, qv, tids)
-                        }
-                    }
-                }
-                return OpenVocabConcepts(list, tagPairs, refMemes)
+                return OpenVocabConcepts(list)
             }
         }
 

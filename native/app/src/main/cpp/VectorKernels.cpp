@@ -2,6 +2,8 @@
 // ~11 s for 1,700 memes on a Pixel 5a running the debug app; here they take a fraction of a second.
 #include <jni.h>
 
+#include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <limits>
 #include <vector>
@@ -148,6 +150,91 @@ Java_com_memeget_nativeapp_inference_NativeBridge_nativeNearest(
     }
     env->SetIntArrayRegion(outIndex, 0, slots, index.data());
     env->SetFloatArrayRegion(outDot, 0, slots, best.data());
+}
+
+// Grinds Master's online Positive-Unlabeled + explicit-rejection BCE updates straight into the residual
+// verifier head (`deltaW`), zero GGUF bloat, keeping `deltaB` pinned so multi-label hits never lift bystanders.
+JNIEXPORT void JNICALL
+Java_com_memeget_nativeapp_inference_NativeBridge_nativeFitDecisionHead(
+    JNIEnv* env,
+    jobject /* thiz */,
+    jfloatArray baseLogits,
+    jfloatArray scorerHidden,
+    jintArray noneIndices,
+    jfloatArray targets,
+    jfloatArray weights,
+    jint numExamples,
+    jint numOptions,
+    jint hiddenDim,
+    jint epochs,
+    jfloat learningRate,
+    jfloat l2Decay,
+    jfloatArray deltaW,
+    jfloatArray outDeltaBAndLoss) {
+    if (numExamples <= 0 || numOptions < 2 || hiddenDim <= 0) return;
+    std::vector<float> logitsVec(static_cast<size_t>(numExamples) * numOptions);
+    std::vector<float> hiddenVec(static_cast<size_t>(numExamples) * numOptions * hiddenDim);
+    std::vector<jint> noneVec(numExamples);
+    std::vector<float> targetVec(static_cast<size_t>(numExamples) * numOptions);
+    std::vector<float> weightVec(static_cast<size_t>(numExamples) * numOptions);
+    std::vector<float> wVec(hiddenDim);
+    float bLoss[2] = {0.0f, 0.0f};
+
+    env->GetFloatArrayRegion(baseLogits, 0, static_cast<jsize>(logitsVec.size()), logitsVec.data());
+    env->GetFloatArrayRegion(scorerHidden, 0, static_cast<jsize>(hiddenVec.size()), hiddenVec.data());
+    env->GetIntArrayRegion(noneIndices, 0, numExamples, noneVec.data());
+    env->GetFloatArrayRegion(targets, 0, static_cast<jsize>(targetVec.size()), targetVec.data());
+    env->GetFloatArrayRegion(weights, 0, static_cast<jsize>(weightVec.size()), weightVec.data());
+    env->GetFloatArrayRegion(deltaW, 0, hiddenDim, wVec.data());
+    env->GetFloatArrayRegion(outDeltaBAndLoss, 0, 2, bLoss);
+
+    const float deltaB = bLoss[0];
+    float lastLoss = 0.0f;
+    for (int ep = 0; ep < epochs; ++ep) {
+        const float lr = learningRate / (1.0f + 0.1f * static_cast<float>(ep));
+        const float decay = 1.0f - lr * l2Decay;
+        float epochLoss = 0.0f;
+        float totalWeight = 0.0f;
+
+        for (int i = 0; i < numExamples; ++i) {
+            const int noneIdx = noneVec[i];
+            const float* exLogits = logitsVec.data() + static_cast<size_t>(i) * numOptions;
+            const float* exHidden = hiddenVec.data() + static_cast<size_t>(i) * numOptions * hiddenDim;
+            const float* exTargets = targetVec.data() + static_cast<size_t>(i) * numOptions;
+            const float* exWeights = weightVec.data() + static_cast<size_t>(i) * numOptions;
+            const float zNone = exLogits[noneIdx];
+            const float* hNone = exHidden + static_cast<size_t>(noneIdx) * hiddenDim;
+
+            for (int k = 0; k < numOptions; ++k) {
+                if (k == noneIdx) continue;
+                const float w = exWeights[k];
+                if (w <= 0.0f) continue;
+                const float y = exTargets[k];
+                const float* hk = exHidden + static_cast<size_t>(k) * hiddenDim;
+
+                float residual = deltaB;
+                float normSq = 0.0f;
+                for (int d = 0; d < hiddenDim; ++d) {
+                    const float dv = hk[d] - hNone[d];
+                    residual += wVec[d] * dv;
+                    normSq += dv * dv;
+                }
+                const float rel = std::clamp((exLogits[k] - zNone) + residual, -20.0f, 20.0f);
+                const float prob = 1.0f / (1.0f + std::exp(-rel));
+                const float step = (lr * (prob - y) * w) / std::max(4.0f, normSq);
+                for (int d = 0; d < hiddenDim; ++d) {
+                    wVec[d] = wVec[d] * decay - step * (hk[d] - hNone[d]);
+                }
+                epochLoss += (std::log(1.0f + std::exp(rel)) - y * rel) * w;
+                totalWeight += w;
+            }
+        }
+        lastLoss = totalWeight > 0.0f ? (epochLoss / totalWeight) : 0.0f;
+    }
+    bLoss[0] = deltaB;
+    bLoss[1] = lastLoss;
+    env->SetFloatArrayRegion(deltaW, 0, hiddenDim, wVec.data());
+    env->SetFloatArrayRegion(outDeltaBAndLoss, 0, 2, bLoss);
 }
 
 }  // extern "C"

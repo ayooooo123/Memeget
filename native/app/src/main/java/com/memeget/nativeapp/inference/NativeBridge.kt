@@ -102,12 +102,6 @@ internal object NativeBridge {
         dim: Int, k: Int, skipAtOrAbove: Float, outIndex: IntArray, outDot: FloatArray,
     )
 
-    /**
-     * Evaluates a rendered d1-omni prompt in one non-causal pass (`LlamaDecisionRunner`).
-     * Returns `[numOptions, evalMs, baseLogits[0..K-1], scorerHidden[0..K*1024-1]]`.
-     */
-    external fun nativeDecide(modelPath: String, renderedPrompt: String, threads: Int): FloatArray
-
     external fun nativeFitDecisionHead(
         baseLogits: FloatArray,
         scorerHidden: FloatArray,

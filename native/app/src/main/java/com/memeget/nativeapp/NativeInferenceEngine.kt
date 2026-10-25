@@ -50,7 +50,11 @@ internal class NativeInferenceEngine(
 
     private val downloader = ModelDownloader()
     private val modelsDir: File by lazy {
-        File(context.filesDir, "memeget_models").apply { mkdirs() }
+        File(context.filesDir, "memeget_models").apply {
+            mkdirs()
+            // Reclaim 407 MB immediately on phones that pulled the retired text-only d1-omni GGUF.
+            ModelRegistry.RETIRED_DECISION_FILES.forEach { File(this, it).delete() }
+        }
     }
 
     override suspend fun embedImage(uri: String): FloatArray = withContext(Dispatchers.Default) {
@@ -154,20 +158,36 @@ internal class NativeInferenceEngine(
             val handle = activeHandle()
             NativeBridge.nativeResetCancel(handle)
 
-            // Prepare upright copy matching editor coordinate space
-            val prepared = MemeTextDetector.prepareForTextDetection(context, uri)
-            try {
-                val preparedFile = Uri.parse(prepared.uri).path ?: prepared.uri
+            val alreadyUprightModelJpeg = uri.startsWith("file://") &&
+                (Uri.parse(uri).path?.let { p ->
+                    val f = File(p)
+                    f.isFile && f.name.startsWith("upright_")
+                } == true)
+            if (alreadyUprightModelJpeg) {
+                val directPath = Uri.parse(uri).path ?: uri.removePrefix("file://")
                 val raw = NativeBridge.nativeRecognize(
                     handle = handle,
                     detectorPath = craftFile.absolutePath,
                     recognizerPath = crnnFile.absolutePath,
-                    imagePath = preparedFile,
+                    imagePath = directPath,
                 )
                 OcrPostProcessor.toReadingOrderRegions(raw)
-            } finally {
-                runCatching {
-                    Uri.parse(prepared.uri).path?.let { File(it).delete() }
+            } else {
+                // External/editor URI: prepare upright copy matching editor coordinate space
+                val prepared = MemeTextDetector.prepareForTextDetection(context, uri)
+                try {
+                    val preparedFile = Uri.parse(prepared.uri).path ?: prepared.uri
+                    val raw = NativeBridge.nativeRecognize(
+                        handle = handle,
+                        detectorPath = craftFile.absolutePath,
+                        recognizerPath = crnnFile.absolutePath,
+                        imagePath = preparedFile,
+                    )
+                    OcrPostProcessor.toReadingOrderRegions(raw)
+                } finally {
+                    runCatching {
+                        Uri.parse(prepared.uri).path?.let { File(it).delete() }
+                    }
                 }
             }
         }
@@ -184,16 +204,23 @@ internal class NativeInferenceEngine(
                 NativeBridge.nativeResetCancel(handle)
 
                 withLocalPath(uri) { localPath ->
+                    val skipVerbatimText = grounding.contains("Untrusted OCR evidence:") &&
+                        PromptBuilder.hasSubstantialOcr(grounding.substringAfter("Untrusted OCR evidence:", ""))
+                    val pixelBudget = if (!skipVerbatimText && isTallStrip(localPath)) {
+                        DESCRIBE_TALL_STRIP_MAX_PIXELS
+                    } else {
+                        DESCRIBE_MAX_PIXELS
+                    }
                     NativeBridge.nativeDescribe(
                         handle = handle,
                         modelPath = modelFile.absolutePath,
                         projectorPath = projectorFile.absolutePath,
                         imagePath = localPath,
                         systemPrompt = PromptBuilder.SYSTEM_PROMPT,
-                        userPrompt = PromptBuilder.buildUserPrompt(grounding),
-                        maxTokens = 320,
+                        userPrompt = PromptBuilder.buildUserPrompt(grounding, skipVerbatimText = skipVerbatimText),
+                        maxTokens = if (skipVerbatimText) 112 else 160,
                         temperature = 0.1f,
-                        maxImagePixels = DESCRIBE_MAX_PIXELS,
+                        maxImagePixels = pixelBudget,
                     )
                 }
             }
@@ -227,7 +254,13 @@ internal class NativeInferenceEngine(
             return@withContext ""
         }
 
-        // Step 2: Whisper STT inference
+        // Gate out silent MP4s, pure tones, hum, and dead air in <5 ms before touching the 448 MB Whisper weights.
+        val speechPcm = com.memeget.nativeapp.inference.AudioVad.compactForWhisper(pcmFloats)
+        if (speechPcm.isEmpty()) {
+            return@withContext ""
+        }
+
+        // Step 2: Whisper STT inference over voiced windows only
         val whisperModelFile = ensureModel(ModelRegistry.WHISPER_MODEL)
         val tokenizerFile = ensureModel(ModelRegistry.WHISPER_TOKENIZER)
         ModelRegistry.RETIRED_WHISPER_FILES.forEach { File(modelsDir, it).delete() }
@@ -240,7 +273,7 @@ internal class NativeInferenceEngine(
                 handle = handle,
                 modelPath = whisperModelFile.absolutePath,
                 tokenizerPath = tokenizerFile.absolutePath,
-                pcmSamples = pcmFloats,
+                pcmSamples = speechPcm,
             )
             PromptBuilder.cleanTranscript(rawTranscript)
         }
@@ -443,8 +476,20 @@ internal class NativeInferenceEngine(
         return floats
     }
 
+    private fun isTallStrip(path: String): Boolean {
+        val opts = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        android.graphics.BitmapFactory.decodeFile(path, opts)
+        val w = opts.outWidth
+        val h = opts.outHeight
+        if (w <= 0 || h <= 0) return false
+        val ratio = maxOf(w, h).toFloat() / minOf(w, h).toFloat()
+        return ratio >= 1.85f
+    }
+
     private companion object {
         /** MiniCPM-V's 448x448 slice area: larger images would add a full encoder pass per extra slice. */
         const val DESCRIBE_MAX_PIXELS = 448 * 448
+        /** Two slices for tall un-OCRed tweet/greentext strips so 3-px text doesn't mush into unreadability. */
+        const val DESCRIBE_TALL_STRIP_MAX_PIXELS = 448 * 896
     }
 }

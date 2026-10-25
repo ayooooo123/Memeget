@@ -107,7 +107,7 @@ internal fun MemegetApp(
                 try {
                     cloud.recordTeaching(memeId, label, category ?: knowledge.knownCategory(label), positive, emptyList())
                     labelsChanged = true
-                    scope.launch { runCatching { knowledge.recordD1Teaching(memeId) } }
+                    scope.launch { runCatching { knowledge.recordVerifierTeaching(memeId) } }
                     null
                 } catch (cancelled: CancellationException) {
                     throw cancelled
@@ -124,7 +124,7 @@ internal fun MemegetApp(
                 try {
                     store.removeTag(memeId, label)
                     labelsChanged = true
-                    scope.launch { runCatching { knowledge.recordD1Teaching(memeId) } }
+                    scope.launch { runCatching { knowledge.recordVerifierTeaching(memeId) } }
                     null
                 } catch (cancelled: CancellationException) {
                     throw cancelled
@@ -145,7 +145,7 @@ internal fun MemegetApp(
     // Resume pending indexing after an activity cycle. The session belongs to the coordinator, so a configuration
     // change or closing the app's screen stops neither it nor a model download it started.
     LaunchedEffect(Unit) {
-        runCatching { knowledge.loadPersistedD1Head() }
+        runCatching { knowledge.loadPersistedVerifierHead() }
         coordinator.resumePending()
     }
 
@@ -286,7 +286,7 @@ internal fun MemegetApp(
                 },
                 onTaught = {
                     labelsChanged = true
-                    scope.launch { runCatching { knowledge.recordD1Teaching(meme.id) } }
+                    scope.launch { runCatching { knowledge.recordVerifierTeaching(meme.id) } }
                 },
             )
         }

@@ -465,14 +465,24 @@ internal class IndexCoordinator(
                             if (candidates.isEmpty()) break
                             val batch = ArrayList<Prepared>(candidates.size)
                             var stagedBytes = 0L
+                            val audioOnlyBatch = transcripts.isNotEmpty()
                             try {
                                 for (meme in candidates) {
                                     if (batch.isNotEmpty() && stagedBytes >= BATCH_DISK_BYTES) break
-                                    if (transcripts.isEmpty()) tried += meme.id else triedSpeech += meme.id
+                                    if (audioOnlyBatch) triedSpeech += meme.id else tried += meme.id
                                     val vectors = store.vectors(meme.id)?.takeIf { it.model == engine.primaryModel } ?: continue
                                     mutableProgress.value = WorkProgress("preparing media", detail = meme.name, running = true, memeId = meme.id)
+                                    val memeNeedsAudio = speech && meme.kind == "video" && meme.audioState == "pending" && meme.id !in backgroundSkip
                                     try {
-                                        prepare(meme, vectors.image).also { batch += it; stagedBytes += it.source.length() }
+                                        prepare(
+                                            meme = meme,
+                                            knownVector = vectors.image,
+                                            extractFrames = !audioOnlyBatch,
+                                            requireSource = audioOnlyBatch || memeNeedsAudio,
+                                        ).also {
+                                            batch += it
+                                            stagedBytes += if (it.source.exists()) it.source.length() else 0L
+                                        }
                                     } catch (cancelled: CancellationException) {
                                         throw cancelled
                                     } catch (failure: Exception) {
@@ -481,7 +491,7 @@ internal class IndexCoordinator(
                                     }
                                 }
                                 // One call per batch, so each model loads once per batch rather than once per meme.
-                                enrich(batch, background, gaps, captionTexts, describe = transcripts.isEmpty(), yieldTo = stopForNext)
+                                enrich(batch, background, gaps, captionTexts, describe = !audioOnlyBatch, yieldTo = stopForNext)
                             } finally {
                                 withContext(NonCancellable + Dispatchers.IO) { batch.forEach(::cleanPrepared) }
                             }
@@ -608,11 +618,101 @@ internal class IndexCoordinator(
      * vector for the bytes with that hash, reused (with the import's OCR) only while the file
      * still has those bytes.
      */
-    private suspend fun prepare(meme: Meme, knownVector: FloatArray? = null, importedFor: String? = null): Prepared {
+    private fun sceneCacheDir(memeId: Long, hash: String): File =
+        File(context.cacheDir, "scene_cache/${memeId}_${hash.take(16)}")
+
+    private fun readCachedSceneFrames(memeId: Long, hash: String): Pair<List<String>, String>? {
+        if (hash.isBlank()) return null
+        val dir = sceneCacheDir(memeId, hash)
+        if (!dir.isDirectory) return null
+        val files = dir.listFiles { f -> f.isFile && f.name.startsWith("upright_scene_") && f.length() > 0L }
+            ?.sortedBy { it.name }
+            ?: return null
+        if (files.isEmpty()) return null
+        val uris = files.map { Uri.fromFile(it).toString() }
+        val rep = File(dir, "rep.txt").takeIf(File::isFile)?.readText()?.trim().orEmpty()
+        val validRep = rep.takeIf { it in uris } ?: uris.first()
+        return uris to validRep
+    }
+
+    private fun saveSceneFramesCache(memeId: Long, hash: String, distinctFrames: List<String>, repFrame: String) {
+        if (hash.isBlank() || distinctFrames.isEmpty()) return
+        runCatching {
+            // Prune any older hash cache for this memeId first
+            File(context.cacheDir, "scene_cache").listFiles { f -> f.isDirectory && f.name.startsWith("${memeId}_") }
+                ?.forEach { it.deleteRecursively() }
+            val dir = sceneCacheDir(memeId, hash).apply { mkdirs() }
+            val selected = LinkedHashSet<String>()
+            distinctFrames.take(3).forEach { selected += it }
+            if (repFrame.isNotBlank()) selected += repFrame
+            var mappedRep = ""
+            for ((idx, uriStr) in selected.withIndex()) {
+                val src = Uri.parse(uriStr).path?.let(::File) ?: continue
+                if (!src.isFile) continue
+                val dst = File(dir, "upright_scene_$idx.jpg")
+                src.copyTo(dst, overwrite = true)
+                val dstUri = Uri.fromFile(dst).toString()
+                if (uriStr == repFrame || mappedRep.isEmpty()) mappedRep = dstUri
+            }
+            if (mappedRep.isNotBlank()) File(dir, "rep.txt").writeText(mappedRep)
+        }
+    }
+
+    private suspend fun prepare(
+        meme: Meme,
+        knownVector: FloatArray? = null,
+        importedFor: String? = null,
+        extractFrames: Boolean = true,
+        requireSource: Boolean = true,
+    ): Prepared {
+        // Fast path for caption / DINO backfill on already-indexed videos: reuse the CLIP-deduplicated
+        // 768px scene JPEGs from indexing without re-copying a 100 MB MP4 from SAF or spinning MediaCodec!
+        if (knownVector != null && importedFor == null && extractFrames && !requireSource && meme.contentHash.isNotBlank()) {
+            readCachedSceneFrames(meme.id, meme.contentHash)?.let { (cachedFrames, cachedRep) ->
+                return Prepared(
+                    meme = meme,
+                    source = File(context.cacheDir, "index_work/.nostage_${meme.id}"),
+                    hash = meme.contentHash,
+                    image = knownVector,
+                    frames = cachedFrames,
+                    temporaryFrames = emptyList(),
+                    thumbnail = meme.thumbUri,
+                    imported = false,
+                    representativeFrame = cachedRep,
+                )
+            }
+        }
+
         val (source, hash) = stage(meme.uri)
         val temporaryFrames = ArrayList<File>()
         try {
             val reused = knownVector?.takeIf { importedFor == null || importedFor == hash }
+            // Audio-only speech batches only need the staged container; never spin video decoders or write JPEGs!
+            if (!extractFrames && reused != null) {
+                return Prepared(
+                    meme = meme,
+                    source = source,
+                    hash = hash,
+                    image = reused,
+                    frames = emptyList(),
+                    temporaryFrames = emptyList(),
+                    thumbnail = meme.thumbUri,
+                )
+            }
+            if (reused != null && importedFor == null) {
+                readCachedSceneFrames(meme.id, hash)?.let { (cachedFrames, cachedRep) ->
+                    return Prepared(
+                        meme = meme,
+                        source = source,
+                        hash = hash,
+                        image = reused,
+                        frames = cachedFrames,
+                        temporaryFrames = emptyList(),
+                        thumbnail = meme.thumbUri.ifBlank { if (meme.kind == "video") files.thumbnail(meme.copy(uri = Uri.fromFile(source).toString())) else meme.uri },
+                        representativeFrame = cachedRep,
+                    )
+                }
+            }
             // The hash above covers the original bytes; the repair only touches this private copy.
             if (meme.kind == "video") Mp4Repair.zeroCttsFlags(source)
             val staged = meme.copy(uri = Uri.fromFile(source).toString())
@@ -625,14 +725,12 @@ internal class IndexCoordinator(
                 val file = Uri.parse(uri).path?.let(::File) ?: continue
                 if (file.canonicalPath.startsWith(cacheRoot)) temporaryFrames += file
             }
-            // The models read what the original app gave them, a 768-px-wide JPEG of each frame, so
-            // its exports and teachings stay comparable; WebP, GIF and HEIF, which the native decoder
-            // cannot read, then index like any other image.
+            // Named `upright_*.jpg` so NativeInferenceEngine.recognize skips MemeTextDetector's redundant JPEG re-encode.
             val workDir = File(context.cacheDir, "index_work")
             val inputs = ArrayList<String>(candidates.size)
             for (uri in if (reused != null) candidates.take(3) else candidates) {
                 currentCoroutineContext().ensureActive()
-                val input = File(workDir, "${UUID.randomUUID()}.jpg")
+                val input = File(workDir, "upright_${UUID.randomUUID()}.jpg")
                 temporaryFrames += input
                 withContext(Dispatchers.IO) { MediaIoUtils.writeModelInputJpeg(context, Uri.parse(uri), input) }
                 inputs += Uri.fromFile(input).toString()
@@ -640,7 +738,6 @@ internal class IndexCoordinator(
             val frames = ArrayList<String>(inputs.size)
             val vectors = ArrayList<FloatArray>(inputs.size)
             if (reused != null) {
-                // Without the image model there is nothing to compare frames with, so look-alikes go by their pixels.
                 frames += if (meme.kind == "video") withContext(Dispatchers.IO) { FrameLikeness.distinct(inputs) } else inputs
                 vectors += reused
             } else {
@@ -689,6 +786,9 @@ internal class IndexCoordinator(
                 frames[bestIdx]
             } else {
                 frames.firstOrNull().orEmpty()
+            }
+            if (reused == null && meme.kind == "video" && frames.isNotEmpty()) {
+                withContext(Dispatchers.IO) { saveSceneFramesCache(meme.id, hash, frames, repFrame) }
             }
             val thumbnail = if (meme.kind == "video") files.thumbnail(staged) else meme.uri
             return Prepared(
@@ -851,10 +951,10 @@ internal class IndexCoordinator(
                 }
             }
         }
-        if (store.setting("visual.enabled") == "1" && "visual" !in gaps) {
+        if (describe && store.setting("visual.enabled") == "1" && "visual" !in gaps) {
             for (item in items) {
                 if (powerBlock(background) != null || interactive || yieldTo()) break
-                if (store.vectors(item.meme.id)?.visual != null) continue
+                if (item.frames.isEmpty() || store.vectors(item.meme.id)?.visual != null) continue
                 mutableProgress.value = WorkProgress("visual embedding", detail = item.meme.name, running = true, memeId = item.meme.id)
                 val dinoFrame = item.representativeFrame.ifBlank { item.frames.first() }
                 try { store.setVisual(item.meme.id, engine.embedVisual(dinoFrame), ModelRegistry.DINOV2_MODEL_FINGERPRINT) }
@@ -866,6 +966,19 @@ internal class IndexCoordinator(
                         break
                     }
                     store.addError(item.meme.name, "visual", failure.message ?: "Visual embedding failed")
+                }
+            }
+        }
+        if (describe) {
+            val visionOn = store.setting("vision.enabled") == "1"
+            val visualOn = store.setting("visual.enabled") == "1"
+            for (item in items) {
+                if (item.meme.kind != "video" || item.hash.isBlank()) continue
+                val latest = store.meme(item.meme.id) ?: continue
+                val visionSettled = !visionOn || latest.visionState != "pending"
+                val visualSettled = !visualOn || store.vectors(latest.id)?.visual != null
+                if (visionSettled && visualSettled) {
+                    withContext(Dispatchers.IO) { runCatching { sceneCacheDir(latest.id, item.hash).deleteRecursively() } }
                 }
             }
         }

@@ -107,6 +107,116 @@ object VideoFrameExtractor {
     }
   }
 
+  // Sweeps one MediaExtractor + one MediaCodec forward across sorted timestamps so an 8-frame
+  // video index doesn't spin up and tear down 8 separate hardware decoders from scratch.
+  fun extractMultiple(ctx: Context, source: String, secondsList: List<Double>): List<String> {
+    val targetsUs = secondsList.filter { it >= 0.0 }
+      .map { (it * 1_000_000.0).toLong() }
+      .distinct()
+      .sorted()
+    if (targetsUs.isEmpty()) return emptyList()
+    if (targetsUs.size == 1) return listOf(extract(ctx, source, secondsList.first { it >= 0.0 }))
+
+    val extractor = MediaExtractor()
+    val written = ArrayList<String>(targetsUs.size)
+    try {
+      if (source.startsWith("content://")) {
+        extractor.setDataSource(ctx, Uri.parse(source), null)
+      } else {
+        extractor.setDataSource(source.removePrefix("file://"))
+      }
+      var trackIndex = -1
+      var format: MediaFormat? = null
+      for (i in 0 until extractor.trackCount) {
+        val f = extractor.getTrackFormat(i)
+        val mime = f.getString(MediaFormat.KEY_MIME) ?: continue
+        if (mime.startsWith("video/")) {
+          trackIndex = i
+          format = f
+          break
+        }
+      }
+      if (trackIndex < 0 || format == null) throw IllegalStateException("no video track")
+      extractor.selectTrack(trackIndex)
+      val mime = format.getString(MediaFormat.KEY_MIME)!!
+
+      extractor.seekTo(targetsUs[0], MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
+      val codec = MediaCodec.createDecoderByType(mime)
+      try {
+        format.setInteger(
+          MediaFormat.KEY_COLOR_FORMAT,
+          MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible,
+        )
+        codec.configure(format, null, null, 0)
+        codec.start()
+
+        val deadline = System.nanoTime() + DEADLINE_NS * 2
+        val info = MediaCodec.BufferInfo()
+        var inputDone = false
+        var targetIdx = 0
+        var lastPath: String? = null
+        val jumpThresholdUs = 3_000_000L
+
+        while (targetIdx < targetsUs.size && System.nanoTime() < deadline) {
+          if (!inputDone) {
+            val inIdx = codec.dequeueInputBuffer(TIMEOUT_US)
+            if (inIdx >= 0) {
+              val buf = codec.getInputBuffer(inIdx)!!
+              val n = extractor.readSampleData(buf, 0)
+              if (n < 0) {
+                codec.queueInputBuffer(inIdx, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                inputDone = true
+              } else {
+                codec.queueInputBuffer(inIdx, 0, n, extractor.sampleTime, 0)
+                extractor.advance()
+              }
+            }
+          }
+          val outIdx = codec.dequeueOutputBuffer(info, TIMEOUT_US)
+          if (outIdx >= 0) {
+            val eos = (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0
+            if (info.size > 0 && info.presentationTimeUs >= targetsUs[targetIdx] - 25_000L) {
+              val image = codec.getOutputImage(outIdx)
+              val path = if (image != null) writeJpeg(ctx, image) else null
+              codec.releaseOutputBuffer(outIdx, false)
+              if (path != null) {
+                written += path
+                lastPath = path
+                while (targetIdx < targetsUs.size && targetsUs[targetIdx] <= info.presentationTimeUs + 25_000L) {
+                  targetIdx++
+                }
+                if (targetIdx < targetsUs.size && !eos && targetsUs[targetIdx] - info.presentationTimeUs > jumpThresholdUs) {
+                  extractor.seekTo(targetsUs[targetIdx], MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
+                  codec.flush()
+                  inputDone = false
+                }
+              }
+            } else if (eos && info.size > 0 && written.isEmpty()) {
+              val image = codec.getOutputImage(outIdx)
+              val path = if (image != null) writeJpeg(ctx, image) else null
+              codec.releaseOutputBuffer(outIdx, false)
+              if (path != null) written += path
+              break
+            } else {
+              codec.releaseOutputBuffer(outIdx, false)
+            }
+            if (eos) break
+          }
+        }
+        if (written.isEmpty() && lastPath != null) written += lastPath
+        return written
+      } finally {
+        runCatching { codec.stop() }
+        codec.release()
+      }
+    } catch (e: Throwable) {
+      written.forEach { File(it.removePrefix("file://")).delete() }
+      throw e
+    } finally {
+      extractor.release()
+    }
+  }
+
   // Seek to the sync frame at/before tUs and decode a single frame with a
   // fresh codec (decoders don't rewind cleanly). Returns the written JPEG's
   // file:// path plus the frame's mean luma.
