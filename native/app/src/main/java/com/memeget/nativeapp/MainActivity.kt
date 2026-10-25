@@ -22,12 +22,14 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.CancellationException
+import com.memeget.nativeapp.storage.LinkResolver
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     private val graph get() = (application as MemegetApplication).graph
     private var intakeError by mutableStateOf<String?>(null)
+    private var incomingSearchQuery by mutableStateOf<String?>(null)
     private var handled = false
     private var notificationsAsked = false
     private val notificationPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
@@ -38,7 +40,17 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         handled = savedInstanceState?.getBoolean("intakeHandled") ?: false
         setContent {
-            MemegetApp(graph.store, graph.files, graph.engine, graph.knowledge, graph.cloud, graph.coordinator, graph.backups)
+            MemegetApp(
+                store = graph.store,
+                files = graph.files,
+                engine = graph.engine,
+                knowledge = graph.knowledge,
+                cloud = graph.cloud,
+                coordinator = graph.coordinator,
+                backups = graph.backups,
+                incomingSearchQuery = incomingSearchQuery,
+                onIncomingSearchConsumed = { incomingSearchQuery = null },
+            )
             intakeError?.let { message ->
                 AlertDialog(
                     onDismissRequest = { intakeError = null },
@@ -80,7 +92,24 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun receive(incoming: Intent?) {
-        if (incoming == null || incoming.action !in setOf(Intent.ACTION_SEND, Intent.ACTION_SEND_MULTIPLE)) return
+        if (incoming == null) return
+        if (incoming.action == Intent.ACTION_PROCESS_TEXT) {
+            val selected = incoming.getCharSequenceExtra(Intent.EXTRA_PROCESS_TEXT)?.toString()?.trim().orEmpty()
+            handled = true
+            if (selected.isNotEmpty()) {
+                incomingSearchQuery = selected.take(400)
+            }
+            return
+        }
+        if (incoming.action !in setOf(Intent.ACTION_SEND, Intent.ACTION_SEND_MULTIPLE)) return
+        if (incoming.action == Intent.ACTION_SEND && incoming.type == "text/plain" && incoming.data == null && !incoming.hasExtra(Intent.EXTRA_STREAM)) {
+            val sharedText = incoming.getStringExtra(Intent.EXTRA_TEXT)?.trim().orEmpty()
+            if (sharedText.isNotEmpty() && LinkResolver.extractUrl(sharedText) == null) {
+                handled = true
+                incomingSearchQuery = sharedText.take(400)
+                return
+            }
+        }
         lifecycleScope.launch {
             try {
                 val before = graph.store.countAll()

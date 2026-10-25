@@ -77,13 +77,22 @@ internal class NativeInferenceEngine(
         }
     }
 
+    // Keeps Master's last 64 reaction queries hot in RAM so re-searching "cooked" or backspacing never reloads 254 MB on CPU.
+    private val queryVectorCache = object : LinkedHashMap<String, FloatArray>(64, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, FloatArray>?): Boolean = size > 64
+    }
+
     override suspend fun embedText(text: String): FloatArray = withContext(Dispatchers.Default) {
         currentCoroutineContext().ensureActive()
+        val cacheKey = text.trim().lowercase(java.util.Locale.ROOT).replace(Regex("\\s+"), " ")
+        if (cacheKey.isNotEmpty() && cacheKey.length <= 160) {
+            synchronized(queryVectorCache) { queryVectorCache[cacheKey] }?.let { return@withContext it.copyOf() }
+        }
         val textModelFile = ensureModel(ModelRegistry.S2_TEXT)
         val tokenizerFile = ensureModel(ModelRegistry.S2_TOKENIZER)
         val tokenIds = clipTokenizer(tokenizerFile).encode(text)
 
-        engineMutex.withLock {
+        val computed = engineMutex.withLock {
             val handle = activeHandle()
             NativeBridge.nativeResetCancel(handle)
 
@@ -97,6 +106,10 @@ internal class NativeInferenceEngine(
             }
             vec
         }
+        if (cacheKey.isNotEmpty() && cacheKey.length <= 160) {
+            synchronized(queryVectorCache) { queryVectorCache[cacheKey] = computed.copyOf() }
+        }
+        computed
     }
 
     @Volatile private var loadedClipTokenizer: Pair<String, ClipTokenizer>? = null

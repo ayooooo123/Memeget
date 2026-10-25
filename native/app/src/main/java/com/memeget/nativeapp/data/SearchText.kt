@@ -6,7 +6,14 @@ internal object SearchText {
 
     private const val CONTEXT_CONCEPT_LIMIT = 8
     private const val CONTEXT_PHRASE_LIMIT = 24
+    private val WORD_REGEX = Regex("[a-z0-9]+")
+    private val APOSTROPHE_REGEX = Regex("['\u2019]")
 
+    // Dry little filler words we strip out of multi-word queries so 2-letter filth like "ai", "tv", "fr", "gm", and "up" stays wet and live on both passes.
+    private val MULTI_WORD_STOPWORDS = setOf(
+        "a", "i", "an", "as", "at", "be", "by", "do", "go", "he", "if",
+        "in", "is", "it", "me", "my", "of", "on", "or", "so", "to", "us", "we", "the",
+    )
     fun cleanTerm(term: String): String {
         return term.trim().lowercase().replace(Regex("\\s+"), " ")
     }
@@ -57,6 +64,22 @@ internal object SearchText {
         return context.joinToString(" ")
     }
 
+    fun mergeOcrTexts(primaryOcr: String, vlmOcr: String): String {
+        val p = primaryOcr.trim()
+        val v = vlmOcr.trim()
+        if (v.isEmpty()) return p
+        if (p.isEmpty()) return v
+        val normP = phraseKey(p)
+        val extraLines = v.lineSequence()
+            .map { it.trim() }
+            .filter { line ->
+                val key = phraseKey(line)
+                key.isNotEmpty() && !containsPhrase(normP, key)
+            }
+            .toList()
+        return if (extraLines.isEmpty()) p else "$p\n${extraLines.joinToString("\n")}"
+    }
+
     fun assembleSearchText(
         ocr: String,
         name: String,
@@ -66,11 +89,16 @@ internal object SearchText {
         extraTerms: String,
         cloudCaption: String = "",
         cloudTerms: String = "",
+        vlmOcr: String = "",
     ): String {
         val labels = tagLabels.joinToString("") { " $it" }
         val labelContext = classificationContextTerms(tags = tagLabels)
         return buildString {
             append(ocr)
+            if (vlmOcr.isNotBlank()) {
+                append(' ')
+                append(vlmOcr)
+            }
             append(' ')
             append(name)
             append(' ')
@@ -117,10 +145,33 @@ internal object SearchText {
         return paddedHaystack.contains(paddedQuery)
     }
 
+    fun wordTokenSet(text: String): Set<String> {
+        if (text.isBlank()) return emptySet()
+        val lower = text.lowercase()
+        val out = HashSet<String>()
+        for (m in WORD_REGEX.findAll(lower)) {
+            out.add(m.value)
+        }
+        if (lower.indexOf('\'') >= 0 || lower.indexOf('\u2019') >= 0) {
+            val collapsed = APOSTROPHE_REGEX.replace(lower, "")
+            for (m in WORD_REGEX.findAll(collapsed)) {
+                out.add(m.value)
+            }
+        }
+        return out
+    }
+
     fun searchTermsForText(queryText: String, keepShort: Boolean = false): List<String> {
-        return queryText.lowercase()
-            .split(Regex("\\s+"))
-            .map { it.trim() }
-            .filter { if (keepShort) it.isNotEmpty() else it.length > 2 }
+        if (queryText.isBlank()) return emptyList()
+        val collapsed = APOSTROPHE_REGEX.replace(queryText.lowercase(), "")
+        val minLen = if (keepShort) 1 else 2
+        val raw = WORD_REGEX.findAll(collapsed)
+            .map { it.value }
+            .filter { it.length >= minLen }
+            .distinct()
+            .toList()
+        if (raw.size <= 1 || keepShort) return raw
+        val meaningful = raw.filter { it !in MULTI_WORD_STOPWORDS }
+        return meaningful.ifEmpty { raw }
     }
 }

@@ -11,6 +11,7 @@ import com.memeget.nativeapp.knowledge.EntityRetrieve
 import com.memeget.nativeapp.knowledge.LearnCore
 import com.memeget.nativeapp.knowledge.LookalikeVote
 import com.memeget.nativeapp.knowledge.NegativeAnchorDef
+import com.memeget.nativeapp.knowledge.Recognition
 import com.memeget.nativeapp.knowledge.Titles
 import kotlinx.coroutines.Dispatchers
 import com.memeget.nativeapp.inference.NativeBridge
@@ -37,12 +38,12 @@ internal class LocalKnowledge(
         // Shows stay out: the cloud question asks for a format or character, and a show's raw prompt score,
         // ambiguous between titles, would otherwise count as a confident local answer and skip escalation.
         val IDENTITY_CANDIDATE_CATEGORIES = setOf("format", "character", "person", "object", "topic")
+        val REACTION_FACET_CATEGORIES = setOf("emotion", "action", "situation", "tone", "setting", "object")
         /** Marks a tag that came from people's labels on a look-alike meme. */
         const val LOOKALIKE_SCORE_DOMAIN = "lookalike-cosine"
         private const val VECTOR_DIM = 512
         /** Broader template/character cluster cosine once 0.80 near-copy clusters are covered. */
         const val CLUSTER_MIN_COS = 0.68f
-
         /**
          * The queue after its first card was dealt with: [yes] true for "Yes" to an ask card's label,
          * false for "Not this", null for a skip or any other answer. A "Yes" leaves one fewer needed; once
@@ -339,8 +340,16 @@ internal class LocalKnowledge(
         } else {
             rawOpenTags
         }
-        // 1. Zero-shot prompt tags with anchor bias (used when open_vocab has no direct match)
-        val promptTags = if (openTags.isNotEmpty()) emptyList() else LearnCore.classifyPrompts(image, snapshot.labels, snapshot.negativeVecs)
+        // 1. Zero-shot prompt tags with anchor bias: full prompt set when open_vocab abstains,
+        //    plus high-confidence reaction/emotion/vibe facets even when open_vocab names an entity.
+        val allPromptTags = LearnCore.classifyPrompts(image, snapshot.labels, snapshot.negativeVecs)
+        val promptTags = if (openTags.isEmpty()) {
+            allPromptTags
+        } else {
+            allPromptTags.filter {
+                it.category.lowercase() in REACTION_FACET_CATEGORIES && it.score >= Recognition.RECOGNIZED_CONFIDENCE
+            }
+        }
         // 2. People's labels on look-alikes: copies of a labeled picture always; otherwise the vote
         // winner once its label has held up on held-out examples. Unproven labels stay suggestions.
         val index = snapshot.vote.index
@@ -354,11 +363,10 @@ internal class LocalKnowledge(
         val ocrTags = CuratedLabels.ocrTags(ocr)
 
         var visualMerged = if (openTags.isNotEmpty()) {
-            openTags + lookalike.values.toList()
+            openTags + promptTags + lookalike.values.toList()
         } else {
             LearnCore.mergeClassified(promptTags, lookalike.values.toList(), topK = 6)
         }
-        // 4. The meme's TV show or movie, carried once.
         val hasOpenTitle = openTags.any { Titles.isTitleCategory(it.category) }
         if (!hasOpenTitle) {
             snapshot.titles.identify(image, memeId)?.let { hit ->
@@ -392,7 +400,10 @@ internal class LocalKnowledge(
         for (t in tags) {
             val norm = TagMerge.normalizeTagLabel(t.label)
             terms.add(norm)
-            for (a in assocMap[norm].orEmpty()) {
+            for (w in norm.split(Regex("\\s+"))) {
+                if (w.isNotBlank()) terms.add(w)
+            }
+            for (a in assocMap[norm].orEmpty() + OpenVocabConcepts.parentAliasesFor(norm)) {
                 for (w in a.lowercase().split(Regex("\\s+"))) {
                     if (w.isNotBlank()) terms.add(w)
                 }
@@ -916,15 +927,14 @@ internal class LocalKnowledge(
                     // Machine tags classification can't regenerate stay unless a nearby "not X" vetoes
                     // them; human-confirmed tags always stay. Recomputed sources are replaced outright.
                     val vetoed = findVetoedLabelsFromMap(vectors.image, snapshot.negExemplarsByLabel)
-                    val hasOpen = freshTags.any { it.source == "open_vocab" }
                     val kept = meme.tags.filter {
-                        (if (hasOpen) TagMerge.isHumanTag(it) || it.source == "manual" else TagMerge.survivesReclassification(it)) &&
+                        TagMerge.survivesReclassification(it) &&
                             (TagMerge.isHumanTag(it) || !vetoed.contains(TagMerge.normalizeTagLabel(it.label)))
                     }.map { tag ->
                         if (!TagMerge.isHumanTag(tag) || Titles.isTitleCategory(tag.category)) tag
                         else snapshot.titles.titleNamed(tag.label)?.let { tag.copy(category = it.category) } ?: tag
                     }
-                    val merged = TagMerge.mergeDurableTags(freshTags + kept, capAuto = if (hasOpen) 12 else 6)
+                    val merged = TagMerge.mergeDurableTags(freshTags + kept)
                     val terms = extraTermsFor(merged, snapshot.assocMap)
                     // Most memes come out unchanged on a later pass; skipping their writes is what lets a slow
                     // phone finish one. Compared as the store keeps them: without the machine tags and search

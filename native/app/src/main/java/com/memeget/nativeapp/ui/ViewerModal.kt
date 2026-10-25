@@ -474,6 +474,7 @@ internal fun ViewerModal(
                                         scope.launch {
                                             try {
                                                 files.copyToClipboard(currentMeme.uri, currentMeme.name)
+                                                runCatching { store.recordCopy(currentMeme.id) }
                                                 val message = if (currentMeme.kind == "video") {
                                                     "Video copied — paste in apps that accept videos"
                                                 } else {

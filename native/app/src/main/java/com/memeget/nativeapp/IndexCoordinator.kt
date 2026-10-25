@@ -90,7 +90,27 @@ internal class IndexCoordinator(
     private val retagRequests = AtomicLong()
     private val retagCovered = AtomicLong()
     @Volatile private var interactive = false
-    fun setInteractive(value: Boolean) { interactive = value }
+    /** Set when [setInteractive] cancels an in-flight enrichment call; cleared once the session handles it. */
+    @Volatile private var interactiveInterrupted = false
+    /** Set when [setInteractive] leaves interactive mode while a session still holds [session]. */
+    @Volatile private var resumeAfterSession = false
+    fun setInteractive(value: Boolean) {
+        val was = interactive
+        interactive = value
+        if (value) {
+            resumeAfterSession = false
+            if (mutableProgress.value.stage in setOf("local description", "local transcription", "visual embedding")) {
+                interactiveInterrupted = true
+                engine.cancel()
+            }
+        } else if (was) {
+            if (session.isLocked) {
+                resumeAfterSession = true
+            } else {
+                resumePending()
+            }
+        }
+    }
 
     /** Stop presses so far; a run started with untilDone ends at the first one after it started. */
     private val stopRequests = AtomicLong()
@@ -261,7 +281,7 @@ internal class IndexCoordinator(
     fun resumePending() {
         scope.launch {
             try {
-                if (store.pending(1).isNotEmpty()) runSession(background = true)
+                if (store.pending(1).isNotEmpty() || (charging() && remainingWork() > 0)) runSession(background = true)
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (failure: Exception) {
@@ -378,7 +398,12 @@ internal class IndexCoordinator(
                                     .filterNot { hint -> localTags.any { it.label.equals(hint.label, true) } }
                                 val tags = localTags + hints
                                 store.setContentHash(item.meme.id, item.hash)
-                                store.completeIndex(item.meme.id, LocalAnalysis(item.image, ocr, tags, terms), engine.primaryModel, item.thumbnail)
+                                store.completeIndex(
+                                    item.meme.id,
+                                    LocalAnalysis(item.image, ocr, tags, terms, item.sceneVectors),
+                                    engine.primaryModel,
+                                    item.thumbnail,
+                                )
                                 indexed += item
                                 completed++
                             } catch (cancelled: CancellationException) {
@@ -405,13 +430,13 @@ internal class IndexCoordinator(
 
                 // Already-indexed items need optional enrichment too. Captions only happen here, after the queue is
                 // indexed, and keep going until the session ends.
-                if (pause == null && SystemClock.elapsedRealtime() - started < limit && !interactive) {
+                if (pause == null && SystemClock.elapsedRealtime() - started < limit && !interactive && !resumeAfterSession) {
                     val vision = store.setting("vision.enabled") == "1"
                     val audio = store.setting("audio.enabled") == "1"
                     val visual = store.setting("visual.enabled") == "1"
                     if (vision || audio || visual) {
 
-                        while (SystemClock.elapsedRealtime() - started < limit && powerBlock(background) == null && !interactive) {
+                        while (SystemClock.elapsedRealtime() - started < limit && powerBlock(background) == null && !interactive && !resumeAfterSession) {
                             if (newMemesWaiting()) {
                                 // The batch this cut short goes back in the queue; failed items already left it.
                                 tried.clear()
@@ -512,9 +537,13 @@ internal class IndexCoordinator(
             } finally {
                 if (held) KeepAliveLease.release(context)
                 activeJob = null
+                interactiveInterrupted = false
                 mutableProgress.value = mutableProgress.value.copy(running = false, memeId = null)
+                val shouldResume = resumeAfterSession && !interactive
+                resumeAfterSession = false
                 session.unlock()
                 launchOwedRetag()
+                if (shouldResume) resumePending()
             }
         }
         return handOver
@@ -549,8 +578,9 @@ internal class IndexCoordinator(
         val frames: List<String>,
         val temporaryFrames: List<File>,
         val thumbnail: String,
-        /** Vector and OCR came from a collection import; text recognition is skipped. */
         val imported: Boolean = false,
+        val sceneVectors: List<FloatArray> = emptyList(),
+        val representativeFrame: String = frames.firstOrNull().orEmpty(),
     )
 
     /**
@@ -625,8 +655,54 @@ internal class IndexCoordinator(
                 }
             }
             val pooled = if (vectors.size == 1) vectors[0] else pool(vectors)
+            val sceneVectors = ArrayList<FloatArray>()
+            if (vectors.size > 1) {
+                sceneVectors.addAll(vectors)
+            } else if (meme.kind == "image" && reused == null && inputs.size == 1) {
+                val firstInputPath = Uri.parse(inputs[0]).path?.let(::File)
+                val cropFiles = if (firstInputPath != null) {
+                    withContext(Dispatchers.IO) { MediaIoUtils.writeAspectSquareCrops(firstInputPath, workDir) }
+                } else emptyList()
+                if (cropFiles.isNotEmpty()) {
+                    temporaryFrames += cropFiles
+                    sceneVectors += pooled
+                    for (crop in cropFiles) {
+                        currentCoroutineContext().ensureActive()
+                        val cropVec = engine.embedImage(Uri.fromFile(crop).toString())
+                        if (cropVec.size == 512 && cropVec.all(Float::isFinite) && sceneVectors.none { dot(it, cropVec) >= 0.985f }) {
+                            sceneVectors += cropVec
+                        }
+                    }
+                    if (sceneVectors.size <= 1) sceneVectors.clear()
+                }
+            }
+            val repFrame = if (frames.size > 1 && vectors.size == frames.size) {
+                var bestIdx = 0
+                var bestSim = -2f
+                for (idx in vectors.indices) {
+                    val sim = dot(vectors[idx], pooled) + if (idx > 0) 0.005f else 0f
+                    if (sim > bestSim) {
+                        bestSim = sim
+                        bestIdx = idx
+                    }
+                }
+                frames[bestIdx]
+            } else {
+                frames.firstOrNull().orEmpty()
+            }
             val thumbnail = if (meme.kind == "video") files.thumbnail(staged) else meme.uri
-            return Prepared(meme, source, hash, pooled, frames, temporaryFrames, thumbnail, imported = importedFor != null && reused != null)
+            return Prepared(
+                meme = meme,
+                source = source,
+                hash = hash,
+                image = pooled,
+                frames = frames,
+                temporaryFrames = temporaryFrames,
+                thumbnail = thumbnail,
+                imported = importedFor != null && reused != null,
+                sceneVectors = sceneVectors,
+                representativeFrame = repFrame,
+            )
         } catch (failure: Throwable) {
             withContext(NonCancellable + Dispatchers.IO) {
                 source.delete()
@@ -676,7 +752,7 @@ internal class IndexCoordinator(
                         descriptions.flatMap { it.tags }.distinctBy { it.label },
                     )
                 } catch (failure: Exception) {
-                    // A native call stopped by Stop or the session limit can fail as an ordinary
+                    // A native call stopped by Stop, interactive pause, or the session limit can fail as an ordinary
                     // exception. Each path writes the meme's state before it drops the in-flight record, so a kill in
                     // between still leaves the record for the next session to find.
                     if (failure is CancellationException || !currentCoroutineContext().isActive) {
@@ -686,6 +762,14 @@ internal class IndexCoordinator(
                         }
                         throw failure as? CancellationException
                             ?: CancellationException("Local description stopped").apply { initCause(failure) }
+                    }
+                    if (interactive || interactiveInterrupted) {
+                        interactiveInterrupted = false
+                        withContext(NonCancellable + Dispatchers.IO) {
+                            store.setCaption(meme.id, meme.caption, emptyList(), null, "pending")
+                            store.setSetting(VISION_IN_FLIGHT, "")
+                        }
+                        break
                     }
                     if (failure is ModelUnavailableException) {
                         // Not this meme's fault: it goes back to the queue, and captions wait for a later session.
@@ -704,6 +788,7 @@ internal class IndexCoordinator(
                 // Keep each caption as soon as it exists, so a later stop cannot discard finished work. Its search
                 // vector comes at the end of the session: the text model would unload the caption model.
                 withContext(NonCancellable) {
+                    if (result.text.isNotBlank()) store.setVlmOcr(meme.id, result.text)
                     store.setCaption(meme.id, result.caption, result.tags, null)
                     store.setSetting(VISION_IN_FLIGHT, "")
                 }
@@ -739,6 +824,14 @@ internal class IndexCoordinator(
                         throw failure as? CancellationException
                             ?: CancellationException("Local transcription stopped").apply { initCause(failure) }
                     }
+                    if (interactive || interactiveInterrupted) {
+                        interactiveInterrupted = false
+                        withContext(NonCancellable + Dispatchers.IO) {
+                            store.setAudioState(meme.id, "pending")
+                            store.setSetting(AUDIO_IN_FLIGHT, "")
+                        }
+                        break
+                    }
                     if (failure is ModelUnavailableException) {
                         withContext(NonCancellable + Dispatchers.IO) {
                             store.setAudioState(meme.id, "pending")
@@ -763,10 +856,15 @@ internal class IndexCoordinator(
                 if (powerBlock(background) != null || interactive || yieldTo()) break
                 if (store.vectors(item.meme.id)?.visual != null) continue
                 mutableProgress.value = WorkProgress("visual embedding", detail = item.meme.name, running = true, memeId = item.meme.id)
-                try { store.setVisual(item.meme.id, engine.embedVisual(item.frames.first()), ModelRegistry.DINOV2_MODEL_FINGERPRINT) }
+                val dinoFrame = item.representativeFrame.ifBlank { item.frames.first() }
+                try { store.setVisual(item.meme.id, engine.embedVisual(dinoFrame), ModelRegistry.DINOV2_MODEL_FINGERPRINT) }
                 catch (cancelled: CancellationException) { throw cancelled }
                 catch (unavailable: ModelUnavailableException) { gaps.note("visual", unavailable); break }
                 catch (failure: Exception) {
+                    if (interactive || interactiveInterrupted) {
+                        interactiveInterrupted = false
+                        break
+                    }
                     store.addError(item.meme.name, "visual", failure.message ?: "Visual embedding failed")
                 }
             }
@@ -794,7 +892,11 @@ internal class IndexCoordinator(
         for (id in store.captionsWithoutVectors(engine.primaryModel, CAPTION_VECTOR_BACKLOG)) {
             if (id in due) continue
             val meme = store.meme(id) ?: continue
-            due[id] = meme.caption to listOf(meme.caption, meme.tags.filter { it.source == "vision" }.joinToString(" ") { it.label }).joinToString(" ").trim()
+            due[id] = meme.caption to listOf(
+                meme.caption,
+                meme.vlmOcr,
+                meme.tags.filter { it.source == "vision" }.joinToString(" ") { it.label },
+            ).filter { it.isNotBlank() }.joinToString(" ").trim()
         }
         for ((id, texts) in due) {
             currentCoroutineContext().ensureActive()

@@ -79,7 +79,11 @@ internal object TagMerge {
             else auto.add(t)
         }
 
-        val effectiveCap = capAuto ?: if (auto.any { it.source.lowercase() == "open_vocab" }) 12 else 6
+        val effectiveCap = capAuto ?: when {
+            auto.any { it.source.lowercase() == "vision" } -> 18
+            auto.any { it.source.lowercase() == "open_vocab" } -> 12
+            else -> 6
+        }
         val sortedDurable = sortTags(durable)
         val sortedAuto = sortTags(auto).take(effectiveCap)
         return sortedDurable + sortedAuto

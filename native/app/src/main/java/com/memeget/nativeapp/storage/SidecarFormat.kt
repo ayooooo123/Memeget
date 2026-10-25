@@ -133,6 +133,7 @@ internal object SidecarFormat {
         obj.put("contentHash", m.contentHash)
         obj.put("modifiedAt", m.modifiedAt)
         obj.put("ocr", m.ocr)
+        if (m.vlmOcr.isNotBlank()) obj.put("vlmOcr", m.vlmOcr)
         obj.put("caption", m.caption)
         obj.put("transcript", m.transcript)
         obj.put("extraTerms", m.extraTerms)
@@ -141,7 +142,8 @@ internal object SidecarFormat {
         obj.put("cloudCaption", m.cloudCaption)
         obj.put("cloudTerms", m.cloudTerms)
         obj.put("legacyImported", m.legacyImported)
-
+        if (m.copyCount > 0) obj.put("copyCount", m.copyCount)
+        if (m.lastCopiedAt > 0L) obj.put("lastCopiedAt", m.lastCopiedAt)
         val tagsArray = JSONArray()
         for (t in m.tags) {
             val tagObj = JSONObject()
@@ -177,6 +179,9 @@ internal object SidecarFormat {
             if (v.visual != null) {
                 obj.put("visualEmbedding", encodeVector(v.visual))
                 obj.put("visualModel", v.visualModel)
+            }
+            if (v.scenes != null && v.scenes.isNotEmpty()) {
+                obj.put("sceneEmbeddings", encodeVector(v.scenes))
             }
         }
         return obj
@@ -257,9 +262,9 @@ internal object SidecarFormat {
             val imageVec = if (contentVerified) decodeVector(obj.optString("embedding")) else null
             val captionVec = if (contentVerified && caption.isNotBlank()) decodeVector(obj.optString("captionEmbedding")) else null
             val visualVec = if (contentVerified) decodeVector(obj.optString("visualEmbedding")) else null
+            val scenesVec = if (contentVerified) decodeVector(obj.optString("sceneEmbeddings")) else null
             val visualModel = obj.optString("visualModel")
             val model = obj.optString("model")
-
             val rejList = mutableListOf<String>()
             val rejArray = if (contentVerified) obj.optJSONArray("rejectedLabels") else null
             if (rejArray != null) {
@@ -279,7 +284,8 @@ internal object SidecarFormat {
                     caption = if (caption.isNotBlank()) captionVec else null,
                     visual = visualVec,
                     model = model,
-                    visualModel = visualModel
+                    visualModel = visualModel,
+                    scenes = scenesVec?.takeIf { it.size >= PRIMARY_DIM * 2 && it.size % PRIMARY_DIM == 0 },
                 )
             } else null
 
@@ -305,8 +311,10 @@ internal object SidecarFormat {
                 legacyImported = !contentVerified || obj.optBoolean("legacyImported", false),
                 cloudObservation = cloudObs,
                 rejectedLabels = rejList,
+                vlmOcr = obj.optString("vlmOcr"),
+                copyCount = obj.optInt("copyCount", 0).coerceAtLeast(0),
+                lastCopiedAt = obj.optLong("lastCopiedAt", 0L).coerceAtLeast(0L),
             )
-
             results.add(RestoredMeme(restoredMeme, vectorRecord))
         }
 

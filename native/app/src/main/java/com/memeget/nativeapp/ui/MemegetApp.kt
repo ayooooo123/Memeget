@@ -60,6 +60,8 @@ internal fun MemegetApp(
     cloud: CloudAssistant,
     coordinator: IndexCoordinator,
     backups: FolderBackupSync,
+    incomingSearchQuery: String? = null,
+    onIncomingSearchConsumed: () -> Unit = {},
 ) {
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
@@ -67,10 +69,19 @@ internal fun MemegetApp(
     var currentTab by remember { mutableStateOf(AppTab.Library) }
     var activeViewerMeme by remember { mutableStateOf<Meme?>(null) }
     var activeRemixMeme by remember { mutableStateOf<Meme?>(null) }
-    // Set by a tag tap in the viewer or Settings; the library clears it once applied, so the same tag twice works.
+    // Set by a tag tap in the viewer/Settings or by highlighting/sharing a social post from another app.
     var tagSearchRequest by remember { mutableStateOf<String?>(null) }
     var deletedMemeIds by remember { mutableStateOf<Set<Long>>(emptySet()) }
     val focusManager = LocalFocusManager.current
+    LaunchedEffect(incomingSearchQuery) {
+        if (!incomingSearchQuery.isNullOrBlank()) {
+            activeViewerMeme = null
+            activeRemixMeme = null
+            currentTab = AppTab.Library
+            tagSearchRequest = incomingSearchQuery
+            onIncomingSearchConsumed()
+        }
+    }
     fun selectTab(tab: AppTab) {
         // A search field focused on one tab must not bring its keyboard back on another.
         focusManager.clearFocus()
@@ -96,6 +107,7 @@ internal fun MemegetApp(
                 try {
                     cloud.recordTeaching(memeId, label, category ?: knowledge.knownCategory(label), positive, emptyList())
                     labelsChanged = true
+                    scope.launch { runCatching { knowledge.recordD1Teaching(memeId) } }
                     null
                 } catch (cancelled: CancellationException) {
                     throw cancelled
@@ -106,8 +118,25 @@ internal fun MemegetApp(
             if (failure != null) throw failure
         }
     }
-    LaunchedEffect(searching, activeRemixMeme) {
-        coordinator.setInteractive(searching || activeRemixMeme != null)
+    val removeAnswer: suspend (Long, String) -> Unit = remember(scope, store) {
+        { memeId, label ->
+            val failure = scope.async {
+                try {
+                    store.removeTag(memeId, label)
+                    labelsChanged = true
+                    scope.launch { runCatching { knowledge.recordD1Teaching(memeId) } }
+                    null
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (failure: Exception) {
+                    failure
+                }
+            }.await()
+            if (failure != null) throw failure
+        }
+    }
+    LaunchedEffect(searching, currentTab, activeRemixMeme) {
+        coordinator.setInteractive(searching || currentTab == AppTab.Label || activeRemixMeme != null)
     }
     DisposableEffect(coordinator) {
         onDispose { coordinator.setInteractive(false) }
@@ -116,6 +145,7 @@ internal fun MemegetApp(
     // Resume pending indexing after an activity cycle. The session belongs to the coordinator, so a configuration
     // change or closing the app's screen stops neither it nor a model download it started.
     LaunchedEffect(Unit) {
+        runCatching { knowledge.loadPersistedD1Head() }
         coordinator.resumePending()
     }
 
@@ -206,6 +236,7 @@ internal fun MemegetApp(
                             knowledge = knowledge,
                             onOpenViewer = { meme -> activeViewerMeme = meme },
                             saveAnswer = saveAnswer,
+                            removeAnswer = removeAnswer,
                         )
                     }
                     AppTab.Settings -> {
@@ -253,7 +284,10 @@ internal fun MemegetApp(
                     activeViewerMeme = null
                     deletedMemeIds = deletedMemeIds + id
                 },
-                onTaught = { labelsChanged = true },
+                onTaught = {
+                    labelsChanged = true
+                    scope.launch { runCatching { knowledge.recordD1Teaching(meme.id) } }
+                },
             )
         }
 

@@ -142,6 +142,7 @@ jobs:
           files: ${{ steps.apk.outputs.path }}
           make_latest: ${{ steps.meta.outputs.make_latest }}
           prerelease: ${{ steps.meta.outputs.prerelease }}
+          append_body: ${{ steps.meta.outputs.prerelease == 'false' }}
 
       # Artifact upload is a convenience copy (the only copy for branch runs).
       # Keep it short-lived and never let a hit artifact-storage quota fail the

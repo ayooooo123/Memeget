@@ -39,6 +39,11 @@ internal data class Meme(
     val analysisImported: Boolean = false,
     /** When the meme was added, or last indexed, in epoch milliseconds. */
     val indexedAt: Long = 0,
+    /** Verbatim on-screen text extracted by the local VLM captioner. */
+    val vlmOcr: String = "",
+    /** How many times Master copied this meme to fire off a reply, plus the last epoch ms it was used. */
+    val copyCount: Int = 0,
+    val lastCopiedAt: Long = 0,
 )
 
 /** How far each stage of the library's analysis has got. */
@@ -71,8 +76,8 @@ internal data class VectorRecord(
     val visual: FloatArray? = null,
     val model: String,
     val visualModel: String = "",
+    val scenes: FloatArray? = null,
 )
-
 internal data class Folder(val uri: String, val name: String, val addedAt: Long)
 internal data class Exemplar(
     val id: Long,
@@ -133,6 +138,7 @@ internal data class LocalAnalysis(
     val ocr: String,
     val tags: List<Tag>,
     val extraTerms: String,
+    val sceneImages: List<FloatArray> = emptyList(),
 )
 /** Analysis a collection export carried for exactly these media bytes. */
 internal data class ImportedAnalysis(
@@ -211,6 +217,13 @@ internal interface LibraryStore {
     fun allMemes(): Flow<Meme>
     suspend fun completeIndex(id: Long, analysis: LocalAnalysis, model: String, thumbUri: String)
     suspend fun setCaption(id: Long, caption: String, tags: List<Tag>, vector: FloatArray?, state: String = "done")
+    suspend fun setVlmOcr(id: Long, vlmOcr: String) {}
+    suspend fun setCaption(id: Long, caption: String, tags: List<Tag>, vector: FloatArray?, state: String, vlmOcr: String) {
+        if (vlmOcr.isNotBlank()) setVlmOcr(id, vlmOcr)
+        setCaption(id, caption, tags, vector, state)
+    }
+    suspend fun recordCopy(id: Long) {}
+    suspend fun recentlyCopied(limit: Int = 90, kind: String? = null): List<Meme> = emptyList()
     suspend fun setTranscript(id: Long, text: String, state: String = "done")
     /** Changes only a video's transcription state; its transcript stays as it is. */
     suspend fun setAudioState(id: Long, state: String)

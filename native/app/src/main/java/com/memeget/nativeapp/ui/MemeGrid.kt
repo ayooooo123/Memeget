@@ -67,6 +67,9 @@ internal fun MemeGrid(
     headerContent: (@Composable () -> Unit)? = null,
     emptyContent: (@Composable () -> Unit)? = null,
     gridState: LazyGridState = rememberLazyGridState(),
+    copiedMemeId: Long? = null,
+    copyingMemeId: Long? = null,
+    onQuickCopy: ((Meme) -> Unit)? = null,
 ) {
     val coroutineScope = rememberCoroutineScope()
     val showTopButton by remember {
@@ -132,9 +135,12 @@ internal fun MemeGrid(
                     selectionMode = selectionMode,
                     isSelected = isSelected,
                     analyzing = activeMemeId == meme.id,
+                    justCopied = copiedMemeId == meme.id,
+                    copying = copyingMemeId == meme.id,
                     onClick = { onItemClick(meme) },
                     onLongClick = { onItemLongClick(meme) },
-                    // The semantic pass reorders text matches about two seconds in: tiles glide to their new places
+                    onQuickCopy = onQuickCopy?.let { cb -> { cb(meme) } },
+                    // The semantic pass reorders text matches cleanly: tiles glide to their new places
                     // instead of jumping, and a deleted meme fades out.
                     modifier = Modifier.animateItem(),
                 )
@@ -197,8 +203,11 @@ internal fun MemeGridCell(
     selectionMode: Boolean,
     isSelected: Boolean,
     analyzing: Boolean,
+    justCopied: Boolean = false,
+    copying: Boolean = false,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
+    onQuickCopy: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
@@ -314,6 +323,40 @@ internal fun MemeGridCell(
                     color = if (!analyzing && meme.indexError.isNotBlank()) MaterialTheme.colorScheme.error else Color.White,
                     fontSize = 9.sp,
                 )
+            }
+        }
+
+        // 1-tap social-reply Copy pill in top-right when browsing/searching outside multi-select
+        if (!selectionMode && onQuickCopy != null && !meme.pending) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(5.dp)
+                    .size(26.dp)
+                    .clip(CircleShape)
+                    .background(if (justCopied) MemegetColors.Volt else Color.Black.copy(alpha = 0.68f))
+                    .border(
+                        width = 0.8.dp,
+                        color = if (justCopied) MemegetColors.Volt else Color.White.copy(alpha = 0.35f),
+                        shape = CircleShape,
+                    )
+                    .clickable(enabled = !copying) { onQuickCopy() },
+                contentAlignment = Alignment.Center,
+            ) {
+                if (copying) {
+                    CircularProgressIndicator(
+                        color = MemegetColors.Volt,
+                        modifier = Modifier.size(12.dp),
+                        strokeWidth = 1.5.dp,
+                    )
+                } else {
+                    Text(
+                        text = if (justCopied) "✓" else "⧉",
+                        color = if (justCopied) Color.Black else Color.White,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
             }
         }
 

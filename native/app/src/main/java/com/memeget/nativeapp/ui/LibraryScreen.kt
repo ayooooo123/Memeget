@@ -1,5 +1,6 @@
 package com.memeget.nativeapp
 
+import android.content.ClipboardManager
 import android.content.Context
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
@@ -69,11 +70,11 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import com.memeget.nativeapp.data.SocialReplyIntent
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
 
 private const val PAGE_SIZE = 90
-// Screen-only choices live outside the library database, so they never count as a library change.
 private const val UI_PREFS = "memeget_ui"
 private const val BANNER_DISMISSED = "libraryBannerDismissed"
 
@@ -111,7 +112,7 @@ internal fun LibraryScreen(
     var query by remember { mutableStateOf("") }
     var kindFilter by remember { mutableStateOf<String?>(null) } // null = all, "image", "video"
     var selectedTag by remember { mutableStateOf<String?>(null) }
-
+    var usedOnly by remember { mutableStateOf(false) }
     var memes by remember { mutableStateOf<List<Meme>>(emptyList()) }
     var hasMore by remember { mutableStateOf(true) }
     var isLoadingMore by remember { mutableStateOf(false) }
@@ -127,11 +128,13 @@ internal fun LibraryScreen(
     var folderCount by remember { mutableStateOf(0) }
     var taughtLabels by remember { mutableStateOf<List<String>>(emptyList()) }
     var libraryTags by remember { mutableStateOf<List<String>>(emptyList()) }
+    var usedCount by remember { mutableStateOf(0) }
+    var copiedMemeId by remember { mutableStateOf<Long?>(null) }
+    var copyingMemeId by remember { mutableStateOf<Long?>(null) }
 
     var isScanning by remember { mutableStateOf(false) }
     var relaxedFromKind by remember { mutableStateOf<String?>(null) }
     var loadingFirstPage by remember { mutableStateOf(false) }
-
     val onStartIndex: () -> Unit = {
         if (!isScanning) {
             isScanning = true
@@ -187,13 +190,15 @@ internal fun LibraryScreen(
     }
 
     // Refresh counts and labels on revision or mount
-    LaunchedEffect(revision) {
+    LaunchedEffect(revision, active) {
+        if (!active) return@LaunchedEffect
         withContext(Dispatchers.IO) {
             val count = store.count()
             val all = store.countAll()
             val folders = store.folders()
             val exemplars = store.exemplars()
             val tags = store.tagLabels()
+            val used = store.recentlyCopied(limit = 256).size
             val taught = exemplars.map { it.label }.distinct()
             withContext(Dispatchers.Main) {
                 totalCount = count
@@ -201,6 +206,8 @@ internal fun LibraryScreen(
                 folderCount = folders.size
                 taughtLabels = taught
                 libraryTags = tags
+                usedCount = used
+                if (used == 0 && usedOnly) usedOnly = false
             }
         }
     }
@@ -211,6 +218,7 @@ internal fun LibraryScreen(
             query = tagSearchRequest
             kindFilter = null
             selectedTag = null
+            usedOnly = false
             onTagSearchApplied()
         }
     }
@@ -233,13 +241,15 @@ internal fun LibraryScreen(
 
     // A library revision must not collapse the pages the user has already loaded.
     // Reuse unchanged row objects so a metadata write does not invalidate every cell.
-    LaunchedEffect(query, kindFilter, selectedTag, revision) {
+    LaunchedEffect(query, kindFilter, selectedTag, usedOnly, revision, active) {
+        if (!active) return@LaunchedEffect
         resultGeneration++
         val generation = resultGeneration
         loadInFlight = true
         pageJob?.cancel()
         isLoadingMore = false
-        val key = Triple(query.trim(), kindFilter, selectedTag)
+        val effectiveTag = if (usedOnly) "__USED__" else selectedTag
+        val key = Triple(query.trim(), kindFilter, effectiveTag)
         userSearching = resultKey != key && key.first.isNotEmpty()
         val previous = if (resultKey == key) memes else emptyList()
         val wanted = maxOf(PAGE_SIZE, previous.size)
@@ -270,7 +280,7 @@ internal fun LibraryScreen(
             val hits = ArrayList<SearchHit>(wanted + 1)
             var cursor: SearchCursor? = null
             while (hits.size <= wanted) {
-                val page = store.search(key.first, vector, effectiveKind, key.third, minOf(PAGE_SIZE, wanted + 1 - hits.size), cursor)
+                val page = store.search(key.first, vector, effectiveKind, selectedTag, minOf(PAGE_SIZE, wanted + 1 - hits.size), cursor)
                 hits.addAll(page)
                 if (page.isEmpty()) break
                 val last = page.last()
@@ -282,27 +292,34 @@ internal fun LibraryScreen(
             Triple(kept.map { it.meme }, keptCursor, more)
         }
         try {
-            delay(120)
             if (key.first.isEmpty()) {
                 val (rows, more) = withContext(Dispatchers.IO) {
-                    val loaded = ArrayList<Meme>(wanted + 1)
-                    var cursor: PageCursor? = null
-                    while (loaded.size <= wanted) {
-                        val page = store.page(minOf(PAGE_SIZE, wanted + 1 - loaded.size), cursor, key.second, key.third)
-                        loaded.addAll(page)
-                        if (page.isEmpty()) break
-                        val last = page.last()
-                        cursor = PageCursor(last.modifiedAt, last.id)
+                    if (usedOnly) {
+                        val usedRows = store.recentlyCopied(limit = minOf(256, wanted + 1), kind = key.second)
+                        if (usedRows.size > wanted) usedRows.subList(0, wanted).toList() to true else usedRows to false
+                    } else {
+                        val loaded = ArrayList<Meme>(wanted + 1)
+                        var cursor: PageCursor? = null
+                        while (loaded.size <= wanted) {
+                            val page = store.page(minOf(PAGE_SIZE, wanted + 1 - loaded.size), cursor, key.second, selectedTag)
+                            loaded.addAll(page)
+                            if (page.isEmpty()) break
+                            val last = page.last()
+                            cursor = PageCursor(last.modifiedAt, last.id)
+                        }
+                        if (loaded.size > wanted) loaded.subList(0, wanted).toList() to true else loaded to false
                     }
-                    if (loaded.size > wanted) loaded.subList(0, wanted).toList() to true else loaded to false
                 }
                 publish(rows, more)
             } else {
+                // Instant 0ms lexical + social-slang pass from the resident RAM index; debounce only the neural text tower.
                 val lexical = searchWindow(null, searchKind)
                 searchCursor = lexical.second
                 publish(lexical.first, lexical.third)
                 val vector = queryVector ?: try {
-                    engine.embedText(key.first)
+                    delay(75)
+                    val distilled = SocialReplyIntent.distill(key.first)
+                    engine.embedText(distilled.embedText)
                 } catch (failure: Exception) {
                     if (failure is CancellationException) throw failure
                     searchError = "Text matches shown; semantic search unavailable: ${failure.message}"
@@ -465,10 +482,13 @@ internal fun LibraryScreen(
         ) {
             OutlinedTextField(
                 value = query,
-                onValueChange = { query = it },
+                onValueChange = {
+                    query = it
+                    if (it.isNotBlank() && usedOnly) usedOnly = false
+                },
                 placeholder = {
                     Text(
-                        text = if (totalCount > 0) "Search $totalCount memes by vibe, tag, text..." else "Search memes...",
+                        text = if (totalCount > 0) "Search vibe, slang, quote, or paste post…" else "Search memes…",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MemegetColors.TextMuted,
                     )
@@ -487,6 +507,26 @@ internal fun LibraryScreen(
                             modifier = Modifier.size(16.dp),
                             strokeWidth = 2.dp,
                         )
+                    } else {
+                        IconButton(onClick = {
+                            val clip = (context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager)
+                                ?.primaryClip
+                                ?.takeIf { it.itemCount > 0 }
+                                ?.getItemAt(0)
+                                ?.coerceToText(context)
+                                ?.toString()
+                                ?.trim()
+                                .orEmpty()
+                            if (clip.isNotBlank()) {
+                                usedOnly = false
+                                selectedTag = null
+                                query = clip.take(400)
+                            } else {
+                                Toast.makeText(context, "Copy a post or reply text first to match memes", Toast.LENGTH_SHORT).show()
+                            }
+                        }) {
+                            Text("📋", fontSize = 14.sp)
+                        }
                     }
                 },
                 singleLine = true,
@@ -511,6 +551,21 @@ internal fun LibraryScreen(
             horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            // Battle-tested replies Master actually copies & fires online
+            if (usedCount > 0 || usedOnly) {
+                FilterChip(
+                    label = if (usedCount > 0) "⚡ Used ($usedCount)" else "⚡ Used",
+                    active = usedOnly,
+                    onClick = {
+                        usedOnly = !usedOnly
+                        if (usedOnly) {
+                            selectedTag = null
+                            query = ""
+                        }
+                    },
+                )
+            }
+
             // Media kind chips
             FilterChip(
                 label = "▦ Images",
@@ -526,7 +581,6 @@ internal fun LibraryScreen(
                     kindFilter = if (kindFilter == "video") null else "video"
                 },
             )
-
             if (taughtLabels.isNotEmpty() || libraryTags.isNotEmpty()) {
                 Box(
                     modifier = Modifier
@@ -545,6 +599,7 @@ internal fun LibraryScreen(
                         if (selectedTag == label) {
                             selectedTag = null
                         } else {
+                            usedOnly = false
                             selectedTag = label
                             query = ""
                         }
@@ -561,6 +616,7 @@ internal fun LibraryScreen(
                         if (selectedTag == label) {
                             selectedTag = null
                         } else {
+                            usedOnly = false
                             selectedTag = label
                             query = ""
                         }
@@ -719,6 +775,33 @@ internal fun LibraryScreen(
             selectionMode = selectionMode,
             selectedIds = selectedIds,
             activeMemeId = indexProgress.memeId.takeIf { indexProgress.running },
+            copiedMemeId = copiedMemeId,
+            copyingMemeId = copyingMemeId,
+            onQuickCopy = { meme ->
+                if (copyingMemeId == null) {
+                    copyingMemeId = meme.id
+                    scope.launch {
+                        try {
+                            files.copyToClipboard(meme.uri, meme.name)
+                            runCatching { store.recordCopy(meme.id) }
+                            copiedMemeId = meme.id
+                            Toast.makeText(
+                                context,
+                                if (meme.kind == "video") "✓ Video copied — paste into reply" else "✓ Meme copied — paste into reply",
+                                Toast.LENGTH_SHORT,
+                            ).show()
+                            delay(1400)
+                            if (copiedMemeId == meme.id) copiedMemeId = null
+                        } catch (cancelled: CancellationException) {
+                            throw cancelled
+                        } catch (failure: Exception) {
+                            Toast.makeText(context, "Could not copy: ${failure.message}", Toast.LENGTH_LONG).show()
+                        } finally {
+                            if (copyingMemeId == meme.id) copyingMemeId = null
+                        }
+                    }
+                }
+            },
             onItemClick = { meme ->
                 if (selectionMode) {
                     selectedIds = if (selectedIds.contains(meme.id)) {

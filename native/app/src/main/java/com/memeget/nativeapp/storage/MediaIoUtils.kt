@@ -514,4 +514,49 @@ internal object MediaIoUtils {
             decoded.recycle()
         }
     }
+
+    /**
+     * Slices up to 3 un-squashed square crops along the long shaft of tall screenshots or wide multi-panel strips
+     * (`aspect >= 1.65`), leaving near-square frames untouched so `recipe-et0.9.2` teaching vectors stay byte-faithful.
+     */
+    fun writeAspectSquareCrops(inputJpeg: File, outDir: File): List<File> {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(inputJpeg.absolutePath, bounds)
+        val w = bounds.outWidth
+        val h = bounds.outHeight
+        if (w <= 0 || h <= 0) return emptyList()
+        val shortSide = minOf(w, h)
+        val longSide = maxOf(w, h)
+        if (shortSide < 96 || longSide.toFloat() / shortSide.toFloat() < 1.65f) return emptyList()
+
+        val bitmap = BitmapFactory.decodeFile(inputJpeg.absolutePath) ?: return emptyList()
+        val crops = ArrayList<File>(3)
+        try {
+            outDir.mkdirs()
+            val side = minOf(bitmap.width, bitmap.height)
+            val span = maxOf(bitmap.width, bitmap.height) - side
+            val offsets = if (longSide.toFloat() / shortSide.toFloat() >= 2.35f) {
+                listOf(0, span / 2, span).distinct()
+            } else {
+                listOf(0, span).distinct()
+            }
+            val vertical = bitmap.height > bitmap.width
+            for ((idx, off) in offsets.withIndex()) {
+                val x = if (vertical) 0 else off
+                val y = if (vertical) off else 0
+                val sub = Bitmap.createBitmap(bitmap, x, y, side, side)
+                try {
+                    val dest = File(outDir, "${inputJpeg.nameWithoutExtension}_crop$idx.jpg")
+                    if (dest.outputStream().use { sub.compress(Bitmap.CompressFormat.JPEG, 90, it) }) {
+                        crops += dest
+                    }
+                } finally {
+                    if (sub !== bitmap) sub.recycle()
+                }
+            }
+        } finally {
+            bitmap.recycle()
+        }
+        return crops
+    }
 }
