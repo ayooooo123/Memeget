@@ -42,7 +42,10 @@ internal class SqliteLibraryDbHelper(context: Context, dbName: String = DATABASE
                 caption_embedding BLOB,
                 cloud_observation TEXT NOT NULL DEFAULT '',
                 rejected_labels TEXT NOT NULL DEFAULT '[]',
-                analysis_imported INTEGER NOT NULL DEFAULT 0
+                analysis_imported INTEGER NOT NULL DEFAULT 0,
+                vlm_ocr TEXT NOT NULL DEFAULT '',
+                copy_count INTEGER NOT NULL DEFAULT 0,
+                last_copied_at INTEGER NOT NULL DEFAULT 0
             );
             """.trimIndent()
         )
@@ -55,7 +58,8 @@ internal class SqliteLibraryDbHelper(context: Context, dbName: String = DATABASE
                 caption BLOB,
                 visual BLOB,
                 model TEXT NOT NULL DEFAULT '',
-                visual_model TEXT NOT NULL DEFAULT ''
+                visual_model TEXT NOT NULL DEFAULT '',
+                scenes BLOB
             );
             """.trimIndent()
         )
@@ -178,9 +182,11 @@ internal class SqliteLibraryDbHelper(context: Context, dbName: String = DATABASE
      */
     override fun onOpen(db: SQLiteDatabase) {
         super.onOpen(db)
-        if (!db.isReadOnly) db.execSQL("CREATE VIRTUAL TABLE IF NOT EXISTS meme_search_terms USING fts4aux(meme_search_fts);")
+        if (!db.isReadOnly) {
+            ensureColumns(db)
+            db.execSQL("CREATE VIRTUAL TABLE IF NOT EXISTS meme_search_terms USING fts4aux(meme_search_fts);")
+        }
     }
-
     /** Schema changes are additive, so a library written by a newer build stays readable after a rollback. */
     override fun onDowngrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {}
 
@@ -219,7 +225,9 @@ internal class SqliteLibraryDbHelper(context: Context, dbName: String = DATABASE
         addCol("rejected_labels", "TEXT NOT NULL DEFAULT '[]'")
         addCol("index_error", "TEXT NOT NULL DEFAULT ''")
         addCol("analysis_imported", "INTEGER NOT NULL DEFAULT 0")
-        // Ensure vectors table
+        addCol("vlm_ocr", "TEXT NOT NULL DEFAULT ''")
+        addCol("copy_count", "INTEGER NOT NULL DEFAULT 0")
+        addCol("last_copied_at", "INTEGER NOT NULL DEFAULT 0")
         db.execSQL(
             """
             CREATE TABLE IF NOT EXISTS vectors (
@@ -228,11 +236,14 @@ internal class SqliteLibraryDbHelper(context: Context, dbName: String = DATABASE
                 caption BLOB,
                 visual BLOB,
                 model TEXT NOT NULL DEFAULT '',
-                visual_model TEXT NOT NULL DEFAULT ''
+                visual_model TEXT NOT NULL DEFAULT '',
+                scenes BLOB
             );
             """.trimIndent()
         )
-
+        try {
+            db.execSQL("ALTER TABLE vectors ADD COLUMN scenes BLOB;")
+        } catch (_: Exception) {}
         // Ensure indices
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_memes_modified_id ON memes(modified_at DESC, id DESC);")
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_memes_pending ON memes(pending);")

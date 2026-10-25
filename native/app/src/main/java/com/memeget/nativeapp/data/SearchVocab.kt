@@ -54,6 +54,7 @@ internal class SearchVocab private constructor(private val freq: Map<String, Int
 
     fun has(term: String): Boolean = freq.containsKey(term)
 
+    fun frequency(term: String): Int = freq[term] ?: 0
     /** Up to [limit] known words within the term's edit budget: nearest first, then most frequent, then alphabetical. */
     fun corrections(term: String, limit: Int = 2): List<String> {
         if (freq.containsKey(term)) return emptyList()
@@ -93,24 +94,33 @@ internal class SearchVocab private constructor(private val freq: Map<String, Int
             .take(limit)
     }
 
-    fun expand(terms: List<String>, lastIsPrefix: Boolean = false): List<String> {
+    data class ExpandedQueryTerms(
+        val typoCorrections: List<String>,
+        val prefixCompletions: List<String>,
+    ) {
+        val all: List<String> get() = typoCorrections + prefixCompletions
+    }
+
+    fun expandSeparated(terms: List<String>, lastIsPrefix: Boolean = false): ExpandedQueryTerms {
         val seen = HashSet(terms)
-        val out = ArrayList<String>()
-        val add = { t: String ->
-            if (!seen.contains(t)) {
-                seen.add(t)
-                out.add(t)
-            }
-        }
+        val typos = ArrayList<String>()
+        val prefixes = ArrayList<String>()
         for (i in terms.indices) {
             val term = terms[i]
-            for (c in corrections(term)) add(c)
+            for (c in corrections(term)) {
+                if (seen.add(c)) typos.add(c)
+            }
             if (lastIsPrefix && i == terms.size - 1) {
-                for (p in prefixMatches(term)) add(p)
+                for (p in prefixMatches(term)) {
+                    if (seen.add(p)) prefixes.add(p)
+                }
             }
         }
-        return out
+        return ExpandedQueryTerms(typos, prefixes)
     }
+
+    fun expand(terms: List<String>, lastIsPrefix: Boolean = false): List<String> =
+        expandSeparated(terms, lastIsPrefix).all
 
     companion object {
         private val wordRegex = Regex("[a-z0-9]{2,}")

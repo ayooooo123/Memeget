@@ -40,6 +40,17 @@
                 <data android:mimeType="video/*" />
             </intent-filter>
         </activity>
+        <activity-alias
+            android:name=".ReplyTextAlias"
+            android:targetActivity=".MainActivity"
+            android:label="Meme Reply"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.PROCESS_TEXT" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+        </activity-alias>
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.files"

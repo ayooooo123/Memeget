@@ -29,6 +29,13 @@ internal class OpenVocabConcepts private constructor(
     )
 
     private val refById: Map<Int, RefMeme> = refMemes.associateBy { it.memeId }
+    private val entryByNormLabel: Map<String, Entry> = HashMap<String, Entry>(entries.size * 2).also { map ->
+        for (e in entries) {
+            val norm = normalizeConceptKey(e.label)
+            if (norm.isNotEmpty()) map.putIfAbsent(norm, e)
+        }
+    }
+
     class Entry(
         val label: String,
         val category: String,
@@ -100,6 +107,48 @@ internal class OpenVocabConcepts private constructor(
         return if (qNormSq > 0) sum / kotlin.math.sqrt(qNormSq.toFloat()) else 0f
     }
 
+    /** Hands back the wet 92k-meme `cHybrid` visual prototype when Master's 1-3 word query names a known concept. */
+    fun conceptPrototype(queryText: String): FloatArray? {
+        val norm = normalizeConceptKey(queryText)
+        if (norm.isEmpty()) return null
+        val tokenCount = norm.count { it == ' ' } + 1
+        if (tokenCount > 3) return null
+        val direct = entryByNormLabel[norm]
+        if (direct != null) return direct.cHybrid
+        val stripped = norm.removePrefix("the ").trim()
+        return if (stripped != norm && stripped.contains(' ')) entryByNormLabel[stripped]?.cHybrid else null
+    }
+
+    /** Spreads a query vector across `tStock` and swallows the closest concept + parent alias words for semantic recall. */
+    fun semanticQueryTerms(queryVec: FloatArray, minCos: Float = 0.30f, limit: Int = 4): Set<String> {
+        if (queryVec.size != DIM || entries.isEmpty()) return emptySet()
+        val topIdx = IntArray(limit) { -1 }
+        val topCos = FloatArray(limit) { minCos }
+        for (i in entries.indices) {
+            val c = FloatBlob.dot(entries[i].tStock, queryVec)
+            if (c <= topCos[limit - 1]) continue
+            var k = limit - 1
+            while (k > 0 && topCos[k - 1] < c) {
+                topCos[k] = topCos[k - 1]
+                topIdx[k] = topIdx[k - 1]
+                k--
+            }
+            topCos[k] = c
+            topIdx[k] = i
+        }
+        val out = LinkedHashSet<String>()
+        val wordRegex = Regex("[a-z0-9]{2,}")
+        for (idx in topIdx) {
+            if (idx < 0) break
+            val lbl = entries[idx].label.lowercase(java.util.Locale.ROOT)
+            for (m in wordRegex.findAll(lbl)) out.add(m.value)
+            for (alias in parentAliasesFor(lbl)) {
+                for (m in wordRegex.findAll(alias)) out.add(m.value)
+            }
+        }
+        return out
+    }
+
     fun retrieveCandidates(image: FloatArray, ocrAndText: String = "", limit: Int = 6): List<Hit> {
         if (image.size != DIM || entries.isEmpty() || FloatBlob.dot(image, image) < 0.5f) return emptyList()
         val n = entries.size
@@ -134,7 +183,10 @@ internal class OpenVocabConcepts private constructor(
         }
 
         val merged = LinkedHashMap<String, Hit>()
-        if (bestEnt1 >= 0 && bestZ1 >= 3.30f && bestRaw1 >= 0.23f && (bestZ1 - bestZ2) >= 0.18f) {
+        val zCorroborated = bestEnt1 >= 0 &&
+            ((bestZ1 >= 3.80f && bestRaw1 >= 0.25f && (bestZ1 - bestZ2) >= 0.25f && hyCos[bestEnt1] >= 0.46f) ||
+                (bestZ1 >= 4.60f && bestRaw1 >= 0.29f && (bestZ1 - bestZ2) >= 0.45f))
+        if (zCorroborated) {
             val e = entries[bestEnt1]
             val eqCos = (0.62f + 0.08f * bestZ1).coerceIn(0.85f, 0.96f)
             val bestCos = max(eqCos, hyCos[bestEnt1])
@@ -259,6 +311,23 @@ internal class OpenVocabConcepts private constructor(
                 "partyhat" in l || l == "party hat" || l == "phat" -> "partyhat"
                 else -> l
             }
+        }
+
+        internal fun normalizeConceptKey(raw: String): String =
+            raw.lowercase(java.util.Locale.ROOT).replace(Regex("[^a-z0-9]+"), " ").trim()
+
+        internal fun parentAliasesFor(label: String): List<String> {
+            val norm = label.trim().lowercase(java.util.Locale.ROOT)
+            val out = LinkedHashSet<String>()
+            PARENT_IMPLICATIONS[norm]?.forEach { (pLbl, _) -> out.add(pLbl) }
+            when {
+                norm == "apu apustaja" || norm == "apustaja" -> { out.add("apu"); out.add("pepe") }
+                norm == "bobo the bear" -> { out.add("bobo"); out.add("bear") }
+                "pepe" in norm && norm != "pepe" -> out.add("pepe")
+                ("wojak" in norm || "soyjak" in norm || norm == "doomer" || norm == "brainlet") && norm != "wojak" -> out.add("wojak")
+                norm == "spongebob squarepants" -> out.add("spongebob")
+            }
+            return out.toList()
         }
 
         internal val PARENT_IMPLICATIONS: Map<String, List<Pair<String, String>>> = mapOf(

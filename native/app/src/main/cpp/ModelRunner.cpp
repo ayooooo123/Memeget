@@ -200,10 +200,11 @@ std::vector<float> ModelRunner::embedImage(
     cv::Mat resized;
     if (imageRGB.cols == inputSize && imageRGB.rows == inputSize) {
         resized = imageRGB;
+    } else if (isVisual && (imageRGB.cols > inputSize || imageRGB.rows > inputSize)) {
+        cv::resize(imageRGB, resized, cv::Size(inputSize, inputSize), 0, 0, cv::INTER_AREA);
     } else {
         cv::resize(imageRGB, resized, cv::Size(inputSize, inputSize));
     }
-
     // Both S2 and DINOv2 take RGB in [0, 1] planar CHW.
     // DINOv2 mean/std is baked in the ExecuTorch graph (do not normalize twice).
     std::vector<float> chw = rnexecutorch::image_processing::colorMatToVector(resized);
@@ -736,8 +737,8 @@ std::vector<FastSamItem> ModelRunner::segment(
     const cv::Size modelSize(modelWidth, modelHeight);
     cv::Mat resized;
     if (imageRGB.size() == modelSize) resized = imageRGB;
+    else if (imageRGB.cols > modelWidth || imageRGB.rows > modelHeight) cv::resize(imageRGB, resized, modelSize, 0, 0, cv::INTER_AREA);
     else cv::resize(imageRGB, resized, modelSize);
-
     std::vector<float> chw = rnexecutorch::image_processing::colorMatToVector(resized);
     std::vector<int32_t> shape(sizes.begin(), sizes.end());
     TensorPtr inputTensor = from_blob(chw.data(), shape, ScalarType::Float);
