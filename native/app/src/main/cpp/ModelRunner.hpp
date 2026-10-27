@@ -11,6 +11,7 @@
 #include <rnexecutorch/models/ocr/CTCLabelConverter.h>
 
 #include "LlamaVisionRunner.hpp"
+#include "LlamaDecisionRunner.hpp"
 
 namespace memeget {
 
@@ -21,6 +22,7 @@ enum class ModelFamily {
     OCR,           // CRAFT + CRNN
     AUDIO,         // Whisper
     SEGMENTATION,  // FastSAM
+    DECISION,      // LiquidAI/d1-omni-600M System-1 Meme Gate
     VLM            // MiniCPM-V 4.7 1B (llama.cpp)
 };
 
@@ -97,6 +99,19 @@ public:
         float temperature,
         int maxImagePixels);
 
+
+    VisionGateDescribeResult gateAndDescribe(
+        const std::string& modelPath,
+        const std::string& projectorPath,
+        const std::string& imagePath,
+        const std::string& ocrHint,
+        const std::string& candidateHints,
+        int maxTokens,
+        int maxImagePixels);
+
+    core::MemeGateD1Result evaluateD1Gate(
+        const std::string& modelPath,
+        const std::string& renderedGatePrompt);
     // Writes an F16 copy of a BF16 GGUF projector (see ProjectorConversion.hpp); honors cancel().
     int convertProjector(const std::string& sourcePath, const std::string& destinationPath);
 
@@ -135,6 +150,9 @@ private:
 
     // VLM family (MiniCPM-V 4.7 through llama.cpp); reads cancelled_ as its abort flag.
     std::unique_ptr<LlamaVisionRunner> vlm_runner_;
+
+    // System-1 d1-omni-600M runner for Stage-2 text/screenshot meme gating; freed immediately by unloadHeavy().
+    std::unique_ptr<core::LlamaDecisionRunner> d1_runner_;
 };
 
 } // namespace memeget

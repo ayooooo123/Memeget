@@ -22,9 +22,16 @@ internal object CollectionManifest {
     /** Version 2 original-app exports hold the original media bytes these vectors describe. */
     private const val FIRST_ORIGINAL_MEDIA_VERSION = 2
 
+    const val STAGE3_PACK_FORMAT = "memeget-stage3-pack"
+    const val STAGE3_PACK_VERSION = 3
+
     data class Record(val file: String, val analysis: ImportedAnalysis)
 
-    fun read(file: File): List<Record> {
+    fun read(
+        file: File,
+        allowStage3Enrichment: Boolean = false,
+        trustManifestMetadata: Boolean = false,
+    ): List<Record> {
         var format = ""
         var version = 0
         var model = ""
@@ -37,8 +44,7 @@ internal object CollectionManifest {
                     "format" -> { format = reader.nextString(); headerRead = headerRead or 1 }
                     "version" -> { version = reader.nextInt(); headerRead = headerRead or 2 }
                     "model" -> { model = reader.nextString(); headerRead = headerRead or 4 }
-                    // Exporters write the header first; any other member order costs a second pass.
-                    "memes" -> if (headerRead == 7) records = readMemes(reader, format, version, model) else reader.skipValue()
+                    "memes" -> if (headerRead == 7) records = readMemes(reader, format, version, model, allowStage3Enrichment, trustManifestMetadata) else reader.skipValue()
                     else -> reader.skipValue()
                 }
             }
@@ -48,19 +54,31 @@ internal object CollectionManifest {
             var found: List<Record> = emptyList()
             reader.beginObject()
             while (reader.hasNext()) {
-                if (reader.nextName() == "memes") found = readMemes(reader, format, version, model) else reader.skipValue()
+                if (reader.nextName() == "memes") found = readMemes(reader, format, version, model, allowStage3Enrichment, trustManifestMetadata) else reader.skipValue()
             }
             reader.endObject()
             found
         }
     }
 
-    private fun readMemes(reader: JsonReader, format: String, version: Int, model: String): List<Record> {
-        require(format == FORMAT) { "Not a Memeget collection manifest" }
-        val vectorsTrusted = version >= FIRST_ORIGINAL_MEDIA_VERSION && compatibleModel(model)
+    private fun readMemes(
+        reader: JsonReader,
+        format: String,
+        version: Int,
+        model: String,
+        allowStage3Enrichment: Boolean,
+        trustManifestMetadata: Boolean,
+    ): List<Record> {
+        require(format == FORMAT || format == STAGE3_PACK_FORMAT) { "Not a Memeget collection manifest" }
+        val stage3Trusted = allowStage3Enrichment &&
+            format == STAGE3_PACK_FORMAT &&
+            version == STAGE3_PACK_VERSION &&
+            model == ModelRegistry.PRIMARY_MODEL_FINGERPRINT
+        val effectiveMetadataTrust = trustManifestMetadata || stage3Trusted
+        val vectorsTrusted = effectiveMetadataTrust && version >= FIRST_ORIGINAL_MEDIA_VERSION && compatibleModel(model)
         val records = ArrayList<Record>()
         reader.beginArray()
-        while (reader.hasNext()) readRecord(reader, vectorsTrusted)?.let(records::add)
+        while (reader.hasNext()) readRecord(reader, vectorsTrusted, stage3Trusted, effectiveMetadataTrust)?.let(records::add)
         reader.endArray()
         return records
     }
@@ -68,13 +86,26 @@ internal object CollectionManifest {
     // The original app stamps the export header "mobileclip-s2" and each item "mobileclip-s2@512".
     private fun compatibleModel(model: String): Boolean =
         model == TeachingPackIo.PACK_MODEL || model == "${TeachingPackIo.PACK_MODEL}@512" ||
-            model == ModelRegistry.PRIMARY_MODEL_FINGERPRINT
+            ModelRegistry.isCompatiblePrimaryModel(model)
 
-    private fun readRecord(reader: JsonReader, vectorsTrusted: Boolean): Record? {
+    private data class ParsedTags(
+        val human: List<Tag>,
+        val rawVision: List<Triple<String, String, Float>>,
+    )
+
+    private fun readRecord(
+        reader: JsonReader,
+        vectorsTrusted: Boolean,
+        stage3Trusted: Boolean,
+        trustManifestMetadata: Boolean,
+    ): Record? {
         var file: String? = null
-        var tags: List<Tag> = emptyList()
+        var parsedTags = ParsedTags(emptyList(), emptyList())
         var ocr = ""
         var transcript = ""
+        var caption = ""
+        var extraTerms = ""
+        var twoDomainProvenance = ""
         var embedding: FloatArray? = null
         var itemModel = ""
         var pending = false
@@ -82,9 +113,12 @@ internal object CollectionManifest {
         while (reader.hasNext()) {
             when (reader.nextName()) {
                 "file" -> file = optString(reader)
-                "tags" -> tags = readHumanTags(reader)
+                "tags" -> parsedTags = readTags(reader)
                 "ocr" -> ocr = optString(reader).orEmpty().trim()
                 "transcript" -> transcript = optString(reader).orEmpty().trim()
+                "caption" -> caption = optString(reader).orEmpty().trim()
+                "extraTerms" -> extraTerms = optString(reader).orEmpty().trim()
+                "twoDomainProvenance" -> twoDomainProvenance = optString(reader).orEmpty().trim()
                 "embedding" -> if (vectorsTrusted) embedding = readUnitVector(reader) else reader.skipValue()
                 "embeddingModel", "model" -> itemModel = optString(reader).orEmpty()
                 "pending" -> pending = if (reader.peek() == JsonToken.BOOLEAN) reader.nextBoolean() else { reader.skipValue(); false }
@@ -94,15 +128,40 @@ internal object CollectionManifest {
         reader.endObject()
         val path = file?.replace('\\', '/')?.trimStart('/') ?: return null
         val image = embedding?.takeIf { !pending && (itemModel.isEmpty() || compatibleModel(itemModel)) }
-        return Record(path, ImportedAnalysis(tags, ocr, transcript, image))
+        val allowTwoDomain = stage3Trusted && image != null && twoDomainProvenance == "minicpm-v-4.7-1b"
+        val twoDomTags = if (allowTwoDomain) {
+            parsedTags.rawVision.map { (norm, facet, score) ->
+                Tag(norm, facet, score, "vision", "two-domain", "unreviewed", "collection-import:$twoDomainProvenance")
+            }
+        } else emptyList()
+        val trustedHumanTags = if (trustManifestMetadata) {
+            parsedTags.human
+        } else {
+            parsedTags.human.map { t ->
+                Tag(t.label, t.category, 0.5f, "imported_hint", "untrusted-import", "unreviewed", "untrusted-share")
+            }
+        }
+        return Record(
+            path,
+            ImportedAnalysis(
+                humanTags = trustedHumanTags,
+                ocr = if (trustManifestMetadata) ocr else "",
+                transcript = if (trustManifestMetadata) transcript else "",
+                image = if (trustManifestMetadata) image else null,
+                twoDomainCaption = if (allowTwoDomain) caption else "",
+                twoDomainTerms = if (allowTwoDomain) extraTerms else "",
+                twoDomainTags = twoDomTags,
+            ),
+        )
     }
 
-    private fun readHumanTags(reader: JsonReader): List<Tag> {
+    private fun readTags(reader: JsonReader): ParsedTags {
         if (reader.peek() != JsonToken.BEGIN_ARRAY) {
             reader.skipValue()
-            return emptyList()
+            return ParsedTags(emptyList(), emptyList())
         }
-        val out = ArrayList<Tag>()
+        val humanOut = ArrayList<Tag>()
+        val visionOut = ArrayList<Triple<String, String, Float>>()
         reader.beginArray()
         while (reader.hasNext()) {
             var label = ""
@@ -123,17 +182,18 @@ internal object CollectionManifest {
             }
             reader.endObject()
             val norm = TagMerge.normalizeTagLabel(label)
-            // Native exports record confirmation; the original app marks people's labels by source:
-            // hand tags, and teach-sheet labels written at full score.
+            if (norm.isEmpty()) continue
+            val facet = category.trim().lowercase().takeUnless { it.isEmpty() || it == "user" } ?: "topic"
             val human = confirmation?.let { it == "confirmed" }
                 ?: (source == "manual" || source == "exemplar" && score >= 0.999)
-            if (norm.isEmpty() || !human) continue
-            // Imported as hand tags so they train like the user's own bulk tags.
-            val facet = category.trim().lowercase().takeUnless { it.isEmpty() || it == "user" } ?: "topic"
-            out += Tag(norm, facet, 1f, "manual", "user", "confirmed", "collection-import")
+            if (human) {
+                humanOut += Tag(norm, facet, 1f, "manual", "user", "confirmed", "collection-import")
+            } else if (source == "vision" || source == "open_vocab") {
+                visionOut += Triple(norm, facet, score.toFloat().coerceIn(0f, 1f))
+            }
         }
         reader.endArray()
-        return out
+        return ParsedTags(humanOut, visionOut)
     }
 
     private fun readUnitVector(reader: JsonReader): FloatArray? {

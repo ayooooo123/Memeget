@@ -3,7 +3,7 @@ package com.memeget.nativeapp.inference
 internal object PromptBuilder {
     const val SYSTEM_PROMPT =
         "You are a meme cataloging engine. You look at a single image and describe it for " +
-        "search using four labeled lines. Tag both what is literally happening and what the meme " +
+        "search using six labeled lines. Tag both what is literally happening and what the meme " +
         "MEANS and the moment someone would send it. Output ONLY those lines — no prose, no JSON, no " +
         "markdown, no code fences."
 
@@ -20,23 +20,28 @@ internal object PromptBuilder {
         return lettersOrDigits >= 14 && text.trim().contains(' ')
     }
 
+    fun escapeChatMlTokens(text: String): String =
+        text.replace("<|", "<¦").replace("|>", "¦>")
+
     fun buildUserPrompt(grounding: String, skipVerbatimText: Boolean = false): String {
         return buildString {
             append("Describe this meme so it can be found later by search. People search with a SINGLE ")
             append("word for any aspect — a feeling, an action, a character, a format, or the situation ")
-            append("they would send it in — so name each aspect explicitly. Reply with EXACTLY these four ")
+            append("they would send it in — so name each aspect explicitly. Reply with EXACTLY these six ")
             append("lines, each starting with the label in caps, and nothing else:\n")
             append("CAPTION: one sentence, <=20 words: the action taking place, the feeling or mood, the situation it is used to react to, and why it is funny\n")
+            append("SOURCE_TYPE: movie only when the image itself clearly identifies a specific film; otherwise none\n")
+            append("SOURCE_TITLE: the exact movie title only when SOURCE_TYPE is movie; otherwise none. Do not guess from generic UI/OCR words or uncertain context hints.\n")
             append("TEXT: text visible in the image, verbatim; leave blank if none\n")
             append("SUBJECTS: comma-separated main people, characters, or objects\n")
             append("TAGS: 6-12 comma-separated lowercase keywords for how a person would SEARCH for this meme.\n")
             append('\n').append(IMAGE_MARKER)
             if (grounding.isNotBlank()) {
-                append("\nContext hints:\n").append(grounding).append("\n")
+                append("\nContext hints:\n").append(escapeChatMlTokens(grounding)).append("\n")
             }
-            // Sits after IMAGE_MARKER so the 234-token prefix state before the image stays 100% reusable across frames.
+            // Per-image OCR instructions stay after IMAGE_MARKER so the fixed prefix can be reused across frames.
             if (skipVerbatimText) {
-                append("\nOn-screen text is already captured above; write `TEXT: none` instead of repeating it, and focus on CAPTION, SUBJECTS, and TAGS.")
+                append("\nOn-screen text is already captured above; write `TEXT: none` instead of repeating it, and focus on CAPTION, SOURCE_TYPE, SOURCE_TITLE, SUBJECTS, and TAGS.")
             }
             append("\nNow describe the image. Be concise.")
         }

@@ -14,6 +14,10 @@ internal object SearchRanking {
     const val CONCEPT_PROTO_FLOOR = 0.50f
     const val CONCEPT_PROTO_WEIGHT = 0.45f
 
+    const val CSLS_HUBNESS_FLOOR = 0.37f
+    const val CSLS_HUBNESS_WEIGHT = 0.22f
+    private const val INT8_INV_SCALE_SQ = 1.0f / (127.0f * 127.0f)
+    @Volatile private var nativeQuantizedBatchAvailable = true
     const val LEXICAL_WEIGHT = 0.35f
     const val ALL_TERMS_BOOST = 0.6f
     const val EXPANDED_LEXICAL_WEIGHT = 0.22f
@@ -324,6 +328,143 @@ internal object SearchRanking {
             }
             return out
         }
+    }
+
+    fun quantizeUnitVec512(src: FloatArray, dstInt8: ByteArray, dstOffset: Int = 0, dstRabit64: LongArray? = null, rabitOffset: Int = 0) {
+        if (dstRabit64 != null) {
+            for (w in 0 until 8) dstRabit64[rabitOffset + w] = 0L
+        }
+        for (i in 0 until 512) {
+            val v = if (i < src.size) src[i] else 0f
+            val q = kotlin.math.round((v * 127f).coerceIn(-127f, 127f)).toInt()
+            dstInt8[dstOffset + i] = q.toByte()
+            if (dstRabit64 != null && v >= 0f) {
+                dstRabit64[rabitOffset + (i ushr 6)] = dstRabit64[rabitOffset + (i ushr 6)] or (1L shl (i and 63))
+            }
+        }
+    }
+
+    fun computeCandidateCslsHubness(imageVec: FloatArray, queryBankFlat: FloatArray, bankCount: Int, topK: Int = 10): Float {
+        if (imageVec.size < 512 || bankCount <= 0 || queryBankFlat.size < bankCount * 512) return 0f
+        if (nativeQuantizedBatchAvailable) {
+            try {
+                return com.memeget.nativeapp.inference.NativeBridge.nativeComputeCslsHubness(imageVec, queryBankFlat, bankCount, topK)
+            } catch (_: LinkageError) {
+                nativeQuantizedBatchAvailable = false
+            }
+        }
+        val k = min(topK, bankCount)
+        val top = FloatArray(k) { -2f }
+        for (b in 0 until bankCount) {
+            val off = b * 512
+            var dot = 0f
+            for (d in 0 until 512) dot += imageVec[d] * queryBankFlat[off + d]
+            if (dot <= top[k - 1]) continue
+            var p = k - 1
+            while (p > 0 && top[p - 1] < dot) {
+                top[p] = top[p - 1]
+                p--
+            }
+            top[p] = dot
+        }
+        var sum = 0f
+        for (v in top) sum += v
+        return sum / k.toFloat()
+    }
+
+    fun batchDenseScoresQuantized(
+        queryVec: FloatArray,
+        protoVec: FloatArray?,
+        imageMatInt8: ByteArray,
+        imageRabit64: LongArray?,
+        hasImage: BooleanArray,
+        imgCslsHubness: FloatArray?,
+        scenePoolInt8: ByteArray?,
+        sceneOffsets: IntArray?,
+        captionMatInt8: ByteArray?,
+        hasCaption: BooleanArray,
+        capHubness: FloatArray,
+        count: Int,
+        cslsWeight: Float = CSLS_HUBNESS_WEIGHT,
+        cslsFloor: Float = CSLS_HUBNESS_FLOOR,
+    ): FloatArray {
+        val out = FloatArray(count)
+        if (count <= 0 || queryVec.size < 512) return out
+        if (nativeQuantizedBatchAvailable) {
+            try {
+                val computed = com.memeget.nativeapp.inference.NativeBridge.nativeBatchDenseScoresQuantized(
+                    queryVec = queryVec,
+                    protoVec = protoVec?.takeIf { it.size == 512 },
+                    imageMatInt8 = imageMatInt8,
+                    imageRabit64 = imageRabit64,
+                    hasImage = hasImage,
+                    imgCslsHubness = imgCslsHubness,
+                    scenePoolInt8 = scenePoolInt8,
+                    sceneOffsets = sceneOffsets,
+                    captionMatInt8 = captionMatInt8,
+                    hasCaption = hasCaption,
+                    capHubness = capHubness,
+                    count = count,
+                    cslsWeight = cslsWeight,
+                    cslsFloor = cslsFloor,
+                    outScores = out,
+                )
+                if (computed == count) return out
+                nativeQuantizedBatchAvailable = false
+            } catch (_: LinkageError) {
+                nativeQuantizedBatchAvailable = false
+            }
+        }
+
+        val qInt8 = ByteArray(512)
+        quantizeUnitVec512(queryVec, qInt8)
+        val validProto = protoVec?.takeIf { it.size == 512 }
+        val pInt8 = if (validProto != null) ByteArray(512).also { quantizeUnitVec512(validProto, it) } else null
+
+        fun dotI8(a: ByteArray, aOff: Int, b: ByteArray, bOff: Int): Float {
+            var sum = 0
+            for (d in 0 until 512) sum += a[aOff + d].toInt() * b[bOff + d].toInt()
+            return sum.toFloat() * INT8_INV_SCALE_SQ
+        }
+
+        for (i in 0 until count) {
+            var s = 0f
+            if (hasImage[i]) {
+                val imgOff = i * 512
+                var imgScore = dotI8(qInt8, 0, imageMatInt8, imgOff)
+                if (scenePoolInt8 != null && sceneOffsets != null && i + 1 < sceneOffsets.size) {
+                    val s0 = sceneOffsets[i]
+                    val s1 = sceneOffsets[i + 1]
+                    if (s1 > s0) {
+                        var bestScene = -2f
+                        for (sc in s0 until s1) {
+                            val scDot = dotI8(qInt8, 0, scenePoolInt8, sc * 512)
+                            if (scDot > bestScene) bestScene = scDot
+                        }
+                        if (bestScene > imgScore) {
+                            imgScore = max(imgScore, 0.25f * imgScore + 0.75f * bestScene)
+                        }
+                    }
+                }
+                if (imgCslsHubness != null && cslsWeight > 0f) {
+                    imgScore -= cslsWeight * max(0f, imgCslsHubness[i] - cslsFloor)
+                }
+                s = imgScore
+                if (pInt8 != null) {
+                    val ps = dotI8(pInt8, 0, imageMatInt8, imgOff)
+                    if (ps > CONCEPT_PROTO_FLOOR) s += CONCEPT_PROTO_WEIGHT * (ps - CONCEPT_PROTO_FLOOR)
+                }
+            }
+            if (captionMatInt8 != null && hasCaption[i]) {
+                val capCos = dotI8(qInt8, 0, captionMatInt8, i * 512)
+                val cAdj = capCos - 0.35f * max(0f, capHubness[i] - 0.68f)
+                if (cAdj > 0.60f) {
+                    s += min(0.14f, 0.45f * (cAdj - 0.60f))
+                }
+            }
+            out[i] = s
+        }
+        return out
     }
 
     /**

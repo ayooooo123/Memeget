@@ -3,6 +3,7 @@ package com.memeget.nativeapp.data
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
+import com.memeget.nativeapp.inference.ModelRegistry
 
 internal class SqliteLibraryDbHelper(context: Context, dbName: String = DATABASE_NAME) :
     SQLiteOpenHelper(context, dbName, null, DATABASE_VERSION) {
@@ -133,6 +134,42 @@ internal class SqliteLibraryDbHelper(context: Context, dbName: String = DATABASE
             """.trimIndent()
         )
 
+
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS camera_roll_gate (
+                source_key TEXT PRIMARY KEY,
+                uri TEXT NOT NULL,
+                name TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                modified_at INTEGER NOT NULL DEFAULT 0,
+                width INTEGER NOT NULL DEFAULT 0,
+                height INTEGER NOT NULL DEFAULT 0,
+                duration_ms INTEGER NOT NULL DEFAULT 0,
+                verdict INTEGER NOT NULL DEFAULT 0,
+                meme_prob REAL NOT NULL DEFAULT 0,
+                d1_prompt TEXT NOT NULL DEFAULT '',
+                ocr_text TEXT NOT NULL DEFAULT '',
+                candidate_hints TEXT NOT NULL DEFAULT '',
+                image_vec BLOB,
+                scene_vecs BLOB,
+                meme_id INTEGER NOT NULL DEFAULT 0,
+                updated_at INTEGER NOT NULL DEFAULT 0
+            );
+            """.trimIndent()
+        )
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_camera_roll_verdict ON camera_roll_gate(verdict, modified_at DESC);")
+
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS rejected_photo_vectors (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_key TEXT UNIQUE NOT NULL,
+                vector BLOB NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+            """.trimIndent()
+        )
         db.execSQL(
             """
             CREATE INDEX IF NOT EXISTS idx_memes_modified_id ON memes(modified_at DESC, id DESC);
@@ -185,6 +222,15 @@ internal class SqliteLibraryDbHelper(context: Context, dbName: String = DATABASE
         if (!db.isReadOnly) {
             ensureColumns(db)
             db.execSQL("CREATE VIRTUAL TABLE IF NOT EXISTS meme_search_terms USING fts4aux(meme_search_fts);")
+            // Migrate compatible recipe-et0.9.2 MobileCLIP-S2 vectors & exemplars across artifact re-exports
+            db.execSQL(
+                "UPDATE vectors SET model = ? WHERE model = ?;",
+                arrayOf(ModelRegistry.PRIMARY_MODEL_FINGERPRINT, ModelRegistry.LEGACY_S2_MODEL_FINGERPRINT),
+            )
+            db.execSQL(
+                "UPDATE exemplars SET model = ? WHERE model = ?;",
+                arrayOf(ModelRegistry.PRIMARY_MODEL_FINGERPRINT, ModelRegistry.LEGACY_S2_MODEL_FINGERPRINT),
+            )
         }
     }
     /** Schema changes are additive, so a library written by a newer build stays readable after a rollback. */
@@ -249,6 +295,40 @@ internal class SqliteLibraryDbHelper(context: Context, dbName: String = DATABASE
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_memes_pending ON memes(pending);")
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_exemplars_model ON exemplars(model);")
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_vectors_model ON vectors(model);")
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS camera_roll_gate (
+                source_key TEXT PRIMARY KEY,
+                uri TEXT NOT NULL,
+                name TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                modified_at INTEGER NOT NULL DEFAULT 0,
+                width INTEGER NOT NULL DEFAULT 0,
+                height INTEGER NOT NULL DEFAULT 0,
+                duration_ms INTEGER NOT NULL DEFAULT 0,
+                verdict INTEGER NOT NULL DEFAULT 0,
+                meme_prob REAL NOT NULL DEFAULT 0,
+                d1_prompt TEXT NOT NULL DEFAULT '',
+                ocr_text TEXT NOT NULL DEFAULT '',
+                candidate_hints TEXT NOT NULL DEFAULT '',
+                image_vec BLOB,
+                scene_vecs BLOB,
+                meme_id INTEGER NOT NULL DEFAULT 0,
+                updated_at INTEGER NOT NULL DEFAULT 0
+            );
+            """.trimIndent()
+        )
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_camera_roll_verdict ON camera_roll_gate(verdict, modified_at DESC);")
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS rejected_photo_vectors (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_key TEXT UNIQUE NOT NULL,
+                vector BLOB NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+            """.trimIndent()
+        )
     }
 
     companion object {

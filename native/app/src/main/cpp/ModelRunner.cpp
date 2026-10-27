@@ -88,6 +88,7 @@ void ModelRunner::unloadAll() {
     fastsam_module_.reset();
     fastsam_path_.clear();
 
+    d1_runner_.reset();
     vlm_runner_.reset();
 
     current_family_ = ModelFamily::NONE;
@@ -118,6 +119,7 @@ void ModelRunner::unloadHeavy() {
     fastsam_module_.reset();
     fastsam_path_.clear();
 
+    d1_runner_.reset();
     vlm_runner_.reset();
 
     current_family_ = s2_text_module_ ? ModelFamily::PRIMARY : ModelFamily::NONE;
@@ -134,6 +136,7 @@ std::string ModelRunner::getDiagnostics() {
         case ModelFamily::OCR: oss << "OCR(CRAFT+CRNN)"; break;
         case ModelFamily::AUDIO: oss << "AUDIO(Whisper)"; break;
         case ModelFamily::SEGMENTATION: oss << "SEGMENTATION(FastSAM)"; break;
+        case ModelFamily::DECISION: oss << "DECISION(d1-omni-600M)"; break;
         case ModelFamily::VLM: oss << "VLM(MiniCPM-V-4.7-1B)"; break;
     }
     oss << ";cancelled=" << (cancelled_.load() ? "true" : "false");
@@ -170,6 +173,8 @@ void ModelRunner::ensureFamily(ModelFamily family) {
         } else if (current_family_ == ModelFamily::SEGMENTATION) {
             fastsam_module_.reset();
             fastsam_path_.clear();
+        } else if (current_family_ == ModelFamily::DECISION) {
+            d1_runner_.reset();
         } else if (current_family_ == ModelFamily::VLM) {
             vlm_runner_.reset();
         }
@@ -942,6 +947,60 @@ std::string ModelRunner::describe(
             modelPath, projectorPath, defaultInferenceThreads(), &cancelled_);
     }
     return vlm_runner_->describe(image, systemPrompt, userPrompt, maxTokens, temperature);
+}
+
+VisionGateDescribeResult ModelRunner::gateAndDescribe(
+    const std::string& modelPath,
+    const std::string& projectorPath,
+    const std::string& imagePath,
+    const std::string& ocrHint,
+    const std::string& candidateHints,
+    int maxTokens,
+    int maxImagePixels) {
+
+    std::scoped_lock lock(mutex_);
+    ensureFamily(ModelFamily::VLM);
+    if (cancelled_.load()) throw std::runtime_error("Inference cancelled");
+
+    cv::Mat imageBGR = rnexecutorch::image_processing::readImage(imagePath);
+    if (imageBGR.empty()) throw std::runtime_error("Failed to read image at: " + imagePath);
+    int width = 0;
+    int height = 0;
+    fitWithinPixels(imageBGR.cols, imageBGR.rows, maxImagePixels, width, height);
+    if (width != imageBGR.cols || height != imageBGR.rows) {
+        cv::resize(imageBGR, imageBGR, cv::Size(width, height), 0, 0, cv::INTER_AREA);
+    }
+    cv::Mat imageRGB;
+    cv::cvtColor(imageBGR, imageRGB, cv::COLOR_BGR2RGB);
+    RgbImage image;
+    image.width = imageRGB.cols;
+    image.height = imageRGB.rows;
+    image.pixels.resize(static_cast<size_t>(image.width) * static_cast<size_t>(image.height) * 3);
+    const size_t rowBytes = static_cast<size_t>(image.width) * 3;
+    for (int row = 0; row < imageRGB.rows; ++row) {
+        std::memcpy(image.pixels.data() + row * rowBytes, imageRGB.ptr<uint8_t>(row), rowBytes);
+    }
+
+    if (!vlm_runner_ || !vlm_runner_->matches(modelPath, projectorPath)) {
+        vlm_runner_.reset();
+        vlm_runner_ = std::make_unique<LlamaVisionRunner>(
+            modelPath, projectorPath, defaultInferenceThreads(), &cancelled_);
+    }
+    return vlm_runner_->gateAndDescribe(image, ocrHint, candidateHints, maxTokens);
+}
+
+core::MemeGateD1Result ModelRunner::evaluateD1Gate(
+    const std::string& modelPath,
+    const std::string& renderedGatePrompt) {
+    std::scoped_lock lock(mutex_);
+    ensureFamily(ModelFamily::DECISION);
+    if (cancelled_.load()) throw std::runtime_error("Inference cancelled");
+    if (!d1_runner_ || d1_runner_->modelPath() != modelPath) {
+        d1_runner_.reset();
+        d1_runner_ = std::make_unique<core::LlamaDecisionRunner>(
+            modelPath, defaultInferenceThreads(), &cancelled_);
+    }
+    return d1_runner_->evaluateMemeGate(renderedGatePrompt);
 }
 
 int ModelRunner::convertProjector(const std::string& sourcePath, const std::string& destinationPath) {

@@ -43,11 +43,8 @@ import androidx.compose.ui.window.DialogProperties
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
-import com.memeget.nativeapp.editor.RemixStudio
-
 internal enum class AppTab {
     Library,
-    Label,
     Settings,
 }
 
@@ -68,7 +65,6 @@ internal fun MemegetApp(
 
     var currentTab by remember { mutableStateOf(AppTab.Library) }
     var activeViewerMeme by remember { mutableStateOf<Meme?>(null) }
-    var activeRemixMeme by remember { mutableStateOf<Meme?>(null) }
     // Set by a tag tap in the viewer/Settings or by highlighting/sharing a social post from another app.
     var tagSearchRequest by remember { mutableStateOf<String?>(null) }
     var deletedMemeIds by remember { mutableStateOf<Set<Long>>(emptySet()) }
@@ -76,7 +72,6 @@ internal fun MemegetApp(
     LaunchedEffect(incomingSearchQuery) {
         if (!incomingSearchQuery.isNullOrBlank()) {
             activeViewerMeme = null
-            activeRemixMeme = null
             currentTab = AppTab.Library
             tagSearchRequest = incomingSearchQuery
             onIncomingSearchConsumed()
@@ -95,48 +90,14 @@ internal fun MemegetApp(
     // leaving mid-save neither cancels the answer nor misses that re-tag.
     var labelsChanged by remember { mutableStateOf(false) }
     val viewerOpen = activeViewerMeme != null
-    LaunchedEffect(currentTab, labelsChanged, viewerOpen) {
-        if (currentTab != AppTab.Label && !viewerOpen && labelsChanged) {
+    LaunchedEffect(labelsChanged, viewerOpen) {
+        if (!viewerOpen && labelsChanged) {
             labelsChanged = false
             scope.launch { coordinator.retag() }
         }
     }
-    val saveAnswer: suspend (Long, String, String?, Boolean) -> Unit = remember(scope, cloud, knowledge) {
-        { memeId, label, category, positive ->
-            val failure = scope.async {
-                try {
-                    cloud.recordTeaching(memeId, label, category ?: knowledge.knownCategory(label), positive, emptyList())
-                    labelsChanged = true
-                    scope.launch { runCatching { knowledge.recordVerifierTeaching(memeId) } }
-                    null
-                } catch (cancelled: CancellationException) {
-                    throw cancelled
-                } catch (failure: Exception) {
-                    failure
-                }
-            }.await()
-            if (failure != null) throw failure
-        }
-    }
-    val removeAnswer: suspend (Long, String) -> Unit = remember(scope, store) {
-        { memeId, label ->
-            val failure = scope.async {
-                try {
-                    store.removeTag(memeId, label)
-                    labelsChanged = true
-                    scope.launch { runCatching { knowledge.recordVerifierTeaching(memeId) } }
-                    null
-                } catch (cancelled: CancellationException) {
-                    throw cancelled
-                } catch (failure: Exception) {
-                    failure
-                }
-            }.await()
-            if (failure != null) throw failure
-        }
-    }
-    LaunchedEffect(searching, currentTab, activeRemixMeme) {
-        coordinator.setInteractive(searching || currentTab == AppTab.Label || activeRemixMeme != null)
+    LaunchedEffect(searching) {
+        coordinator.setInteractive(searching)
     }
     DisposableEffect(coordinator) {
         onDispose { coordinator.setInteractive(false) }
@@ -152,52 +113,6 @@ internal fun MemegetApp(
     MemegetTheme {
         Scaffold(
             snackbarHost = { SnackbarHost(snackbarHostState) },
-            bottomBar = {
-                // Bottom Tab Navigation Bar
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(MemegetColors.Surface)
-                        .navigationBarsPadding(),
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(0.5.dp)
-                            .background(MemegetColors.Border),
-                    )
-
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(56.dp)
-                            .padding(horizontal = 24.dp),
-                        horizontalArrangement = Arrangement.SpaceAround,
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        TabItem(
-                            label = "Library",
-                            glyph = "▦",
-                            selected = currentTab == AppTab.Library,
-                            onClick = { selectTab(AppTab.Library) },
-                        )
-
-                        TabItem(
-                            label = "Label",
-                            glyph = "✎",
-                            selected = currentTab == AppTab.Label,
-                            onClick = { selectTab(AppTab.Label) },
-                        )
-
-                        TabItem(
-                            label = "Settings",
-                            glyph = "⚙",
-                            selected = currentTab == AppTab.Settings,
-                            onClick = { selectTab(AppTab.Settings) },
-                        )
-                    }
-                }
-            },
             containerColor = MemegetColors.Background,
         ) { innerPadding ->
             Box(
@@ -219,7 +134,6 @@ internal fun MemegetApp(
                         knowledge = knowledge,
                         coordinator = coordinator,
                         onOpenViewer = { meme -> activeViewerMeme = meme },
-                        onOpenRemix = { meme -> activeRemixMeme = meme },
                         onOpenSettings = { selectTab(AppTab.Settings) },
                         active = libraryActive,
                         tagSearchRequest = tagSearchRequest,
@@ -230,15 +144,6 @@ internal fun MemegetApp(
                 }
                 when (currentTab) {
                     AppTab.Library -> Unit
-                    AppTab.Label -> {
-                        LabelQueueScreen(
-                            store = store,
-                            knowledge = knowledge,
-                            onOpenViewer = { meme -> activeViewerMeme = meme },
-                            saveAnswer = saveAnswer,
-                            removeAnswer = removeAnswer,
-                        )
-                    }
                     AppTab.Settings -> {
                         SettingsScreen(
                             store = store,
@@ -268,10 +173,6 @@ internal fun MemegetApp(
                 cloud = cloud,
                 coordinator = coordinator,
                 onClose = { activeViewerMeme = null },
-                onRemix = { m ->
-                    activeViewerMeme = null
-                    activeRemixMeme = m
-                },
                 onSearchTag = { tag ->
                     activeViewerMeme = null
                     tagSearchRequest = tag
@@ -290,35 +191,6 @@ internal fun MemegetApp(
                 },
             )
         }
-
-        // Keep library state while isolating editor input and accessibility.
-        activeRemixMeme?.let { meme ->
-            Dialog(
-                onDismissRequest = { activeRemixMeme = null },
-                properties = DialogProperties(
-                    dismissOnClickOutside = false,
-                    usePlatformDefaultWidth = false,
-                    decorFitsSystemWindows = false,
-                ),
-            ) {
-                RemixStudio(
-                    meme = meme,
-                    engine = engine,
-                    files = files,
-                    onClose = { activeRemixMeme = null },
-                    onSaved = { newMemeId ->
-                        activeRemixMeme = null
-                        scope.launch {
-                            snackbarHostState.showSnackbar("Remix saved to library")
-                            val savedMeme = store.meme(newMemeId)
-                            if (savedMeme != null) {
-                                activeViewerMeme = savedMeme
-                            }
-                        }
-                    },
-                )
-            }
-        }
     }
 }
 
@@ -330,30 +202,4 @@ private fun Modifier.placedOnlyWhen(visible: Boolean): Modifier = layout { measu
     }
 }
 
-@Composable
-private fun TabItem(
-    label: String,
-    glyph: String,
-    selected: Boolean,
-    onClick: () -> Unit,
-) {
-    Column(
-        modifier = Modifier
-            .clickable(onClick = onClick)
-            .padding(horizontal = 16.dp, vertical = 6.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center,
-    ) {
-        Text(
-            text = glyph,
-            fontSize = 18.sp,
-            color = if (selected) MemegetColors.Volt else MemegetColors.TextMuted,
-        )
-        Text(
-            text = label,
-            style = MaterialTheme.typography.labelSmall,
-            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
-            color = if (selected) MemegetColors.Volt else MemegetColors.TextMuted,
-        )
-    }
-}
+// Dead-simple single-screen navigation: TabItem & bottom bar bloat stripped clean.

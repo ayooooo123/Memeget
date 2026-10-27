@@ -19,15 +19,19 @@ internal data class DerivedModelArtifact(
 
 internal object ModelRegistry {
     // Immutable artifact digests + tokenizer + adapter/preprocessing/runtime recipe
-    const val PRIMARY_MODEL_FINGERPRINT = "mobileclip-s2@512:5c7311ce:e7576174:8e019f93:recipe-et0.9.2"
-    const val DINOV2_MODEL_FINGERPRINT = "dinov2@768:30ead905:recipe-et0.9.2"
+    const val PRIMARY_MODEL_FINGERPRINT = "mobileclip-s2@512:dd6a357f:e7576174:8e019f93:recipe-et0.9.2"
+    const val LEGACY_S2_MODEL_FINGERPRINT = "mobileclip-s2@512:5c7311ce:e7576174:8e019f93:recipe-et0.9.2"
+    const val DINOV2_MODEL_FINGERPRINT = "dinov2@768:2969a41b:recipe-et0.9.2"
+
+    fun isCompatiblePrimaryModel(model: String): Boolean =
+        model == PRIMARY_MODEL_FINGERPRINT || model == LEGACY_S2_MODEL_FINGERPRINT
 
     val S2_IMAGE = ModelArtifact(
         id = "mobileclip-s2-image",
         filename = "mobileclip_s2_image_xnnpack_fp32.pte",
         url = "https://github.com/ayooooo123/Memeget/releases/download/models-v1/mobileclip_s2_image_xnnpack_fp32.pte",
-        sha256Hex = "5c7311ceeda0238b1fc1df9bf4a179daaff832de41c2bbab36f8fe86a67abd3e",
-        expectedSizeBytes = 143424000L,
+        sha256Hex = "dd6a357fea3199b00eff17cd0898023213cf176e7566f7cbdf8dab9f0a1fe7f5",
+        expectedSizeBytes = 143278592L,
     )
 
     val S2_TEXT = ModelArtifact(
@@ -50,8 +54,8 @@ internal object ModelRegistry {
         id = "dinov2-base-image",
         filename = "dinov2_base_xnnpack_fp32.pte",
         url = "https://github.com/ayooooo123/Memeget/releases/download/models-v1/dinov2_base_xnnpack_fp32.pte",
-        sha256Hex = "30ead9054464e2c7c15bed89cb7527d08ea544c930738af91fc32176def78089",
-        expectedSizeBytes = 346561280L,
+        sha256Hex = "2969a41b9101f67b17c7d96cfd02879fec94e375a00eaca232d0684700c99ac4",
+        expectedSizeBytes = 346562304L,
     )
 
     val OCR_CRAFT = ModelArtifact(
@@ -131,6 +135,14 @@ internal object ModelRegistry {
         expectedSizeBytes = 1110117984L,
     )
 
-    // Dead 407 MB text-only d1-omni GGUF artifacts purged on sight so Master's phone reclaims disk and RAM.
-    val RETIRED_DECISION_FILES = listOf("d1-omni-600M-memeget-Q8_0.gguf")
+    // Master's fine-tuned LiquidAI/d1-omni-600M System-1 decision model (Q8_0 GGUF, llama.cpp b11588) for Stage-2 text/screenshot meme gating.
+    val D1_OMNI_DECISION_MODEL = ModelArtifact(
+        id = "d1-omni-600m-memeget-q8_0",
+        filename = "d1-omni-600M-memeget-Q8_0.gguf",
+        url = "https://github.com/ayooooo123/Memeget/releases/download/models-v1/d1-omni-600M-memeget-Q8_0.gguf",
+        sha256Hex = "ed64250aecb7bf62ebd5a655ac68012e9d5af859c968a648184c6f5bcea6d88d",
+        expectedSizeBytes = 407203808L,
+    )
+
+    val RETIRED_DECISION_FILES: List<String> = emptyList()
 }

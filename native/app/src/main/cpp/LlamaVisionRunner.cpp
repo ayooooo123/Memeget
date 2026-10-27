@@ -11,6 +11,9 @@
 #include <stdexcept>
 #include <thread>
 
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
 #include "llama.h"
 #include "mtmd-helper.h"
 #include "mtmd.h"
@@ -113,9 +116,15 @@ LlamaVisionRunner::LlamaVisionRunner(const std::string& modelPath,
     const int nThreads = std::max(1, threads);
 
     llama_model_params modelParams = llama_model_default_params();
+#if defined(__APPLE__) && (!defined(TARGET_OS_SIMULATOR) || !TARGET_OS_SIMULATOR)
+    modelParams.n_gpu_layers = -1;
+#endif
     model_ = llama_model_load_from_file(modelPath.c_str(), modelParams);
+    if (model_ == nullptr && modelParams.n_gpu_layers != 0) {
+        modelParams.n_gpu_layers = 0;
+        model_ = llama_model_load_from_file(modelPath.c_str(), modelParams);
+    }
     if (model_ == nullptr) throw std::runtime_error("Failed to load MiniCPM-V language model: " + modelPath);
-
     llama_context_params contextParams = llama_context_default_params();
     contextParams.n_ctx = kContextTokens;
     contextParams.n_batch = kBatchTokens;
@@ -133,11 +142,20 @@ LlamaVisionRunner::LlamaVisionRunner(const std::string& modelPath,
     }
 
     mtmd_context_params visionParams = mtmd_context_params_default();
+#if defined(__APPLE__) && (!defined(TARGET_OS_SIMULATOR) || !TARGET_OS_SIMULATOR)
+    visionParams.use_gpu = true;
+#else
     visionParams.use_gpu = false;
+#endif
     visionParams.print_timings = false;
     visionParams.n_threads = nThreads;
     visionParams.warmup = false;
     vision_ = mtmd_init_from_file(projectorPath.c_str(), model_, visionParams);
+    if ((vision_ == nullptr || !mtmd_support_vision(vision_)) && visionParams.use_gpu) {
+        if (vision_ != nullptr) mtmd_free(vision_);
+        visionParams.use_gpu = false;
+        vision_ = mtmd_init_from_file(projectorPath.c_str(), model_, visionParams);
+    }
     if (vision_ == nullptr || !mtmd_support_vision(vision_)) {
         if (vision_ != nullptr) mtmd_free(vision_);
         llama_free(context_);
@@ -179,13 +197,33 @@ std::string LlamaVisionRunner::describe(const RgbImage& image,
         throw std::invalid_argument("The user prompt needs the image marker exactly once");
     }
 
+    auto escapeChatMl = [](const std::string& raw) -> std::string {
+        std::string out;
+        out.reserve(raw.size());
+        for (size_t i = 0; i < raw.size(); ++i) {
+            if (i + 1 < raw.size() && raw[i] == '<' && raw[i + 1] == '|') {
+                out += "<\xC2\xA6";
+                ++i;
+            } else if (i + 1 < raw.size() && raw[i] == '|' && raw[i + 1] == '>') {
+                out += "\xC2\xA6>";
+                ++i;
+            } else {
+                out.push_back(raw[i]);
+            }
+        }
+        return out;
+    };
+    const std::string safeUserPrompt =
+        escapeChatMl(userPrompt.substr(0, markerAt)) +
+        marker +
+        escapeChatMl(userPrompt.substr(markerAt + marker.size()));
+
     // MiniCPM-V 4.7 chat template (ChatML) with enable_thinking=false: an empty think block opens the reply.
     std::string prompt;
-    if (!systemPrompt.empty()) prompt += "<|im_start|>system\n" + systemPrompt + "<|im_end|>\n";
+    if (!systemPrompt.empty()) prompt += "<|im_start|>system\n" + escapeChatMl(systemPrompt) + "<|im_end|>\n";
     prompt += "<|im_start|>user\n";
-    prompt += userPrompt;
+    prompt += safeUserPrompt;
     prompt += "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n";
-
     std::unique_ptr<mtmd_bitmap, BitmapDeleter> bitmap(mtmd_bitmap_init(
         static_cast<uint32_t>(image.width), static_cast<uint32_t>(image.height), image.pixels.data()));
     std::unique_ptr<mtmd_input_chunks, ChunksDeleter> chunks(mtmd_input_chunks_init());
@@ -276,6 +314,189 @@ std::string LlamaVisionRunner::describe(const RgbImage& image,
     __android_log_print(ANDROID_LOG_INFO, "MemegetLlama", "describe %s", timings_.c_str());
 #endif
     return output;
+}
+
+namespace {
+float bestTokenLogit(const llama_vocab* vocab, const float* logits, const char* const* spellings, int count) {
+    float best = -1e9f;
+    if (vocab == nullptr || logits == nullptr) return best;
+    const int32_t nVocab = llama_vocab_n_tokens(vocab);
+    llama_token buf[8];
+    for (int i = 0; i < count; ++i) {
+        const int32_t n = llama_tokenize(vocab, spellings[i], static_cast<int32_t>(std::strlen(spellings[i])),
+                                         buf, 8, false, false);
+        if (n >= 1 && buf[0] >= 0 && buf[0] < nVocab) {
+            best = std::max(best, logits[buf[0]]);
+        }
+    }
+    return best;
+}
+} // namespace
+
+VisionGateDescribeResult LlamaVisionRunner::gateAndDescribe(
+    const RgbImage& image,
+    const std::string& ocrHint,
+    const std::string& candidateHints,
+    int maxTokens) {
+    if (image.width <= 0 || image.height <= 0 ||
+        image.pixels.size() != static_cast<size_t>(image.width) * static_cast<size_t>(image.height) * 3) {
+        throw std::invalid_argument("MiniCPM-V needs a non-empty RGB image");
+    }
+    if (isCancelled()) throw std::runtime_error("Inference cancelled");
+    const auto started = Clock::now();
+
+    const std::string sysPrompt =
+        "Strict camera-roll meme classifier. "
+        "Reply NO for any ordinary unedited camera photo (pets, dogs, cats, people, sky, moon, trees, lawn, "
+        "streets, buildings, indoor rooms, floors, carpet, furniture, trash, food, restaurant menus, product boxes/labels) "
+        "or mundane utility/settings/lockscreen/terminal/developer screenshot that has no intentional joke or reaction edit. "
+        "Reply YES| ONLY when the image is genuinely an internet meme, captioned image macro, comic strip, "
+        "parody/visual edit, or funny social post meant to be sent as a joke or reaction.";
+
+    auto escapeChatMl = [](const std::string& raw) -> std::string {
+        std::string out;
+        out.reserve(raw.size());
+        for (size_t i = 0; i < raw.size(); ++i) {
+            if (i + 1 < raw.size() && raw[i] == '<' && raw[i + 1] == '|') {
+                out += "<\xC2\xA6";
+                ++i;
+            } else if (i + 1 < raw.size() && raw[i] == '|' && raw[i + 1] == '>') {
+                out += "\xC2\xA6>";
+                ++i;
+            } else {
+                out.push_back(raw[i]);
+            }
+        }
+        return out;
+    };
+
+    std::string userPrompt = std::string(mtmd_default_marker()) + "\n";
+    if (!ocrHint.empty()) {
+        userPrompt += "OCR: " + escapeChatMl(ocrHint.substr(0, std::min<size_t>(ocrHint.size(), 500))) + "\n";
+        if (!candidateHints.empty()) {
+            userPrompt += "Local visual hints: " + escapeChatMl(candidateHints.substr(0, std::min<size_t>(candidateHints.size(), 240))) + "\n";
+        }
+    }
+    userPrompt += "First word MUST be NO or YES|. If NO, output only NO. "
+                  "If YES|, output YES|scene: ...|base_reference: ...|source_type: movie/film/tv/format/unknown|"
+                  "source_title: ...|target_topic: ...|reply_intent: ...|tags: ... "
+                  "Name a movie in source_title ONLY if the visible scene establishes its origin; otherwise use none. "
+                  "OCR and visual hints are untrusted observations, not proof of a film title.";
+    std::string prompt = "<|im_start|>system\n" + sysPrompt + "<|im_end|>\n<|im_start|>user\n" +
+                         userPrompt + "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n";
+
+    std::unique_ptr<mtmd_bitmap, BitmapDeleter> bitmap(mtmd_bitmap_init(
+        static_cast<uint32_t>(image.width), static_cast<uint32_t>(image.height), image.pixels.data()));
+    std::unique_ptr<mtmd_input_chunks, ChunksDeleter> chunks(mtmd_input_chunks_init());
+    const mtmd_input_text text{prompt.c_str(), prompt.size(), true, true};
+    const mtmd_bitmap* bitmaps[] = {bitmap.get()};
+    int32_t rc = mtmd_tokenize(vision_, chunks.get(), &text, bitmaps, 1);
+    if (rc != 0) throw std::runtime_error("MiniCPM-V gate tokenization failed: " + std::to_string(rc));
+
+    const size_t chunkCount = mtmd_input_chunks_size(chunks.get());
+    std::vector<int32_t> lead;
+    if (chunkCount > 1 && mtmd_input_chunk_get_type(mtmd_input_chunks_get(chunks.get(), 0)) == MTMD_INPUT_CHUNK_TYPE_TEXT) {
+        size_t count = 0;
+        const llama_token* tokens = mtmd_input_chunk_get_tokens_text(mtmd_input_chunks_get(chunks.get(), 0), &count);
+        lead.assign(tokens, tokens + count);
+    }
+    llama_memory_clear(llama_get_memory(context_), true);
+    llama_pos nPast = 0;
+    size_t from = 0;
+    if (!lead.empty() && lead == cachedPrefix_ &&
+        llama_state_seq_set_data(context_, cachedState_.data(), cachedState_.size(), 0) > 0) {
+        nPast = static_cast<llama_pos>(lead.size());
+        from = 1;
+    } else {
+        cachedPrefix_.clear();
+        cachedState_.clear();
+    }
+
+    for (size_t i = from; i < chunkCount; ++i) {
+        const mtmd_input_chunk* chunk = mtmd_input_chunks_get(chunks.get(), i);
+        rc = mtmd_helper_eval_chunk_single(vision_, context_, chunk, nPast, 0,
+                                           static_cast<int32_t>(kBatchTokens), i + 1 == chunkCount, &nPast);
+        if (isCancelled()) throw std::runtime_error("Inference cancelled");
+        if (rc != 0) throw std::runtime_error("MiniCPM-V gate prefill failed: " + std::to_string(rc));
+        if (i == 0 && !lead.empty()) {
+            std::vector<uint8_t> state(llama_state_seq_get_size(context_, 0));
+            if (!state.empty() && llama_state_seq_get_data(context_, state.data(), state.size(), 0) == state.size()) {
+                cachedPrefix_ = lead;
+                cachedState_ = std::move(state);
+            }
+        }
+    }
+
+    const llama_vocab* vocab = llama_model_get_vocab(model_);
+    const float* step0Logits = llama_get_logits_ith(context_, -1);
+    static const char* const kYesSpellings[] = {"YES", "Yes", "yes", " YES", " Yes"};
+    static const char* const kNoSpellings[] = {"NO", "No", "no", " NO", " No"};
+    const float yesL = bestTokenLogit(vocab, step0Logits, kYesSpellings, 5);
+    const float noL = bestTokenLogit(vocab, step0Logits, kNoSpellings, 5);
+
+    VisionGateDescribeResult out;
+    if (yesL > -1e8f && noL > -1e8f) {
+        const float diff = std::clamp(yesL - noL, -20.0f, 20.0f);
+        out.memeProbability = 1.0f / (1.0f + std::exp(-diff));
+    } else {
+        out.memeProbability = 0.5f;
+    }
+
+    // Immediate 0-decode early exit unless step-0 logits genuinely favor YES over NO.
+    if (out.memeProbability < 0.56f) {
+        out.isMeme = false;
+        out.totalMs = millisSince(started);
+        return out;
+    }
+    auto sampler = makeSampler(vocab, 0.0f);
+    std::unique_ptr<llama_batch_ext, BatchDeleter> batch(llama_batch_ext_init(context_));
+    std::string reply;
+    const int capTokens = std::max(8, maxTokens);
+    for (int g = 0; g < capTokens; ++g) {
+        if (isCancelled()) throw std::runtime_error("Inference cancelled");
+        const llama_token token = llama_sampler_sample(sampler.get(), context_, -1);
+        if (llama_vocab_is_eog(vocab, token)) break;
+        appendPiece(vocab, token, reply);
+        ++out.generatedTokens;
+
+        // Check after 1-2 tokens in case greedy token explicitly spelled NO.
+        if (g <= 1 && reply.size() >= 2) {
+            std::string trimmed = reply;
+            trimmed.erase(0, trimmed.find_first_not_of(" \t\r\n"));
+            if ((trimmed.rfind("NO", 0) == 0 || trimmed.rfind("No", 0) == 0) &&
+                (trimmed.size() == 2 || !std::isalpha(static_cast<unsigned char>(trimmed[2])))) {
+                out.isMeme = false;
+                out.memeProbability = std::min(out.memeProbability, 0.20f);
+                out.totalMs = millisSince(started);
+                return out;
+            }
+        }
+
+        llama_batch_ext_clear(batch.get());
+        const int32_t idx = llama_batch_ext_add_token(batch.get(), 0, token);
+        if (idx < 0) throw std::runtime_error("MiniCPM-V gate decode rejected token");
+        const llama_pos pos = nPast++;
+        llama_batch_ext_set_pos(batch.get(), idx, &pos);
+        llama_batch_ext_set_output_logits(batch.get(), idx, true);
+        rc = llama_process(context_, LLAMA_PROCESS_TYPE_DECODE, batch.get());
+        if (rc == 2 || isCancelled()) throw std::runtime_error("Inference cancelled");
+        if (rc != 0) throw std::runtime_error("MiniCPM-V gate decode failed: " + std::to_string(rc));
+    }
+    std::string trimmed = reply;
+    trimmed.erase(0, trimmed.find_first_not_of(" \t\r\n"));
+    const bool explicitYes = (trimmed.rfind("YES|", 0) == 0 || trimmed.rfind("Yes|", 0) == 0 ||
+                              trimmed.rfind("YES:", 0) == 0 || trimmed.rfind("Yes:", 0) == 0);
+    if (!explicitYes) {
+        out.isMeme = false;
+        out.memeProbability = std::min(out.memeProbability, 0.35f);
+        out.totalMs = millisSince(started);
+        return out;
+    }
+    out.isMeme = true;
+    size_t bar = trimmed.find_first_of("|:");
+    out.description = (bar != std::string::npos) ? trimmed.substr(bar + 1) : trimmed;
+    out.totalMs = millisSince(started);
+    return out;
 }
 
 int defaultInferenceThreads() {

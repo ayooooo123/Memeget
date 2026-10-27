@@ -27,6 +27,11 @@ import com.memeget.nativeapp.inference.ModelRegistry
 import com.memeget.nativeapp.storage.FrameLikeness
 import com.memeget.nativeapp.storage.MediaIoUtils
 import com.memeget.nativeapp.storage.Mp4Repair
+import com.memeget.nativeapp.knowledge.MemeGateEvaluator
+import com.memeget.nativeapp.knowledge.MemeGateVerdict
+import com.memeget.nativeapp.knowledge.OpenVocabConcepts
+import com.memeget.nativeapp.storage.CameraRollAsset
+import com.memeget.nativeapp.storage.CameraRollScanner
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -173,9 +178,17 @@ internal class IndexCoordinator(
                 store.addError(folder.name, "scan", failure.message ?: "Folder could not be read")
             }
         }
+        val crNew = runCatching { countUnseenCameraRollAssets() }.getOrDefault(0)
         start()
-        found
+        found + crNew
     }.await()
+
+    private suspend fun countUnseenCameraRollAssets(): Int {
+        if (!CameraRollScanner.hasMediaAccess(context)) return 0
+        val seen = store.cameraRollSeenModifiedAt()
+        val assets = CameraRollScanner.enumerateAssets(context)
+        return assets.count { a -> seen[a.sourceKey] != a.modifiedAt }
+    }
     fun cancel() {
         stopRequests.incrementAndGet()
         retagCovered.accumulateAndGet(retagRequests.get(), ::maxOf)
@@ -361,7 +374,7 @@ internal class IndexCoordinator(
                             try {
                                 // A collection import supplied the vector and OCR: reuse them once instead of the models.
                                 val importedVector = if (meme.analysisImported) {
-                                    store.vectors(meme.id)?.takeIf { it.model == engine.primaryModel && it.image.size == 512 }?.image
+                                    store.vectors(meme.id)?.takeIf { ModelRegistry.isCompatiblePrimaryModel(it.model) && it.image.size == 512 }?.image
                                 } else null
                                 val item = prepare(meme, importedVector, importedFor = meme.contentHash.takeIf { importedVector != null })
                                 prepared += item
@@ -428,6 +441,18 @@ internal class IndexCoordinator(
                     if (background && completed + failed >= BACKGROUND_ITEMS) break
                 }
 
+                // Automatic Camera-Roll 3-Stage Meme Gate: loop bounded batches until unseen assets & Stage-2/3 queues drain
+                while (pause == null && SystemClock.elapsedRealtime() - started < limit && !interactive && CameraRollScanner.hasMediaAccess(context)) {
+                    currentCoroutineContext().ensureActive()
+                    val (gatedAccepted, didGateWork) = runCameraRollGateBatches(started, limit, background, gaps)
+                    completed += gatedAccepted
+                    if (!didGateWork) break
+                    if (background && completed + failed >= BACKGROUND_ITEMS) break
+                }
+                if (completed > 0 && !interactive) {
+                    runCatching { knowledge.propagateClusterIdentities() }
+                }
+
                 // Already-indexed items need optional enrichment too. Captions only happen here, after the queue is
                 // indexed, and keep going until the session ends.
                 if (pause == null && SystemClock.elapsedRealtime() - started < limit && !interactive && !resumeAfterSession) {
@@ -456,10 +481,11 @@ internal class IndexCoordinator(
                                 }.take(BATCH_SIZE).toList()
                             } else emptyList()
                             val candidates = transcripts.ifEmpty {
+                                val missingVisual = if (appearance) store.idsMissingVisual() else emptySet()
                                 store.allMemes().filter { meme ->
                                     meme.id !in tried && !meme.pending && (captions && meme.visionState == "pending" ||
                                         speech && meme.kind == "video" && meme.audioState == "pending" && meme.id !in backgroundSkip ||
-                                        appearance && store.vectors(meme.id)?.visual == null)
+                                        meme.id in missingVisual)
                                 }.take(BATCH_SIZE).toList()
                             }
                             if (candidates.isEmpty()) break
@@ -502,7 +528,7 @@ internal class IndexCoordinator(
                 }
                 if (store.setting("vision.enabled") == "1") embedCaptions(captionTexts, gaps)
 
-                val remaining = store.pending(1).isNotEmpty()
+                val remaining = store.pending(1).isNotEmpty() || hasRemainingCameraRollWork(gaps)
                 val waiting = gaps.first?.let { "${it.message}. $MODEL_WAIT" }
                 mutableProgress.value = WorkProgress(
                     stage = if (pause != null || waiting != null || remaining) "paused" else "complete",
@@ -515,7 +541,7 @@ internal class IndexCoordinator(
             }
 
             if (sessionFinished == null && !completedNaturally && mutableProgress.value.stage != "complete") {
-                val remaining = store.pending(1).isNotEmpty()
+                val remaining = store.pending(1).isNotEmpty() || hasRemainingCameraRollWork(gaps)
                 mutableProgress.value = WorkProgress(
                     stage = if (remaining || pause != null) "paused" else "complete",
                     done = completed,
@@ -757,9 +783,10 @@ internal class IndexCoordinator(
                 sceneVectors.addAll(vectors)
             } else if (meme.kind == "image" && reused == null && inputs.size == 1) {
                 val firstInputPath = Uri.parse(inputs[0]).path?.let(::File)
-                val cropFiles = if (firstInputPath != null) {
-                    withContext(Dispatchers.IO) { MediaIoUtils.writeAspectSquareCrops(firstInputPath, workDir) }
-                } else emptyList()
+                val cropOutcome = if (firstInputPath != null) {
+                    withContext(Dispatchers.IO) { MediaIoUtils.writePanelAndSubCrops(firstInputPath, workDir) }
+                } else MediaIoUtils.PanelSubCropOutcome(1, false, emptyList())
+                val cropFiles = cropOutcome.cropFiles
                 if (cropFiles.isNotEmpty()) {
                     temporaryFrames += cropFiles
                     sceneVectors += pooled
@@ -810,6 +837,289 @@ internal class IndexCoordinator(
             }
             throw failure
         }
+    }
+
+    /**
+     * Sweeps unseen Android Camera Roll photos/videos through the batched 3-stage local Meme Gate:
+     *   1. Stage 1 (PRIMARY + OCR): MobileCLIP-S2 + panel gutters + OCR layout geometry (<0.2 ms decision)
+     *   2. Stage 2 (DECISION): Fine-tuned LiquidAI/d1-omni-600M System-1 pass on text-heavy borderline screenshots
+     *   3. Stage 3 (VLM): MiniCPM-V 4.7 1B 1-token YES/NO gate + zero-re-encode two-domain captioning on visual borderlines
+     */
+    private suspend fun runCameraRollGateBatches(
+        started: Long,
+        limit: Long,
+        background: Boolean,
+        gaps: ModelGaps,
+    ): Pair<Int, Boolean> {
+        var acceptedTotal = 0
+        var didWork = false
+        val seen = store.cameraRollSeenModifiedAt()
+        val unseen = CameraRollScanner.enumerateAssets(context)
+            .filter { a -> seen[a.sourceKey] != a.modifiedAt }
+            .take(if (background) 32 else 96)
+        if (unseen.isNotEmpty() && "index" !in gaps) {
+            val openVocab = OpenVocabConcepts.load(context)
+            val curated = knowledge.curatedForGate()
+            val curLabels = curated?.first.orEmpty()
+            val curAnchors = curated?.second.orEmpty()
+            val rejectedVecs = store.rejectedPhotoVectors(256)
+            val workDir = File(context.cacheDir, "gate_work").apply { mkdirs() }
+
+            data class StagedAsset(
+                val asset: CameraRollAsset,
+                val uprightFile: File,
+                val imageVec: FloatArray,
+                val sceneVecs: List<FloatArray>,
+                val panelCount: Int,
+                val hasGutter: Boolean,
+            )
+
+            val staged = ArrayList<StagedAsset>(unseen.size)
+            try {
+                for ((idx, asset) in unseen.withIndex()) {
+                    currentCoroutineContext().ensureActive()
+                    if (SystemClock.elapsedRealtime() - started >= limit || (background && interactive)) break
+                    mutableProgress.value = WorkProgress("camera roll gate", idx, unseen.size, asset.name, true)
+                    val upright = File(workDir, "upright_gate_${UUID.randomUUID()}.jpg")
+                    try {
+                        if (asset.kind == "video") {
+                            val frames = expo.modules.memegetbg.VideoFrameExtractor.extractMultiple(context, asset.uri, listOf(0.25))
+                            val firstUri = frames.firstOrNull() ?: continue
+                            withContext(Dispatchers.IO) { MediaIoUtils.writeModelInputJpeg(context, Uri.parse(firstUri), upright) }
+                            frames.mapNotNull { Uri.parse(it).path?.let(::File) }.forEach(File::delete)
+                        } else {
+                            withContext(Dispatchers.IO) { MediaIoUtils.writeModelInputJpeg(context, Uri.parse(asset.uri), upright) }
+                        }
+                        val uprightUri = Uri.fromFile(upright).toString()
+                        val imgVec = engine.embedImage(uprightUri)
+                        val panelOut = withContext(Dispatchers.IO) { MediaIoUtils.writePanelAndSubCrops(upright, workDir) }
+                        val sVecs = ArrayList<FloatArray>()
+                        if (panelOut.cropFiles.isNotEmpty()) {
+                            sVecs += imgVec
+                            for (cf in panelOut.cropFiles) {
+                                runCatching {
+                                    val cv = engine.embedImage(Uri.fromFile(cf).toString())
+                                    if (cv.size == 512) sVecs += cv
+                                }
+                                cf.delete()
+                            }
+                            if (sVecs.size <= 1) sVecs.clear()
+                        }
+                        staged += StagedAsset(asset, upright, imgVec, sVecs, panelOut.panelCount, panelOut.hasPanelGutter)
+                    } catch (cancelled: CancellationException) {
+                        upright.delete()
+                        throw cancelled
+                    } catch (unavailable: ModelUnavailableException) {
+                        upright.delete()
+                        gaps.note("index", unavailable)
+                        break
+                    } catch (_: Exception) {
+                        upright.delete()
+                        didWork = true
+                        store.upsertCameraRollGate(
+                            CameraRollGateItem(asset.sourceKey, asset.uri, asset.name, asset.kind, asset.modifiedAt, verdict = MemeGateVerdict.REJECTED.code)
+                        )
+                    }
+                }
+
+                for ((idx, item) in staged.withIndex()) {
+                    currentCoroutineContext().ensureActive()
+                    mutableProgress.value = WorkProgress("meme layout check", idx, staged.size, item.asset.name, true)
+                    try {
+                        val regions = engine.recognize(Uri.fromFile(item.uprightFile).toString())
+                        val ocrText = regions.joinToString(" ") { it.text }.trim()
+                        val s1 = MemeGateEvaluator.evaluateStage1(
+                            width = item.asset.width.takeIf { it > 0 } ?: 768,
+                            height = item.asset.height.takeIf { it > 0 } ?: 768,
+                            isVideo = item.asset.kind == "video",
+                            durationMs = item.asset.durationMs,
+                            isScreenshotHint = item.asset.isScreenshotHint,
+                            imageVec = item.imageVec,
+                            openVocab = openVocab,
+                            curatedAnchors = curAnchors,
+                            curatedLabels = curLabels,
+                            rejectedUserVectors = rejectedVecs,
+                            detectedPanelCount = item.panelCount,
+                            hasPanelGutter = item.hasGutter,
+                            ocrRegions = regions,
+                            fullOcrText = ocrText,
+                        )
+                        val topHints = openVocab?.retrieveCandidates(item.imageVec, ocrText, limit = 4)
+                            .orEmpty().joinToString(", ") { it.label }
+                        when (s1.verdict) {
+                            MemeGateVerdict.ACCEPTED -> {
+                                val memeId = promoteGatedMeme(item.asset, item.imageVec, item.sceneVecs, ocrText, twoDomainRaw = null)
+                                store.upsertCameraRollGate(
+                                    CameraRollGateItem(
+                                        sourceKey = item.asset.sourceKey, uri = item.asset.uri, name = item.asset.name,
+                                        kind = item.asset.kind, modifiedAt = item.asset.modifiedAt,
+                                        width = item.asset.width, height = item.asset.height, durationMs = item.asset.durationMs,
+                                        verdict = MemeGateVerdict.ACCEPTED.code, memeProbability = s1.memeProbability,
+                                        ocrText = ocrText, memeId = memeId,
+                                    )
+                                )
+                                acceptedTotal++
+                            }
+                            MemeGateVerdict.REJECTED -> {
+                                store.upsertCameraRollGate(
+                                    CameraRollGateItem(
+                                        sourceKey = item.asset.sourceKey, uri = item.asset.uri, name = item.asset.name,
+                                        kind = item.asset.kind, modifiedAt = item.asset.modifiedAt,
+                                        verdict = MemeGateVerdict.REJECTED.code, memeProbability = s1.memeProbability,
+                                    )
+                                )
+                            }
+                            MemeGateVerdict.UNCERTAIN_TEXT, MemeGateVerdict.UNCERTAIN_VISUAL -> {
+                                store.upsertCameraRollGate(
+                                    CameraRollGateItem(
+                                        sourceKey = item.asset.sourceKey, uri = item.asset.uri, name = item.asset.name,
+                                        kind = item.asset.kind, modifiedAt = item.asset.modifiedAt,
+                                        width = item.asset.width, height = item.asset.height, durationMs = item.asset.durationMs,
+                                        verdict = s1.verdict.code, memeProbability = s1.memeProbability,
+                                        d1Prompt = s1.d1Prompt, ocrText = ocrText, candidateHints = topHints,
+                                        imageVector = item.imageVec, sceneVectors = item.sceneVecs,
+                                    )
+                                )
+                            }
+                        }
+                        didWork = true
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (unavailable: ModelUnavailableException) {
+                        gaps.note("index", unavailable)
+                        break
+                    } catch (_: Exception) {
+                        didWork = true
+                        store.upsertCameraRollGate(
+                            CameraRollGateItem(item.asset.sourceKey, item.asset.uri, item.asset.name, item.asset.kind, item.asset.modifiedAt, verdict = MemeGateVerdict.REJECTED.code)
+                        )
+                    }
+                }
+            } finally {
+                staged.forEach { it.uprightFile.delete() }
+            }
+        }
+
+        if (SystemClock.elapsedRealtime() - started < limit && !interactive && "d1" !in gaps) {
+            val pendingD1 = store.pendingCameraRollGate(MemeGateVerdict.UNCERTAIN_TEXT.code, limit = 24)
+            for ((idx, item) in pendingD1.withIndex()) {
+                currentCoroutineContext().ensureActive()
+                if (SystemClock.elapsedRealtime() - started >= limit || (background && interactive)) break
+                mutableProgress.value = WorkProgress("d1 meme check", idx, pendingD1.size, item.name, true)
+                try {
+                    val d1Res = engine.evaluateD1Gate(item.d1Prompt)
+                    didWork = true
+                    if (d1Res.isMeme && item.imageVector != null) {
+                        val memeId = promoteGatedMeme(
+                            CameraRollAsset(item.sourceKey, item.uri, item.name, item.kind, item.modifiedAt, item.width, item.height, item.durationMs, true),
+                            item.imageVector, item.sceneVectors, item.ocrText, twoDomainRaw = null,
+                        )
+                        store.upsertCameraRollGate(item.copy(verdict = MemeGateVerdict.ACCEPTED.code, memeProbability = d1Res.memeProbability, imageVector = null, sceneVectors = emptyList(), memeId = memeId))
+                        acceptedTotal++
+                    } else {
+                        store.upsertCameraRollGate(item.copy(verdict = MemeGateVerdict.REJECTED.code, memeProbability = d1Res.memeProbability, imageVector = null, sceneVectors = emptyList()))
+                    }
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (unavailable: ModelUnavailableException) {
+                    gaps.note("d1", unavailable)
+                    break
+                } catch (_: Exception) {
+                    didWork = true
+                    store.upsertCameraRollGate(item.copy(verdict = MemeGateVerdict.REJECTED.code, imageVector = null, sceneVectors = emptyList()))
+                    continue
+                }
+            }
+        }
+
+        if (SystemClock.elapsedRealtime() - started < limit && !interactive && "vision" !in gaps && store.setting("vision.enabled") != "0") {
+            val pendingVlm = store.pendingCameraRollGate(MemeGateVerdict.UNCERTAIN_VISUAL.code, limit = 8)
+            val vlmWorkDir = File(context.cacheDir, "gate_vlm_posters").apply { mkdirs() }
+            for ((idx, item) in pendingVlm.withIndex()) {
+                currentCoroutineContext().ensureActive()
+                if (SystemClock.elapsedRealtime() - started >= limit || (background && interactive)) break
+                mutableProgress.value = WorkProgress("visual meme check", idx, pendingVlm.size, item.name, true)
+                var tempPoster: File? = null
+                try {
+                    val targetImageUri = if (item.kind == "video") {
+                        val frames = expo.modules.memegetbg.VideoFrameExtractor.extractMultiple(context, item.uri, listOf(0.25))
+                        val firstFrame = frames.firstOrNull() ?: throw IllegalStateException("No poster frame extracted from video")
+                        val poster = File(vlmWorkDir, "vlm_poster_${UUID.randomUUID()}.jpg")
+                        tempPoster = poster
+                        try {
+                            withContext(Dispatchers.IO) { MediaIoUtils.writeModelInputJpeg(context, Uri.parse(firstFrame), poster) }
+                        } finally {
+                            frames.mapNotNull { Uri.parse(it).path?.let(::File) }.forEach(File::delete)
+                        }
+                        Uri.fromFile(poster).toString()
+                    } else {
+                        item.uri
+                    }
+                    val vlmRes = engine.gateAndDescribe(targetImageUri, item.ocrText, item.candidateHints)
+                    didWork = true
+                    if (vlmRes.isMeme && item.imageVector != null) {
+                        val memeId = promoteGatedMeme(
+                            CameraRollAsset(item.sourceKey, item.uri, item.name, item.kind, item.modifiedAt, item.width, item.height, item.durationMs, false),
+                            item.imageVector, item.sceneVectors, item.ocrText, twoDomainRaw = vlmRes.description,
+                        )
+                        store.upsertCameraRollGate(item.copy(verdict = MemeGateVerdict.ACCEPTED.code, memeProbability = vlmRes.memeProbability, imageVector = null, sceneVectors = emptyList(), memeId = memeId))
+                        acceptedTotal++
+                    } else {
+                        store.upsertCameraRollGate(item.copy(verdict = MemeGateVerdict.REJECTED.code, memeProbability = vlmRes.memeProbability, imageVector = null, sceneVectors = emptyList()))
+                    }
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (unavailable: ModelUnavailableException) {
+                    gaps.note("vision", unavailable)
+                    break
+                } catch (_: Exception) {
+                    // Isolate unreadable/corrupt media item so it never permanently blocks older visual candidates!
+                    didWork = true
+                    store.upsertCameraRollGate(item.copy(verdict = MemeGateVerdict.REJECTED.code, imageVector = null, sceneVectors = emptyList()))
+                    continue
+                } finally {
+                    tempPoster?.delete()
+                }
+            }
+        }
+        return acceptedTotal to didWork
+    }
+
+    private suspend fun hasRemainingCameraRollWork(gaps: ModelGaps): Boolean {
+        if (!CameraRollScanner.hasMediaAccess(context)) return false
+        if ("index" !in gaps && runCatching { countUnseenCameraRollAssets() }.getOrDefault(0) > 0) return true
+        if ("d1" !in gaps && store.pendingCameraRollGate(MemeGateVerdict.UNCERTAIN_TEXT.code, limit = 1).isNotEmpty()) return true
+        if ("vision" !in gaps && store.setting("vision.enabled") != "0" && store.pendingCameraRollGate(MemeGateVerdict.UNCERTAIN_VISUAL.code, limit = 1).isNotEmpty()) return true
+        return false
+    }
+
+    private suspend fun promoteGatedMeme(
+        asset: CameraRollAsset,
+        imageVec: FloatArray,
+        sceneVecs: List<FloatArray>,
+        ocrText: String,
+        twoDomainRaw: String?,
+    ): Long {
+        val existing = store.memeByUri(asset.uri)
+        val memeId = existing?.id ?: store.insertPending(asset.uri, asset.name, asset.kind, asset.modifiedAt)
+        val (localTags, baseTerms) = knowledge.classify(imageVec, ocrText, memeId)
+        val twoDom = twoDomainRaw?.takeIf { it.isNotBlank() }?.let { MemeGateEvaluator.parseTwoDomainDescription(it, sourceTag = "vision") }
+        val combinedTags = if (twoDom != null) (localTags + twoDom.tags).distinctBy { it.label } else localTags
+        val combinedTerms = listOf(baseTerms, twoDom?.searchTerms.orEmpty()).filter { it.isNotBlank() }.joinToString(" ")
+        val thumb = if (asset.kind == "video") {
+            runCatching { files.thumbnail(Meme(id = memeId, uri = asset.uri, name = asset.name, kind = asset.kind)) }.getOrDefault(asset.uri)
+        } else asset.uri
+        store.completeIndex(
+            memeId,
+            LocalAnalysis(imageVec, ocrText, combinedTags, combinedTerms, sceneVecs),
+            engine.primaryModel,
+            thumb,
+        )
+        if (twoDom != null && twoDom.combinedCaption.isNotBlank()) {
+            val capVec = runCatching { engine.embedText(twoDom.combinedCaption) }.getOrNull()
+            store.setCaption(memeId, twoDom.combinedCaption, combinedTags, capVec, state = "done")
+        }
+        return memeId
     }
 
     private suspend fun enrich(
@@ -1094,14 +1404,19 @@ internal class IndexCoordinator(
         val vision = store.setting("vision.enabled") == "1"
         val audio = store.setting("audio.enabled") == "1"
         val visual = store.setting("visual.enabled") == "1"
-        return store.allMemes().fold(0) { tasks, meme ->
+        val missingVisual = if (visual) store.idsMissingVisual() else emptySet()
+        val libraryLeft = store.allMemes().fold(0) { tasks, meme ->
             var left = tasks
             if (meme.pending) left++
             if (vision && meme.visionState == "pending") left++
             if (audio && meme.kind == "video" && meme.audioState == "pending") left++
-            if (visual && store.vectors(meme.id)?.visual == null) left++
+            if (meme.id in missingVisual) left++
             left
         }
+        val gateLeft = runCatching { countUnseenCameraRollAssets() }.getOrDefault(0) +
+            store.pendingCameraRollGate(MemeGateVerdict.UNCERTAIN_TEXT.code, limit = 1000).size +
+            if (store.setting("vision.enabled") != "0") store.pendingCameraRollGate(MemeGateVerdict.UNCERTAIN_VISUAL.code, limit = 1000).size else 0
+        return libraryLeft + gateLeft
     }
 
     private suspend fun backgroundSkips(): Set<Long> =

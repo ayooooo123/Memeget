@@ -91,6 +91,32 @@ internal object NativeBridge {
         destinationPath: String,
     ): Int
 
+    external fun nativeEvaluateD1Gate(
+        handle: Long,
+        modelPath: String,
+        renderedPrompt: String,
+    ): FloatArray
+
+    external fun nativeGateAndDescribe(
+        handle: Long,
+        modelPath: String,
+        projectorPath: String,
+        imagePath: String,
+        ocrHint: String,
+        candidateHints: String,
+        maxTokens: Int,
+        maxImagePixels: Int,
+    ): String
+
+    external fun nativeDetectPanelCrops(
+        rgbBytes: ByteArray,
+        width: Int,
+        height: Int,
+        channels: Int,
+        ocrBoxCount: Int,
+        allowMiner: Boolean,
+    ): IntArray?
+
     /** For each row of [dim] floats in [vectors], how many other rows reach [minCos] with it. */
     external fun nativeLookalikeCounts(vectors: FloatArray, dim: Int, minCos: Float): IntArray
 
@@ -129,6 +155,37 @@ internal object NativeBridge {
         capHubness: FloatArray,
         count: Int,
         dim: Int,
+        outScores: FloatArray,
+    ): Int
+
+    external fun nativeQuantizeVec512(
+        srcFp32: FloatArray,
+        dstInt8: ByteArray,
+        dstRabit64: LongArray?,
+    )
+
+    external fun nativeComputeCslsHubness(
+        imageVec: FloatArray,
+        queryBankFlat: FloatArray,
+        bankCount: Int,
+        topK: Int,
+    ): Float
+
+    external fun nativeBatchDenseScoresQuantized(
+        queryVec: FloatArray,
+        protoVec: FloatArray?,
+        imageMatInt8: ByteArray,
+        imageRabit64: LongArray?,
+        hasImage: BooleanArray,
+        imgCslsHubness: FloatArray?,
+        scenePoolInt8: ByteArray?,
+        sceneOffsets: IntArray?,
+        captionMatInt8: ByteArray?,
+        hasCaption: BooleanArray?,
+        capHubness: FloatArray?,
+        count: Int,
+        cslsWeight: Float,
+        cslsFloor: Float,
         outScores: FloatArray,
     ): Int
 }

@@ -10,7 +10,8 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -71,6 +72,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import com.memeget.nativeapp.data.SocialReplyIntent
+import com.memeget.nativeapp.storage.CameraRollScanner
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
 
@@ -86,7 +88,6 @@ internal fun LibraryScreen(
     knowledge: LocalKnowledge,
     coordinator: IndexCoordinator,
     onOpenViewer: (Meme) -> Unit,
-    onOpenRemix: (Meme) -> Unit,
     onOpenSettings: () -> Unit,
     // False while Label or Settings shows: the screen stays composed then, but must not take Back.
     active: Boolean = true,
@@ -154,6 +155,18 @@ internal fun LibraryScreen(
             }
         }
     }
+    var hasCameraRollAccess by remember { mutableStateOf(CameraRollScanner.hasMediaAccess(context)) }
+    val cameraRollPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestMultiplePermissions()
+    ) { _ ->
+        val granted = CameraRollScanner.hasMediaAccess(context)
+        hasCameraRollAccess = granted
+        if (granted) {
+            onStartIndex()
+        } else {
+            Toast.makeText(context, "Grant photo access to auto-organize memes from your camera roll", Toast.LENGTH_LONG).show()
+        }
+    }
 
     val uiPrefs = remember { context.getSharedPreferences(UI_PREFS, Context.MODE_PRIVATE) }
     var bannerDismissed by remember { mutableStateOf(uiPrefs.getBoolean(BANNER_DISMISSED, false)) }
@@ -189,13 +202,20 @@ internal fun LibraryScreen(
         }
     }
 
-    // Pre-warm the resident search index + MobileCLIP-S2 text encoder on mount so the very first keystroke
-    // lands in <3 ms without stalling behind a 40 MB SQLite scan or a cold 254 MB .pte load.
+    // Pre-warm the resident search index + MobileCLIP-S2 text encoder on mount. Searches typed before the index is
+    // built use the SQLite/FTS path instead of waiting (about 2 s of build for 2,344 memes on a Pixel 5a).
     LaunchedEffect(Unit) {
         withContext(Dispatchers.IO) {
             runCatching { store.warmSearchIndex() }
             if (!coordinator.progress.value.running) {
                 runCatching { engine.warmTextEncoder() }
+            }
+        }
+    }
+    LaunchedEffect(hasCameraRollAccess) {
+        if (hasCameraRollAccess && !coordinator.progress.value.running) {
+            withContext(Dispatchers.IO) {
+                runCatching { coordinator.scanAndStart() }
             }
         }
     }
@@ -270,7 +290,7 @@ internal fun LibraryScreen(
         val searchKind = if (relaxedFromKind != null) null else key.second
         resultKey = key
         // Never blank `memes = emptyList()` on keystroke changes: keep existing tiles mounted with zero flicker
-        // while the <2 ms resident lexical pass updates on the next frame.
+        // while the resident lexical pass (tens of ms on a Pixel 5a) updates.
         if (memes.isEmpty()) {
             loadingFirstPage = true
         }
@@ -322,7 +342,7 @@ internal fun LibraryScreen(
                 }
                 publish(rows, more)
             } else {
-                // Instant <2 ms lexical + social-slang pass from the resident RAM index.
+                // Lexical + social-slang pass from the resident RAM index first (tens of ms), then the hybrid pass.
                 val lexical = searchWindow(null, searchKind)
                 searchCursor = lexical.second
                 publish(lexical.first, lexical.third)
@@ -554,56 +574,67 @@ internal fun LibraryScreen(
             )
         }
 
-        // Quick Filter Chips (Media kinds & Tags)
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .horizontalScroll(rememberScrollState())
-                .padding(horizontal = 14.dp, vertical = 4.dp),
+        // Quick Filter Chips (Media kinds & Tags). A library carries hundreds of taught labels and thousands of tags:
+        // a lazy row composes only the chips on screen, and the tag filter runs once per data change, not per keystroke.
+        val libraryTagChips = remember(libraryTags, taughtLabels) {
+            val taught = taughtLabels.toHashSet()
+            libraryTags.asSequence().filter { it !in taught }.take(20).toList()
+        }
+        LazyRow(
+            modifier = Modifier.fillMaxWidth(),
+            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 4.dp),
             horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             // Battle-tested replies Master actually copies & fires online
             if (usedCount > 0 || usedOnly) {
-                FilterChip(
-                    label = if (usedCount > 0) "⚡ Used ($usedCount)" else "⚡ Used",
-                    active = usedOnly,
-                    onClick = {
-                        usedOnly = !usedOnly
-                        if (usedOnly) {
-                            selectedTag = null
-                            query = ""
-                        }
-                    },
-                )
+                item(key = "used") {
+                    FilterChip(
+                        label = if (usedCount > 0) "⚡ Used ($usedCount)" else "⚡ Used",
+                        active = usedOnly,
+                        onClick = {
+                            usedOnly = !usedOnly
+                            if (usedOnly) {
+                                selectedTag = null
+                                query = ""
+                            }
+                        },
+                    )
+                }
             }
 
             // Media kind chips
-            FilterChip(
-                label = "▦ Images",
-                active = kindFilter == "image",
-                onClick = {
-                    kindFilter = if (kindFilter == "image") null else "image"
-                },
-            )
-            FilterChip(
-                label = "▶ Videos",
-                active = kindFilter == "video",
-                onClick = {
-                    kindFilter = if (kindFilter == "video") null else "video"
-                },
-            )
-            if (taughtLabels.isNotEmpty() || libraryTags.isNotEmpty()) {
-                Box(
-                    modifier = Modifier
-                        .height(18.dp)
-                        .width(1.dp)
-                        .background(MemegetColors.Border),
+            item(key = "kind:image") {
+                FilterChip(
+                    label = "▦ Images",
+                    active = kindFilter == "image",
+                    onClick = {
+                        kindFilter = if (kindFilter == "image") null else "image"
+                    },
                 )
+            }
+            item(key = "kind:video") {
+                FilterChip(
+                    label = "▶ Videos",
+                    active = kindFilter == "video",
+                    onClick = {
+                        kindFilter = if (kindFilter == "video") null else "video"
+                    },
+                )
+            }
+            if (taughtLabels.isNotEmpty() || libraryTags.isNotEmpty()) {
+                item(key = "divider") {
+                    Box(
+                        modifier = Modifier
+                            .height(18.dp)
+                            .width(1.dp)
+                            .background(MemegetColors.Border),
+                    )
+                }
             }
 
             // Taught concepts first (starred)
-            taughtLabels.forEach { label ->
+            items(taughtLabels, key = { "taught:$it" }) { label ->
                 FilterChip(
                     label = "★ $label",
                     active = selectedTag == label || query.trim() == label,
@@ -620,7 +651,7 @@ internal fun LibraryScreen(
             }
 
             // Library tags
-            libraryTags.filter { !taughtLabels.contains(it) }.take(20).forEach { label ->
+            items(libraryTagChips, key = { "tag:$it" }) { label ->
                 FilterChip(
                     label = label,
                     active = selectedTag == label || query.trim() == label,
@@ -886,29 +917,34 @@ internal fun LibraryScreen(
                             color = MemegetColors.TextSecondary,
                         )
 
-                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            OutlinedButton(
-                                onClick = { linkFolderLauncher.launch(null) },
-                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-                            ) {
-                                Text("＋ Folder", style = MaterialTheme.typography.labelSmall)
+                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                if (!hasCameraRollAccess) {
+                                    OutlinedButton(
+                                        onClick = { cameraRollPermissionLauncher.launch(CameraRollScanner.requiredPermissions()) },
+                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                    ) {
+                                        Text("＋ Camera Roll", style = MaterialTheme.typography.labelSmall)
+                                    }
+                                }
+                                Button(
+                                    onClick = {
+                                        if (hasCameraRollAccess || folderCount > 0) onStartIndex()
+                                        else cameraRollPermissionLauncher.launch(CameraRollScanner.requiredPermissions())
+                                    },
+                                    enabled = !isScanning,
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = MemegetColors.Volt,
+                                        contentColor = MemegetColors.Background,
+                                    ),
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+                                ) {
+                                    Text(
+                                        text = if (isScanning) "Scanning…" else "⟳ Scan",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.Bold,
+                                    )
+                                }
                             }
-                            Button(
-                                onClick = onStartIndex,
-                                enabled = !isScanning,
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = MemegetColors.Volt,
-                                    contentColor = MemegetColors.Background,
-                                ),
-                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
-                            ) {
-                                Text(
-                                    text = if (isScanning) "Scanning…" else "⟳ Index",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    fontWeight = FontWeight.Bold,
-                                )
-                            }
-                        }
                     }
                 }
             },
@@ -916,8 +952,13 @@ internal fun LibraryScreen(
                 if (libraryCount == 0 && !indexProgress.running) {
                     // Onboarding 1-2-3 guide
                     OnboardingCard(
+                        onScanCameraRoll = {
+                            if (hasCameraRollAccess) onStartIndex()
+                            else cameraRollPermissionLauncher.launch(CameraRollScanner.requiredPermissions())
+                        },
                         onLink = { linkFolderLauncher.launch(null) },
                         onIndex = onStartIndex,
+                        hasCameraRollAccess = hasCameraRollAccess,
                         folderCount = folderCount,
                         isScanning = isScanning,
                     )
@@ -1107,8 +1148,10 @@ private fun FilterChip(
 
 @Composable
 private fun OnboardingCard(
+    onScanCameraRoll: () -> Unit,
     onLink: () -> Unit,
     onIndex: () -> Unit,
+    hasCameraRollAccess: Boolean,
     folderCount: Int,
     isScanning: Boolean = false,
 ) {
@@ -1126,53 +1169,43 @@ private fun OnboardingCard(
     ) {
         Text("🐸", fontSize = 36.sp)
         Text(
-            text = "Your stash, searchable",
+            text = "Search your memes instantly",
             style = MaterialTheme.typography.titleMedium,
             fontWeight = FontWeight.Bold,
             color = MemegetColors.TextPrimary,
         )
         Text(
-            text = "Memeget indexes your local memes entirely on your phone — no uploads, no cloud required. Find anything by vibe, character, format, or words inside.",
+            text = "Memeget scans your camera roll locally on-device, separates memes from personal photos & receipts, and indexes every format, quote, and reaction for instant search.",
             style = MaterialTheme.typography.bodySmall,
             color = MemegetColors.TextSecondary,
             textAlign = TextAlign.Center,
         )
 
-        Column(
+        Button(
+            onClick = if (hasCameraRollAccess || folderCount > 0) onIndex else onScanCameraRoll,
+            enabled = !isScanning,
+            colors = ButtonDefaults.buttonColors(
+                containerColor = MemegetColors.Volt,
+                contentColor = MemegetColors.Background,
+            ),
             modifier = Modifier.fillMaxWidth(),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            StepRow(number = "1", title = "Link your meme folder", completed = folderCount > 0)
-            StepRow(number = "2", title = "Index your library on-device", completed = false)
-            StepRow(number = "3", title = "Search “sad frog”, “galaxy brain”, anything", completed = false)
+            Text(
+                text = when {
+                    isScanning -> "Scanning Camera Roll…"
+                    hasCameraRollAccess -> "Scan Camera Roll Now"
+                    else -> "Scan Camera Roll (100% Local)"
+                },
+                fontWeight = FontWeight.Bold,
+            )
         }
 
-        if (folderCount == 0) {
-            Button(
-                onClick = onLink,
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = MemegetColors.Volt,
-                    contentColor = MemegetColors.Background,
-                ),
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text("Link Meme Folder", fontWeight = FontWeight.Bold)
-            }
-        } else {
-            Button(
-                onClick = onIndex,
-                enabled = !isScanning,
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = MemegetColors.Volt,
-                    contentColor = MemegetColors.Background,
-                ),
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text(
-                    text = if (isScanning) "Scanning…" else "Index My Memes",
-                    fontWeight = FontWeight.Bold,
-                )
-            }
+        TextButton(onClick = onLink) {
+            Text(
+                text = if (folderCount > 0) "Linked folders: $folderCount · Add another" else "Or link a specific meme folder",
+                style = MaterialTheme.typography.labelSmall,
+                color = MemegetColors.TextMuted,
+            )
         }
     }
 }

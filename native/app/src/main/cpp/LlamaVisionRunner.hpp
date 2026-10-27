@@ -18,6 +18,14 @@ struct RgbImage {
     std::vector<uint8_t> pixels;
 };
 
+struct VisionGateDescribeResult {
+    bool isMeme = false;
+    float memeProbability = 0.0f;
+    std::string description;
+    int generatedTokens = 0;
+    long long totalMs = 0;
+};
+
 // MiniCPM-V 4.7 through the pinned llama.cpp/libmtmd runtime: a GGUF language model plus its
 // vision projector, CPU only. One instance owns both models until it is destroyed.
 class LlamaVisionRunner {
@@ -43,6 +51,14 @@ public:
                          const std::string& userPrompt,
                          int maxTokens,
                          float temperature);
+
+    // 1-token camera-roll gate + zero-re-encode two-domain meme describer:
+    // reads step-0 YES/NO logits right off the prefilled image state, aborts at <=1 token on non-memes,
+    // and continues straight into structured two-domain captioning when a real meme is on the slab.
+    VisionGateDescribeResult gateAndDescribe(const RgbImage& image,
+                                             const std::string& ocrHint,
+                                             const std::string& candidateHints,
+                                             int maxTokens = 140);
 
     // Measurements from the latest describe call, for diagnostics.
     const std::string& lastTimings() const { return timings_; }

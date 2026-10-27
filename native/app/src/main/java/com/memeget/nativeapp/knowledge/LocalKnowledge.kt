@@ -127,6 +127,47 @@ internal class LocalKnowledge(
         }
     }
 
+    @Volatile private var bundledGateAnchors: Pair<List<CuratedLabelDef>, List<NegativeAnchorDef>>? = null
+
+    internal suspend fun curatedForGate(): Pair<List<CuratedLabelDef>, List<NegativeAnchorDef>>? {
+        bundledGateAnchors?.let { return it }
+        val app = context
+        if (app != null) {
+            val loaded = withContext(Dispatchers.IO) {
+                runCatching {
+                    app.assets.open("knowledge/meme_gate_anchors.bin").use { raw ->
+                        val bytes = raw.readBytes()
+                        if (bytes.size >= 16) {
+                            val buf = java.nio.ByteBuffer.wrap(bytes).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                            val magic = buf.int
+                            val version = buf.int
+                            val nPos = buf.int
+                            val nNeg = buf.int
+                            val expectedBytes = 16 + (nPos + nNeg) * 512 * 4
+                            if (magic == 0x4D474741 && version == 1 && nPos in 1..256 && nNeg in 1..256 && bytes.size == expectedBytes) {
+                                val posList = ArrayList<CuratedLabelDef>(nPos)
+                                for (i in 0 until nPos) {
+                                    val v = FloatArray(512) { buf.float }
+                                    posList += CuratedLabelDef("meme_anchor_$i", "meme anchor $i", "Format", emptyList(), v, emptyList())
+                                }
+                                val negList = ArrayList<NegativeAnchorDef>(nNeg)
+                                for (i in 0 until nNeg) {
+                                    val v = FloatArray(512) { buf.float }
+                                    negList += NegativeAnchorDef("ordinary_anchor_$i", v)
+                                }
+                                posList to negList
+                            } else null
+                        } else null
+                    }
+                }.getOrNull()
+            }
+            if (loaded != null) {
+                bundledGateAnchors = loaded
+                return loaded
+            }
+        }
+        return curatedIfReady() ?: runCatching { ensureCuratedLoaded() }.getOrNull()
+    }
     /** Title names from the bundled labels, read without their vectors: an answer's category needs only names. */
     @Volatile private var titleNames: Titles.Names? = null
     private suspend fun titleNames(): Titles.Names? {
@@ -157,7 +198,7 @@ internal class LocalKnowledge(
     // The pinned recipe passed the original encoder's 32-image/8-text parity gate.
     // Compatibility is limited to teaching packs; filename-only sidecars still require reindexing.
     private fun compatibleTeachingModel(model: String): Boolean =
-        model == ModelRegistry.PRIMARY_MODEL_FINGERPRINT || model == TeachingPackIo.PACK_MODEL
+        ModelRegistry.isCompatiblePrimaryModel(model) || model == TeachingPackIo.PACK_MODEL
 
     private suspend fun buildD1Index(
         humanExamples: List<LookalikeVote.Example>,
@@ -1010,7 +1051,7 @@ internal class LocalKnowledge(
                 if (meme.id in pass.finished) return@collect
 
                 val vectors = store.vectors(meme.id)
-                if (vectors != null && vectors.image.isNotEmpty() && vectors.model == ModelRegistry.PRIMARY_MODEL_FINGERPRINT) {
+                if (vectors != null && vectors.image.isNotEmpty() && ModelRegistry.isCompatiblePrimaryModel(vectors.model)) {
                     val memeText = "${meme.ocr} ${meme.transcript}".trim()
                     val verifierScores = scoreWithVerifier(
                         image = vectors.image,
@@ -1066,5 +1107,134 @@ internal class LocalKnowledge(
 
         unfinishedRetag = null
         progress(WorkProgress(stage = "complete", done = pass.finished.size, total = total, running = false))
+    }
+
+    /**
+     * Bounded Transductive Template Cluster Propagation (arXiv:2501.06031 frozen-graph + PairwiseVisualVerifier):
+     * spreads verified template, character, and show identities across visually matching variations in the library
+     * without copying OCR or captions and without a manual Label quiz tab.
+     */
+    suspend fun propagateClusterIdentities(maxSeeds: Int = 512, maxTargets: Int = 1024): Int = withContext(Dispatchers.Default) {
+        val imgVecs = store.imageVectors()
+        if (imgVecs.size < 2) return@withContext 0
+        val entityCats = setOf("format", "character", "person", "tv", "movie")
+        val allRows = ArrayList<Meme>(minOf(imgVecs.size, maxOf(maxSeeds, maxTargets) * 2))
+        store.allMemes().collect { m ->
+            if (!m.pending && imgVecs.containsKey(m.id) && allRows.size < maxOf(maxSeeds, maxTargets) * 2) {
+                allRows += m
+            }
+        }
+        if (allRows.size < 2) return@withContext 0
+
+        fun signSketch64(v: FloatArray): Long {
+            var bits = 0L
+            val lim = minOf(64, v.size)
+            for (b in 0 until lim) {
+                if (v[b] >= 0f) bits = bits or (1L shl b)
+            }
+            return bits
+        }
+
+        data class Seed(val memeId: Long, val vec: FloatArray, val sketch: Long, val tag: Tag)
+        val rawSeeds = ArrayList<Seed>()
+        for (m in allRows) {
+            val v = imgVecs[m.id] ?: continue
+            val sk = signSketch64(v)
+            for (t in m.tags) {
+                val cat = t.category.lowercase(java.util.Locale.ROOT)
+                if (cat !in entityCats) continue
+                if (TagMerge.isHumanTag(t) || (t.source != "propagated" && t.score >= 0.84f)) {
+                    rawSeeds += Seed(m.id, v, sk, t)
+                }
+            }
+        }
+        if (rawSeeds.isEmpty()) return@withContext 0
+        rawSeeds.sortWith(compareByDescending<Seed> { TagMerge.isHumanTag(it.tag) }.thenByDescending { it.tag.score })
+        val seeds = rawSeeds.take(maxSeeds)
+        val targets = allRows.take(maxTargets)
+
+        val pv = verifier()
+        val openConcepts = OpenVocabConcepts.load(context)
+        var updatedCount = 0
+        for (target in targets) {
+            currentCoroutineContext().ensureActive()
+            val tv = imgVecs[target.id] ?: continue
+            val tSketch = signSketch64(tv)
+            val existingNorm = target.tags.mapTo(HashSet()) { TagMerge.normalizeTagLabel(it.label) }
+            val rejectedNorm = target.rejectedLabels.mapTo(HashSet()) { TagMerge.normalizeTagLabel(it) }
+
+            val bestByLabel = LinkedHashMap<String, Pair<Seed, Float>>()
+            for (s in seeds) {
+                if (s.memeId == target.id) continue
+                if (java.lang.Long.bitCount(tSketch xor s.sketch) > 20) continue
+                val norm = TagMerge.normalizeTagLabel(s.tag.label)
+                if (norm.isEmpty() || norm in existingNorm || norm in rejectedNorm) continue
+                val cos = FloatBlob.dot(tv, s.vec)
+                if (cos >= 0.83f) {
+                    val prev = bestByLabel[norm]
+                    if (prev == null || cos > prev.second) bestByLabel[norm] = s to cos
+                }
+            }
+            if (bestByLabel.isEmpty()) continue
+            val propagated = ArrayList<Tag>(2)
+            for ((norm, pair) in bestByLabel.entries.sortedByDescending { it.value.second }.take(3)) {
+                val (seed, cos) = pair
+                val ov = openConcepts?.entryFor(norm)
+                val effectiveProto = if (ov != null && FloatBlob.dot(seed.vec, ov.cHybrid) >= 0.40f) {
+                    val sum = FloatArray(VECTOR_DIM) { d -> 0.65f * seed.vec[d] + 0.35f * ov.cHybrid[d] }
+                    normalizeVec(sum) ?: seed.vec
+                } else {
+                    seed.vec
+                }
+                val verified = if (TagMerge.isHumanTag(seed.tag) && cos >= com.memeget.nativeapp.data.TagPropagation.PROPAGATE_MIN_COS_PRIMARY) {
+                    true
+                } else if (pv != null) {
+                    val sample = pv.evaluate(
+                        tv,
+                        listOf(
+                            PairwiseVisualVerifier.VerifierCandidate(
+                                key = norm,
+                                protoVec = effectiveProto,
+                                textVec = ov?.tStock?.takeIf { FloatBlob.dot(seed.vec, ov.cHybrid) >= 0.40f },
+                                calPosCos = cos,
+                                tagMean = ov?.tagMean ?: 0.20f,
+                                tagStd = ov?.tagStd ?: 0.045f,
+                                hasStats = ov != null && FloatBlob.dot(seed.vec, ov.cHybrid) >= 0.40f,
+                                voteCount = 2,
+                                support70 = 2,
+                                isEntity = true,
+                            ),
+                        ),
+                    )
+                    OnDeviceDecisionHead.sigmoid(sample.baseLogits[0]) >= 0.65f
+                } else cos >= 0.87f
+
+                if (verified) {
+                    propagated += Tag(
+                        label = norm,
+                        category = seed.tag.category,
+                        score = cos,
+                        source = "propagated",
+                        scoreDomain = "cluster-propagation",
+                        confirmation = "unreviewed",
+                        provenance = "cluster:${seed.memeId}",
+                    )
+                    if (propagated.size >= 2) break
+                }
+            }
+            if (propagated.isNotEmpty()) {
+                val merged = TagMerge.mergeDurableTags(target.tags + propagated)
+                var extra = target.extraTerms
+                for (pt in propagated) {
+                    extra = TagMerge.termsWithLabel(extra, pt.label)
+                    for (parent in OpenVocabConcepts.parentAliasesFor(pt.label)) {
+                        extra = TagMerge.termsWithLabel(extra, parent)
+                    }
+                }
+                store.updateTags(target.id, merged, extra)
+                updatedCount++
+            }
+        }
+        updatedCount
     }
 }

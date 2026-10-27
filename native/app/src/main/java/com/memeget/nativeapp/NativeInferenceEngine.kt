@@ -260,6 +260,70 @@ internal class NativeInferenceEngine(
         }
     }
 
+    override suspend fun evaluateD1Gate(renderedPrompt: String): D1GateOutcome = withContext(Dispatchers.Default) {
+        currentCoroutineContext().ensureActive()
+        val d1File = ensureModel(ModelRegistry.D1_OMNI_DECISION_MODEL)
+        try {
+            engineMutex.withLock {
+                val handle = activeHandle()
+                NativeBridge.nativeResetCancel(handle)
+                val raw = NativeBridge.nativeEvaluateD1Gate(handle, d1File.absolutePath, renderedPrompt)
+                if (raw.size < 5) throw IllegalStateException("d1-omni gate returned incomplete output")
+                D1GateOutcome(
+                    isMeme = raw[0] >= 0.5f,
+                    memeProbability = raw[1],
+                    memeLogit = raw[2],
+                    nonMemeLogit = raw[3],
+                    evalMs = raw[4].toLong(),
+                )
+            }
+        } catch (failure: RuntimeException) {
+            currentCoroutineContext().ensureActive()
+            throw failure
+        }
+    }
+
+    override suspend fun gateAndDescribe(
+        uri: String,
+        ocrHint: String,
+        candidateHints: String,
+    ): VlmGateOutcome = withContext(Dispatchers.Default) {
+        currentCoroutineContext().ensureActive()
+        val modelFile = ensureModel(ModelRegistry.MINICPM_V47_MODEL)
+        val projectorFile = ensureProjector()
+        try {
+            engineMutex.withLock {
+                val handle = activeHandle()
+                NativeBridge.nativeResetCancel(handle)
+                withLocalPath(uri) { localPath ->
+                    val pixelBudget = if (isTallStrip(localPath)) DESCRIBE_TALL_STRIP_MAX_PIXELS else DESCRIBE_MAX_PIXELS
+                    val encoded = NativeBridge.nativeGateAndDescribe(
+                        handle = handle,
+                        modelPath = modelFile.absolutePath,
+                        projectorPath = projectorFile.absolutePath,
+                        imagePath = localPath,
+                        ocrHint = ocrHint,
+                        candidateHints = candidateHints,
+                        maxTokens = 140,
+                        maxImagePixels = pixelBudget,
+                    )
+                    val parts = encoded.split('\t', limit = 5)
+                    if (parts.size < 5) throw IllegalStateException("Malformed MiniCPM gate payload")
+                    VlmGateOutcome(
+                        isMeme = parts[0] == "1",
+                        memeProbability = parts[1].toFloatOrNull() ?: 0.5f,
+                        generatedTokens = parts[2].toIntOrNull() ?: 0,
+                        totalMs = parts[3].toLongOrNull() ?: 0L,
+                        description = parts[4],
+                    )
+                }
+            }
+        } catch (failure: RuntimeException) {
+            currentCoroutineContext().ensureActive()
+            throw failure
+        }
+    }
+
     override suspend fun transcribe(uri: String): String = withContext(Dispatchers.Default) {
         currentCoroutineContext().ensureActive()
 

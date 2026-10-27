@@ -9,6 +9,7 @@
 
 #include "ModelRunner.hpp"
 #include "JniStrings.hpp"
+#include "MemeGateCore.hpp"
 
 #define LOG_TAG "MemegetInferenceJni"
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
@@ -410,6 +411,115 @@ Java_com_memeget_nativeapp_inference_NativeBridge_nativeConvertProjector(
     } catch (const std::exception& e) {
         throwJavaException(env, e.what());
         return 0;
+    }
+}
+
+JNIEXPORT jfloatArray JNICALL
+Java_com_memeget_nativeapp_inference_NativeBridge_nativeEvaluateD1Gate(
+    JNIEnv* env,
+    jobject /* thiz */,
+    jlong handle,
+    jstring modelPath,
+    jstring renderedPrompt) {
+    try {
+        auto runner = getRunner(handle);
+        if (!runner) {
+            throwJavaException(env, "ModelRunner instance is null");
+            return nullptr;
+        }
+        const auto res = runner->evaluateD1Gate(
+            JStringUtf(env, modelPath).str(),
+            JStringUtf(env, renderedPrompt).str());
+        float packed[5] = {
+            res.isMeme ? 1.0f : 0.0f,
+            res.memeProbability,
+            res.memeLogit,
+            res.nonMemeLogit,
+            static_cast<float>(res.evalMs),
+        };
+        jfloatArray out = env->NewFloatArray(5);
+        if (out != nullptr) env->SetFloatArrayRegion(out, 0, 5, packed);
+        return out;
+    } catch (const std::exception& e) {
+        throwJavaException(env, e.what());
+        return nullptr;
+    }
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_memeget_nativeapp_inference_NativeBridge_nativeGateAndDescribe(
+    JNIEnv* env,
+    jobject /* thiz */,
+    jlong handle,
+    jstring modelPath,
+    jstring projectorPath,
+    jstring imagePath,
+    jstring ocrHint,
+    jstring candidateHints,
+    jint maxTokens,
+    jint maxImagePixels) {
+    try {
+        auto runner = getRunner(handle);
+        if (!runner) {
+            throwJavaException(env, "ModelRunner instance is null");
+            return nullptr;
+        }
+        const auto res = runner->gateAndDescribe(
+            JStringUtf(env, modelPath).str(),
+            JStringUtf(env, projectorPath).str(),
+            JStringUtf(env, imagePath).str(),
+            JStringUtf(env, ocrHint).str(),
+            JStringUtf(env, candidateHints).str(),
+            maxTokens,
+            maxImagePixels);
+        std::string encoded = std::string(res.isMeme ? "1" : "0") + "\t" +
+                              std::to_string(res.memeProbability) + "\t" +
+                              std::to_string(res.generatedTokens) + "\t" +
+                              std::to_string(res.totalMs) + "\t" +
+                              res.description;
+        return newJavaString(env, encoded);
+    } catch (const std::exception& e) {
+        throwJavaException(env, e.what());
+        return nullptr;
+    }
+}
+
+JNIEXPORT jintArray JNICALL
+Java_com_memeget_nativeapp_inference_NativeBridge_nativeDetectPanelCrops(
+    JNIEnv* env,
+    jobject /* thiz */,
+    jbyteArray rgbBytes,
+    jint width,
+    jint height,
+    jint channels,
+    jint ocrBoxCount,
+    jboolean allowMiner) {
+    try {
+        if (!rgbBytes || width <= 0 || height <= 0 || channels < 1) return nullptr;
+        const jsize len = env->GetArrayLength(rgbBytes);
+        if (static_cast<size_t>(len) < static_cast<size_t>(width) * height * channels) return nullptr;
+        std::vector<uint8_t> pixels(static_cast<size_t>(len));
+        env->GetByteArrayRegion(rgbBytes, 0, len, reinterpret_cast<jbyte*>(pixels.data()));
+        const auto det = memeget::core::detectPanelsAndSubCrops(
+            pixels.data(), width, height, channels, ocrBoxCount, allowMiner == JNI_TRUE);
+        std::vector<jint> packed;
+        packed.reserve(4 + det.crops.size() * 4);
+        packed.push_back(det.panelCount);
+        packed.push_back(det.hasHorizontalGutter ? 1 : 0);
+        packed.push_back(det.hasVerticalGutter ? 1 : 0);
+        packed.push_back(det.usedMinerSubCrops ? 1 : 0);
+        for (const auto& c : det.crops) {
+            packed.push_back(c.x);
+            packed.push_back(c.y);
+            packed.push_back(c.width);
+            packed.push_back(c.height);
+        }
+        jintArray out = env->NewIntArray(static_cast<jsize>(packed.size()));
+        if (out != nullptr) env->SetIntArrayRegion(out, 0, static_cast<jsize>(packed.size()), packed.data());
+        return out;
+    } catch (const std::exception& e) {
+        throwJavaException(env, e.what());
+        return nullptr;
     }
 }
 

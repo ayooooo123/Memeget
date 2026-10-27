@@ -55,10 +55,14 @@ internal object TagPropagation {
         if (hasActiveVisual(target, activeVisualModel) && hasActiveVisual(candidate, activeVisualModel)) {
             return SelectedPair(target.visualEmbedding!!, candidate.visualEmbedding!!, VectorSpace.VISUAL)
         }
-        if (target.imageModel.isNotBlank() && activePrimaryModel.isNotBlank() && target.imageModel != activePrimaryModel) {
+        val targetCompat = target.imageModel == activePrimaryModel ||
+            (activePrimaryModel == ModelRegistry.PRIMARY_MODEL_FINGERPRINT && ModelRegistry.isCompatiblePrimaryModel(target.imageModel))
+        val candCompat = candidate.imageModel == activePrimaryModel ||
+            (activePrimaryModel == ModelRegistry.PRIMARY_MODEL_FINGERPRINT && ModelRegistry.isCompatiblePrimaryModel(candidate.imageModel))
+        if (target.imageModel.isNotBlank() && activePrimaryModel.isNotBlank() && !targetCompat) {
             return SelectedPair(FloatArray(0), FloatArray(0), VectorSpace.PRIMARY)
         }
-        if (candidate.imageModel.isNotBlank() && activePrimaryModel.isNotBlank() && candidate.imageModel != activePrimaryModel) {
+        if (candidate.imageModel.isNotBlank() && activePrimaryModel.isNotBlank() && !candCompat) {
             return SelectedPair(FloatArray(0), FloatArray(0), VectorSpace.PRIMARY)
         }
         return SelectedPair(target.imageEmbedding, candidate.imageEmbedding, VectorSpace.PRIMARY)

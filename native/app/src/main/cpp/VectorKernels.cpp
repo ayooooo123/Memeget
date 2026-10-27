@@ -11,6 +11,7 @@
 #if defined(__aarch64__)
 #include <arm_neon.h>
 #endif
+#include "ResidentSearchCore.hpp"
 
 namespace {
 
@@ -297,6 +298,132 @@ Java_com_memeget_nativeapp_inference_NativeBridge_nativeBatchDenseScores(
             }
         }
         env->ReleasePrimitiveArrayCritical(captionMat, const_cast<float*>(capPtr), JNI_ABORT);
+    }
+    env->SetFloatArrayRegion(outScores, 0, count, out.data());
+    return count;
+}
+
+JNIEXPORT void JNICALL
+Java_com_memeget_nativeapp_inference_NativeBridge_nativeQuantizeVec512(
+    JNIEnv* env,
+    jobject /* thiz */,
+    jfloatArray srcFp32,
+    jbyteArray dstInt8,
+    jlongArray dstRabit64) {
+    if (!srcFp32 || !dstInt8 || env->GetArrayLength(srcFp32) < 512 || env->GetArrayLength(dstInt8) < 512) return;
+    float src[512];
+    int8_t q[512];
+    uint64_t rabit[8];
+    env->GetFloatArrayRegion(srcFp32, 0, 512, src);
+    memeget::core::quantizeUnitVec512(src, q, dstRabit64 ? rabit : nullptr);
+    env->SetByteArrayRegion(dstInt8, 0, 512, reinterpret_cast<const jbyte*>(q));
+    if (dstRabit64 && env->GetArrayLength(dstRabit64) >= 8) {
+        env->SetLongArrayRegion(dstRabit64, 0, 8, reinterpret_cast<const jlong*>(rabit));
+    }
+}
+
+JNIEXPORT jfloat JNICALL
+Java_com_memeget_nativeapp_inference_NativeBridge_nativeComputeCslsHubness(
+    JNIEnv* env,
+    jobject /* thiz */,
+    jfloatArray imageVec,
+    jfloatArray queryBankFlat,
+    jint bankCount,
+    jint topK) {
+    if (!imageVec || !queryBankFlat || bankCount <= 0) return 0.0f;
+    float img[512];
+    env->GetFloatArrayRegion(imageVec, 0, 512, img);
+    // The same 256×512 bank arrives for every meme of an index build: borrow it in place rather than allocate and
+    // copy 512 KB per call (≈1.2 s of a 2,344-meme cold build). The kernel makes no JNI calls while it holds it.
+    auto* bank = static_cast<const float*>(env->GetPrimitiveArrayCritical(queryBankFlat, nullptr));
+    if (!bank) return 0.0f;
+    const float hubness = memeget::core::computeCandidateCslsHubness(img, bank, bankCount, 512, topK);
+    env->ReleasePrimitiveArrayCritical(queryBankFlat, const_cast<float*>(bank), JNI_ABORT);
+    return hubness;
+}
+
+JNIEXPORT jint JNICALL
+Java_com_memeget_nativeapp_inference_NativeBridge_nativeBatchDenseScoresQuantized(
+    JNIEnv* env,
+    jobject /* thiz */,
+    jfloatArray queryVec,
+    jfloatArray protoVec,
+    jbyteArray imageMatInt8,
+    jlongArray imageRabit64,
+    jbooleanArray hasImage,
+    jfloatArray imgCslsHubness,
+    jbyteArray scenePoolInt8,
+    jintArray sceneOffsets,
+    jbyteArray captionMatInt8,
+    jbooleanArray hasCaption,
+    jfloatArray capHubness,
+    jint count,
+    jfloat cslsWeight,
+    jfloat cslsFloor,
+    jfloatArray outScores) {
+    if (count <= 0 || !queryVec || !imageMatInt8 || !hasImage || !outScores) return 0;
+    float q[512];
+    env->GetFloatArrayRegion(queryVec, 0, 512, q);
+    const bool useProto = (protoVec != nullptr && env->GetArrayLength(protoVec) == 512);
+    float p[512];
+    if (useProto) env->GetFloatArrayRegion(protoVec, 0, 512, p);
+
+    std::vector<uint8_t> imgValid(count);
+    env->GetBooleanArrayRegion(hasImage, 0, count, reinterpret_cast<jboolean*>(imgValid.data()));
+    std::vector<float> imgHub(count, 0.0f);
+    if (imgCslsHubness != nullptr && env->GetArrayLength(imgCslsHubness) >= count) {
+        env->GetFloatArrayRegion(imgCslsHubness, 0, count, imgHub.data());
+    }
+    std::vector<uint8_t> capValid(count, 0);
+    if (hasCaption != nullptr && env->GetArrayLength(hasCaption) >= count) {
+        env->GetBooleanArrayRegion(hasCaption, 0, count, reinterpret_cast<jboolean*>(capValid.data()));
+    }
+    std::vector<float> cHub(count, 0.0f);
+    if (capHubness != nullptr && env->GetArrayLength(capHubness) >= count) {
+        env->GetFloatArrayRegion(capHubness, 0, count, cHub.data());
+    }
+    std::vector<int32_t> sOffsets;
+    if (sceneOffsets != nullptr && env->GetArrayLength(sceneOffsets) >= count + 1) {
+        sOffsets.resize(count + 1);
+        env->GetIntArrayRegion(sceneOffsets, 0, count + 1, reinterpret_cast<jint*>(sOffsets.data()));
+    }
+    std::vector<int8_t> sPool;
+    if (scenePoolInt8 != nullptr && !sOffsets.empty() && sOffsets.back() > 0) {
+        const jsize sBytes = env->GetArrayLength(scenePoolInt8);
+        sPool.resize(sBytes);
+        env->GetByteArrayRegion(scenePoolInt8, 0, sBytes, reinterpret_cast<jbyte*>(sPool.data()));
+    }
+    std::vector<uint64_t> rabit;
+    if (imageRabit64 != nullptr && count > 8192 && env->GetArrayLength(imageRabit64) >= count * 8) {
+        rabit.resize(static_cast<size_t>(count) * 8);
+        env->GetLongArrayRegion(imageRabit64, 0, count * 8, reinterpret_cast<jlong*>(rabit.data()));
+    }
+    std::vector<int8_t> capMat;
+    if (captionMatInt8 != nullptr && env->GetArrayLength(captionMatInt8) >= count * 512) {
+        capMat.resize(static_cast<size_t>(count) * 512);
+        env->GetByteArrayRegion(captionMatInt8, 0, count * 512, reinterpret_cast<jbyte*>(capMat.data()));
+    }
+
+    std::vector<float> out(count, 0.0f);
+    auto* imgPtr = static_cast<const int8_t*>(env->GetPrimitiveArrayCritical(imageMatInt8, nullptr));
+    if (imgPtr != nullptr) {
+        memeget::core::batchDenseScoresQuantized512(
+            q,
+            useProto ? p : nullptr,
+            imgPtr,
+            rabit.empty() ? nullptr : rabit.data(),
+            imgValid.data(),
+            imgCslsHubness != nullptr ? imgHub.data() : nullptr,
+            sPool.empty() ? nullptr : sPool.data(),
+            sOffsets.empty() ? nullptr : sOffsets.data(),
+            capMat.empty() ? nullptr : capMat.data(),
+            hasCaption != nullptr ? capValid.data() : nullptr,
+            capHubness != nullptr ? cHub.data() : nullptr,
+            count,
+            cslsWeight,
+            cslsFloor,
+            out.data());
+        env->ReleasePrimitiveArrayCritical(imageMatInt8, const_cast<int8_t*>(imgPtr), JNI_ABORT);
     }
     env->SetFloatArrayRegion(outScores, 0, count, out.data());
     return count;

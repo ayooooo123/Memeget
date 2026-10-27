@@ -109,10 +109,13 @@ internal object TagMerge {
             .joinToString(" ")
     }
 
-    /** A cloud caption that names a rejected label is dropped whole: it has no safe partial edit. */
+    /** A rejected source must not sneak back through either the local or cloud caption. */
     fun captionWithoutRejected(caption: String, label: String): String {
         val norm = normalizeTagLabel(label)
-        return if (norm.isNotEmpty() && caption.contains(norm, ignoreCase = true)) "" else caption
+        if (norm.isEmpty() || !caption.contains(norm, ignoreCase = true)) return caption
+        val reference = Regex("(?:^|\\s)Reference:\\s*(?:(?:movie|film):\\s*)?${Regex.escape(norm)}\\.(?=\\s|$)", RegexOption.IGNORE_CASE)
+        val withoutReference = caption.replace(reference, " ").replace(Regex("\\s+"), " ").trim()
+        return if (withoutReference.contains(norm, ignoreCase = true)) "" else withoutReference
     }
 
     fun upsertDurableTag(

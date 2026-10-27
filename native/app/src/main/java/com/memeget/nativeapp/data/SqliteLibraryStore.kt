@@ -37,6 +37,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.util.PriorityQueue
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.locks.ReentrantLock
 
 internal class SqliteLibraryStore(val context: Context) : LibraryStore {
 
@@ -74,7 +75,7 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
         val teachings = exemplars().filter {
             it.vector.size == 512 &&
                 it.origin != "archive-d1" &&
-                (it.model == ModelRegistry.PRIMARY_MODEL_FINGERPRINT || it.model == TeachingPackIo.PACK_MODEL)
+                (ModelRegistry.isCompatiblePrimaryModel(it.model) || it.model == TeachingPackIo.PACK_MODEL)
         }
         return teachings
     }
@@ -427,9 +428,13 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
         val labels: List<String>,
         val normalizedTagSet: Set<String>,
         val compatibleModel: Boolean,
-        val image: FloatArray,
-        val caption: FloatArray?,
-        val scenes: FloatArray?,
+        val imageInt8: ByteArray,
+        val imageRabit64: LongArray,
+        val cslsHubness: Float,
+        val captionInt8: ByteArray?,
+        val captionFp32ForMean: FloatArray?,
+        val scenesInt8: ByteArray?,
+        val sceneCount: Int,
         val document: String,
         val humanTagWords: Set<String>,
         val tagWords: Set<String>,
@@ -446,14 +451,31 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
         val vocab: SearchVocab,
         val docFreq: Map<String, Int>,
         val tagLabels: List<String>,
-        val imageMat: FloatArray,
+        val imageMatInt8: ByteArray,
+        val imageRabit64: LongArray,
         val hasImage: BooleanArray,
-        val captionMat: FloatArray,
+        val imgCslsHubness: FloatArray,
+        val scenePoolInt8: ByteArray?,
+        val sceneOffsets: IntArray,
+        val captionMatInt8: ByteArray?,
         val hasCaption: BooleanArray,
         val capHubness: FloatArray,
     )
 
-    private val residentLock = Any()
+    @Volatile private var cachedCslsBank: FloatArray? = null
+    private fun ensureCslsBank(): FloatArray {
+        cachedCslsBank?.let { return it }
+        val bank = OpenVocabConcepts.load(context)?.buildCslsQueryBank(256) ?: FloatArray(0)
+        cachedCslsBank = bank
+        return bank
+    }
+
+    private val maxResidentMemes = 30_000
+    private val residentLock = ReentrantLock()
+    private inline fun <T> withResidentLock(block: () -> T): T {
+        residentLock.lock()
+        try { return block() } finally { residentLock.unlock() }
+    }
     @Volatile private var cachedResidentIndex: ResidentSearchIndex? = null
     @Volatile private var ftsCompactedOnce = false
 
@@ -478,7 +500,7 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
 
     override suspend fun taughtLabelNames(): List<String> = withContext(Dispatchers.IO) {
         val out = LinkedHashSet<String>()
-        getReadableDb().rawQuery("SELECT DISTINCT label FROM exemplars WHERE positive = 1 ORDER BY id DESC", null).use { c ->
+        getReadableDb().rawQuery("SELECT DISTINCT label FROM exemplars WHERE is_positive = 1 ORDER BY id DESC", null).use { c ->
             while (c.moveToNext()) {
                 val l = c.getString(0)?.trim().orEmpty()
                 if (l.isNotEmpty()) out += l
@@ -488,7 +510,7 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
     }
 
     private fun patchResidentCopyCount(id: Long, now: Long) {
-        synchronized(residentLock) {
+        withResidentLock {
             val idx = cachedResidentIndex ?: return
             val entry = idx.byId[id] ?: return
             entry.meme = entry.meme.copy(copyCount = entry.meme.copyCount + 1, lastCopiedAt = now)
@@ -497,7 +519,7 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
 
     private fun evictResidentIds(ids: List<Long>) {
         if (ids.isEmpty()) return
-        synchronized(residentLock) {
+        withResidentLock {
             val idx = cachedResidentIndex ?: return
             var removed = false
             for (id in ids) if (idx.byId.remove(id) != null) removed = true
@@ -508,7 +530,7 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
     }
 
     private fun clearResidentIndex() {
-        synchronized(residentLock) {
+        withResidentLock {
             cachedResidentIndex = null
         }
     }
@@ -530,14 +552,45 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
             addAll(tagW); addAll(quoteW); addAll(capW); addAll(extraW)
         }
         val realPhrase = SearchText.phraseKey(doc)
+
+        val imgI8 = ByteArray(512)
+        val rabit = LongArray(8)
+        val cslsHub: Float
+        if (compat && img.size == 512) {
+            SearchRanking.quantizeUnitVec512(img, imgI8, 0, rabit, 0)
+            val bank = ensureCslsBank()
+            cslsHub = if (bank.isNotEmpty()) SearchRanking.computeCandidateCslsHubness(img, bank, bank.size / 512, 10) else 0f
+        } else {
+            cslsHub = 0f
+        }
+
+        val capI8 = if (compat && cap != null && cap.size == 512) {
+            ByteArray(512).also { SearchRanking.quantizeUnitVec512(cap, it) }
+        } else null
+
+        val sCount = if (compat && scn != null && scn.size >= 512) scn.size / 512 else 0
+        val scnI8 = if (sCount > 0 && scn != null) {
+            ByteArray(sCount * 512).also { buf ->
+                val tmp = FloatArray(512)
+                for (s in 0 until sCount) {
+                    System.arraycopy(scn, s * 512, tmp, 0, 512)
+                    SearchRanking.quantizeUnitVec512(tmp, buf, s * 512)
+                }
+            }
+        } else null
+
         return ResidentSearchEntry(
             meme = meme,
             labels = labels,
             normalizedTagSet = normTags,
             compatibleModel = compat,
-            image = img,
-            caption = cap,
-            scenes = scn,
+            imageInt8 = imgI8,
+            imageRabit64 = rabit,
+            cslsHubness = cslsHub,
+            captionInt8 = capI8,
+            captionFp32ForMean = if (capI8 != null) cap else null,
+            scenesInt8 = scnI8,
+            sceneCount = sCount,
             document = doc,
             humanTagWords = humanTagW,
             tagWords = tagW,
@@ -553,9 +606,13 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
         val list = ArrayList(byId.values)
         val n = list.size
         val dim = 512
-        val imgMat = FloatArray(n * dim)
+        val imgMatI8 = ByteArray(n * dim)
+        val imgRabit = LongArray(n * 8)
         val hasImg = BooleanArray(n)
-        val capMat = FloatArray(n * dim)
+        val imgCsls = FloatArray(n)
+        val sceneOffsets = IntArray(n + 1)
+        var totalScenes = 0
+        var anyCap = false
         val hasCap = BooleanArray(n)
         val capMean = FloatArray(dim)
         var capCount = 0
@@ -563,22 +620,52 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
         val allTagLabels = LinkedHashSet<String>()
 
         for ((i, e) in list.withIndex()) {
+            sceneOffsets[i] = totalScenes
+            totalScenes += e.sceneCount
             for (l in e.labels) if (l.isNotBlank()) allTagLabels.add(l)
             for (w in e.docWords) df[w] = (df[w] ?: 0) + 1
-            if (e.compatibleModel && e.image.size == dim) {
-                System.arraycopy(e.image, 0, imgMat, i * dim, dim)
+            if (e.compatibleModel) {
+                System.arraycopy(e.imageInt8, 0, imgMatI8, i * dim, dim)
+                System.arraycopy(e.imageRabit64, 0, imgRabit, i * 8, 8)
                 hasImg[i] = true
+                imgCsls[i] = e.cslsHubness
             }
-            val cv = e.caption
-            if (e.compatibleModel && cv != null && cv.size == dim) {
-                System.arraycopy(cv, 0, capMat, i * dim, dim)
+            if (e.captionInt8 != null) {
+                anyCap = true
                 hasCap[i] = true
-                for (d in 0 until dim) capMean[d] += cv[d]
+                val fp = e.captionFp32ForMean
+                if (fp != null && fp.size == dim) {
+                    for (d in 0 until dim) capMean[d] += fp[d]
+                } else {
+                    for (d in 0 until dim) capMean[d] += e.captionInt8[d].toFloat() / 127f
+                }
                 capCount++
             }
         }
+        sceneOffsets[n] = totalScenes
+
+        val scenePoolI8 = if (totalScenes > 0) {
+            ByteArray(totalScenes * dim).also { pool ->
+                for ((i, e) in list.withIndex()) {
+                    val sb = e.scenesInt8
+                    if (sb != null && e.sceneCount > 0) {
+                        System.arraycopy(sb, 0, pool, sceneOffsets[i] * dim, e.sceneCount * dim)
+                    }
+                }
+            }
+        } else null
+
+        val capMatI8 = if (anyCap) {
+            ByteArray(n * dim).also { mat ->
+                for ((i, e) in list.withIndex()) {
+                    val cb = e.captionInt8 ?: continue
+                    System.arraycopy(cb, 0, mat, i * dim, dim)
+                }
+            }
+        } else null
+
         val capHub = FloatArray(n)
-        if (capCount > 0) {
+        if (capCount > 0 && capMatI8 != null) {
             var normSq = 0.0
             for (d in 0 until dim) normSq += capMean[d].toDouble() * capMean[d]
             val inv = if (normSq > 1e-12) (1.0 / kotlin.math.sqrt(normSq)).toFloat() else 0f
@@ -588,7 +675,7 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
                     if (!hasCap[i]) continue
                     val off = i * dim
                     var dot = 0f
-                    for (d in 0 until dim) dot += capMat[off + d] * capMean[d]
+                    for (d in 0 until dim) dot += (capMatI8[off + d].toFloat() / 127f) * capMean[d]
                     capHub[i] = dot
                 }
             }
@@ -599,9 +686,13 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
             vocab = SearchVocab.fromCounts(df),
             docFreq = df,
             tagLabels = allTagLabels.sorted(),
-            imageMat = imgMat,
+            imageMatInt8 = imgMatI8,
+            imageRabit64 = imgRabit,
             hasImage = hasImg,
-            captionMat = capMat,
+            imgCslsHubness = imgCsls,
+            scenePoolInt8 = scenePoolI8,
+            sceneOffsets = sceneOffsets,
+            captionMatInt8 = capMatI8,
             hasCaption = hasCap,
             capHubness = capHub,
         )
@@ -644,14 +735,14 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
 
         // Pass 2: primary search vectors only (skipping 768-d DINO visual blobs cuts cursor transfer in half!).
         val vecWhere = if (onlyIds != null) {
-            "WHERE model = ? AND id IN (${onlyIds.joinToString(",")})"
+            "WHERE model IN (?, ?) AND id IN (${onlyIds.joinToString(",")})"
         } else {
-            "WHERE model = ?"
+            "WHERE model IN (?, ?)"
         }
         val vecsById = HashMap<Long, Triple<FloatArray, FloatArray?, FloatArray?>>(memesById.size * 2)
         db.rawQuery(
             "SELECT id, image, caption, scenes FROM vectors $vecWhere",
-            arrayOf(ModelRegistry.PRIMARY_MODEL_FINGERPRINT),
+            arrayOf(ModelRegistry.PRIMARY_MODEL_FINGERPRINT, ModelRegistry.LEGACY_S2_MODEL_FINGERPRINT),
             signal,
         ).use { vc ->
             while (vc.moveToNext()) {
@@ -675,15 +766,20 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
         }
     }
 
-    private fun residentIndexIfEligible(db: SQLiteDatabase, signal: CancellationSignal?): ResidentSearchIndex? {
-        synchronized(residentLock) {
+    /**
+     * With [waitForBuild] false (searches), a call arriving while another thread builds or patches the index returns
+     * the last packed snapshot, or null for the SQLite path, instead of queueing every keystroke behind the build.
+     */
+    private fun residentIndexIfEligible(db: SQLiteDatabase, signal: CancellationSignal?, waitForBuild: Boolean = true): ResidentSearchIndex? {
+        if (waitForBuild) residentLock.lock() else if (!residentLock.tryLock()) return cachedResidentIndex
+        try {
             val dirty = drainDirtySearchIds(db)
             val existing = cachedResidentIndex
             if (existing != null) {
                 if (dirty.isEmpty()) return existing
-                if (existing.byId.size + dirty.size <= 6_000 && dirty.size <= 128) {
+                if (existing.byId.size + dirty.size <= maxResidentMemes && dirty.size <= 256) {
                     loadRowsIntoMap(db, existing.byId, dirty, signal)
-                    return if (existing.byId.isEmpty() || existing.byId.size > 6_000) {
+                    return if (existing.byId.isEmpty() || existing.byId.size > maxResidentMemes) {
                         cachedResidentIndex = null
                         null
                     } else {
@@ -694,7 +790,7 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
             val total = db.rawQuery("SELECT COUNT(*) FROM memes", null).use { c ->
                 if (c.moveToNext()) c.getInt(0) else 0
             }
-            if (total <= 0 || total > 6_000) {
+            if (total <= 0 || total > maxResidentMemes) {
                 cachedResidentIndex = null
                 return null
             }
@@ -702,6 +798,8 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
             loadRowsIntoMap(db, freshMap, onlyIds = null, signal = signal)
             if (freshMap.isEmpty()) return null
             return packResidentIndex(freshMap).also { cachedResidentIndex = it }
+        } finally {
+            residentLock.unlock()
         }
     }
 
@@ -741,10 +839,10 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
             SELECT m.id, m.tags, m.rejected_labels, v.image
             FROM memes m
             JOIN vectors v ON m.id = v.id
-            WHERE v.model = ? AND (m.tags LIKE '%"confirmation":"confirmed"%' OR m.rejected_labels <> '[]')
+            WHERE v.model IN (?, ?) AND (m.tags LIKE '%"confirmation":"confirmed"%' OR m.rejected_labels <> '[]')
             ORDER BY m.id ASC
             """.trimIndent(),
-            arrayOf(ModelRegistry.PRIMARY_MODEL_FINGERPRINT)
+            arrayOf(ModelRegistry.PRIMARY_MODEL_FINGERPRINT, ModelRegistry.LEGACY_S2_MODEL_FINGERPRINT)
         ).use { c ->
             while (c.moveToNext()) {
                 val image = FloatBlob.fromBytes(c.getBlob(3) ?: continue)
@@ -767,10 +865,10 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
             SELECT m.id, m.tags, v.image
             FROM memes m
             JOIN vectors v ON m.id = v.id
-            WHERE v.model = ? AND m.tags LIKE '%"provenance":"d1-omni%'
+            WHERE v.model IN (?, ?) AND m.tags LIKE '%"provenance":"d1-omni%'
             ORDER BY m.id ASC
             """.trimIndent(),
-            arrayOf(ModelRegistry.PRIMARY_MODEL_FINGERPRINT)
+            arrayOf(ModelRegistry.PRIMARY_MODEL_FINGERPRINT, ModelRegistry.LEGACY_S2_MODEL_FINGERPRINT)
         ).use { c ->
             while (c.moveToNext()) {
                 val image = FloatBlob.fromBytes(c.getBlob(2) ?: continue)
@@ -789,7 +887,7 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
 
     override suspend fun imageVectors(): Map<Long, FloatArray> = withContext(Dispatchers.IO) {
         val out = HashMap<Long, FloatArray>()
-        getReadableDb().rawQuery("SELECT id, image FROM vectors WHERE model = ?", arrayOf(ModelRegistry.PRIMARY_MODEL_FINGERPRINT)).use { c ->
+        getReadableDb().rawQuery("SELECT id, image FROM vectors WHERE model IN (?, ?)", arrayOf(ModelRegistry.PRIMARY_MODEL_FINGERPRINT, ModelRegistry.LEGACY_S2_MODEL_FINGERPRINT)).use { c ->
             while (c.moveToNext()) {
                 val image = FloatBlob.fromBytes(c.getBlob(1) ?: continue)
                 if (image.size == 512) out[c.getLong(0)] = image
@@ -1018,7 +1116,7 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
         val emptyVector = FloatArray(0)
         val tagKey = tag?.takeIf { it.isNotBlank() }?.let(TagMerge::normalizeTagLabel)
         try {
-            val resident = residentIndexIfEligible(db, signal)
+            val resident = residentIndexIfEligible(db, signal, waitForBuild = false)
             if (resident != null) {
                 // 100% RAM-only fast path: zero SQLite queries, zero FTS segment merges, NEON batch dense cosines!
                 val rEntries = resident.entries
@@ -1036,16 +1134,19 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
                     w
                 }
                 val denseScores = if (semantic && vector != null) {
-                    SearchRanking.batchDenseScores(
+                    SearchRanking.batchDenseScoresQuantized(
                         queryVec = vector,
                         protoVec = conceptProto,
-                        imageMat = resident.imageMat,
+                        imageMatInt8 = resident.imageMatInt8,
+                        imageRabit64 = resident.imageRabit64,
                         hasImage = resident.hasImage,
-                        captionMat = resident.captionMat,
+                        imgCslsHubness = resident.imgCslsHubness,
+                        scenePoolInt8 = resident.scenePoolInt8,
+                        sceneOffsets = resident.sceneOffsets,
+                        captionMatInt8 = resident.captionMatInt8,
                         hasCaption = resident.hasCaption,
                         capHubness = resident.capHubness,
                         count = rEntries.size,
-                        dim = vector.size.coerceAtLeast(1),
                     )
                 } else null
 
@@ -1072,14 +1173,13 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
                     if (tagKey != null && tagKey !in entry.normalizedTagSet) continue
                     val phraseHit = hasPhrase && SearchText.containsPhrase(entry.realPhraseDoc, phrase)
                     val baseDense = if (denseScores != null) denseScores[idx] else 0f
-                    val imgCos = if (semantic && vector != null && resident.hasImage[idx]) FloatBlob.dot(vector, entry.image) else 0f
                     val score = SearchRanking.calibratedResidentScore(
                         semantic = semantic,
                         baseDenseScore = baseDense,
                         queryVec = vector,
                         conceptProto = conceptProto,
-                        scenesFlat = if (semantic && entry.compatibleModel) entry.scenes else null,
-                        imageCos = imgCos,
+                        scenesFlat = null,
+                        imageCos = 0f,
                         exactTerms = exactTerms,
                         exactTermWeights = exactWeights,
                         totalExactWeight = totalExactW,
@@ -1189,7 +1289,7 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
                         val meme = cursorToMeme(cursor)
                         if (tagKey != null && meme.tags.none { TagMerge.normalizeTagLabel(it.label) == tagKey }) continue
                         val labels = meme.tags.map { it.label }
-                        val compatible = semantic && cursor.getString(modelColumn) == ModelRegistry.PRIMARY_MODEL_FINGERPRINT
+                        val compatible = semantic && !cursor.isNull(modelColumn) && ModelRegistry.isCompatiblePrimaryModel(cursor.getString(modelColumn))
                         val image = if (compatible && !cursor.isNull(imageColumn)) FloatBlob.fromBytes(cursor.getBlob(imageColumn)) else emptyVector
                         val caption = if (compatible && !cursor.isNull(captionColumn)) FloatBlob.fromBytes(cursor.getBlob(captionColumn)) else null
                         val scenes = if (compatible && !cursor.isNull(scenesColumn)) FloatBlob.fromBytes(cursor.getBlob(scenesColumn)) else null
@@ -1278,7 +1378,7 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
     @OptIn(InternalCoroutinesApi::class)
     override suspend fun similar(id: Long, limit: Int): List<SearchHit> = withContext(Dispatchers.IO) {
         val targetVectors = vectors(id) ?: return@withContext emptyList()
-        if (targetVectors.image.isEmpty() || targetVectors.model != ModelRegistry.PRIMARY_MODEL_FINGERPRINT) {
+        if (targetVectors.image.isEmpty() || !ModelRegistry.isCompatiblePrimaryModel(targetVectors.model)) {
             return@withContext emptyList()
         }
 
@@ -1306,9 +1406,9 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
                 SELECT m.*, v.image, v.caption as caption_vec, v.visual, v.visual_model, v.model as vec_model
                 FROM memes m
                 JOIN vectors v ON m.id = v.id
-                WHERE m.id != ? AND m.pending = 0 AND v.model = ?
+                WHERE m.id != ? AND m.pending = 0 AND v.model IN (?, ?)
                 """.trimIndent(),
-                arrayOf(id.toString(), ModelRegistry.PRIMARY_MODEL_FINGERPRINT),
+                arrayOf(id.toString(), ModelRegistry.PRIMARY_MODEL_FINGERPRINT, ModelRegistry.LEGACY_S2_MODEL_FINGERPRINT),
                 cancellationSignal,
             ).use { c ->
                 var rowCount = 0
@@ -1389,8 +1489,8 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
         val db = getReadableDb()
         val list = ArrayList<VectorRecord>()
         val cursor = db.rawQuery(
-            "SELECT id, image, caption, visual, model, visual_model, scenes FROM vectors WHERE model = ? ORDER BY id DESC LIMIT ?",
-            arrayOf(ModelRegistry.PRIMARY_MODEL_FINGERPRINT, limit.toString())
+            "SELECT id, image, caption, visual, model, visual_model, scenes FROM vectors WHERE model IN (?, ?) ORDER BY id DESC LIMIT ?",
+            arrayOf(ModelRegistry.PRIMARY_MODEL_FINGERPRINT, ModelRegistry.LEGACY_S2_MODEL_FINGERPRINT, limit.toString())
         )
         cursor.use { c ->
             while (c.moveToNext()) {
@@ -1454,7 +1554,7 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
         writeMutex.withLock {
             // Teachings imported before this meme had a vector attach to it now that it has one; read
             // under the writer lock so a teaching import committing alongside is never missed.
-            val showing = if (model == ModelRegistry.PRIMARY_MODEL_FINGERPRINT) teachingsShowing(analysis.image, comparableTeachings()) else emptyMap()
+            val showing = if (ModelRegistry.isCompatiblePrimaryModel(model)) teachingsShowing(analysis.image, comparableTeachings()) else emptyMap()
             val db = getWritableDb()
             var labeled = false
             db.beginTransaction()
@@ -1485,9 +1585,14 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
                 val attached = attachTeachings(classified, showing)
                 val result = attached ?: classified
                 val human = result.tags.any(TagMerge::isHumanTag) || result.rejected.isNotEmpty()
+                val safeCaption = result.rejected.fold(currentMeme.caption) { text, label ->
+                    TagMerge.captionWithoutRejected(text, label)
+                }
+
 
                 val memeCv = ContentValues().apply {
                     put("ocr_text", analysis.ocr)
+                    if (safeCaption != currentMeme.caption) put("caption", safeCaption)
                     put("tags", serializeTags(result.tags))
                     put("extra_terms", result.terms)
                     if (attached != null) {
@@ -1532,7 +1637,7 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
                         put("scenes", FloatBlob.toBytes(existingVec.scenes))
                     }
                     if (existingVec != null) {
-                        if (existingVec.caption != null && existingVec.model == model) {
+                        if (safeCaption == currentMeme.caption && existingVec.caption != null && existingVec.model == model) {
                             put("caption", FloatBlob.toBytes(existingVec.caption))
                         }
                         if (existingVec.visual != null) {
@@ -1548,7 +1653,7 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
                     id = id,
                     name = currentMeme.name,
                     ocr = analysis.ocr,
-                    caption = currentMeme.caption,
+                    caption = safeCaption,
                     transcript = currentMeme.transcript,
                     tags = result.tags,
                     extraTerms = result.terms,
@@ -1653,6 +1758,9 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
             try {
                 val currentMeme = meme(id) ?: return@withLock
                 val rejected = currentMeme.rejectedLabels.map { TagMerge.normalizeTagLabel(it) }.toSet()
+                val safeCaption = rejected.fold(caption) { text, label ->
+                    TagMerge.captionWithoutRejected(text, label)
+                }
                 val validTags = tags.filter {
                     !rejected.contains(TagMerge.normalizeTagLabel(it.label))
                 }
@@ -1664,12 +1772,12 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
                 updatedExtra = TagMerge.withoutRejectedTerms(updatedExtra, rejected)
                 val effectiveVlmOcr = when {
                     vlmOcr.isNotBlank() -> vlmOcr.trim()
-                    state == "done" && caption != currentMeme.caption -> ""
+                    state == "done" && safeCaption != currentMeme.caption -> ""
                     else -> currentMeme.vlmOcr
                 }
 
                 val cv = ContentValues().apply {
-                    put("caption", caption)
+                    put("caption", safeCaption)
                     put("tags", serializeTags(mergedTags))
                     put("extra_terms", updatedExtra)
                     put("vision_state", state)
@@ -1677,23 +1785,19 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
                 }
                 db.update("memes", cv, "id = ?", arrayOf(id.toString()))
 
-                if (vector != null && vector.isNotEmpty()) {
+                if (vector != null && vector.isNotEmpty() && safeCaption == caption) {
                     val vecCv = ContentValues().apply { put("caption", FloatBlob.toBytes(vector)) }
-                    db.update("vectors", vecCv, "id = ? AND model = ?", arrayOf(id.toString(), ModelRegistry.PRIMARY_MODEL_FINGERPRINT))
-                } else if (caption != currentMeme.caption) {
-                    // Stale caption vector must be cleared when text changes without matching vector
-                    val vecCv = ContentValues().apply {
-                        putNull("caption")
-                    }
+                    db.update("vectors", vecCv, "id = ? AND model IN (?, ?)", arrayOf(id.toString(), ModelRegistry.PRIMARY_MODEL_FINGERPRINT, ModelRegistry.LEGACY_S2_MODEL_FINGERPRINT))
+                } else if (safeCaption != currentMeme.caption || safeCaption != caption) {
+                    val vecCv = ContentValues().apply { putNull("caption") }
                     db.update("vectors", vecCv, "id = ?", arrayOf(id.toString()))
                 }
-
                 updateFtsRow(
                     db = db,
                     id = id,
                     name = currentMeme.name,
                     ocr = currentMeme.ocr,
-                    caption = caption,
+                    caption = safeCaption,
                     transcript = currentMeme.transcript,
                     tags = mergedTags,
                     extraTerms = updatedExtra,
@@ -1924,6 +2028,18 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
         }
     }
 
+    override suspend fun idsMissingVisual(): Set<Long> = withContext(Dispatchers.IO) {
+        // No vectors row and a row with a NULL visual both count, matching `vectors(id)?.visual == null`.
+        getReadableDb().rawQuery(
+            "SELECT m.id FROM memes m LEFT JOIN vectors v ON v.id = m.id WHERE v.visual IS NULL",
+            null,
+        ).use { c ->
+            val ids = HashSet<Long>(c.count)
+            while (c.moveToNext()) ids += c.getLong(0)
+            ids
+        }
+    }
+
     override suspend fun captionsWithoutVectors(model: String, limit: Int): List<Long> = withContext(Dispatchers.IO) {
         getReadableDb().rawQuery(
             """
@@ -1939,15 +2055,16 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
         writeMutex.withLock {
             val written = getWritableDb().compileStatement(
                 """
-                UPDATE vectors SET caption = ? WHERE id = ? AND model = ?
+                UPDATE vectors SET caption = ? WHERE id = ? AND model IN (?, ?)
                 AND EXISTS (SELECT 1 FROM memes WHERE id = ? AND caption = ? AND vision_state = 'done')
                 """.trimIndent(),
             ).use {
                 it.bindBlob(1, FloatBlob.toBytes(vector))
                 it.bindLong(2, id)
                 it.bindString(3, ModelRegistry.PRIMARY_MODEL_FINGERPRINT)
-                it.bindLong(4, id)
-                it.bindString(5, caption)
+                it.bindString(4, ModelRegistry.LEGACY_S2_MODEL_FINGERPRINT)
+                it.bindLong(5, id)
+                it.bindString(6, caption)
                 it.executeUpdateDelete() > 0
             }
             if (written) {
@@ -2208,8 +2325,8 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
                     val sources = ArrayList<TagPropagation.VisualRecord>()
                     for (id in ids) {
                         val vr = vectors(id) ?: continue
-                        if (vr.image.isNotEmpty() && vr.model == ModelRegistry.PRIMARY_MODEL_FINGERPRINT) {
-                            sources.add(TagPropagation.VisualRecord(vr.image, vr.model, vr.visual, vr.visualModel))
+                        if (vr.image.isNotEmpty() && ModelRegistry.isCompatiblePrimaryModel(vr.model)) {
+                            sources.add(TagPropagation.VisualRecord(vr.image, ModelRegistry.PRIMARY_MODEL_FINGERPRINT, vr.visual, vr.visualModel))
                         }
                     }
 
@@ -2221,9 +2338,9 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
                             SELECT m.id, m.tags, v.image, v.visual, v.visual_model, v.model, m.rejected_labels
                             FROM memes m
                             JOIN vectors v ON m.id = v.id
-                            WHERE m.pending = 0 AND v.model = ?
+                            WHERE m.pending = 0 AND v.model IN (?, ?)
                             """.trimIndent(),
-                            arrayOf(ModelRegistry.PRIMARY_MODEL_FINGERPRINT)
+                            arrayOf(ModelRegistry.PRIMARY_MODEL_FINGERPRINT, ModelRegistry.LEGACY_S2_MODEL_FINGERPRINT)
                         )
                         cursor.use { c ->
                             val idCol = c.getColumnIndexOrThrow("id")
@@ -2383,7 +2500,7 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
                 }
 
                 if (positive) {
-                    if (currentVectors != null && currentVectors.image.isNotEmpty() && currentVectors.model == ModelRegistry.PRIMARY_MODEL_FINGERPRINT) {
+                    if (currentVectors != null && currentVectors.image.isNotEmpty() && ModelRegistry.isCompatiblePrimaryModel(currentVectors.model)) {
                         val cv = ContentValues().apply {
                             put("label", normLabel)
                             put("category", category)
@@ -2432,7 +2549,7 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
                     )
                 } else {
                     // Negative correction: persist rejected_labels independently of vector availability
-                    if (currentVectors != null && currentVectors.image.isNotEmpty() && currentVectors.model == ModelRegistry.PRIMARY_MODEL_FINGERPRINT) {
+                    if (currentVectors != null && currentVectors.image.isNotEmpty() && ModelRegistry.isCompatiblePrimaryModel(currentVectors.model)) {
                         val cv = ContentValues().apply {
                             put("label", normLabel)
                             put("category", category)
@@ -2455,9 +2572,11 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
                     val cleanedExtraTerms = TagMerge.withoutRejectedTerms(currentMeme.extraTerms, listOf(normLabel))
                     val cleanedCloudTerms = TagMerge.withoutRejectedTerms(currentMeme.cloudTerms, listOf(normLabel))
                     val updatedCloudCaption = TagMerge.captionWithoutRejected(currentMeme.cloudCaption, normLabel)
+                    val updatedCaption = TagMerge.captionWithoutRejected(currentMeme.caption, normLabel)
 
                     val memeCv = ContentValues().apply {
                         put("tags", serializeTags(filteredTags))
+                        put("caption", updatedCaption)
                         put("extra_terms", cleanedExtraTerms)
                         put("rejected_labels", serializeStrings(updatedRejected))
                         put("cloud_caption", updatedCloudCaption)
@@ -2469,7 +2588,7 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
                         id = id,
                         name = currentMeme.name,
                         ocr = currentMeme.ocr,
-                        caption = currentMeme.caption,
+                        caption = updatedCaption,
                         transcript = currentMeme.transcript,
                         tags = filteredTags,
                         extraTerms = cleanedExtraTerms,
@@ -2477,6 +2596,9 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
                         cloudTerms = cleanedCloudTerms,
                         vlmOcr = currentMeme.vlmOcr,
                     )
+                    if (updatedCaption != currentMeme.caption) {
+                        db.update("vectors", ContentValues().apply { putNull("caption") }, "id = ?", arrayOf(id.toString()))
+                    }
                 }
 
                 db.setTransactionSuccessful()
@@ -2729,11 +2851,16 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
             try {
                 val m = meme(id) ?: return@withLock
                 val rejected = m.rejectedLabels.map { TagMerge.normalizeTagLabel(it) }.toSet()
-                val imported = analysis.humanTags.filter { !rejected.contains(TagMerge.normalizeTagLabel(it.label)) }
-                val tags = TagMerge.mergeDurableTags(m.tags + imported)
+                val importedHuman = analysis.humanTags.filter { !rejected.contains(TagMerge.normalizeTagLabel(it.label)) }
+                val importedTwoDom = analysis.twoDomainTags.filter { !rejected.contains(TagMerge.normalizeTagLabel(it.label)) }
+                val tags = TagMerge.mergeDurableTags(m.tags + importedHuman + importedTwoDom)
                 var terms = m.extraTerms
-                for (t in imported) terms = TagMerge.termsWithLabel(terms, t.label)
+                for (t in importedHuman + importedTwoDom) terms = TagMerge.termsWithLabel(terms, t.label)
+                if (analysis.twoDomainTerms.isNotBlank()) {
+                    terms = listOf(terms, analysis.twoDomainTerms).filter { it.isNotBlank() }.joinToString(" ")
+                }
                 val ocr = m.ocr.ifBlank { analysis.ocr }
+                val caption = m.caption.ifBlank { analysis.twoDomainCaption }
                 val transcript = m.transcript.ifBlank { analysis.transcript }
                 // Indexed rows keep their own analysis; a pending row reuses the export's vector once.
                 val vector = analysis.image?.takeIf { m.pending && vectors(id) == null }
@@ -2741,6 +2868,8 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
                     put("tags", serializeTags(tags))
                     put("extra_terms", terms)
                     put("ocr_text", ocr)
+                    put("caption", caption)
+                    if (caption.isNotBlank()) put("vision_state", "done")
                     put("transcript", transcript)
                     if (transcript.isNotBlank() && m.kind == "video") put("audio_state", "done")
                     if (vector != null) put("analysis_imported", 1)
@@ -2754,7 +2883,7 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
                     }
                     db.insertWithOnConflict("vectors", null, vecCv, SQLiteDatabase.CONFLICT_IGNORE)
                 }
-                updateFtsRow(db, id, m.name, ocr, m.caption, transcript, tags, terms, m.cloudCaption, m.cloudTerms, m.vlmOcr)
+                updateFtsRow(db, id, m.name, ocr, caption, transcript, tags, terms, m.cloudCaption, m.cloudTerms, m.vlmOcr)
                 db.setTransactionSuccessful()
             } finally {
                 db.endTransaction()
@@ -3144,5 +3273,159 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
             bumpLabels()
             restored
         }
+    }
+
+    override suspend fun markNotAMeme(id: Long): Boolean = withContext(Dispatchers.IO) {
+        writeMutex.withLock {
+            val existing = meme(id) ?: return@withContext false
+            val vecRec = vectors(id)
+            val db = getWritableDb()
+            val now = System.currentTimeMillis()
+            db.beginTransaction()
+            try {
+                if (vecRec != null && vecRec.image.size == 512) {
+                    val rcv = ContentValues().apply {
+                        put("source_key", existing.uri)
+                        put("vector", FloatBlob.toBytes(vecRec.image))
+                        put("created_at", now)
+                    }
+                    db.insertWithOnConflict("rejected_photo_vectors", null, rcv, SQLiteDatabase.CONFLICT_REPLACE)
+                }
+                val gcv = ContentValues().apply {
+                    put("source_key", existing.uri)
+                    put("uri", existing.uri)
+                    put("name", existing.name)
+                    put("kind", existing.kind)
+                    put("modified_at", existing.modifiedAt)
+                    put("verdict", 0)
+                    put("meme_prob", 0.01f)
+                    put("meme_id", 0L)
+                    put("updated_at", now)
+                }
+                db.insertWithOnConflict("camera_roll_gate", null, gcv, SQLiteDatabase.CONFLICT_REPLACE)
+                val gcvUri = ContentValues().apply {
+                    put("verdict", 0)
+                    put("meme_prob", 0.01f)
+                    put("meme_id", 0L)
+                    put("updated_at", now)
+                }
+                db.update("camera_roll_gate", gcvUri, "uri = ?", arrayOf(existing.uri))
+
+                db.delete("meme_search_fts", "rowid = ?", arrayOf(id.toString()))
+                db.delete("vectors", "id = ?", arrayOf(id.toString()))
+                db.delete("memes", "id = ?", arrayOf(id.toString()))
+                if (existing.contentHash.isNotEmpty()) {
+                    db.delete("content_hashes", "hash = ?", arrayOf(existing.contentHash))
+                }
+                db.setTransactionSuccessful()
+            } finally {
+                db.endTransaction()
+            }
+            evictResidentIds(listOf(id))
+            bumpRevision()
+            bumpLabels()
+            true
+        }
+    }
+
+    override suspend fun cameraRollSeenModifiedAt(): Map<String, Long> = withContext(Dispatchers.IO) {
+        val out = HashMap<String, Long>(2048)
+        getReadableDb().rawQuery("SELECT source_key, modified_at FROM camera_roll_gate", null).use { c ->
+            while (c.moveToNext()) out[c.getString(0)] = c.getLong(1)
+        }
+        out
+    }
+
+    override suspend fun upsertCameraRollGate(item: CameraRollGateItem) = withContext(Dispatchers.IO) {
+        writeMutex.withLock {
+            val cv = ContentValues().apply {
+                put("source_key", item.sourceKey)
+                put("uri", item.uri)
+                put("name", item.name)
+                put("kind", item.kind)
+                put("modified_at", item.modifiedAt)
+                put("width", item.width)
+                put("height", item.height)
+                put("duration_ms", item.durationMs)
+                put("verdict", item.verdict)
+                put("meme_prob", item.memeProbability)
+                put("d1_prompt", item.d1Prompt)
+                put("ocr_text", item.ocrText)
+                put("candidate_hints", item.candidateHints)
+                put("image_vec", item.imageVector?.let(FloatBlob::toBytes))
+                if (item.sceneVectors.isNotEmpty()) {
+                    val flat = FloatArray(item.sceneVectors.size * 512)
+                    for ((idx, sv) in item.sceneVectors.withIndex()) {
+                        if (sv.size == 512) System.arraycopy(sv, 0, flat, idx * 512, 512)
+                    }
+                    put("scene_vecs", FloatBlob.toBytes(flat))
+                } else {
+                    putNull("scene_vecs")
+                }
+                put("meme_id", item.memeId)
+                put("updated_at", System.currentTimeMillis())
+            }
+            getWritableDb().insertWithOnConflict("camera_roll_gate", null, cv, SQLiteDatabase.CONFLICT_REPLACE)
+            Unit
+        }
+    }
+
+    override suspend fun pendingCameraRollGate(verdict: Int, limit: Int): List<CameraRollGateItem> = withContext(Dispatchers.IO) {
+        val out = ArrayList<CameraRollGateItem>(limit)
+        getReadableDb().rawQuery(
+            """
+            SELECT source_key, uri, name, kind, modified_at, width, height, duration_ms,
+                   verdict, meme_prob, d1_prompt, ocr_text, candidate_hints, image_vec, scene_vecs, meme_id
+            FROM camera_roll_gate
+            WHERE verdict = ?
+            ORDER BY modified_at DESC
+            LIMIT ?
+            """.trimIndent(),
+            arrayOf(verdict.toString(), limit.toString()),
+        ).use { c ->
+            while (c.moveToNext()) {
+                val imgBlob = if (!c.isNull(13)) c.getBlob(13) else null
+                val scnBlob = if (!c.isNull(14)) c.getBlob(14) else null
+                val scenes = ArrayList<FloatArray>()
+                if (scnBlob != null) {
+                    val flat = FloatBlob.fromBytes(scnBlob)
+                    val cnt = flat.size / 512
+                    for (s in 0 until cnt) scenes += flat.copyOfRange(s * 512, (s + 1) * 512)
+                }
+                out += CameraRollGateItem(
+                    sourceKey = c.getString(0),
+                    uri = c.getString(1),
+                    name = c.getString(2),
+                    kind = c.getString(3),
+                    modifiedAt = c.getLong(4),
+                    width = c.getInt(5),
+                    height = c.getInt(6),
+                    durationMs = c.getLong(7),
+                    verdict = c.getInt(8),
+                    memeProbability = c.getFloat(9),
+                    d1Prompt = c.getString(10).orEmpty(),
+                    ocrText = c.getString(11).orEmpty(),
+                    candidateHints = c.getString(12).orEmpty(),
+                    imageVector = imgBlob?.let(FloatBlob::fromBytes),
+                    sceneVectors = scenes,
+                    memeId = c.getLong(15),
+                )
+            }
+        }
+        out
+    }
+
+    override suspend fun rejectedPhotoVectors(limit: Int): List<FloatArray> = withContext(Dispatchers.IO) {
+        val out = ArrayList<FloatArray>()
+        getReadableDb().rawQuery(
+            "SELECT vector FROM rejected_photo_vectors ORDER BY created_at DESC LIMIT ?",
+            arrayOf(limit.toString()),
+        ).use { c ->
+            while (c.moveToNext()) {
+                val v = FloatBlob.fromBytes(c.getBlob(0) ?: continue)
+                if (v.size == 512) out += v
+            }
+        }
+        out
     }
 }
