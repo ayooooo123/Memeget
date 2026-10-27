@@ -278,7 +278,9 @@ internal fun LibraryScreen(
         val effectiveTag = if (usedOnly) "__USED__" else selectedTag
         val key = Triple(query.trim(), kindFilter, effectiveTag)
         userSearching = resultKey != key && key.first.isNotEmpty()
-        val previous = if (resultKey == key) memes else emptyList()
+        // Same query, re-run by a library write (a tag edit, or the library-wide re-tag one starts).
+        val isRefresh = resultKey == key
+        val previous = if (isRefresh) memes else emptyList()
         val wanted = maxOf(PAGE_SIZE, previous.size)
         val previousById = previous.associateBy { it.id }
         // A library write re-runs this search; a search already widened past its media filter stays widened, so
@@ -298,7 +300,18 @@ internal fun LibraryScreen(
         isSearching = key.first.isNotEmpty()
         searchError = null
         fun publish(rows: List<Meme>, more: Boolean) {
-            memes = rows.filterNot { it.id in deletedIds }.map { row -> previousById[row.id]?.takeIf { it == row } ?: row }
+            val fresh = rows.filterNot { it.id in deletedIds }
+            // A re-tag rewrites tags across the whole library for minutes, re-running this search every settle with
+            // slightly different scores. Re-sorting each time kept the grid shuffling under the user's thumb, so a
+            // refreshed search keeps its tiles in place: survivors stay put, vanished rows drop, newcomers append.
+            // The plain library (no query) keeps its newest-first order so new memes still land on top.
+            val ordered = if (isRefresh && key.first.isNotEmpty() && previous.isNotEmpty()) {
+                val byId = fresh.associateBy { it.id }
+                val kept = previous.mapNotNull { byId[it.id] }
+                val keptIds = kept.mapTo(HashSet(kept.size)) { it.id }
+                kept + fresh.filter { it.id !in keptIds }
+            } else fresh
+            memes = ordered.map { row -> previousById[row.id]?.takeIf { it == row } ?: row }
             hasMore = more
             loadingFirstPage = false
         }
@@ -339,12 +352,18 @@ internal fun LibraryScreen(
                 }
                 publish(rows, more)
             } else {
-                // Lexical + social-slang pass from the resident RAM index first (tens of ms), then the hybrid pass.
-                val lexical = searchWindow(null, searchKind)
-                searchCursor = lexical.second
-                publish(lexical.first, lexical.third)
                 val distilled = SocialReplyIntent.distill(key.first)
                 val cachedVec = queryVector ?: engine.cachedTextVector(distilled.embedText)
+                // Lexical + social-slang pass from the resident RAM index first (tens of ms), then the hybrid pass.
+                // With the query vector already known (a refresh, or a query typed before) go straight to hybrid:
+                // publishing the lexical order first and then the hybrid order flipped the grid on every re-run.
+                var currentResults = emptyList<Meme>()
+                if (cachedVec == null) {
+                    val lexical = searchWindow(null, searchKind)
+                    searchCursor = lexical.second
+                    publish(lexical.first, lexical.third)
+                    currentResults = lexical.first
+                }
                 val vector = cachedVec ?: try {
                     // Wait for a brief thumb pause so typing a 12-letter query doesn't queue 10 neural CPU forwards.
                     delay(150)
@@ -355,7 +374,6 @@ internal fun LibraryScreen(
                     null
                 }
                 queryVector = vector
-                var currentResults = lexical.first
                 if (vector != null) {
                     val hybrid = searchWindow(vector, searchKind)
                     searchCursor = hybrid.second
