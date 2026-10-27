@@ -131,7 +131,7 @@ internal class OpenVocabConcepts private constructor(
         val n = entries.size
         val hyCos = FloatArray(n)
         val normOcr = if (ocrAndText.isNotBlank()) {
-            " " + ocrAndText.lowercase(java.util.Locale.ROOT).replace(Regex("[^a-z0-9]+"), " ").trim() + " "
+            " " + ocrAndText.lowercase(java.util.Locale.ROOT).replace(NON_ALNUM, " ").trim() + " "
         } else ""
         var bestEnt1 = -1
         var bestZ1 = Float.NEGATIVE_INFINITY
@@ -252,7 +252,7 @@ internal class OpenVocabConcepts private constructor(
 
     internal fun matchesOcr(label: String, isEntity: Boolean, ocrAndText: String): Boolean {
         if (ocrAndText.isBlank()) return false
-        val normOcr = " " + ocrAndText.lowercase(java.util.Locale.ROOT).replace(Regex("[^a-z0-9]+"), " ").trim() + " "
+        val normOcr = " " + ocrAndText.lowercase(java.util.Locale.ROOT).replace(NON_ALNUM, " ").trim() + " "
         return matchesOcrConcept(label, isEntity, normOcr)
     }
 
@@ -264,9 +264,18 @@ internal class OpenVocabConcepts private constructor(
         if (label == "hikikomori" && (normOcr.contains(" hikikomori ") || normOcr.contains(" hikkikimori "))) return true
         if (!isEntity && !label.contains(' ') && label.length < 6) return false
         if (label.length < 4 || label in GENERIC_OCR_SKIP) return false
-        val cleanLbl = label.lowercase(java.util.Locale.ROOT).replace(Regex("[^a-z0-9]+"), " ").trim()
-        if (cleanLbl.length < 4) return false
-        return normOcr.contains(" $cleanLbl ")
+        val needle = ocrNeedle(label)
+        return needle.isNotEmpty() && normOcr.contains(needle)
+    }
+
+    /**
+     * " cleaned label " for an OCR phrase match, or "" when the cleaned label is too short to match. Cached per label:
+     * [retrieveCandidates] checks all ~6,000 concepts against each meme's text, and re-cleaning every label (with a
+     * Regex compiled per label) on every call took its two calls per re-tagged meme from ~17 ms to ~141 ms on a Pixel 9 Pro.
+     */
+    private fun ocrNeedle(label: String): String = OCR_NEEDLES.getOrPut(label) {
+        val clean = label.lowercase(java.util.Locale.ROOT).replace(NON_ALNUM, " ").trim()
+        if (clean.length < 4) "" else " $clean "
     }
 
     companion object {
@@ -275,6 +284,8 @@ internal class OpenVocabConcepts private constructor(
         private const val VERSION = 1
 
         @Volatile private var cached: OpenVocabConcepts? = null
+        private val NON_ALNUM = Regex("[^a-z0-9]+")
+        private val OCR_NEEDLES = java.util.concurrent.ConcurrentHashMap<String, String>()
         private val GENERIC_OCR_SKIP = setOf(
             "meme", "text", "like", "just", "with", "that", "this", "from", "your", "when", "what", "have",
             "will", "good", "time", "look", "make", "know", "people", "think", "going", "want", "really",
@@ -297,7 +308,7 @@ internal class OpenVocabConcepts private constructor(
         }
 
         internal fun normalizeConceptKey(raw: String): String =
-            raw.lowercase(java.util.Locale.ROOT).replace(Regex("[^a-z0-9]+"), " ").trim()
+            raw.lowercase(java.util.Locale.ROOT).replace(NON_ALNUM, " ").trim()
 
         internal fun parentAliasesFor(label: String): List<String> {
             val norm = label.trim().lowercase(java.util.Locale.ROOT)

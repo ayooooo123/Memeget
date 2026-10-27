@@ -21,6 +21,9 @@ import java.io.File
 import com.memeget.nativeapp.knowledge.OpenVocabConcepts
 import com.memeget.nativeapp.knowledge.LookalikeKernels
 import com.memeget.nativeapp.storage.TeachingPackIo
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.collect
@@ -43,6 +46,8 @@ internal class LocalKnowledge(
         /** Marks a tag that came from people's labels on a look-alike meme. */
         const val LOOKALIKE_SCORE_DOMAIN = "lookalike-cosine"
         private const val VECTOR_DIM = 512
+        /** Memes a re-tag scores together on [retagScoring] before writing their results in order. */
+        private const val RETAG_BATCH = 48
         /** Broader template/character cluster cosine once 0.80 near-copy clusters are covered. */
         const val CLUSTER_MIN_COS = 0.68f
         /**
@@ -1016,11 +1021,15 @@ internal class LocalKnowledge(
     private class UnfinishedRetag(val labelRevision: Long, val finished: HashSet<Long>)
     @Volatile private var unfinishedRetag: UnfinishedRetag? = null
 
+    /** Half the cores, at most 4: a re-tag runs while the person is in the app, so the UI keeps its share. */
+    private val retagScoring = Dispatchers.Default.limitedParallelism((Runtime.getRuntime().availableProcessors() / 2).coerceIn(1, 4))
+
     /**
      * Re-tags the library. A pass that ended early is resumed where it stopped while the labels and teachings behind
      * it are unchanged; after a change it starts over. A change while the pass runs sends it round the library again
      * for the memes it did with the older ones. A meme whose tags come out the same is not written. Passes run one at
-     * a time (IndexCoordinator holds its session lock), so the finished set has one writer.
+     * a time (IndexCoordinator holds its session lock). Memes are scored [RETAG_BATCH] at a time on [retagScoring]
+     * (scoring only reads the snapshot); their writes, the finished set and progress stay on this coroutine, in order.
      */
     suspend fun retag(progress: (WorkProgress) -> Unit) = withContext(Dispatchers.Default) {
         progress(WorkProgress(stage = "retag", running = true, detail = "Preparing knowledge…"))
@@ -1031,63 +1040,71 @@ internal class LocalKnowledge(
             ?: UnfinishedRetag(snapshot.vote.labelRevision, HashSet())
         // Kept while the pass runs, so a pass cut short leaves what it finished for the next one.
         unfinishedRetag = pass
+        var roundAgain = false
 
-        do {
-            var roundAgain = false
-            // Stream bounded rows without materializing the whole library
-            store.allMemes().collect { meme ->
-                currentCoroutineContext().ensureActive()
-                if (store.revision.value != expectedRevision) {
-                    // Store was mutated concurrently outside this pass's writes (e.g. user teach/correction)
-                    snapshot = prepareSnapshot()
-                    expectedRevision = store.revision.value
-                    if (snapshot.vote.labelRevision != pass.labelRevision) {
-                        // Memes done with the older labels are done again with these, in another round.
-                        pass = UnfinishedRetag(snapshot.vote.labelRevision, HashSet())
-                        unfinishedRetag = pass
-                        roundAgain = true
-                    }
-                }
-                if (meme.id in pass.finished) return@collect
+        // The tags and search words to store for [meme] under [snap]; null when it has no usable vectors or comes out
+        // unchanged.
+        suspend fun retagged(meme: Meme, snap: ClassificationSnapshot): Pair<List<Tag>, String>? {
+            val vectors = store.vectors(meme.id) ?: return null
+            if (vectors.image.isEmpty() || !ModelRegistry.isCompatiblePrimaryModel(vectors.model)) return null
+            val verifierScores = scoreWithVerifier(
+                image = vectors.image,
+                ocrAndText = "${meme.ocr} ${meme.transcript}".trim(),
+                snapshot = snap,
+                memeId = meme.id,
+            )
+            val (freshTags, _) = classifyInternal(
+                image = vectors.image,
+                ocr = meme.ocr,
+                snapshot = snap,
+                memeId = meme.id,
+                verifierScores = verifierScores,
+            )
+            // Machine tags classification can't regenerate stay unless a nearby "not X" vetoes
+            // them; human-confirmed tags always stay. Recomputed sources are replaced outright.
+            val vetoed = findVetoedLabelsFromMap(vectors.image, snap.negExemplarsByLabel)
+            val kept = meme.tags.filter {
+                TagMerge.survivesReclassification(it) &&
+                    (TagMerge.isHumanTag(it) || !vetoed.contains(TagMerge.normalizeTagLabel(it.label)))
+            }.map { tag ->
+                if (!TagMerge.isHumanTag(tag) || Titles.isTitleCategory(tag.category)) tag
+                else snap.titles.titleNamed(tag.label)?.let { tag.copy(category = it.category) } ?: tag
+            }
+            val merged = TagMerge.mergeDurableTags(freshTags + kept)
+            val terms = extraTermsFor(merged, snap.assocMap)
+            // Most memes come out unchanged on a later pass; skipping their writes is what lets a slow
+            // phone finish one. Compared as the store keeps them: without the machine tags and search
+            // words a person rejected on this meme.
+            val rejected = meme.rejectedLabels.mapTo(HashSet()) { TagMerge.normalizeTagLabel(it) }
+            val stored = merged.filter { TagMerge.isHumanTag(it) || TagMerge.normalizeTagLabel(it.label) !in rejected }
+            val changed = stored.toSet() != meme.tags.toSet() || TagMerge.withoutRejectedTerms(terms, rejected) != meme.extraTerms
+            return if (changed) merged to terms else null
+        }
 
-                val vectors = store.vectors(meme.id)
-                if (vectors != null && vectors.image.isNotEmpty() && ModelRegistry.isCompatiblePrimaryModel(vectors.model)) {
-                    val memeText = "${meme.ocr} ${meme.transcript}".trim()
-                    val verifierScores = scoreWithVerifier(
-                        image = vectors.image,
-                        ocrAndText = memeText,
-                        snapshot = snapshot,
-                        memeId = meme.id,
-                    )
-                    val (freshTags, _) = classifyInternal(
-                        image = vectors.image,
-                        ocr = meme.ocr,
-                        snapshot = snapshot,
-                        memeId = meme.id,
-                        verifierScores = verifierScores,
-                    )
+        // A write outside this pass's own (e.g. user teach/correction) refreshes the snapshot; a teaching that moved
+        // the labels starts the pass over, so memes done with the older labels are done again with these.
+        suspend fun refreshIfChangedOutside() {
+            if (store.revision.value == expectedRevision) return
+            snapshot = prepareSnapshot()
+            expectedRevision = store.revision.value
+            if (snapshot.vote.labelRevision != pass.labelRevision) {
+                pass = UnfinishedRetag(snapshot.vote.labelRevision, HashSet())
+                unfinishedRetag = pass
+                roundAgain = true
+            }
+        }
 
-                    // Machine tags classification can't regenerate stay unless a nearby "not X" vetoes
-                    // them; human-confirmed tags always stay. Recomputed sources are replaced outright.
-                    val vetoed = findVetoedLabelsFromMap(vectors.image, snapshot.negExemplarsByLabel)
-                    val kept = meme.tags.filter {
-                        TagMerge.survivesReclassification(it) &&
-                            (TagMerge.isHumanTag(it) || !vetoed.contains(TagMerge.normalizeTagLabel(it.label)))
-                    }.map { tag ->
-                        if (!TagMerge.isHumanTag(tag) || Titles.isTitleCategory(tag.category)) tag
-                        else snapshot.titles.titleNamed(tag.label)?.let { tag.copy(category = it.category) } ?: tag
-                    }
-                    val merged = TagMerge.mergeDurableTags(freshTags + kept)
-                    val terms = extraTermsFor(merged, snapshot.assocMap)
-                    // Most memes come out unchanged on a later pass; skipping their writes is what lets a slow
-                    // phone finish one. Compared as the store keeps them: without the machine tags and search
-                    // words a person rejected on this meme.
-                    val rejected = meme.rejectedLabels.mapTo(HashSet()) { TagMerge.normalizeTagLabel(it) }
-                    val stored = merged.filter { TagMerge.isHumanTag(it) || TagMerge.normalizeTagLabel(it.label) !in rejected }
-                    if (stored.toSet() != meme.tags.toSet() || TagMerge.withoutRejectedTerms(terms, rejected) != meme.extraTerms) {
-                        store.updateTags(meme.id, merged, terms)
-                        expectedRevision++
-                    }
+        suspend fun runBatch(batch: List<Meme>) {
+            currentCoroutineContext().ensureActive()
+            refreshIfChangedOutside()
+            val todo = batch.filter { it.id !in pass.finished }
+            if (todo.isEmpty()) return
+            val snap = snapshot
+            val results = coroutineScope { todo.map { meme -> async(retagScoring) { retagged(meme, snap) } }.awaitAll() }
+            for ((i, meme) in todo.withIndex()) {
+                results[i]?.let { (merged, terms) ->
+                    store.updateTags(meme.id, merged, terms)
+                    expectedRevision++
                 }
                 pass.finished += meme.id
                 val done = pass.finished.size
@@ -1103,6 +1120,23 @@ internal class LocalKnowledge(
                     )
                 }
             }
+            // Checked again once the batch is written: a teaching that landed while it was scored or written must still
+            // send the pass round again, even when this was the library's last batch.
+            refreshIfChangedOutside()
+        }
+
+        do {
+            roundAgain = false
+            // Stream bounded rows without materializing the whole library
+            val batch = ArrayList<Meme>(RETAG_BATCH)
+            store.allMemes().collect { meme ->
+                batch += meme
+                if (batch.size >= RETAG_BATCH) {
+                    runBatch(batch)
+                    batch.clear()
+                }
+            }
+            if (batch.isNotEmpty()) runBatch(batch)
         } while (roundAgain)
 
         unfinishedRetag = null
