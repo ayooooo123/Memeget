@@ -103,16 +103,10 @@ internal class NativeInferenceEngine(
             it.isFile && it.length() == ModelRegistry.S2_TOKENIZER.expectedSizeBytes
         } ?: return@withContext
         val tokenIds = runCatching { clipTokenizer(tokenizerFile).encode("meme") }.getOrNull() ?: return@withContext
-        // Never block behind an active background caption/OCR pass; warm only while the engine is free.
-        if (!engineMutex.tryLock()) return@withContext
-        try {
-            val handle = activeHandle()
-            NativeBridge.nativeResetCancel(handle)
-            NativeBridge.nativeEmbedTextTokens(handle, textModelFile.absolutePath, tokenIds)
-        } catch (_: Throwable) {
-        } finally {
-            engineMutex.unlock()
-        }
+        // The text tower has its own native lock outside the model-family lease, so warming never waits on (or
+        // disturbs) a background caption/OCR pass.
+        runCatching { NativeBridge.nativeEmbedTextTokens(activeHandle(), textModelFile.absolutePath, tokenIds) }
+        Unit
     }
 
     override suspend fun embedText(text: String): FloatArray = withContext(Dispatchers.Default) {
@@ -125,24 +119,20 @@ internal class NativeInferenceEngine(
         val tokenizerFile = ensureModel(ModelRegistry.S2_TOKENIZER)
         val tokenIds = clipTokenizer(tokenizerFile).encode(text)
 
-        val computed = engineMutex.withLock {
-            val handle = activeHandle()
-            NativeBridge.nativeResetCancel(handle)
-
-            val vec = NativeBridge.nativeEmbedTextTokens(
-                handle = handle,
-                modelPath = textModelFile.absolutePath,
-                tokenIds = tokenIds,
-            )
-            if (vec.size != 512 || !vec.all(Float::isFinite)) {
-                throw IllegalStateException("Invalid MobileCLIP-S2 text embedding returned (size=${vec.size})")
-            }
-            vec
+        // No engineMutex and no nativeResetCancel: a query must not queue behind a background caption, nor clear the
+        // cancel flag of the work it runs beside. The native runner serializes text embeds on their own lock.
+        val vec = NativeBridge.nativeEmbedTextTokens(
+            handle = activeHandle(),
+            modelPath = textModelFile.absolutePath,
+            tokenIds = tokenIds,
+        )
+        if (vec.size != 512 || !vec.all(Float::isFinite)) {
+            throw IllegalStateException("Invalid MobileCLIP-S2 text embedding returned (size=${vec.size})")
         }
         if (cacheKey.isNotEmpty() && cacheKey.length <= 160) {
-            synchronized(queryVectorCache) { queryVectorCache[cacheKey] = computed.copyOf() }
+            synchronized(queryVectorCache) { queryVectorCache[cacheKey] = vec.copyOf() }
         }
-        computed
+        vec
     }
 
     @Volatile private var loadedClipTokenizer: Pair<String, ClipTokenizer>? = null
@@ -522,7 +512,7 @@ internal class NativeInferenceEngine(
         return ModelUnavailableException(id, error, failure)
     }
 
-    /** Called under engineMutex on a worker dispatcher; browsing never loads the native runtime. */
+    /** Called on a worker dispatcher, under engineMutex except for text embedding; browsing never loads the native runtime. */
     private suspend fun activeHandle(): Long {
         currentCoroutineContext().ensureActive()
         val current = nativeHandle.get()
@@ -531,8 +521,11 @@ internal class NativeInferenceEngine(
         val created = NativeBridge.nativeCreate()
         check(created > 0L) { "Native inference initialization failed" }
         if (!nativeHandle.compareAndSet(0L, created)) {
+            // Text embedding runs outside engineMutex, so another caller may have created the handle first.
             NativeBridge.nativeDestroy(created)
-            throw IllegalStateException("NativeInferenceEngine is closed")
+            val winner = nativeHandle.get()
+            check(winner > 0L) { "NativeInferenceEngine is closed" }
+            return winner
         }
         currentCoroutineContext().ensureActive()
         return created

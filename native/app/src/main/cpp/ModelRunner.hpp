@@ -119,6 +119,9 @@ private:
     void ensureFamily(ModelFamily family);
 
     std::mutex mutex_;
+    // Guards only s2_text_module_/s2_text_path_: search embeds its query without waiting for (or evicting) whatever
+    // model family background indexing holds under mutex_. Lock order when both are needed: mutex_, then text_mutex_.
+    std::mutex text_mutex_;
     std::atomic<bool> cancelled_{false};
     ModelFamily current_family_{ModelFamily::NONE};
     // Primary family (MobileCLIP-S2)

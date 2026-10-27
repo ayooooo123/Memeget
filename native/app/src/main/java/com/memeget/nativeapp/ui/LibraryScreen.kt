@@ -202,15 +202,12 @@ internal fun LibraryScreen(
         }
     }
 
-    // Pre-warm the resident search index + MobileCLIP-S2 text encoder on mount. Searches typed before the index is
-    // built use the SQLite/FTS path instead of waiting (about 2 s of build for 2,344 memes on a Pixel 5a).
+    // Pre-warm the MobileCLIP-S2 text encoder and the resident search index on mount, side by side. The text tower
+    // has its own native lock outside the indexing model lease, so it warms even while background work runs.
+    // Searches typed before the index is built use the SQLite/FTS path instead of waiting for it.
     LaunchedEffect(Unit) {
-        withContext(Dispatchers.IO) {
-            runCatching { store.warmSearchIndex() }
-            if (!coordinator.progress.value.running) {
-                runCatching { engine.warmTextEncoder() }
-            }
-        }
+        launch(Dispatchers.Default) { runCatching { engine.warmTextEncoder() } }
+        withContext(Dispatchers.IO) { runCatching { store.warmSearchIndex() } }
     }
     LaunchedEffect(hasCameraRollAccess) {
         if (hasCameraRollAccess && !coordinator.progress.value.running) {
@@ -668,8 +665,9 @@ internal fun LibraryScreen(
             }
         }
 
-        // Index Coordinator Progress Card (when indexing is running)
-        AnimatedVisibility(visible = indexProgress.running) {
+        // Index Coordinator Progress Card (when indexing is running). Hidden while a query is typed: background work
+        // pauses for search anyway, and the card popping in and out shoved the results grid a row up or down.
+        AnimatedVisibility(visible = indexProgress.running && query.isBlank()) {
             Box(
                 modifier = Modifier
                     .fillMaxWidth()

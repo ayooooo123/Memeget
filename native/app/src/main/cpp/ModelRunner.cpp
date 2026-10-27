@@ -64,7 +64,7 @@ void ModelRunner::unloadAll() {
     // Promptly signal cancellation before locking
     cancel();
 
-    std::scoped_lock lock(mutex_);
+    std::scoped_lock lock(mutex_, text_mutex_);
 
     s2_image_module_.reset();
     s2_text_module_.reset();
@@ -122,7 +122,8 @@ void ModelRunner::unloadHeavy() {
     d1_runner_.reset();
     vlm_runner_.reset();
 
-    current_family_ = s2_text_module_ ? ModelFamily::PRIMARY : ModelFamily::NONE;
+    // The text tower lives outside the family lease, so nothing family-owned stays loaded.
+    current_family_ = ModelFamily::NONE;
 }
 
 std::string ModelRunner::getDiagnostics() {
@@ -152,10 +153,9 @@ void ModelRunner::ensureFamily(ModelFamily family) {
     // Switch model family: unload other models to guarantee single-family lease
     if (current_family_ != ModelFamily::NONE) {
         if (current_family_ == ModelFamily::PRIMARY) {
+            // The text tower is not part of the lease: search must never reload it from disk after indexing ran.
             s2_image_module_.reset();
-            s2_text_module_.reset();
             s2_image_path_.clear();
-            s2_text_path_.clear();
         } else if (current_family_ == ModelFamily::VISUAL) {
             visual_module_.reset();
             visual_path_.clear();
@@ -292,12 +292,12 @@ std::vector<float> ModelRunner::embedTextTokens(
     const std::string& modelPath,
     const std::vector<int64_t>& tokenIds) {
 
-    std::scoped_lock lock(mutex_);
-    ensureFamily(ModelFamily::PRIMARY);
+    // Own lock, no ensureFamily(): a query never queues behind a caption/OCR/transcription pass or evicts its model.
+    // Plain mmap (no mlock) keeps the 254 MB tower reclaimable while it coexists with a heavy family.
+    std::scoped_lock lock(text_mutex_);
 
     if (!s2_text_module_ || s2_text_path_ != modelPath) {
-        s2_text_module_ = std::make_unique<Module>(
-            modelPath, Module::LoadMode::MmapUseMlockIgnoreErrors);
+        s2_text_module_ = std::make_unique<Module>(modelPath, Module::LoadMode::Mmap);
         auto err = s2_text_module_->load();
         if (err != executorch::runtime::Error::Ok) {
             s2_text_module_.reset();
