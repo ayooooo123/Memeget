@@ -22,7 +22,7 @@ internal object SearchText {
     /**
      * The `[a-z0-9]+` runs of [s] lowercased, joined by single spaces; with [dropApostrophes], `'` and `’` vanish
      * instead of splitting a word ("I'm" → "im"). One pass, no regex: the resident index runs this dozens of times
-     * per meme, and compiling a Regex per call made the cold index build take ~10 s on a 2,344-meme library.
+     * per meme, and per-call Regex compilation cost ~2.2 s of a 2,344-meme cold index build on a Pixel 5a (~80 ms now).
      */
     private fun alnumRuns(s: String, dropApostrophes: Boolean): String {
         val lower = s.lowercase()
