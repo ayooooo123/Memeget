@@ -43,6 +43,8 @@ import androidx.compose.ui.window.DialogProperties
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
+import com.memeget.nativeapp.editor.RemixStudio
+
 internal enum class AppTab {
     Library,
     Settings,
@@ -65,6 +67,7 @@ internal fun MemegetApp(
 
     var currentTab by remember { mutableStateOf(AppTab.Library) }
     var activeViewerMeme by remember { mutableStateOf<Meme?>(null) }
+    var activeRemixMeme by remember { mutableStateOf<Meme?>(null) }
     // Set by a tag tap in the viewer/Settings or by highlighting/sharing a social post from another app.
     var tagSearchRequest by remember { mutableStateOf<String?>(null) }
     var deletedMemeIds by remember { mutableStateOf<Set<Long>>(emptySet()) }
@@ -72,6 +75,7 @@ internal fun MemegetApp(
     LaunchedEffect(incomingSearchQuery) {
         if (!incomingSearchQuery.isNullOrBlank()) {
             activeViewerMeme = null
+            activeRemixMeme = null
             currentTab = AppTab.Library
             tagSearchRequest = incomingSearchQuery
             onIncomingSearchConsumed()
@@ -96,8 +100,9 @@ internal fun MemegetApp(
             scope.launch { coordinator.retag() }
         }
     }
-    LaunchedEffect(searching) {
-        coordinator.setInteractive(searching)
+    // The editor pauses background work like a search does, so renders and previews get the CPU.
+    LaunchedEffect(searching, activeRemixMeme) {
+        coordinator.setInteractive(searching || activeRemixMeme != null)
     }
     DisposableEffect(coordinator) {
         onDispose { coordinator.setInteractive(false) }
@@ -173,6 +178,10 @@ internal fun MemegetApp(
                 cloud = cloud,
                 coordinator = coordinator,
                 onClose = { activeViewerMeme = null },
+                onRemix = { m ->
+                    activeViewerMeme = null
+                    activeRemixMeme = m
+                },
                 onSearchTag = { tag ->
                     activeViewerMeme = null
                     tagSearchRequest = tag
@@ -190,6 +199,35 @@ internal fun MemegetApp(
                     scope.launch { runCatching { knowledge.recordVerifierTeaching(meme.id) } }
                 },
             )
+        }
+
+        // Keep library state while isolating editor input and accessibility.
+        activeRemixMeme?.let { meme ->
+            Dialog(
+                onDismissRequest = { activeRemixMeme = null },
+                properties = DialogProperties(
+                    dismissOnClickOutside = false,
+                    usePlatformDefaultWidth = false,
+                    decorFitsSystemWindows = false,
+                ),
+            ) {
+                RemixStudio(
+                    meme = meme,
+                    engine = engine,
+                    files = files,
+                    onClose = { activeRemixMeme = null },
+                    onSaved = { newMemeId ->
+                        activeRemixMeme = null
+                        scope.launch {
+                            snackbarHostState.showSnackbar("Remix saved to library")
+                            val savedMeme = store.meme(newMemeId)
+                            if (savedMeme != null) {
+                                activeViewerMeme = savedMeme
+                            }
+                        }
+                    },
+                )
+            }
         }
     }
 }
