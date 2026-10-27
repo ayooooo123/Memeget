@@ -368,16 +368,33 @@ internal object MediaIoUtils {
     fun copyUriToFile(
         context: Context,
         sourceUri: Uri,
-        destFile: File
+        destFile: File,
+        maxBytes: Long = Long.MAX_VALUE,
     ) {
         destFile.parentFile?.mkdirs()
-        context.contentResolver.openInputStream(sourceUri)?.use { input ->
-            destFile.outputStream().use { output ->
-                input.copyTo(output)
-            }
-        } ?: throw IllegalStateException("Could not open input stream for $sourceUri")
+        var failed = false
+        try {
+            context.contentResolver.openInputStream(sourceUri)?.use { input ->
+                destFile.outputStream().use { output ->
+                    val buf = ByteArray(65536)
+                    var total = 0L
+                    while (true) {
+                        val n = input.read(buf)
+                        if (n < 0) break
+                        total += n
+                        if (total > maxBytes) {
+                            failed = true
+                            throw java.io.IOException("Input exceeds maximum allowed size (${maxBytes / (1024 * 1024)} MiB)")
+                        }
+                        output.write(buf, 0, n)
+                    }
+                }
+            } ?: throw IllegalStateException("Could not open input stream for $sourceUri")
+        } catch (t: Throwable) {
+            if (failed) destFile.delete()
+            throw t
+        }
     }
-
     fun shareableUriForFile(context: Context, file: File): Uri {
         val authority = "${context.packageName}.files"
         return FileProvider.getUriForFile(context, authority, file)
@@ -558,5 +575,195 @@ internal object MediaIoUtils {
             bitmap.recycle()
         }
         return crops
+    }
+
+    data class PanelSubCropOutcome(
+        val panelCount: Int,
+        val hasPanelGutter: Boolean,
+        val cropFiles: List<File>,
+    )
+
+    /**
+     * Detects 2-panel, 3-panel, and 2x2 4-panel comic gutters (Drake, Two Buttons, Gru, Wojak grids),
+     * elongated strips, and MINER cluttered sub-crops so square multi-panel memes stop collapsing into one muddy vector.
+     */
+    fun writePanelAndSubCrops(inputJpeg: File, outDir: File, ocrBoxCount: Int = 0): PanelSubCropOutcome {
+        val bitmap = BitmapFactory.decodeFile(inputJpeg.absolutePath) ?: return PanelSubCropOutcome(1, false, emptyList())
+        try {
+            val w = bitmap.width
+            val h = bitmap.height
+            if (w < 96 || h < 96) return PanelSubCropOutcome(1, false, emptyList())
+
+            val argb = IntArray(w * h)
+            bitmap.getPixels(argb, 0, w, 0, 0, w, h)
+            val rgb = ByteArray(w * h * 3)
+            var p = 0
+            for (px in argb) {
+                rgb[p++] = ((px shr 16) and 0xFF).toByte()
+                rgb[p++] = ((px shr 8) and 0xFF).toByte()
+                rgb[p++] = (px and 0xFF).toByte()
+            }
+
+            val nativePacked = runCatching {
+                com.memeget.nativeapp.inference.NativeBridge.nativeDetectPanelCrops(rgb, w, h, 3, ocrBoxCount, true)
+            }.getOrNull()
+
+            val panelCount: Int
+            val hasGutter: Boolean
+            val rects = ArrayList<IntArray>(4)
+            if (nativePacked != null && nativePacked.size >= 4) {
+                panelCount = nativePacked[0]
+                hasGutter = nativePacked[1] != 0 || nativePacked[2] != 0
+                var i = 4
+                while (i + 3 < nativePacked.size && rects.size < 4) {
+                    rects += intArrayOf(nativePacked[i], nativePacked[i + 1], nativePacked[i + 2], nativePacked[i + 3])
+                    i += 4
+                }
+            } else {
+                val fallback = detectPanelRectsKotlin(rgb, w, h, ocrBoxCount)
+                panelCount = fallback.first
+                hasGutter = fallback.second
+                rects += fallback.third
+            }
+
+            if (rects.isEmpty()) return PanelSubCropOutcome(panelCount, hasGutter, emptyList())
+            outDir.mkdirs()
+            val crops = ArrayList<File>(rects.size)
+            for ((idx, r) in rects.withIndex()) {
+                val cx = r[0].coerceIn(0, w - 1)
+                val cy = r[1].coerceIn(0, h - 1)
+                val cw = r[2].coerceIn(1, w - cx)
+                val ch = r[3].coerceIn(1, h - cy)
+                if (cw < 64 || ch < 64) continue
+                val sub = Bitmap.createBitmap(bitmap, cx, cy, cw, ch)
+                try {
+                    val dest = File(outDir, "${inputJpeg.nameWithoutExtension}_panel$idx.jpg")
+                    if (dest.outputStream().use { sub.compress(Bitmap.CompressFormat.JPEG, 90, it) }) {
+                        crops += dest
+                    }
+                } finally {
+                    if (sub !== bitmap) sub.recycle()
+                }
+            }
+            return PanelSubCropOutcome(panelCount, hasGutter, crops)
+        } finally {
+            bitmap.recycle()
+        }
+    }
+
+    private fun detectPanelRectsKotlin(
+        rgb: ByteArray,
+        width: Int,
+        height: Int,
+        ocrBoxCount: Int,
+    ): Triple<Int, Boolean, List<IntArray>> {
+        fun gutterSplits(horizontal: Boolean): List<Int> {
+            val primary = if (horizontal) height else width
+            val cross = if (horizontal) width else height
+            if (primary < 160 || cross < 160) return emptyList()
+            val start = (primary * 0.22f).toInt()
+            val end = (primary * 0.78f).toInt()
+            val step = maxOf(1, cross / 96)
+            val stds = FloatArray(primary) { 999f }
+            val means = FloatArray(primary) { 128f }
+            val cStart = (cross * 0.04f).toInt()
+            val cEnd = (cross * 0.96f).toInt()
+            for (idx in maxOf(0, start - 10)..minOf(primary - 1, end + 10)) {
+                var sum = 0.0
+                var sumSq = 0.0
+                var n = 0
+                var c = cStart
+                while (c < cEnd) {
+                    val x = if (horizontal) c else idx
+                    val y = if (horizontal) idx else c
+                    val off = (y * width + x) * 3
+                    val l = 0.299 * (rgb[off].toInt() and 0xFF) +
+                        0.587 * (rgb[off + 1].toInt() and 0xFF) +
+                        0.114 * (rgb[off + 2].toInt() and 0xFF)
+                    sum += l
+                    sumSq += l * l
+                    n++
+                    c += step
+                }
+                if (n >= 8) {
+                    val mean = sum / n
+                    val variance = maxOf(0.0, sumSq / n - mean * mean)
+                    means[idx] = mean.toFloat()
+                    stds[idx] = kotlin.math.sqrt(variance).toFloat()
+                }
+            }
+            val cands = ArrayList<Pair<Int, Float>>()
+            var p = start
+            while (p <= end) {
+                if (stds[p] <= 7.5f) {
+                    val r0 = p
+                    while (p <= end && stds[p] <= 8.5f) p++
+                    val r1 = p - 1
+                    val rw = r1 - r0 + 1
+                    if (rw in 2..maxOf(24, primary / 14)) {
+                        val mid = (r0 + r1) / 2
+                        val bIdx = maxOf(0, r0 - 6)
+                        val aIdx = minOf(primary - 1, r1 + 6)
+                        val act = maxOf(stds[bIdx], stds[aIdx])
+                        val jmp = maxOf(kotlin.math.abs(means[mid] - means[bIdx]), kotlin.math.abs(means[mid] - means[aIdx]))
+                        if (act >= 14f || jmp >= 22f) cands += mid to (act + jmp)
+                    }
+                } else {
+                    p++
+                }
+            }
+            val chosen = ArrayList<Int>(2)
+            val minGap = (primary * 0.22f).toInt()
+            for ((center, _) in cands.sortedByDescending { it.second }) {
+                if (chosen.none { kotlin.math.abs(it - center) < minGap }) {
+                    chosen += center
+                    if (chosen.size == 2) break
+                }
+            }
+            return chosen.sorted()
+        }
+
+        val hSplits = gutterSplits(true)
+        val vSplits = gutterSplits(false)
+        if (hSplits.isNotEmpty() || vSplits.isNotEmpty()) {
+            val ys = listOf(0) + hSplits + listOf(height)
+            val xs = listOf(0) + vSplits + listOf(width)
+            val rects = ArrayList<IntArray>(4)
+            for (yi in 0 until ys.size - 1) {
+                for (xi in 0 until xs.size - 1) {
+                    if (rects.size >= 4) break
+                    val pw = xs[xi + 1] - xs[xi]
+                    val ph = ys[yi + 1] - ys[yi]
+                    if (pw >= 64 && ph >= 64) rects += intArrayOf(xs[xi], ys[yi], pw, ph)
+                }
+            }
+            if (rects.size >= 2) return Triple(rects.size, true, rects)
+        }
+
+        val shortSide = minOf(width, height)
+        val longSide = maxOf(width, height)
+        val aspect = longSide.toFloat() / shortSide.toFloat()
+        if (aspect >= 1.65f) {
+            val span = longSide - shortSide
+            val offsets = if (aspect >= 2.35f) listOf(0, span / 2, span).distinct() else listOf(0, span).distinct()
+            val vertical = height > width
+            val rects = offsets.map { off ->
+                if (vertical) intArrayOf(0, off, shortSide, shortSide) else intArrayOf(off, 0, shortSide, shortSide)
+            }
+            return Triple(rects.size, false, rects)
+        }
+
+        if (ocrBoxCount >= 3 && width >= 192 && height >= 192) {
+            val cw = (width * 0.62f).toInt()
+            val ch = (height * 0.62f).toInt()
+            val rects = listOf(
+                intArrayOf(0, 0, cw, ch),
+                intArrayOf(width - cw, 0, cw, ch),
+                intArrayOf(0, height - ch, cw, ch),
+                intArrayOf(width - cw, height - ch, cw, ch),
+            )
+            return Triple(1, false, rects)
+        }
+        return Triple(1, false, emptyList())
     }
 }

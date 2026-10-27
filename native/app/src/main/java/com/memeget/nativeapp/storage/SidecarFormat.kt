@@ -289,7 +289,7 @@ internal object SidecarFormat {
                 )
             } else null
 
-            val isCompatible = vectorRecord != null && vectorRecord.model == ModelRegistry.PRIMARY_MODEL_FINGERPRINT
+            val isCompatible = vectorRecord != null && ModelRegistry.isCompatiblePrimaryModel(vectorRecord.model)
 
             val restoredMeme = Meme(
                 id = 0L,

@@ -1,5 +1,6 @@
 package com.memeget.nativeapp
 
+import com.memeget.nativeapp.knowledge.MemeGateEvaluator
 import org.json.JSONObject
 import java.util.Locale
 
@@ -7,9 +8,11 @@ internal data class VisionDescription(val caption: String, val text: String, val
 
 internal object VisionText {
     // MiniCPM-V 4.7 1B sometimes writes "SUBJECTS, a, b" instead of "SUBJECTS: a, b",
-    private val field = Regex("^\\s*(caption|subjects|text|tags)\\s*[:\\-,]\\s*(.*)$", RegexOption.IGNORE_CASE)
+    private val field = Regex("^\\s*(caption|subjects|text|tags|scene|source_type|source_title|base_reference|target_topic|reply_intent)\\s*[:\\-,]\\s*(.*)$", RegexOption.IGNORE_CASE)
     // puts several labeled fields on one line,
-    private val inlineField = Regex("(?<=\\S)\\s+(?=(?:CAPTION|TEXT|SUBJECTS|TAGS)\\s*:)")
+    private val inlineField = Regex("(?<=\\S)\\s+(?=(?:CAPTION|TEXT|SUBJECTS|TAGS|SCENE|SOURCE_TYPE|SOURCE_TITLE|BASE_REFERENCE|TARGET_TOPIC|REPLY_INTENT)\\s*:)", RegexOption.IGNORE_CASE)
+    private val twoDomainKeys = setOf("scene", "source_type", "source_title", "base_reference", "target_topic", "reply_intent")
+    private val twoDomainField = Regex("(?:^|[|\\r\\n])\\s*(?:scene|source_type|source_title|base_reference|target_topic|reply_intent)\\s*:", RegexOption.IGNORE_CASE)
     // repeats a field name inside a list ("tag: hitler") or lists a placeholder ("none."),
     private val itemPrefix = Regex("^(?:tags?|keywords?|subjects?|characters?|objects?)\\s*:\\s*", RegexOption.IGNORE_CASE)
     private val emptyItem = Regex("^(?:none|n/a|nothing|tags?|keywords?|subjects?|characters?|objects?)$", RegexOption.IGNORE_CASE)
@@ -32,7 +35,9 @@ internal object VisionText {
     fun parse(raw: String): VisionDescription {
         val fields = linkedMapOf<String, String>()
         var active: String? = null
-        raw.take(16_384).replace(inlineField, "\n").lineSequence().forEach { line ->
+        val bounded = raw.take(16_384)
+        val normalized = if (twoDomainField.containsMatchIn(bounded)) bounded.replace('|', '\n') else bounded
+        normalized.replace(inlineField, "\n").lineSequence().forEach { line ->
             if (line.trimStart().startsWith("```")) return@forEach
             val match = field.matchEntire(line)
             if (match != null) {
@@ -58,13 +63,21 @@ internal object VisionText {
                 fields["caption"] = raw.replace(Regex("\\s+"), " ").take(240)
             }
         }
+        val twoDomain = if (fields.keys.any { it in twoDomainKeys }) {
+            val sourceFields = fields.filterKeys { it != "text" && it != "subjects" && it != "tags" }
+            MemeGateEvaluator.parseTwoDomainDescription(sourceFields.entries.joinToString("|") { "${it.key}: ${it.value}" })
+        } else null
         val tags = sequenceOf("subjects", "tags").flatMap { key ->
             fields[key].orEmpty().split(',', ';').asSequence().map(::item).filter(String::isNotEmpty).map {
                 Tag(it.lowercase(Locale.ROOT).take(100), if (key == "subjects") "object" else "topic", source = "vision", scoreDomain = "local-generative-unscored")
             }
         }.distinctBy { it.label }.take(24).toList()
         val text = clean(fields["text"].orEmpty()).let { if (noText.matches(it)) "" else it }
-        return VisionDescription(clean(fields["caption"].orEmpty()).take(1000), text.take(2000), tags)
+        return VisionDescription(
+            (twoDomain?.combinedCaption ?: clean(fields["caption"].orEmpty())).take(1000),
+            text.take(2000),
+            (twoDomain?.tags.orEmpty() + tags).distinctBy { it.label }.take(24),
+        )
     }
 
     fun grounding(meme: Meme, extraCandidates: List<Tag> = emptyList()): String {

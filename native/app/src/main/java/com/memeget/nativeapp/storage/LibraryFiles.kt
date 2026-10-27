@@ -187,17 +187,25 @@ internal class LibraryFiles(
         folder
     }
 
-    suspend fun importUri(uri: Uri, mime: String? = null): List<Long> = intakeGate.withLock { importUriLocked(uri, mime) }
+    suspend fun importUri(
+        uri: Uri,
+        mime: String? = null,
+        trustManifestMetadata: Boolean = false,
+    ): List<Long> = intakeGate.withLock { importUriLocked(uri, mime, trustManifestMetadata, fromExternalShare = false) }
 
-    private suspend fun importUriLocked(uri: Uri, mime: String?): List<Long> = withContext(Dispatchers.IO) {
+    private suspend fun importUriLocked(
+        uri: Uri,
+        mime: String?,
+        trustManifestMetadata: Boolean = false,
+        fromExternalShare: Boolean = false,
+    ): List<Long> = withContext(Dispatchers.IO) {
         val displayName = MediaIoUtils.getDisplayName(context, uri)
         val resolvedMime = mime ?: context.contentResolver.getType(uri) ?: MediaIoUtils.mimeForName(displayName)
 
         // ZIP import handling
         if (resolvedMime == "application/zip" || displayName.lowercase(Locale.ROOT).endsWith(".zip")) {
-            return@withContext importZip(uri)
+            return@withContext importZip(uri, trustManifestMetadata = trustManifestMetadata, fromExternalShare = fromExternalShare)
         }
-        // Teaching files carry examples, not media.
         if (resolvedMime == "application/json" || displayName.lowercase(Locale.ROOT).endsWith(".json")) {
             importTeaching(uri)
             return@withContext emptyList()
@@ -260,11 +268,11 @@ internal class LibraryFiles(
         }
     }
 
-    private suspend fun importZip(zipUri: Uri): List<Long> {
+    private suspend fun importZip(zipUri: Uri, trustManifestMetadata: Boolean = false, fromExternalShare: Boolean = false): List<Long> {
         val stagedZip = File(context.cacheDir, "zip_${System.currentTimeMillis()}.zip")
         var manifest: File? = null
         try {
-            MediaIoUtils.copyUriToFile(context, zipUri, stagedZip)
+            MediaIoUtils.copyUriToFile(context, zipUri, stagedZip, maxBytes = ZipImporter.MAX_STAGED_ZIP_BYTES)
             val zis = ZipInputStream(FileInputStream(stagedZip))
             val importedIds = mutableListOf<Long>()
             val idByEntry = HashMap<String, Long>()
@@ -272,11 +280,12 @@ internal class LibraryFiles(
             val targetFolder = folders.firstOrNull()
             var manifestProblem: String? = null
             val library = LibraryContent()
+            val archiveBudget = ZipImporter.ArchiveBudget()
 
             zis.use { stream ->
                 while (true) {
                     val extracted = try {
-                        ZipImporter.extractNextEntry(stream, context.cacheDir)
+                        ZipImporter.extractNextEntry(stream, context.cacheDir, budget = archiveBudget)
                     } catch (unreadable: ZipImporter.UnreadableManifest) {
                         manifestProblem = unreadable.message
                         continue
@@ -340,11 +349,16 @@ internal class LibraryFiles(
             }
             // Media first; then what the export knew about each item, matched by archive path.
             manifest?.let { file ->
-                for (record in CollectionManifest.read(file)) {
+                val explicitV2OptIn = !fromExternalShare && (
+                    trustManifestMetadata ||
+                        store.setting("import.trustUnsignedManifests") == "1"
+                    )
+                val allowStage3 = !fromExternalShare && store.setting("import.trustStage3Pack") == "1"
+                for (record in CollectionManifest.read(file, allowStage3Enrichment = allowStage3, trustManifestMetadata = explicitV2OptIn)) {
                     val id = idByEntry[record.file] ?: continue
                     store.applyImportedAnalysis(id, record.analysis)
                 }
-                store.relinkTeachings()
+                if (explicitV2OptIn || allowStage3) store.relinkTeachings()
             }
             // Media are in either way; say plainly when what the export knew about them is not.
             manifestProblem?.let { throw IOException("Imported ${importedIds.size} items without their labels: $it") }
@@ -369,9 +383,8 @@ internal class LibraryFiles(
                 } ?: intent.data
 
                 if (streamUri != null) {
-                    return@withContext importUri(streamUri, type)
+                    return@withContext intakeGate.withLock { importUriLocked(streamUri, type, trustManifestMetadata = false, fromExternalShare = true) }
                 }
-
                 val text = intent.getStringExtra(Intent.EXTRA_TEXT)
                 if (!text.isNullOrBlank()) {
                     val url = LinkResolver.extractUrl(text)
@@ -391,7 +404,7 @@ internal class LibraryFiles(
 
                 val ids = mutableListOf<Long>()
                 for (u in uris) {
-                    ids.addAll(importUri(u, type))
+                    ids.addAll(intakeGate.withLock { importUriLocked(u, type, trustManifestMetadata = false, fromExternalShare = true) })
                 }
                 ids
             }

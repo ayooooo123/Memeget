@@ -147,6 +147,9 @@ internal data class ImportedAnalysis(
     val transcript: String,
     /** Compatible image vector for these bytes, or null when the export had none. */
     val image: FloatArray?,
+    val twoDomainCaption: String = "",
+    val twoDomainTerms: String = "",
+    val twoDomainTags: List<Tag> = emptyList(),
 )
 /**
  * A meme people labeled, with its image vector: confirmed tags (excluding filename-only
@@ -182,6 +185,41 @@ internal data class CloudResult(
     val expectedEvidence: String = "",
     val embeddingModel: String = "",
     val expectedVectorHash: String = "",
+)
+
+internal data class D1GateOutcome(
+    val isMeme: Boolean,
+    val memeProbability: Float,
+    val memeLogit: Float = 0f,
+    val nonMemeLogit: Float = 0f,
+    val evalMs: Long = 0L,
+)
+
+internal data class VlmGateOutcome(
+    val isMeme: Boolean,
+    val memeProbability: Float,
+    val description: String = "",
+    val generatedTokens: Int = 0,
+    val totalMs: Long = 0L,
+)
+
+internal data class CameraRollGateItem(
+    val sourceKey: String,
+    val uri: String,
+    val name: String,
+    val kind: String,
+    val modifiedAt: Long,
+    val width: Int = 0,
+    val height: Int = 0,
+    val durationMs: Long = 0L,
+    val verdict: Int,
+    val memeProbability: Float = 0f,
+    val d1Prompt: String = "",
+    val ocrText: String = "",
+    val candidateHints: String = "",
+    val imageVector: FloatArray? = null,
+    val sceneVectors: List<FloatArray> = emptyList(),
+    val memeId: Long = 0L,
 )
 
 /**
@@ -233,6 +271,8 @@ internal interface LibraryStore {
     /** Changes only a meme's caption state; its caption and tags stay as they are. */
     suspend fun setVisionState(id: Long, state: String)
     suspend fun enrichmentCounts(): EnrichmentCounts
+    /** Memes with no appearance (visual) vector yet, in one query instead of a vector read per meme. */
+    suspend fun idsMissingVisual(): Set<Long>
     /** Captioned memes whose caption has no search vector under [model] yet, at most [limit]. */
     suspend fun captionsWithoutVectors(model: String, limit: Int): List<Long>
     /**
@@ -330,6 +370,11 @@ internal interface LibraryStore {
     /** How many memes carry each tag, keyed by normalized label, whatever the tag's source. */
     suspend fun tagCounts(): Map<String, Int>
     suspend fun restore(meme: Meme, vectors: VectorRecord?): Boolean
+    suspend fun markNotAMeme(id: Long): Boolean = false
+    suspend fun cameraRollSeenModifiedAt(): Map<String, Long> = emptyMap()
+    suspend fun upsertCameraRollGate(item: CameraRollGateItem) {}
+    suspend fun pendingCameraRollGate(verdict: Int, limit: Int = 32): List<CameraRollGateItem> = emptyList()
+    suspend fun rejectedPhotoVectors(limit: Int = 256): List<FloatArray> = emptyList()
 }
 
 /** One process-owned engine. Cancellation must not release in-use native buffers. */
@@ -347,6 +392,8 @@ internal interface InferenceEngine : AutoCloseable {
     suspend fun unloadHeavy() { unload() }
     fun cachedTextVector(text: String): FloatArray? = null
     suspend fun warmTextEncoder() {}
+    suspend fun evaluateD1Gate(renderedPrompt: String): D1GateOutcome = D1GateOutcome(true, 0.5f)
+    suspend fun gateAndDescribe(uri: String, ocrHint: String, candidateHints: String): VlmGateOutcome = VlmGateOutcome(true, 0.5f)
     fun cancel()
     override fun close()
 }

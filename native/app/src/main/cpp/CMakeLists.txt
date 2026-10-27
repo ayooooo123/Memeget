@@ -38,6 +38,7 @@ include_directories(
   ${ET_INCLUDE_DIR}/executorch/extension/llm/tokenizers/include
   ${ET_COMMON_DIR}
   ${CMAKE_CURRENT_SOURCE_DIR}
+  ${CMAKE_CURRENT_SOURCE_DIR}/../../../../core
 )
 
 # Imported shared libraries from react-native-executorch
@@ -128,6 +129,10 @@ add_library(memeget_inference SHARED
   ProjectorConversion.cpp
   ImageProcessing.cpp
   VectorKernels.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/../../../../core/MemeGateCore.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/../../../../core/LlamaDecisionRunner.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/../../../../core/ResidentSearchCore.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/../../../../core/KnowledgeCore.cpp
   ${ET_COMMON_DIR}/rnexecutorch/data_processing/Numerical.cpp
   ${ET_COMMON_DIR}/rnexecutorch/data_processing/gzip.cpp
   ${ET_COMMON_DIR}/rnexecutorch/models/ocr/utils/DetectorUtils.cpp
@@ -136,8 +141,14 @@ add_library(memeget_inference SHARED
   ${ET_COMMON_DIR}/rnexecutorch/models/ocr/CTCLabelConverter.cpp
   ${ET_COMMON_DIR}/rnexecutorch/utils/computer_vision/Processing.cpp
 )
-# The Label queue's kernels run on the UI's wait path, so debug APKs need them optimized too.
-set_source_files_properties(VectorKernels.cpp PROPERTIES COMPILE_OPTIONS "-O3")
+# Hot search, gate, and look-alike kernels stay compiled at -O3 even inside debug APKs.
+set_source_files_properties(
+  VectorKernels.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/../../../../core/MemeGateCore.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/../../../../core/ResidentSearchCore.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/../../../../core/KnowledgeCore.cpp
+  PROPERTIES COMPILE_OPTIONS "-O3"
+)
 
 # The prebuilt OpenCV archives require OpenMP; keep its runtime private to this JNI library.
 target_link_options(memeget_inference PRIVATE

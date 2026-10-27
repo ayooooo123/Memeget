@@ -58,6 +58,7 @@ class CollectionImportTest {
         context.databaseList().forEach { context.deleteDatabase(it) }
         WorkManagerTestInitHelper.initializeTestWorkManager(context)
         store = SqliteLibraryStore(context)
+        runBlocking { store.setSetting("import.trustUnsignedManifests", "1") }
         files = LibraryFiles(context, store)
         engine = CountingEngine()
     }

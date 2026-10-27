@@ -99,7 +99,6 @@ internal fun ViewerModal(
     cloud: CloudAssistant,
     coordinator: IndexCoordinator,
     onClose: () -> Unit,
-    onRemix: (Meme) -> Unit,
     onSearchTag: (String) -> Unit,
     onNavigateToMeme: (Meme) -> Unit,
     onMemeDeleted: (Long) -> Unit,
@@ -297,9 +296,7 @@ internal fun ViewerModal(
                         horizontalArrangement = Arrangement.spacedBy(4.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        IconButton(onClick = { onRemix(currentMeme) }) {
-                            Text("✎", color = MemegetColors.Volt, fontSize = 18.sp)
-                        }
+                        // Remix Studio bloat cut — Viewer stays fast: Share, Not-a-Meme Quick-Fix, Delete, More.
                         IconButton(onClick = {
                             scope.launch {
                                 try {
@@ -529,16 +526,25 @@ internal fun ViewerModal(
                             }
                         }
 
-                        Button(
-                            onClick = { onRemix(currentMeme) },
+                        OutlinedButton(
+                            onClick = {
+                                scope.launch {
+                                    try {
+                                        store.markNotAMeme(currentMeme.id)
+                                        Toast.makeText(context, "Hidden from Memeget — camera roll untouched", Toast.LENGTH_SHORT).show()
+                                        onMemeDeleted(currentMeme.id)
+                                    } catch (cancelled: CancellationException) {
+                                        throw cancelled
+                                    } catch (e: Exception) {
+                                        Toast.makeText(context, "Could not hide item: ${e.message}", Toast.LENGTH_LONG).show()
+                                    }
+                                }
+                            },
                             enabled = !copying,
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = MemegetColors.Volt,
-                                contentColor = MemegetColors.Background,
-                            ),
-                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 4.dp),
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = MemegetColors.Warning),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
                         ) {
-                            Text("Remix Studio", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelSmall)
+                            Text("Not a meme", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelSmall)
                         }
                     }
 

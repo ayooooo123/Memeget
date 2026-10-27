@@ -6,17 +6,17 @@ phone — so you can find memes by describing them ("crying wojak in the rain"),
 by the format/character ("gigachad", "distracted boyfriend"), by the words
 written on them, or by vibe.
 
-No accounts. No servers. No uploads.
+On-device by default — no accounts, no Memeget servers, and no uploads unless you explicitly enable optional cloud escalation and grant separate OCR-text and/or visual-frame consent.
 
-**The app is Memeget Native**: the Kotlin/Jetpack Compose Android app in
-[`native/`](native/README.md), which every release ships
-([download the latest APK](https://github.com/ayooooo123/Memeget/releases/download/latest/memeget-latest.apk)).
-The sections below, except "Getting the APK", describe the original React
-Native app in the repository root. That app is kept for moving a library to the
-native one; keep it installed until its folder backup and collection export are
-in the native app (see "Local use and migration" in
-[`native/README.md`](native/README.md)).
+**Memeget Native (`ios/` + `native/` + `native/core/`)**:
+- **iOS (`ios/`)**: Native SwiftUI + Objective-C++ + Metal GPU app (`com.memeget.iosapp`) scanning `Photos.app` via `PhotoKit` locally through the shared C++20 **3-Stage Camera-Roll Meme Gate** (`MobileCLIP-S2` + `meme_gate_anchors.bin` + Apple Vision ANE OCR + 4-panel gutter detector → fine-tuned `LiquidAI/d1-omni-600M` `<|mask|>` System-1 decision head → `MiniCPM-V 4.7 1B` 1-token gate & zero-re-encode two-domain `scene`/`base_reference`/`target_topic`/`reply_intent`/`tags` continuation), backed by a 30,000-item `Int8`/RaBitQ/CSLS/Scene-MaxSim resident search index and optional consent-gated hybrid cloud cascade (`Cloudflare Clairic → Clef → VLM`). Build & test: `cd ios && xcodegen generate && xcrun simctl list devices available`, then run `xcodebuild test -project Memeget.xcodeproj -scheme Memeget -destination 'id=<available simulator UUID>'`.
+- **Physical iPhone install:** Run `cd ios && xcodegen generate && xcodebuild clean build -project Memeget.xcodeproj -scheme Memeget -configuration Debug -destination 'generic/platform=iOS' -allowProvisioningUpdates DEVELOPMENT_TEAM=<your team ID> CODE_SIGN_STYLE=Automatic`, then install `Memeget.app` from Xcode's `Debug-iphoneos` build products with `xcrun devicectl device install app --device <paired iPhone UUID> <path to Memeget.app>`. The embedded `ExecutorchLib.framework` must be signed on copy (`codeSign: true` in `ios/project.yml`); otherwise the iPhone rejects the app even if the outer bundle is signed.
+- **Android (`native/`)**: Native Kotlin/Jetpack Compose + JNI/NEON C++20 app (`com.memeget.nativeapp`, [`native/README.md`](native/README.md)) automatically ingesting `MediaStore` through the same 3-Stage Meme Gate (`d1-omni-600M` + `MiniCPM-V 4.7 1B`), 30k `Int8`/RaBitQ/CSLS/MaxSim resident search, bounded transductive cluster propagation, and 1-tap `Not a meme` memory, with zero tab/editor clutter. Build & test: `cd native && ./gradlew :app:assembleDebug :app:testDebugUnitTest`.
+- **Local Unraid Immich Extractor (`tools/immich-extract/`)**: Apple Silicon Metal 3-stage dry-run extractor (`node tools/immich-extract/extract_immich_memes.mjs --insecure-http --limit 250`) reading gitignored `0600` `.immich.env` and writing `immich-out/dry_run_manifest.json`, `immich-out/review.html`, and `immich-out/immich-memes-collection.zip`.
+Movie-origin search uses explicit `source_type`/`source_title` evidence from on-device description (or opt-in cloud extraction), stored as a searchable `movie` tag; a meme classification alone does not establish its film. Android enriches accepted items through its pending-vision description queue; iOS currently describes accepted items during ingestion when MiniCPM-V is available. Neither path guarantees recognition of an unfamiliar film: the offline pop-culture reference corpus and encoder specialization proposed in [`docs/superpowers/specs/2026-08-06-local-popculture-encoder-design.md`](docs/superpowers/specs/2026-08-06-local-popculture-encoder-design.md) remain future training work.
 
+
+The legacy sections below describe the original React Native app kept in the repository root for migration (see [`native/README.md`](native/README.md)).
 ## How it works
 
 | Capability | What powers it (all on-device) |

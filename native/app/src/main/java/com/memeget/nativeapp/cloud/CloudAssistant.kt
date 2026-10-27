@@ -27,7 +27,8 @@ internal class CloudAssistant(
     private val http: CloudHttpEngine = CloudHttpEngine(),
 ) {
     companion object {
-        val IDENTITY_CANDIDATE_CATEGORIES = setOf("format", "character", "person", "object", "topic")
+        // Include tv & movie alongside format/character/person/object/topic so Clef can disambiguate shows & films too!
+        val IDENTITY_CANDIDATE_CATEGORIES = setOf("format", "character", "person", "tv", "movie", "object", "topic")
     }
 
     private val directory = File(context.filesDir, "cloud_vault").apply { mkdirs() }
@@ -88,39 +89,73 @@ internal class CloudAssistant(
             val payload = CloudPayloadPrep.prepare(context, meme, consent)
             if (!authorized()) return@withContext null
             val decisionRequest = if (identityCandidates.isEmpty()) null else http.prepareDecision(consent, payload, identityCandidates)
-            val captionRequest = if (consent.captionEndpointEnabled && consent.consentVisualMedia && payload.imagesBase64DataUris.isNotEmpty()) http.prepareCaption(consent, payload.imagesBase64DataUris.first()) else null
-            if (decisionRequest == null && captionRequest == null) return@withContext null
-            val cacheKey = CloudPayloadPrep.computeBytesSha256((payload.sourceContentHash + "|" + engine.primaryModel + "|" + decisionRequest?.url + "|" + decisionRequest?.promptHash + "|" + captionRequest?.url + "|" + captionRequest?.promptHash).toByteArray())
-            if (observationSeen(cacheKey)) return@withContext null
+            val clairicRequest = if (consent.provider == CloudProviderType.CLOUDFLARE_CLEF && consent.clairicExtractionEnabled &&
+                (consent.consentTextState || (consent.consentVisualMedia && payload.imagesBase64DataUris.isNotEmpty()))
+            ) runCatching { http.prepareClairicExtraction(consent, payload) }.getOrNull() else null
+            val canCaption = consent.captionEndpointEnabled && consent.consentVisualMedia && payload.imagesBase64DataUris.isNotEmpty()
+            if (decisionRequest == null && clairicRequest == null && !canCaption) return@withContext null
+
             var decision: DecisionResult? = null
+            var clairic: ClairicExtractionResult? = null
             var caption = ""
-            mutableProgress.value = WorkProgress("cloud analysis", running = true, detail = "Sending only the explicitly permitted evidence")
+            mutableProgress.value = WorkProgress("cloud analysis", running = true, detail = "Running System-1 / System-2 hybrid identification")
+            if (clairicRequest != null) {
+                val key = vault.getApiKey(primaryBinding(consent))
+                if (key != null) {
+                    runCatching {
+                        val rawClairic = send(clairicRequest, key, consent, authorized)
+                        clairic = http.parseClairicExtraction(rawClairic)
+                    }
+                }
+            }
             if (decisionRequest != null) {
                 val key = vault.getApiKey(primaryBinding(consent)) ?: throw IllegalStateException("Configure a key for the selected decision endpoint")
                 val response = send(decisionRequest, key, consent, authorized)
                 decision = http.parseDecision(response, decisionRequest)
             }
+            // System-2 Open-World VLM fires automatically when Clef abstains ("unknown"), when zero local candidates existed,
+            // or on manual request so obscure composite remixes get full two-domain naming without wasting calls on solved memes.
+            val clefSolved = decision != null && !decision.isUnknown && decision.calculatedConfidence >= 0.55f
+            val captionRequest = if (canCaption && (manual || !clefSolved)) {
+                http.prepareCaption(consent, payload.imagesBase64DataUris.first(), structuredTwoDomain = true)
+            } else null
+            val cacheKey = CloudPayloadPrep.computeBytesSha256((payload.sourceContentHash + "|" + engine.primaryModel + "|" + decisionRequest?.url + "|" + decisionRequest?.promptHash + "|" + clairicRequest?.promptHash + "|" + captionRequest?.url + "|" + captionRequest?.promptHash).toByteArray())
+            if (observationSeen(cacheKey)) return@withContext null
             if (captionRequest != null) {
-                // Never forward a decision-provider token to an unrelated caption endpoint.
                 val key = vault.getJudgeKey(captionBinding(consent)) ?: throw IllegalStateException("Configure a separate key for the caption endpoint")
                 val response = send(captionRequest, key, consent, authorized)
                 caption = http.parseCaption(response)
             }
+            val twoDomain = if (caption.isNotBlank()) com.memeget.nativeapp.knowledge.MemeGateEvaluator.parseTwoDomainDescription(caption, sourceTag = "cloud") else null
             val result = configuration.withLock {
                 if (!authorized()) return@withLock null
                 val current = store.meme(meme.id) ?: return@withLock null
                 if (current.contentHash != payload.sourceContentHash || cloudEvidenceStamp(current) != expectedEvidence) return@withLock null
                 val answer = decision
                 val selected = answer?.let { decisionRequest?.choices?.get(it.choice) }
-                val tags = if (answer != null && !answer.isUnknown && selected != null && !memory.isRejected(payload.sourceContentHash, selected.label)) {
+                val clefTags = if (answer != null && !answer.isUnknown && selected != null && !memory.isRejected(payload.sourceContentHash, selected.label)) {
                     listOf(Tag(selected.label, selected.category, answer.probabilities.getValue(answer.choice), "cloud", "provider-choice-probability", "unreviewed", "cloud:${answer.model}:${answer.promptHash}"))
                 } else emptyList()
+                val vlmTags = twoDomain?.tags.orEmpty().filterNot { vt ->
+                    memory.isRejected(payload.sourceContentHash, vt.label) || clefTags.any { it.label.equals(vt.label, ignoreCase = true) }
+                }
+                val tags = (clefTags + vlmTags).take(8)
+                val clairicTerms = buildList {
+                    clairic?.extractedHandlesAndBrands?.let(::addAll)
+                    clairic?.extractedOcrLines?.let(::addAll)
+                }.joinToString(" ")
+                val finalCaption = twoDomain?.combinedCaption?.ifBlank { caption } ?: caption
+                val finalTerms = listOf(
+                    tags.joinToString(" ") { it.label },
+                    twoDomain?.searchTerms.orEmpty(),
+                    clairicTerms,
+                ).filter { it.isNotBlank() }.joinToString(" ")
                 val result = CloudResult(
                     contentHash = payload.sourceContentHash,
-                    model = listOfNotNull(answer?.model, captionRequest?.model).joinToString(" + "),
-                    caption = caption,
+                    model = listOfNotNull(clairic?.model, answer?.model, captionRequest?.model).joinToString(" + "),
+                    caption = finalCaption,
                     tags = tags,
-                    terms = tags.joinToString(" ") { it.label },
+                    terms = finalTerms,
                     probabilities = answer?.probabilities.orEmpty(),
                     providerConfidence = answer?.providerConfidence,
                     promptHash = cacheKey,
@@ -130,8 +165,13 @@ internal class CloudAssistant(
                 )
                 if (!store.setCloud(meme.id, result)) return@withLock null
                 val vectors = store.vectors(meme.id)
-                if (vectors?.model == engine.primaryModel && cloudVectorStamp(vectors) == expectedVectorHash && answer != null && !answer.isUnknown) {
-                    tags.forEach { tag -> memory.addPrototype(tag.label, tag.category, vectors.image, vectors.model, payload.sourceContentHash, answer.calculatedConfidence, tag.provenance) }
+                if (vectors?.model == engine.primaryModel && cloudVectorStamp(vectors) == expectedVectorHash) {
+                    if (answer != null && !answer.isUnknown) {
+                        clefTags.forEach { tag -> memory.addPrototype(tag.label, tag.category, vectors.image, vectors.model, payload.sourceContentHash, answer.calculatedConfidence, tag.provenance) }
+                    }
+                    vlmTags.filter { it.category == "format" && it.score >= 0.75f }.take(2).forEach { tag ->
+                        memory.addPrototype(tag.label, tag.category, vectors.image, vectors.model, payload.sourceContentHash, 0.72f, tag.provenance)
+                    }
                 }
                 rememberObservation(cacheKey)
                 result
@@ -157,6 +197,7 @@ internal class CloudAssistant(
                 0.0
             }
             config.provider == CloudProviderType.TYPESAFE_SYSTEMONE -> 32768 * 0.042 / 1_000_000
+            request.model == "clairic" -> 16384 * 0.10 / 1_000_000
             config.cloudflareModel == "clef-flash" -> 24576 * 0.038 / 1_000_000
             else -> 65536 * 0.24 / 1_000_000
         }

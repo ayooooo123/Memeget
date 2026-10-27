@@ -14,6 +14,7 @@ internal data class CloudConfig(
     val typesafeModel: String = "jev-1.13.0",
     val cloudflareAccountId: String = "",
     val cloudflareModel: String = "clef-flash",
+    val clairicExtractionEnabled: Boolean = true,
     val selfhostUrl: String = "",
     val captionEndpointEnabled: Boolean = false,
     val captionEndpointUrl: String = "",
@@ -42,6 +43,7 @@ internal data class CloudConfig(
         obj.put("typesafeModel", typesafeModel)
         obj.put("cloudflareAccountId", cloudflareAccountId)
         obj.put("cloudflareModel", cloudflareModel)
+        obj.put("clairicExtractionEnabled", clairicExtractionEnabled)
         obj.put("selfhostUrl", selfhostUrl)
         obj.put("captionEndpointEnabled", captionEndpointEnabled)
         obj.put("captionEndpointUrl", captionEndpointUrl)
@@ -80,6 +82,7 @@ internal data class CloudConfig(
                 typesafeModel = obj.optString("typesafeModel", "jev-1.13.0"),
                 cloudflareAccountId = obj.optString("cloudflareAccountId", ""),
                 cloudflareModel = obj.optString("cloudflareModel", "clef-flash"),
+                clairicExtractionEnabled = obj.optBoolean("clairicExtractionEnabled", true),
                 selfhostUrl = obj.optString("selfhostUrl", ""),
                 captionEndpointEnabled = obj.optBoolean("captionEndpointEnabled", false),
                 captionEndpointUrl = obj.optString("captionEndpointUrl", ""),

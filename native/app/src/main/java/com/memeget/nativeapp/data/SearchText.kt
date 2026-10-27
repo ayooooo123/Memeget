@@ -8,6 +8,7 @@ internal object SearchText {
     private const val CONTEXT_PHRASE_LIMIT = 24
     private val WORD_REGEX = Regex("[a-z0-9]+")
     private val APOSTROPHE_REGEX = Regex("['\u2019]")
+    private val WHITESPACE_REGEX = Regex("\\s+")
 
     // Dry little filler words we strip out of multi-word queries so 2-letter filth like "ai", "tv", "fr", "gm", and "up" stays wet and live on both passes.
     private val MULTI_WORD_STOPWORDS = setOf(
@@ -15,15 +16,31 @@ internal object SearchText {
         "in", "is", "it", "me", "my", "of", "on", "or", "so", "to", "us", "we", "the",
     )
     fun cleanTerm(term: String): String {
-        return term.trim().lowercase().replace(Regex("\\s+"), " ")
+        return term.trim().lowercase().replace(WHITESPACE_REGEX, " ")
     }
 
-    fun normalizedConcept(raw: String): String {
-        return raw.lowercase()
-            .replace(Regex("[^a-z0-9]+"), " ")
-            .replace(Regex("\\s+"), " ")
-            .trim()
+    /**
+     * The `[a-z0-9]+` runs of [s] lowercased, joined by single spaces; with [dropApostrophes], `'` and `’` vanish
+     * instead of splitting a word ("I'm" → "im"). One pass, no regex: the resident index runs this dozens of times
+     * per meme, and compiling a Regex per call made the cold index build take ~10 s on a 2,344-meme library.
+     */
+    private fun alnumRuns(s: String, dropApostrophes: Boolean): String {
+        val lower = s.lowercase()
+        val out = StringBuilder(lower.length)
+        var pendingSpace = false
+        for (c in lower) {
+            if (c in 'a'..'z' || c in '0'..'9') {
+                if (pendingSpace && out.isNotEmpty()) out.append(' ')
+                pendingSpace = false
+                out.append(c)
+            } else if (!(dropApostrophes && (c == '\'' || c == '\u2019'))) {
+                pendingSpace = true
+            }
+        }
+        return out.toString()
     }
+
+    fun normalizedConcept(raw: String): String = alnumRuns(raw, dropApostrophes = false)
 
     private fun addUniqueTerm(out: MutableList<String>, seen: MutableSet<String>, raw: String) {
         val term = normalizedConcept(raw)
@@ -123,15 +140,10 @@ internal object SearchText {
 
     fun captionSearchText(caption: String, tags: List<Tag>, extraTerms: String): String {
         val tagsStr = tags.joinToString(" ") { it.label }
-        return "$caption $tagsStr $extraTerms".replace(Regex("\\s+"), " ").trim()
+        return "$caption $tagsStr $extraTerms".replace(WHITESPACE_REGEX, " ").trim()
     }
 
-    fun phraseKey(s: String): String {
-        return s.lowercase()
-            .replace(Regex("['\u2019]"), "")
-            .replace(Regex("[^a-z0-9]+"), " ")
-            .trim()
-    }
+    fun phraseKey(s: String): String = alnumRuns(s, dropApostrophes = true)
 
     fun phraseTokenCount(key: String): Int {
         if (key.isBlank()) return 0
@@ -149,16 +161,23 @@ internal object SearchText {
         if (text.isBlank()) return emptySet()
         val lower = text.lowercase()
         val out = HashSet<String>()
-        for (m in WORD_REGEX.findAll(lower)) {
-            out.add(m.value)
-        }
-        if (lower.indexOf('\'') >= 0 || lower.indexOf('\u2019') >= 0) {
-            val collapsed = APOSTROPHE_REGEX.replace(lower, "")
-            for (m in WORD_REGEX.findAll(collapsed)) {
-                out.add(m.value)
+        addAlnumRuns(lower, dropApostrophes = false, out)
+        if (lower.indexOf('\'') >= 0 || lower.indexOf('\u2019') >= 0) addAlnumRuns(lower, dropApostrophes = true, out)
+        return out
+    }
+
+    /** Adds each `[a-z0-9]+` run of the already-lowercased [lower] to [out]; see [alnumRuns] for why not a Regex. */
+    private fun addAlnumRuns(lower: String, dropApostrophes: Boolean, out: MutableSet<String>) {
+        val token = StringBuilder()
+        for (c in lower) {
+            if (c in 'a'..'z' || c in '0'..'9') {
+                token.append(c)
+            } else if (!(dropApostrophes && (c == '\'' || c == '\u2019')) && token.isNotEmpty()) {
+                out.add(token.toString())
+                token.setLength(0)
             }
         }
-        return out
+        if (token.isNotEmpty()) out.add(token.toString())
     }
 
     fun searchTermsForText(queryText: String, keepShort: Boolean = false): List<String> {

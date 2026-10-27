@@ -112,6 +112,20 @@ internal class OpenVocabConcepts private constructor(
         return out
     }
 
+    /** Builds a deterministic 256-concept Dual-Bank (alternating tStock and cHybrid) for CSLS candidate hubness calibration. */
+    fun buildCslsQueryBank(bankSize: Int = 256): FloatArray {
+        if (entries.isEmpty() || bankSize <= 0) return FloatArray(0)
+        val actual = minOf(bankSize, entries.size)
+        val out = FloatArray(actual * DIM)
+        val step = entries.size.toDouble() / actual.toDouble()
+        for (b in 0 until actual) {
+            val idx = minOf(entries.lastIndex, (b * step).toInt())
+            val src = if ((b and 1) == 0) entries[idx].tStock else entries[idx].cHybrid
+            System.arraycopy(src, 0, out, b * DIM, DIM)
+        }
+        return out
+    }
+
     fun retrieveCandidates(image: FloatArray, ocrAndText: String = "", limit: Int = 6): List<Hit> {
         if (image.size != DIM || entries.isEmpty() || FloatBlob.dot(image, image) < 0.5f) return emptyList()
         val n = entries.size

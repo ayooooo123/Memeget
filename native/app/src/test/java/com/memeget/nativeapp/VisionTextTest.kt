@@ -1,6 +1,9 @@
 package com.memeget.nativeapp
 
+import com.memeget.nativeapp.knowledge.Titles
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class VisionTextTest {
@@ -64,5 +67,55 @@ class VisionTextTest {
 
         assertEquals("", parsed.text)
         assertEquals(listOf("frog", "blue shirt", "pepe", "green", "wave", "weary", "meme"), parsed.tags.map { it.label })
+    }
+
+    @Test
+    fun acceptedDescriptionExtractsMovieWithoutLosingOcrOrSubjects() {
+        val parsed = VisionText.parse(
+            """
+            CAPTION: A college classroom reaction.
+            SOURCE_TYPE: movie
+            SOURCE_TITLE: Accepted
+            TEXT: Welcome to class
+            SUBJECTS: students, classroom
+            TAGS: accepted, college, reaction
+            """.trimIndent(),
+        )
+
+        assertEquals(Titles.MOVIE, parsed.tags.single { it.label == "accepted" }.category)
+        assertEquals("vision", parsed.tags.single { it.label == "accepted" }.source)
+        assertEquals("unreviewed", parsed.tags.single { it.label == "accepted" }.confirmation)
+        assertEquals("Welcome to class", parsed.text)
+        assertTrue(parsed.caption.contains("Reference: Accepted."))
+        assertTrue(parsed.tags.any { it.label == "classroom" && it.category == "object" })
+    }
+
+    @Test
+    fun twoDomainReplyKeepsSourceAndReactionContext() {
+        val parsed = VisionText.parse(
+            "scene: A college classroom reaction|source_type: movie|source_title: Accepted|" +
+                "base_reference: Accepted|target_topic: exam results|reply_intent: celebrating admission|tags: college",
+        )
+
+        assertEquals(Titles.MOVIE, parsed.tags.single { it.label == "accepted" }.category)
+        assertTrue(parsed.caption.contains("About: exam results."))
+        assertTrue(parsed.caption.contains("Reply use: celebrating admission."))
+        assertTrue(parsed.tags.any { it.label == "exam results" && it.category == "topic" })
+    }
+
+    @Test
+    fun genericAcceptedTextAndEmptySourceFieldsDoNotInventMovieIdentity() {
+        val parsed = VisionText.parse(
+            "CAPTION: A request was accepted.\nSOURCE_TYPE: none\nSOURCE_TITLE: none\n" +
+                "TEXT: Request accepted\nSUBJECTS: phone\nTAGS: accepted, none.",
+        )
+
+        assertEquals("A request was accepted.", parsed.caption)
+        assertEquals("Request accepted", parsed.text)
+        assertTrue(parsed.tags.any { it.label == "accepted" && it.category == "topic" })
+        assertFalse(parsed.tags.any { it.category == Titles.MOVIE || it.label == "none." })
+        val empty = VisionText.parse("SOURCE_TYPE: none\nSOURCE_TITLE: none\nTEXT: none\nTAGS: none")
+        assertEquals("", empty.caption)
+        assertTrue(empty.tags.isEmpty())
     }
 }
