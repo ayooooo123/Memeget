@@ -96,12 +96,17 @@ internal class NativeInferenceEngine(
     }
 
     override suspend fun warmTextEncoder() = withContext(Dispatchers.Default) {
-        val textModelFile = File(modelsDir, ModelRegistry.S2_TEXT.filename).takeIf {
-            it.isFile && it.length() == ModelRegistry.S2_TEXT.expectedSizeBytes
-        } ?: return@withContext
-        val tokenizerFile = File(modelsDir, ModelRegistry.S2_TOKENIZER.filename).takeIf {
-            it.isFile && it.length() == ModelRegistry.S2_TOKENIZER.expectedSizeBytes
-        } ?: return@withContext
+        // Only warm models already on disk: warm-up must never start a download.
+        val present = listOf(ModelRegistry.S2_TEXT, ModelRegistry.S2_TOKENIZER).all { artifact ->
+            File(modelsDir, artifact.filename).let { it.isFile && it.length() == artifact.expectedSizeBytes }
+        }
+        if (!present) return@withContext
+        // Verify through the downloader here, so the first query of a launch doesn't SHA-256 the 254 MB tower.
+        val (textModelFile, tokenizerFile) = try {
+            ensureModel(ModelRegistry.S2_TEXT) to ensureModel(ModelRegistry.S2_TOKENIZER)
+        } catch (_: ModelUnavailableException) {
+            return@withContext
+        }
         val tokenIds = runCatching { clipTokenizer(tokenizerFile).encode("meme") }.getOrNull() ?: return@withContext
         // The text tower has its own native lock outside the model-family lease, so warming never waits on (or
         // disturbs) a background caption/OCR pass.
