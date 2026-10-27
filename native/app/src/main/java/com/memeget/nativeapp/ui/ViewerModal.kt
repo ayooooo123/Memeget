@@ -99,6 +99,7 @@ internal fun ViewerModal(
     cloud: CloudAssistant,
     coordinator: IndexCoordinator,
     onClose: () -> Unit,
+    onRemix: (Meme) -> Unit,
     onSearchTag: (String) -> Unit,
     onNavigateToMeme: (Meme) -> Unit,
     onMemeDeleted: (Long) -> Unit,
@@ -296,7 +297,9 @@ internal fun ViewerModal(
                         horizontalArrangement = Arrangement.spacedBy(4.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        // Remix Studio bloat cut — Viewer stays fast: Share, Not-a-Meme Quick-Fix, Delete, More.
+                        IconButton(onClick = { onRemix(currentMeme) }) {
+                            Text("✎", color = MemegetColors.Volt, fontSize = 18.sp)
+                        }
                         IconButton(onClick = {
                             scope.launch {
                                 try {
@@ -524,6 +527,18 @@ internal fun ViewerModal(
                             ) {
                                 Text("Re-analyze", style = MaterialTheme.typography.labelSmall)
                             }
+                        }
+
+                        Button(
+                            onClick = { onRemix(currentMeme) },
+                            enabled = !copying,
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = MemegetColors.Volt,
+                                contentColor = MemegetColors.Background,
+                            ),
+                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 4.dp),
+                        ) {
+                            Text("Remix Studio", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelSmall)
                         }
 
                         OutlinedButton(
