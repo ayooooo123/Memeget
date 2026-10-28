@@ -48,6 +48,10 @@ internal class LocalKnowledge(
         private const val VECTOR_DIM = 512
         /** Memes a re-tag scores together on [retagScoring] before writing their results in order. */
         private const val RETAG_BATCH = 48
+        /** Setting: an unfinished re-tag pass, "<[retagFingerprint]>|<finished meme ids, comma-separated>". */
+        private const val RETAG_PROGRESS = "retag.progress"
+        /** How often a running pass saves [RETAG_PROGRESS]; a restart redoes at most this much. */
+        private const val RETAG_SAVE_NANOS = 10_000_000_000L
         /** Broader template/character cluster cosine once 0.80 near-copy clusters are covered. */
         const val CLUSTER_MIN_COS = 0.68f
         /**
@@ -359,8 +363,9 @@ internal class LocalKnowledge(
         withContext(Dispatchers.Default) {
             currentCoroutineContext().ensureActive()
             val snapshot = prepareSnapshot()
-            val verifierScores = scoreWithVerifier(image = image, ocrAndText = ocr, snapshot = snapshot, memeId = memeId)
-            classifyInternal(image, ocr, snapshot, memeId, verifierScores)
+            val dots = OpenVocabConcepts.load(context)?.imageDots(image)
+            val verifierScores = scoreWithVerifier(image = image, ocrAndText = ocr, snapshot = snapshot, memeId = memeId, conceptDots = dots)
+            classifyInternal(image, ocr, snapshot, memeId, verifierScores, dots)
         }
 
     private fun classifyInternal(
@@ -369,10 +374,12 @@ internal class LocalKnowledge(
         snapshot: ClassificationSnapshot,
         memeId: Long,
         verifierScores: Map<String, Float>? = null,
+        /** This image's [OpenVocabConcepts.imageDots], shared with [scoreWithVerifier]; computed here when null. */
+        conceptDots: OpenVocabConcepts.ImageDots? = null,
     ): Pair<List<Tag>, String> {
         val vetoedLabels = findVetoedLabelsFromMap(image, snapshot.negExemplarsByLabel)
         val openConcepts = OpenVocabConcepts.load(context)
-        val candidateHits = openConcepts?.retrieveCandidates(image, ocrAndText = ocr, limit = 8).orEmpty()
+        val candidateHits = openConcepts?.retrieveCandidates(image, ocrAndText = ocr, limit = 8, dots = conceptDots).orEmpty()
         val rawOpenTags = candidateHits
             .filter { it.source == "z_top1" || it.posCos >= 0.78f }
             .map {
@@ -666,6 +673,7 @@ internal class LocalKnowledge(
         mustInclude: Set<String> = emptySet(),
         limit: Int = 12,
         ocrAndText: String = "",
+        conceptDots: OpenVocabConcepts.ImageDots? = null,
     ): List<PairwiseVisualVerifier.VerifierCandidate> {
         val openConcepts = OpenVocabConcepts.load(context)
         val topRank = LookalikeVote.rank(vote.d1Index, image, excludeMeme = memeId, skipSamePicture = false)
@@ -675,7 +683,7 @@ internal class LocalKnowledge(
         val byLabel = LinkedHashMap<String, LookalikeVote.Vote>()
         for (v in topRank + nearestAll) byLabel.putIfAbsent(v.label, v)
         val openByLabel = HashMap<String, OpenVocabConcepts.Hit>()
-        for (oh in openConcepts?.retrieveCandidates(image, ocrAndText = ocrAndText, limit = 10).orEmpty()) {
+        for (oh in openConcepts?.retrieveCandidates(image, ocrAndText = ocrAndText, limit = 10, dots = conceptDots).orEmpty()) {
             openByLabel[oh.label] = oh
             val prev = byLabel[oh.label]
             if (prev == null || oh.posCos > prev.cosine) {
@@ -812,6 +820,7 @@ internal class LocalKnowledge(
         voteOverride: VoteState? = null,
         memeId: Long = LookalikeVote.NO_MEME,
         mustInclude: Set<String> = emptySet(),
+        conceptDots: OpenVocabConcepts.ImageDots? = null,
     ): Map<String, Float>? {
         val pv = verifier() ?: return null
         if (image.size != VECTOR_DIM) return null
@@ -825,6 +834,7 @@ internal class LocalKnowledge(
             mustInclude = mustInclude,
             limit = 12,
             ocrAndText = ocrAndText,
+            conceptDots = conceptDots,
         )
         if (cands.isEmpty()) return emptyMap()
         return decisionHeadMutex.withLock {
@@ -1021,37 +1031,75 @@ internal class LocalKnowledge(
     private class UnfinishedRetag(val labelRevision: Long, val finished: HashSet<Long>)
     @Volatile private var unfinishedRetag: UnfinishedRetag? = null
 
+    /**
+     * What a pass's finished memes depend on, stable across restarts (the label revision is not): the installed
+     * build, the curated labels, and people's labeled memes, "not this" answers and teachings.
+     */
+    private fun retagFingerprint(snap: ClassificationSnapshot): String {
+        val md = java.security.MessageDigest.getInstance("SHA-256")
+        fun put(s: String) {
+            md.update(s.toByteArray(Charsets.UTF_8))
+            md.update(0)
+        }
+        val installed = context?.let { app ->
+            runCatching { app.packageManager.getPackageInfo(app.packageName, 0).lastUpdateTime }.getOrNull()
+        } ?: 0L
+        put("B:$installed")
+        for (l in snap.labels) put("L:${l.label}:${l.category}")
+        for (e in snap.vote.index.examples.map { "E:${it.memeId}:${it.label}:${it.category}" }.sorted()) put(e)
+        for ((label, vectors) in snap.vote.index.negatives.toSortedMap()) put("N:$label:${vectors.size}")
+        for (x in snap.vote.exemplars.sortedBy { it.id }) put("X:${x.id}:${x.label}:${x.positive}")
+        return md.digest().take(16).joinToString("") { "%02x".format(it) }
+    }
+
+    /** The pass saved in [RETAG_PROGRESS] when it was made under [fingerprint]'s labels, else null. */
+    private suspend fun savedRetag(labelRevision: Long, fingerprint: String): UnfinishedRetag? {
+        val saved = store.setting(RETAG_PROGRESS).orEmpty()
+        val sep = saved.indexOf('|')
+        if (sep < 0 || saved.substring(0, sep) != fingerprint) return null
+        val ids = saved.substring(sep + 1).split(',').mapNotNullTo(HashSet()) { it.toLongOrNull() }
+        return UnfinishedRetag(labelRevision, ids)
+    }
+
     /** Half the cores, at most 4: a re-tag runs while the person is in the app, so the UI keeps its share. */
     private val retagScoring = Dispatchers.Default.limitedParallelism((Runtime.getRuntime().availableProcessors() / 2).coerceIn(1, 4))
 
     /**
      * Re-tags the library. A pass that ended early is resumed where it stopped while the labels and teachings behind
-     * it are unchanged; after a change it starts over. A change while the pass runs sends it round the library again
-     * for the memes it did with the older ones. A meme whose tags come out the same is not written. Passes run one at
-     * a time (IndexCoordinator holds its session lock). Memes are scored [RETAG_BATCH] at a time on [retagScoring]
-     * (scoring only reads the snapshot); their writes, the finished set and progress stay on this coroutine, in order.
+     * it are unchanged, also after a restart ([RETAG_PROGRESS]); after a change it starts over. A change while the
+     * pass runs sends it round the library again for the memes it did with the older ones. A meme whose tags come out
+     * the same is not written. Passes run one at a time (IndexCoordinator holds its session lock). Memes are scored
+     * [RETAG_BATCH] at a time on [retagScoring] (scoring only reads the snapshot); their writes, the finished set and
+     * progress stay on this coroutine, in order.
      */
     suspend fun retag(progress: (WorkProgress) -> Unit) = withContext(Dispatchers.Default) {
         progress(WorkProgress(stage = "retag", running = true, detail = "Preparing knowledge…"))
         var snapshot = prepareSnapshot()
         var expectedRevision = store.revision.value
         val total = store.countAll()
+        var fingerprint = retagFingerprint(snapshot)
         var pass = unfinishedRetag?.takeIf { it.labelRevision == snapshot.vote.labelRevision }
+            ?: savedRetag(snapshot.vote.labelRevision, fingerprint)
             ?: UnfinishedRetag(snapshot.vote.labelRevision, HashSet())
         // Kept while the pass runs, so a pass cut short leaves what it finished for the next one.
         unfinishedRetag = pass
         var roundAgain = false
+        var progressSaved = store.setting(RETAG_PROGRESS).orEmpty().isNotEmpty()
+        var savedAt = System.nanoTime()
 
         // The tags and search words to store for [meme] under [snap]; null when it has no usable vectors or comes out
         // unchanged.
         suspend fun retagged(meme: Meme, snap: ClassificationSnapshot): Pair<List<Tag>, String>? {
             val vectors = store.vectors(meme.id) ?: return null
             if (vectors.image.isEmpty() || !ModelRegistry.isCompatiblePrimaryModel(vectors.model)) return null
+            // One scan of the ~6,000 open-vocabulary concepts, shared by the verifier and classification.
+            val dots = OpenVocabConcepts.load(context)?.imageDots(vectors.image)
             val verifierScores = scoreWithVerifier(
                 image = vectors.image,
                 ocrAndText = "${meme.ocr} ${meme.transcript}".trim(),
                 snapshot = snap,
                 memeId = meme.id,
+                conceptDots = dots,
             )
             val (freshTags, _) = classifyInternal(
                 image = vectors.image,
@@ -1059,6 +1107,7 @@ internal class LocalKnowledge(
                 snapshot = snap,
                 memeId = meme.id,
                 verifierScores = verifierScores,
+                conceptDots = dots,
             )
             // Machine tags classification can't regenerate stay unless a nearby "not X" vetoes
             // them; human-confirmed tags always stay. Recomputed sources are replaced outright.
@@ -1090,6 +1139,7 @@ internal class LocalKnowledge(
             if (snapshot.vote.labelRevision != pass.labelRevision) {
                 pass = UnfinishedRetag(snapshot.vote.labelRevision, HashSet())
                 unfinishedRetag = pass
+                fingerprint = retagFingerprint(snapshot)
                 roundAgain = true
             }
         }
@@ -1120,6 +1170,12 @@ internal class LocalKnowledge(
                     )
                 }
             }
+            if (System.nanoTime() - savedAt >= RETAG_SAVE_NANOS) {
+                store.setSetting(RETAG_PROGRESS, "$fingerprint|${pass.finished.joinToString(",")}")
+                expectedRevision++
+                progressSaved = true
+                savedAt = System.nanoTime()
+            }
             // Checked again once the batch is written: a teaching that landed while it was scored or written must still
             // send the pass round again, even when this was the library's last batch.
             refreshIfChangedOutside()
@@ -1140,6 +1196,7 @@ internal class LocalKnowledge(
         } while (roundAgain)
 
         unfinishedRetag = null
+        if (progressSaved) store.setSetting(RETAG_PROGRESS, "")
         progress(WorkProgress(stage = "complete", done = pass.finished.size, total = total, running = false))
     }
 

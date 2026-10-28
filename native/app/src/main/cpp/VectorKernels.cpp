@@ -342,6 +342,36 @@ Java_com_memeget_nativeapp_inference_NativeBridge_nativeComputeCslsHubness(
     return hubness;
 }
 
+// out[r] = dot(row r of the row-major [rows]×[dim] matrix, vec). Returns false (out untouched) on bad sizes.
+// Used for the ~6,000 open-vocabulary concepts scanned for every re-tagged meme, gate check and search query.
+JNIEXPORT jboolean JNICALL
+Java_com_memeget_nativeapp_inference_NativeBridge_nativeMatVec(
+    JNIEnv* env,
+    jobject /* thiz */,
+    jfloatArray matrix,
+    jint rows,
+    jint dim,
+    jfloatArray vec,
+    jfloatArray out) {
+    if (!matrix || !vec || !out || rows <= 0 || dim <= 0) return JNI_FALSE;
+    if (env->GetArrayLength(matrix) < static_cast<jlong>(rows) * dim ||
+        env->GetArrayLength(vec) < dim || env->GetArrayLength(out) < rows) {
+        return JNI_FALSE;
+    }
+    std::vector<float> v(static_cast<size_t>(dim));
+    env->GetFloatArrayRegion(vec, 0, dim, v.data());
+    std::vector<float> result(static_cast<size_t>(rows));
+    // Borrowed in place: the matrix is ~12 MB and the kernel makes no JNI calls while it holds it.
+    auto* m = static_cast<const float*>(env->GetPrimitiveArrayCritical(matrix, nullptr));
+    if (!m) return JNI_FALSE;
+    for (jint r = 0; r < rows; ++r) {
+        result[static_cast<size_t>(r)] = memeget::core::dotFp32(m + static_cast<size_t>(r) * dim, v.data(), dim);
+    }
+    env->ReleasePrimitiveArrayCritical(matrix, const_cast<float*>(m), JNI_ABORT);
+    env->SetFloatArrayRegion(out, 0, rows, result.data());
+    return JNI_TRUE;
+}
+
 JNIEXPORT jint JNICALL
 Java_com_memeget_nativeapp_inference_NativeBridge_nativeBatchDenseScoresQuantized(
     JNIEnv* env,

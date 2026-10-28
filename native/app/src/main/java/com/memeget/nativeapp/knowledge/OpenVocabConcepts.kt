@@ -1,6 +1,7 @@
 package com.memeget.nativeapp.knowledge
 
 import android.content.Context
+import com.memeget.nativeapp.inference.NativeBridge
 import com.memeget.nativeapp.Tag
 import com.memeget.nativeapp.data.FloatBlob
 import java.io.DataInputStream
@@ -19,6 +20,9 @@ import kotlin.math.max
  */
 internal class OpenVocabConcepts private constructor(
     val entries: List<Entry>,
+    /** Every entry's `cHybrid` / `tStock`, row-major ([DIM] floats per entry, in [entries] order): full scans read these. */
+    private val hybridFlat: FloatArray,
+    private val stockFlat: FloatArray,
 ) {
     private val entryByNormLabel: Map<String, Entry> = HashMap<String, Entry>(entries.size * 2).also { map ->
         for (e in entries) {
@@ -29,15 +33,35 @@ internal class OpenVocabConcepts private constructor(
 
     fun entryFor(label: String): Entry? = entryByNormLabel[normalizeConceptKey(label)]
 
-    class Entry(
+    /** One concept. Its vectors live in the shared matrices; one entry's are copied out on first use. */
+    class Entry internal constructor(
         val label: String,
         val category: String,
         val isEntity: Boolean,
         val tagMean: Float,
         val tagStd: Float,
-        val cHybrid: FloatArray,
-        val tStock: FloatArray,
-    )
+        private val hybridFlat: FloatArray,
+        private val stockFlat: FloatArray,
+        private val row: Int,
+    ) {
+        val cHybrid: FloatArray by lazy(LazyThreadSafetyMode.PUBLICATION) { hybridFlat.copyOfRange(row * DIM, (row + 1) * DIM) }
+        val tStock: FloatArray by lazy(LazyThreadSafetyMode.PUBLICATION) { stockFlat.copyOfRange(row * DIM, (row + 1) * DIM) }
+    }
+
+    /** One image's dot product with every entry's `cHybrid` ([hybrid]) and `tStock` ([stock]), in [entries] order. */
+    class ImageDots internal constructor(val hybrid: FloatArray, val stock: FloatArray)
+
+    /** [ImageDots] for [image]: two native matrix scans. Computed once per image and handed to every lookup on it. */
+    fun imageDots(image: FloatArray): ImageDots {
+        val n = entries.size
+        val hybrid = FloatArray(n)
+        val stock = FloatArray(n)
+        if (image.size == DIM && n > 0) {
+            matVec(hybridFlat, n, image, hybrid)
+            matVec(stockFlat, n, image, stock)
+        }
+        return ImageDots(hybrid, stock)
+    }
 
     data class Hit(
         val label: String,
@@ -87,8 +111,9 @@ internal class OpenVocabConcepts private constructor(
         if (queryVec.size != DIM || entries.isEmpty()) return emptySet()
         val topIdx = IntArray(limit) { -1 }
         val topCos = FloatArray(limit) { minCos }
+        val stockDots = FloatArray(entries.size).also { matVec(stockFlat, entries.size, queryVec, it) }
         for (i in entries.indices) {
-            val c = FloatBlob.dot(entries[i].tStock, queryVec)
+            val c = stockDots[i]
             if (c <= topCos[limit - 1]) continue
             var k = limit - 1
             while (k > 0 && topCos[k - 1] < c) {
@@ -120,19 +145,22 @@ internal class OpenVocabConcepts private constructor(
         val step = entries.size.toDouble() / actual.toDouble()
         for (b in 0 until actual) {
             val idx = minOf(entries.lastIndex, (b * step).toInt())
-            val src = if ((b and 1) == 0) entries[idx].tStock else entries[idx].cHybrid
-            System.arraycopy(src, 0, out, b * DIM, DIM)
+            System.arraycopy(if ((b and 1) == 0) stockFlat else hybridFlat, idx * DIM, out, b * DIM, DIM)
         }
         return out
     }
 
-    fun retrieveCandidates(image: FloatArray, ocrAndText: String = "", limit: Int = 6): List<Hit> {
+    /** [dots]: this image's [imageDots] when the caller already has them; computed here otherwise. */
+    fun retrieveCandidates(image: FloatArray, ocrAndText: String = "", limit: Int = 6, dots: ImageDots? = null): List<Hit> {
         if (image.size != DIM || entries.isEmpty() || FloatBlob.dot(image, image) < 0.5f) return emptyList()
         val n = entries.size
+        val d = dots ?: imageDots(image)
         val hyCos = FloatArray(n)
         val normOcr = if (ocrAndText.isNotBlank()) {
             " " + ocrAndText.lowercase(java.util.Locale.ROOT).replace(NON_ALNUM, " ").trim() + " "
         } else ""
+        // The text's words, split once: a concept name can only be in the text if its first word is.
+        val ocrWords = if (normOcr.isNotEmpty()) normOcr.split(' ').filterTo(HashSet()) { it.isNotEmpty() } else null
         var bestEnt1 = -1
         var bestZ1 = Float.NEGATIVE_INFINITY
         var bestRaw1 = 0f
@@ -140,13 +168,13 @@ internal class OpenVocabConcepts private constructor(
 
         for (i in 0 until n) {
             val e = entries[i]
-            var hc = FloatBlob.dot(e.cHybrid, image)
-            if (normOcr.isNotEmpty() && matchesOcrConcept(e.label, e.isEntity, normOcr)) {
+            var hc = d.hybrid[i]
+            if (normOcr.isNotEmpty() && matchesOcrConcept(e.label, e.isEntity, normOcr, ocrWords)) {
                 hc = max(hc, 0.72f)
             }
             hyCos[i] = hc
             if (e.isEntity) {
-                val raw = FloatBlob.dot(e.tStock, image)
+                val raw = d.stock[i]
                 val z = (raw - e.tagMean) / max(e.tagStd, 0.025f)
                 if (z > bestZ1) {
                     bestZ2 = bestZ1
@@ -256,7 +284,8 @@ internal class OpenVocabConcepts private constructor(
         return matchesOcrConcept(label, isEntity, normOcr)
     }
 
-    private fun matchesOcrConcept(label: String, isEntity: Boolean, normOcr: String): Boolean {
+    /** [ocrWords]: the words of [normOcr], to skip the phrase search for names whose first word isn't one of them. */
+    private fun matchesOcrConcept(label: String, isEntity: Boolean, normOcr: String, ocrWords: Set<String>? = null): Boolean {
         if (label == "the lion does not concern himself" && normOcr.contains(" the lion ")) return true
         if (label == "memri tv" && normOcr.contains(" memri ")) return true
         if (label == "they live" && normOcr.contains(" obey ") && normOcr.contains(" consume ")) return true
@@ -265,17 +294,22 @@ internal class OpenVocabConcepts private constructor(
         if (!isEntity && !label.contains(' ') && label.length < 6) return false
         if (label.length < 4 || label in GENERIC_OCR_SKIP) return false
         val needle = ocrNeedle(label)
-        return needle.isNotEmpty() && normOcr.contains(needle)
+        if (needle.phrase.isEmpty()) return false
+        if (ocrWords != null && needle.firstWord !in ocrWords) return false
+        return normOcr.contains(needle.phrase)
     }
 
+    /** A concept name cleaned for an OCR phrase match: " cleaned label ", and its first word. */
+    private class OcrNeedle(val phrase: String, val firstWord: String)
+
     /**
-     * " cleaned label " for an OCR phrase match, or "" when the cleaned label is too short to match. Cached per label:
+     * The [OcrNeedle] for [label]; an empty phrase when the cleaned label is too short to match. Cached per label:
      * [retrieveCandidates] checks all ~6,000 concepts against each meme's text, and re-cleaning every label (with a
      * Regex compiled per label) on every call took its two calls per re-tagged meme from ~17 ms to ~141 ms on a Pixel 9 Pro.
      */
-    private fun ocrNeedle(label: String): String = OCR_NEEDLES.getOrPut(label) {
+    private fun ocrNeedle(label: String): OcrNeedle = OCR_NEEDLES.getOrPut(label) {
         val clean = label.lowercase(java.util.Locale.ROOT).replace(NON_ALNUM, " ").trim()
-        if (clean.length < 4) "" else " $clean "
+        if (clean.length < 4) OcrNeedle("", "") else OcrNeedle(" $clean ", clean.substringBefore(' '))
     }
 
     companion object {
@@ -285,7 +319,7 @@ internal class OpenVocabConcepts private constructor(
 
         @Volatile private var cached: OpenVocabConcepts? = null
         private val NON_ALNUM = Regex("[^a-z0-9]+")
-        private val OCR_NEEDLES = java.util.concurrent.ConcurrentHashMap<String, String>()
+        private val OCR_NEEDLES = java.util.concurrent.ConcurrentHashMap<String, OcrNeedle>()
         private val GENERIC_OCR_SKIP = setOf(
             "meme", "text", "like", "just", "with", "that", "this", "from", "your", "when", "what", "have",
             "will", "good", "time", "look", "make", "know", "people", "think", "going", "want", "really",
@@ -436,6 +470,8 @@ internal class OpenVocabConcepts private constructor(
                 val count = input.readInt()
                 require(count in 1..10_000) { "Invalid open_vocab_concepts count: $count" }
                 val list = ArrayList<Entry>(count)
+                val hybridFlat = FloatArray(count * DIM)
+                val stockFlat = FloatArray(count * DIM)
                 val vecBuf = ByteArray(DIM * 2)
                 for (i in 0 until count) {
                     val lblLen = input.readUnsignedShort()
@@ -446,30 +482,48 @@ internal class OpenVocabConcepts private constructor(
                     val lblBytes = ByteArray(lblLen).also { input.readFully(it) }
                     val catBytes = ByteArray(catLen).also { input.readFully(it) }
                     input.readFully(vecBuf)
-                    val cHybrid = decodeFp16Vector(vecBuf)
+                    decodeFp16Into(vecBuf, hybridFlat, i * DIM)
                     input.readFully(vecBuf)
-                    val tStock = decodeFp16Vector(vecBuf)
+                    decodeFp16Into(vecBuf, stockFlat, i * DIM)
                     list += Entry(
                         label = String(lblBytes, Charsets.UTF_8),
                         category = String(catBytes, Charsets.UTF_8),
                         isEntity = isEnt,
                         tagMean = mean,
                         tagStd = std,
-                        cHybrid = cHybrid,
-                        tStock = tStock,
+                        hybridFlat = hybridFlat,
+                        stockFlat = stockFlat,
+                        row = i,
                     )
                 }
-                return OpenVocabConcepts(list)
+                return OpenVocabConcepts(list, hybridFlat, stockFlat)
             }
         }
 
-        private fun decodeFp16Vector(bytes: ByteArray): FloatArray {
-            val out = FloatArray(DIM)
+        private fun decodeFp16Into(bytes: ByteArray, out: FloatArray, offset: Int) {
             val bb = ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN)
             for (i in 0 until DIM) {
-                out[i] = halfToFloat(bb.short.toInt() and 0xFFFF)
+                out[offset + i] = halfToFloat(bb.short.toInt() and 0xFFFF)
             }
-            return out
+        }
+
+        @Volatile private var nativeMatVecAvailable = true
+
+        /** [out] row r = dot(row r of [matrix], [vec]) for [rows] rows of [DIM]; plain Kotlin without the native library (JVM tests). */
+        private fun matVec(matrix: FloatArray, rows: Int, vec: FloatArray, out: FloatArray) {
+            if (nativeMatVecAvailable) {
+                try {
+                    if (NativeBridge.nativeMatVec(matrix, rows, DIM, vec, out)) return
+                } catch (_: LinkageError) {
+                    nativeMatVecAvailable = false
+                }
+            }
+            for (r in 0 until rows) {
+                val off = r * DIM
+                var s = 0f
+                for (k in 0 until DIM) s += matrix[off + k] * vec[k]
+                out[r] = s
+            }
         }
 
         private fun halfToFloat(hbits: Int): Float {

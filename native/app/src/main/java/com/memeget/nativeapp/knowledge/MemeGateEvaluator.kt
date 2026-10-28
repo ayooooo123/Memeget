@@ -120,18 +120,19 @@ internal object MemeGateEvaluator {
         var maxOvZ = -4f
         val topCandLabels = ArrayList<String>(6)
         if (openVocab != null && imageVec.size == 512) {
-            for (e in openVocab.entries) {
-                val hc = FloatBlob.dot(e.cHybrid, imageVec)
+            val dots = openVocab.imageDots(imageVec)
+            for ((i, e) in openVocab.entries.withIndex()) {
+                val hc = dots.hybrid[i]
                 if (hc > maxOvHybridCos) maxOvHybridCos = hc
                 if (e.isEntity) {
-                    val raw = FloatBlob.dot(e.tStock, imageVec)
+                    val raw = dots.stock[i]
                     if (raw >= 0.22f) {
                         val z = (raw - e.tagMean) / e.tagStd.coerceAtLeast(0.025f)
                         if (z > maxOvZ) maxOvZ = z
                     }
                 }
             }
-            for (h in openVocab.retrieveCandidates(imageVec, fullOcrText, limit = 5)) {
+            for (h in openVocab.retrieveCandidates(imageVec, fullOcrText, limit = 5, dots = dots)) {
                 topCandLabels += h.label
             }
         }

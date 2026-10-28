@@ -171,6 +171,9 @@ internal object NativeBridge {
         topK: Int,
     ): Float
 
+    /** [out] row r = dot(row r of the row-major [rows]×[dim] [matrix], [vec]); false on bad sizes. */
+    external fun nativeMatVec(matrix: FloatArray, rows: Int, dim: Int, vec: FloatArray, out: FloatArray): Boolean
+
     external fun nativeBatchDenseScoresQuantized(
         queryVec: FloatArray,
         protoVec: FloatArray?,
