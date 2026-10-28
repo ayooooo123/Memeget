@@ -192,6 +192,8 @@ internal class IndexCoordinator(
     fun cancel() {
         stopRequests.incrementAndGet()
         retagCovered.accumulateAndGet(retagRequests.get(), ::maxOf)
+        // Stop ends an owed re-tag too: it does not come back at the next session.
+        scope.launch { store.setSetting(RETAG_OWED, "0") }
         activeJob?.cancel()
         engine.cancel()
         cloud.cancel()
@@ -201,11 +203,26 @@ internal class IndexCoordinator(
     /**
      * Re-tags the library now or, when another session holds the lock, as soon as it ends. The pass
      * runs in the coordinator's scope and the caller only waits for it, so a caller that stops
-     * waiting, such as a screen the user left, does not stop the re-tag.
+     * waiting, such as a screen the user left, does not stop the re-tag. The request is saved
+     * ([RETAG_OWED]) until a pass completes: one the session limit or a restart cut short is
+     * resumed by [resumeOwedRetag].
      */
     suspend fun retag() {
+        store.setSetting(RETAG_OWED, "1")
         retagRequests.incrementAndGet()
         scope.launch { runOwedRetag() }.join()
+    }
+
+    /**
+     * Starts a saved re-tag no pass in this process has covered yet: at app start, when a search ends, and after an
+     * indexing session. Not straight after a pass the session limit cut short, so that limit still bounds each run.
+     */
+    private fun resumeOwedRetag() {
+        scope.launch {
+            if (retagRequests.get() > retagCovered.get() || store.setting(RETAG_OWED) != "1") return@launch
+            retagRequests.incrementAndGet()
+            runOwedRetag()
+        }
     }
 
     private suspend fun runOwedRetag() {
@@ -226,12 +243,15 @@ internal class IndexCoordinator(
                 knowledge.retag { mutableProgress.value = it }
                 true
             }
+            if (completed != null && mutableProgress.value.stage == "complete" && retagRequests.get() == upTo) {
+                store.setSetting(RETAG_OWED, "0")
+            }
             if (completed == null && mutableProgress.value.stage != "complete") {
                 mutableProgress.value = WorkProgress(
                     stage = "paused",
                     done = mutableProgress.value.done,
                     total = mutableProgress.value.total,
-                    detail = "Re-tagging paused: session limit reached",
+                    detail = "Re-tagging paused: session limit reached; it continues in the next session",
                     running = false,
                 )
             }
@@ -292,6 +312,7 @@ internal class IndexCoordinator(
      * restart neither stops it nor cuts off a model download it started.
      */
     fun resumePending() {
+        resumeOwedRetag()
         scope.launch {
             try {
                 if (store.pending(1).isNotEmpty() || (charging() && remainingWork() > 0)) runSession(background = true)
@@ -579,6 +600,7 @@ internal class IndexCoordinator(
                 resumeAfterSession = false
                 session.unlock()
                 launchOwedRetag()
+                resumeOwedRetag()
                 if (shouldResume) resumePending()
             }
         }
@@ -1518,6 +1540,8 @@ internal class IndexCoordinator(
         /** Missing caption vectors made at the end of a session, beyond its own captions. */
         private const val CAPTION_VECTOR_BACKLOG = 200
         internal const val LOG_TAG = "MemegetIndex"
+        /** Setting: "1" while a re-tag was asked for and no pass has completed it since. */
+        private const val RETAG_OWED = "retag.owed"
     }
 }
 
