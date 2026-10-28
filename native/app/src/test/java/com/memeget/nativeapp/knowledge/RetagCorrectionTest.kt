@@ -1,7 +1,9 @@
 package com.memeget.nativeapp.knowledge
 
 import android.app.Application
+import com.memeget.nativeapp.HumanLabeled
 import com.memeget.nativeapp.InferenceEngine
+import com.memeget.nativeapp.LibraryStore
 import com.memeget.nativeapp.LocalAnalysis
 import com.memeget.nativeapp.LocalKnowledge
 import com.memeget.nativeapp.ModelProgress
@@ -125,6 +127,52 @@ class RetagCorrectionTest {
         val beforeThird = writes()
         knowledge.retag {}
         assertEquals("a full pass over unchanged memes writes nothing", 0L, writes() - beforeThird)
+    }
+
+    /** A LocalKnowledge as a fresh process makes one: no pass in memory, so only the saved one can be picked up. */
+    private fun afterARestart(on: LibraryStore): LocalKnowledge =
+        LocalKnowledge(RuntimeEnvironment.getApplication(), on, NoModelEngine()).also { k ->
+            for (field in listOf("cachedLabels", "cachedAnchors")) {
+                LocalKnowledge::class.java.getDeclaredField(field).apply { isAccessible = true }.set(k, emptyList<Any>())
+            }
+            k.retagSaveIntervalNanos = 0L
+        }
+
+    /** Sixty memes, more than one 48-meme batch, the first with "not hat"; a pass saved after one batch, then stopped. */
+    private suspend fun aPassCutShortAfterItsFirstBatch(): List<Long> {
+        val ids = (0 until 60).map { indexed("m$it.png", ('A'.code + it).toChar(), unit(it to 1f)) }
+        store.teach(ids[0], "hat", "object", false)
+        try {
+            afterARestart(store).retag { if (it.done >= 50) throw CancellationException("session limit") }
+        } catch (_: CancellationException) {
+        }
+        return ids
+    }
+
+    /** The first count a pass reports: 50 or more when it carried on from the saved 48, 5 when it started over. */
+    private suspend fun firstReportedDone(knowledge: LocalKnowledge): Int {
+        var first = -1
+        knowledge.retag { if (first < 0 && it.done > 0) first = it.done }
+        return first
+    }
+
+    @Test fun aRetagCutShortCarriesOnAfterARestartWhenNoLabelChanged() = runBlocking {
+        aPassCutShortAfterItsFirstBatch()
+        assertTrue(firstReportedDone(afterARestart(store)) >= 50)
+    }
+
+    @Test fun aRetagCutShortStartsOverAfterARestartWhenANotThisMovedToAnotherMeme() = runBlocking {
+        val ids = aPassCutShortAfterItsFirstBatch()
+        val (from, to) = ids[0] to ids[1]
+        val toImage = requireNotNull(store.vectors(to)).image
+        // What a restore can do: "not hat" now stands on another meme and no teaching changed, so every per-label
+        // count is the same as when the pass was saved.
+        val moved = object : LibraryStore by store {
+            override suspend fun humanLabels(): List<HumanLabeled> =
+                store.humanLabels().map { if (it.memeId == from) it.copy(rejected = emptyList()) else it } +
+                    HumanLabeled(to, toImage, emptyList(), listOf("hat"))
+        }
+        assertEquals(5, firstReportedDone(afterARestart(moved)))
     }
 
     @Test fun aLabelTaughtDuringARetagReachesTheMemesItHadAlreadyDone() = runBlocking {

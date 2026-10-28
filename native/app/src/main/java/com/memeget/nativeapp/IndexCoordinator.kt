@@ -213,15 +213,26 @@ internal class IndexCoordinator(
         scope.launch { runOwedRetag() }.join()
     }
 
+    /** Guards [retagRunning] together with claiming a request, so [resumeOwedRetag] never queues a pass behind a running one. */
+    private val retagClaim = Any()
+    @Volatile private var retagRunning = false
+
     /**
      * Starts a saved re-tag no pass in this process has covered yet: at app start, when a search ends, and after an
-     * indexing session. Not straight after a pass the session limit cut short, so that limit still bounds each run.
+     * indexing session. Not straight after a pass the session limit cut short, so that limit still bounds each run,
+     * and not while a pass runs: it is the owed one, and asking again would queue a second full pass behind it.
      */
     private fun resumeOwedRetag() {
         scope.launch {
-            if (retagRequests.get() > retagCovered.get() || store.setting(RETAG_OWED) != "1") return@launch
-            retagRequests.incrementAndGet()
-            runOwedRetag()
+            if (store.setting(RETAG_OWED) != "1") return@launch
+            val claimed = synchronized(retagClaim) {
+                if (retagRunning || retagRequests.get() > retagCovered.get()) false
+                else {
+                    retagRequests.incrementAndGet()
+                    true
+                }
+            }
+            if (claimed) runOwedRetag()
         }
     }
 
@@ -230,14 +241,20 @@ internal class IndexCoordinator(
         // Published before the coverage check: Stop raises coverage before reading the job, so a Stop
         // that misses this check still finds the job and cancels it.
         activeJob = currentCoroutineContext()[Job]
-        val upTo = retagRequests.get()
-        if (upTo <= retagCovered.get()) {
+        val upTo = synchronized(retagClaim) {
+            val requested = retagRequests.get()
+            if (requested > retagCovered.get()) {
+                retagCovered.accumulateAndGet(requested, ::maxOf)
+                retagRunning = true
+            }
+            requested
+        }
+        if (!retagRunning) {
             activeJob = null
             session.unlock()
             launchOwedRetag()
             return
         }
-        retagCovered.accumulateAndGet(upTo, ::maxOf)
         try {
             val completed = withSessionDeadline(sessionTimeoutMillis) {
                 knowledge.retag { mutableProgress.value = it }
@@ -274,6 +291,7 @@ internal class IndexCoordinator(
             } finally {
                 activeJob = null
                 mutableProgress.value = mutableProgress.value.copy(running = false)
+                synchronized(retagClaim) { retagRunning = false }
                 session.unlock()
                 launchOwedRetag()
             }

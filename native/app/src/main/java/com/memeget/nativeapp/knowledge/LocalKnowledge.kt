@@ -1031,9 +1031,13 @@ internal class LocalKnowledge(
     private class UnfinishedRetag(val labelRevision: Long, val finished: HashSet<Long>)
     @Volatile private var unfinishedRetag: UnfinishedRetag? = null
 
+    /** How often a running pass saves [RETAG_PROGRESS]; tests set 0 to save after every batch. */
+    internal var retagSaveIntervalNanos: Long = RETAG_SAVE_NANOS
+
     /**
      * What a pass's finished memes depend on, stable across restarts (the label revision is not): the installed
-     * build, the curated labels, and people's labeled memes, "not this" answers and teachings.
+     * build, the curated labels, the teachings, and each meme people labeled: its labels, its "not this" answers and
+     * its picture. Per meme, not per label: a "not X" that moved from one meme to another keeps every count the same.
      */
     private fun retagFingerprint(snap: ClassificationSnapshot): String {
         val md = java.security.MessageDigest.getInstance("SHA-256")
@@ -1046,9 +1050,15 @@ internal class LocalKnowledge(
         } ?: 0L
         put("B:$installed")
         for (l in snap.labels) put("L:${l.label}:${l.category}")
+        for (x in snap.vote.exemplars.sortedBy { it.id }) put("X:${x.id}:${x.label}:${x.category}:${x.positive}")
         for (e in snap.vote.index.examples.map { "E:${it.memeId}:${it.label}:${it.category}" }.sorted()) put(e)
-        for ((label, vectors) in snap.vote.index.negatives.toSortedMap()) put("N:$label:${vectors.size}")
-        for (x in snap.vote.exemplars.sortedBy { it.id }) put("X:${x.id}:${x.label}:${x.positive}")
+        val picture = java.nio.ByteBuffer.allocate(VECTOR_DIM * 4)
+        for (m in snap.vote.labeled.sortedBy { it.memeId }) {
+            put("M:${m.memeId}:${m.labels.sorted()}:${m.rejected.sorted()}")
+            picture.clear()
+            for (i in 0 until minOf(VECTOR_DIM, m.image.size)) picture.putInt(java.lang.Float.floatToRawIntBits(m.image[i]))
+            md.update(picture.array(), 0, picture.position())
+        }
         return md.digest().take(16).joinToString("") { "%02x".format(it) }
     }
 
@@ -1170,7 +1180,7 @@ internal class LocalKnowledge(
                     )
                 }
             }
-            if (System.nanoTime() - savedAt >= RETAG_SAVE_NANOS) {
+            if (System.nanoTime() - savedAt >= retagSaveIntervalNanos) {
                 store.setSetting(RETAG_PROGRESS, "$fingerprint|${pass.finished.joinToString(",")}")
                 expectedRevision++
                 progressSaved = true
