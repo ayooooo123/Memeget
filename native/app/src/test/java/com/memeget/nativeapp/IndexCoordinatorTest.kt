@@ -21,6 +21,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -52,6 +53,7 @@ import java.io.File
 import java.time.Duration
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], application = Application::class)
@@ -254,6 +256,57 @@ class IndexCoordinatorTest {
         val progress = coordinator.progress.value
         assertEquals("paused", progress.stage)
         assertFalse(progress.running)
+    }
+
+    @Test(timeout = 30_000)
+    fun aRetagTheSessionLimitCutShortRunsAgainAtTheNextSessionStart() = runBlocking {
+        val stuck = AtomicBoolean(true)
+        testEngine.onEmbedText = {
+            if (stuck.get()) awaitCancellation()
+            FloatArray(512).apply { this[1] = 1f }
+        }
+        val coordinator = IndexCoordinator(context, store, files, testEngine, knowledge, cloud, sessionTimeoutMillis = 2_000L)
+
+        coordinator.retag()
+        assertEquals("paused", coordinator.progress.value.stage)
+
+        stuck.set(false)
+        // The native runner clears its cancel flag at the next call; the fake keeps it until told.
+        testEngine.cancelled.set(false)
+        coordinator.resumePending()
+        withTimeout(10_000L) { coordinator.progress.first { it.stage == "complete" } }
+        // The coordinator records the completion right after the pass reports it.
+        withTimeout(5_000L) { while (store.setting("retag.owed") != "0") delay(50) }
+    }
+
+    @Test(timeout = 30_000)
+    fun sessionStartsDuringARetagDoNotQueueASecondPass() = runBlocking {
+        val passes = AtomicInteger()
+        // Each pass counts the library once, at its start.
+        val counting = object : LibraryStore by store {
+            override suspend fun countAll(): Int = store.countAll().also { passes.incrementAndGet() }
+        }
+        val entered = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        testEngine.onEmbedText = {
+            entered.complete(Unit)
+            release.await()
+            FloatArray(512).apply { this[1] = 1f }
+        }
+        val coordinator = IndexCoordinator(
+            context, counting, files, testEngine, LocalKnowledge(context, counting, testEngine), cloud, sessionTimeoutMillis = 10_000L,
+        )
+
+        val asked = launch { coordinator.retag() }
+        awaitStage(entered, asked, coordinator)
+        // App start, searches ending: each looks for an owed re-tag while this one runs.
+        repeat(3) { coordinator.resumePending() }
+        delay(500)
+        release.complete(Unit)
+        asked.join()
+        delay(1_500)
+
+        assertEquals("one pass for one request", 1, passes.get())
     }
 
     @Test(timeout = 30_000)
