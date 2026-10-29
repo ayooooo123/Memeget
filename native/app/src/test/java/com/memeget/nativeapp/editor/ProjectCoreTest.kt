@@ -300,4 +300,35 @@ class ProjectCoreTest {
         assertEquals("impact", style.preset)
         assertTrue("Contrast ratio should be high", style.contrast >= 4.0f)
     }
+
+    @Test
+    fun cropEditingPreviewShowsFullFrameAndKeepsLayersGrounded() {
+        val source = MemeEditSource("file://clip.mp4", "clip.mp4", MediaEditKind.VIDEO, 1000, 500, 2_000_000L)
+        val croppedBase = BaseTransform(
+            crop = NormalizedRect(0.25f, 0.2f, 0.5f, 0.6f),
+            outputAspect = "free"
+        )
+        val caption = MemeEditLayer.Text(
+            id = "caption",
+            text = "GROUNDED",
+            keyframes = listOf(TransformKeyframe(center = NormalizedPoint(0f, 0f)))
+        )
+        val project = ProjectCore.createDefaultVideoProject(source).copy(
+            base = croppedBase,
+            layers = listOf(caption)
+        )
+
+        val preview = ProjectCore.cropEditingProject(project)
+
+        // The crop tool must show the whole source frame so its rectangle maps 1:1.
+        assertEquals(NormalizedRect.Full, preview.base.crop)
+        assertEquals("source", preview.base.outputAspect)
+
+        // Working-canvas (0,0) sits at the crop origin in source space; the preview
+        // keeps the caption glued there instead of drifting with the crop.
+        val previewCaption = preview.layers.single() as MemeEditLayer.Text
+        val center = previewCaption.keyframes.single().center
+        assertEquals(0.25f, center.x, 0.001f)
+        assertEquals(0.2f, center.y, 0.001f)
+    }
 }

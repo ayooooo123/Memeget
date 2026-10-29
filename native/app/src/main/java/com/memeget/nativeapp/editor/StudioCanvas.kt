@@ -12,6 +12,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -19,6 +20,7 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.systemGestureExclusion
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
@@ -101,10 +103,16 @@ internal fun StudioCanvas(
         if (isVideo) ProjectCore.createDefaultVideoProject(project.source)
         else ProjectCore.createDefaultImageProject(project.source)
     }
-    val previewProject = if (beforeMode) uneditedProject else project
+    val isCropEditing = manualCrop && !beforeMode
+    val previewProject = when {
+        beforeMode -> uneditedProject
+        // Crop handles live in source coordinates. Show the entire source frame
+        // while the crop tool is open so the rectangle and the finger agree.
+        isCropEditing -> ProjectCore.cropEditingProject(project)
+        else -> project
+    }
     val previewBase = previewProject.base
     val playheadState = rememberUpdatedState(playheadUs)
-    val baseState = rememberUpdatedState(project.base)
     val ocrRegionState = rememberUpdatedState(manualOcrRegion)
 
     // Media display aspect ratio calculation
@@ -995,92 +1003,16 @@ internal fun StudioCanvas(
             // -----------------------------------------------------------------
             // 7. Free-Crop Interaction Handles
             // -----------------------------------------------------------------
-            if (manualCrop && !beforeMode) {
-                val crop = project.base.crop
-                val leftDp = with(density) { (crop.x * canvasWidth).toDp() }
-                val topDp = with(density) { (crop.y * canvasHeight).toDp() }
-                val widthDp = with(density) { (crop.width * canvasWidth).toDp() }
-                val heightDp = with(density) { (crop.height * canvasHeight).toDp() }
-
-                var startCrop by remember { mutableStateOf(NormalizedRect.Full) }
-                var accumDeltaX by remember { mutableFloatStateOf(0f) }
-                var accumDeltaY by remember { mutableFloatStateOf(0f) }
-
-                Box(
-                    modifier = Modifier
-                        .offset(leftDp, topDp)
-                        .size(widthDp, heightDp)
-                        .border(2.dp, Color(0xFFD8FF4A))
-                ) {
-                    // Top-Left handle
-                    Box(
-                        modifier = Modifier
-                            .align(Alignment.TopStart)
-                            .size(20.dp)
-                            .offset((-10).dp, (-10).dp)
-                            .clip(CircleShape)
-                            .background(Color(0xFFD8FF4A))
-                            .pointerInput(Unit) {
-                                var gestureBase = project.base
-                                detectDragGestures(
-                                    onDragStart = {
-                                        onBeginTransaction()
-                                        gestureBase = baseState.value
-                                        startCrop = gestureBase.crop
-                                        accumDeltaX = 0f
-                                        accumDeltaY = 0f
-                                    },
-                                    onDrag = { change, dragAmount ->
-                                        change.consume()
-                                        accumDeltaX += dragAmount.x
-                                        accumDeltaY += dragAmount.y
-                                        val dx = accumDeltaX / canvasWidth
-                                        val dy = accumDeltaY / canvasHeight
-                                        val newX = (startCrop.x + dx).coerceIn(0f, startCrop.x + startCrop.width - 0.05f)
-                                        val newY = (startCrop.y + dy).coerceIn(0f, startCrop.y + startCrop.height - 0.05f)
-                                        val newW = startCrop.width - (newX - startCrop.x)
-                                        val newH = startCrop.height - (newY - startCrop.y)
-                                        onUpdateBase(gestureBase.copy(crop = NormalizedRect(newX, newY, newW, newH), outputAspect = "free"))
-                                    },
-                                    onDragEnd = { onCommitTransaction() },
-                                    onDragCancel = { onCancelTransaction() }
-                                )
-                            }
-                    )
-                    // Bottom-Right handle
-                    Box(
-                        modifier = Modifier
-                            .align(Alignment.BottomEnd)
-                            .size(20.dp)
-                            .offset(10.dp, 10.dp)
-                            .clip(CircleShape)
-                            .background(Color(0xFFD8FF4A))
-                            .pointerInput(Unit) {
-                                var gestureBase = project.base
-                                detectDragGestures(
-                                    onDragStart = {
-                                        onBeginTransaction()
-                                        gestureBase = baseState.value
-                                        startCrop = gestureBase.crop
-                                        accumDeltaX = 0f
-                                        accumDeltaY = 0f
-                                    },
-                                    onDrag = { change, dragAmount ->
-                                        change.consume()
-                                        accumDeltaX += dragAmount.x
-                                        accumDeltaY += dragAmount.y
-                                        val dx = accumDeltaX / canvasWidth
-                                        val dy = accumDeltaY / canvasHeight
-                                        val newW = (startCrop.width + dx).coerceIn(0.05f, 1f - startCrop.x)
-                                        val newH = (startCrop.height + dy).coerceIn(0.05f, 1f - startCrop.y)
-                                        onUpdateBase(gestureBase.copy(crop = NormalizedRect(startCrop.x, startCrop.y, newW, newH), outputAspect = "free"))
-                                    },
-                                    onDragEnd = { onCommitTransaction() },
-                                    onDragCancel = { onCancelTransaction() }
-                                )
-                            }
-                    )
-                }
+            if (isCropEditing) {
+                CropOverlay(
+                    base = project.base,
+                    canvasWidth = canvasWidth,
+                    canvasHeight = canvasHeight,
+                    onUpdateBase = onUpdateBase,
+                    onBeginTransaction = onBeginTransaction,
+                    onCommitTransaction = onCommitTransaction,
+                    onCancelTransaction = onCancelTransaction
+                )
             }
 
             // -----------------------------------------------------------------
@@ -1175,4 +1107,189 @@ internal fun StudioCanvas(
             }
         }
     }
+}
+
+private enum class CropCorner { TOP_LEFT, TOP_RIGHT, BOTTOM_LEFT, BOTTOM_RIGHT }
+
+/**
+ * Crop handles live in source coordinates on the uncropped preview. Dragging a
+ * corner resizes, dragging the frame moves the whole rectangle, and everything
+ * outside the rectangle is dimmed so the cut is obvious before export.
+ */
+@Composable
+private fun CropOverlay(
+    base: BaseTransform,
+    canvasWidth: Float,
+    canvasHeight: Float,
+    onUpdateBase: (BaseTransform) -> Unit,
+    onBeginTransaction: () -> Unit,
+    onCommitTransaction: () -> Unit,
+    onCancelTransaction: () -> Unit
+) {
+    val density = LocalDensity.current
+    val latestBase = rememberUpdatedState(base)
+    val crop = base.crop
+    val minEdge = ProjectCore.MIN_NORMALIZED_CROP_EDGE
+
+    val leftDp = with(density) { (crop.x * canvasWidth).toDp() }
+    val topDp = with(density) { (crop.y * canvasHeight).toDp() }
+    val widthDp = with(density) { (crop.width * canvasWidth).toDp() }
+    val heightDp = with(density) { (crop.height * canvasHeight).toDp() }
+
+    Canvas(modifier = Modifier.fillMaxSize()) {
+        val left = crop.x * size.width
+        val top = crop.y * size.height
+        val right = (crop.x + crop.width) * size.width
+        val bottom = (crop.y + crop.height) * size.height
+        val shade = Color(0xA6000000)
+        drawRect(shade, topLeft = Offset(0f, 0f), size = Size(size.width, top))
+        drawRect(shade, topLeft = Offset(0f, bottom), size = Size(size.width, size.height - bottom))
+        drawRect(shade, topLeft = Offset(0f, top), size = Size(left, bottom - top))
+        drawRect(shade, topLeft = Offset(right, top), size = Size(size.width - right, bottom - top))
+    }
+
+    Box(
+        modifier = Modifier
+            .offset(leftDp, topDp)
+            .size(widthDp, heightDp)
+            .border(2.dp, Color(0xFFD8FF4A))
+            .pointerInput(canvasWidth, canvasHeight) {
+                var gestureBase = latestBase.value
+                var startCrop = NormalizedRect.Full
+                var accumDeltaX = 0f
+                var accumDeltaY = 0f
+                detectDragGestures(
+                    onDragStart = {
+                        onBeginTransaction()
+                        gestureBase = latestBase.value
+                        startCrop = gestureBase.crop
+                        accumDeltaX = 0f
+                        accumDeltaY = 0f
+                    },
+                    onDrag = { change, dragAmount ->
+                        change.consume()
+                        accumDeltaX += dragAmount.x
+                        accumDeltaY += dragAmount.y
+                        val newX = (startCrop.x + accumDeltaX / canvasWidth)
+                            .coerceIn(0f, 1f - startCrop.width)
+                        val newY = (startCrop.y + accumDeltaY / canvasHeight)
+                            .coerceIn(0f, 1f - startCrop.height)
+                        onUpdateBase(
+                            gestureBase.copy(
+                                crop = startCrop.copy(x = newX, y = newY),
+                                outputAspect = "free"
+                            )
+                        )
+                    },
+                    onDragEnd = { onCommitTransaction() },
+                    onDragCancel = { onCancelTransaction() }
+                )
+            }
+    ) {
+        for (corner in CropCorner.entries) {
+            CropHandle(
+                corner = corner,
+                canvasWidth = canvasWidth,
+                canvasHeight = canvasHeight,
+                minEdge = minEdge,
+                latestBase = { latestBase.value },
+                onBeginTransaction = onBeginTransaction,
+                onUpdateBase = onUpdateBase,
+                onCommitTransaction = onCommitTransaction,
+                onCancelTransaction = onCancelTransaction
+            )
+        }
+    }
+}
+
+@Composable
+private fun BoxScope.CropHandle(
+    corner: CropCorner,
+    canvasWidth: Float,
+    canvasHeight: Float,
+    minEdge: Float,
+    latestBase: () -> BaseTransform,
+    onBeginTransaction: () -> Unit,
+    onUpdateBase: (BaseTransform) -> Unit,
+    onCommitTransaction: () -> Unit,
+    onCancelTransaction: () -> Unit
+) {
+    val alignment = when (corner) {
+        CropCorner.TOP_LEFT -> Alignment.TopStart
+        CropCorner.TOP_RIGHT -> Alignment.TopEnd
+        CropCorner.BOTTOM_LEFT -> Alignment.BottomStart
+        CropCorner.BOTTOM_RIGHT -> Alignment.BottomEnd
+    }
+    val offset = when (corner) {
+        CropCorner.TOP_LEFT -> Offset(-10f, -10f)
+        CropCorner.TOP_RIGHT -> Offset(10f, -10f)
+        CropCorner.BOTTOM_LEFT -> Offset(-10f, 10f)
+        CropCorner.BOTTOM_RIGHT -> Offset(10f, 10f)
+    }
+
+    Box(
+        modifier = Modifier
+            .align(alignment)
+            .size(20.dp)
+            .offset(offset.x.dp, offset.y.dp)
+            .clip(CircleShape)
+            .background(Color(0xFFD8FF4A))
+            // Handles sit on the canvas edge; without this a drag from the left or
+            // right edge is eaten by the system back gesture and exits the studio.
+            .systemGestureExclusion()
+            .pointerInput(corner, canvasWidth, canvasHeight) {
+                var gestureBase = latestBase()
+                var startCrop = NormalizedRect.Full
+                var accumDeltaX = 0f
+                var accumDeltaY = 0f
+                detectDragGestures(
+                    onDragStart = {
+                        onBeginTransaction()
+                        gestureBase = latestBase()
+                        startCrop = gestureBase.crop
+                        accumDeltaX = 0f
+                        accumDeltaY = 0f
+                    },
+                    onDrag = { change, dragAmount ->
+                        change.consume()
+                        accumDeltaX += dragAmount.x
+                        accumDeltaY += dragAmount.y
+                        val dx = accumDeltaX / canvasWidth
+                        val dy = accumDeltaY / canvasHeight
+                        val startRight = startCrop.x + startCrop.width
+                        val startBottom = startCrop.y + startCrop.height
+                        val rect = when (corner) {
+                            CropCorner.TOP_LEFT -> {
+                                val newX = (startCrop.x + dx).coerceIn(0f, startRight - minEdge)
+                                val newY = (startCrop.y + dy).coerceIn(0f, startBottom - minEdge)
+                                NormalizedRect(newX, newY, startRight - newX, startBottom - newY)
+                            }
+                            CropCorner.TOP_RIGHT -> {
+                                val newRight = (startRight + dx).coerceIn(startCrop.x + minEdge, 1f)
+                                val newY = (startCrop.y + dy).coerceIn(0f, startBottom - minEdge)
+                                NormalizedRect(startCrop.x, newY, newRight - startCrop.x, startBottom - newY)
+                            }
+                            CropCorner.BOTTOM_LEFT -> {
+                                val newX = (startCrop.x + dx).coerceIn(0f, startRight - minEdge)
+                                val newBottom = (startBottom + dy).coerceIn(startCrop.y + minEdge, 1f)
+                                NormalizedRect(newX, startCrop.y, startRight - newX, newBottom - startCrop.y)
+                            }
+                            CropCorner.BOTTOM_RIGHT -> {
+                                val newRight = (startRight + dx).coerceIn(startCrop.x + minEdge, 1f)
+                                val newBottom = (startBottom + dy).coerceIn(startCrop.y + minEdge, 1f)
+                                NormalizedRect(startCrop.x, startCrop.y, newRight - startCrop.x, newBottom - startCrop.y)
+                            }
+                        }
+                        onUpdateBase(
+                            gestureBase.copy(
+                                crop = ProjectCore.normalizeFreeCrop(rect),
+                                outputAspect = "free"
+                            )
+                        )
+                    },
+                    onDragEnd = { onCommitTransaction() },
+                    onDragCancel = { onCancelTransaction() }
+                )
+            }
+    )
 }

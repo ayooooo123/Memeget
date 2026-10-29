@@ -130,6 +130,27 @@ internal object ProjectCore {
         )
     }
 
+    /**
+     * Project shown while the crop tool is open: the whole source frame with the
+     * crop rectangle laid over it. Layers are re-anchored to that uncropped
+     * canvas so they stay glued to the content they cover instead of drifting
+     * half a canvas away every time the crop changes.
+     */
+    fun cropEditingProject(project: MemeEditProject): MemeEditProject {
+        val fullBase = project.base.copy(crop = NormalizedRect.Full, outputAspect = "source")
+        if (fullBase == project.base) return project
+        return project.copy(
+            base = fullBase,
+            layers = remapProjectLayers(
+                layers = project.layers,
+                oldBase = project.base,
+                newBase = fullBase,
+                sourceW = project.source.width,
+                sourceH = project.source.height
+            )
+        )
+    }
+
     fun visibleImageDimensions(sourceWidth: Int, sourceHeight: Int, base: BaseTransform): Pair<Int, Int> {
         val (orientedW, orientedH) = orientedImageDimensions(sourceWidth, sourceHeight, base.rotation)
         val crop = normalizeFreeCrop(base.crop)

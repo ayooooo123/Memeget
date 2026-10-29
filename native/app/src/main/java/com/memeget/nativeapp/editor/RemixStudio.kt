@@ -159,9 +159,12 @@ internal fun RemixStudio(
         )
 
         val draftResult = DraftJournalStore.restoreDraft(context, sessionId, expectedIdentity)
-        if (draftResult.restored && draftResult.project != null) {
+        if (draftResult.restored && draftResult.project != null && draftResult.project != defaultProj) {
             loadingState = StudioLoadingState.PromptRestore(draftResult.project, defaultProj)
         } else {
+            // A draft equal to a fresh project carries no edits; drop it instead of
+            // ambushing the next open with a pointless restore prompt.
+            if (draftResult.restored) DraftJournalStore.discardDraft(context, sessionId)
             history = createProjectHistory(defaultProj)
             loadingState = StudioLoadingState.Ready
         }
@@ -172,6 +175,13 @@ internal fun RemixStudio(
     LaunchedEffect(currentHistory?.present, loadingState) {
         if (loadingState !is StudioLoadingState.Ready) return@LaunchedEffect
         val proj = currentHistory?.present ?: return@LaunchedEffect
+        val baseline = initialProject ?: return@LaunchedEffect
+        if (proj == baseline) {
+            // No edits worth restoring. Clear any stale draft so the next open
+            // starts clean instead of asking to restore the untouched default.
+            DraftJournalStore.discardDraft(context, sessionId)
+            return@LaunchedEffect
+        }
         delay(500)
         val probe = sourceProbeResult
         DraftJournalStore.saveDraft(
@@ -323,6 +333,20 @@ internal fun RemixStudio(
         }
     }
 
+    // Leave without laundering an untouched project into a draft. Only real
+    // edits survive into the restore prompt.
+    fun exitStudio() {
+        scope.launch {
+            val present = currentHistory.present
+            if (present == initialProject) {
+                DraftJournalStore.discardDraft(context, sessionId)
+            } else {
+                DraftJournalStore.saveDraft(context, sessionId, present)
+            }
+            withContext(Dispatchers.Main) { onClose() }
+        }
+    }
+
     // Intercept back button
     BackHandler {
         if (isExporting) {
@@ -333,10 +357,7 @@ internal fun RemixStudio(
         if (currentHistory.past.isNotEmpty()) {
             showDiscardConfirmDialog = true
         } else {
-            scope.launch {
-                currentHistory.present.let { DraftJournalStore.saveDraft(context, sessionId, it) }
-                withContext(Dispatchers.Main) { onClose() }
-            }
+            exitStudio()
         }
     }
 
@@ -463,12 +484,7 @@ internal fun RemixStudio(
         ) {
             IconButton(onClick = {
                 if (currentHistory.past.isNotEmpty()) showDiscardConfirmDialog = true
-                else {
-                    scope.launch {
-                        currentHistory.present.let { DraftJournalStore.saveDraft(context, sessionId, it) }
-                        withContext(Dispatchers.Main) { onClose() }
-                    }
-                }
+                else exitStudio()
             }) {
                 Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.White)
             }
@@ -974,6 +990,7 @@ internal fun RemixStudio(
                 listOf(
                     Pair("timeline", "⏱ Timeline"),
                     Pair("frames", "⊞ Frames"),
+                    Pair("transform", "⌗ Crop"),
                     Pair("text", "A Text"),
                     Pair("draw", "✎ Draw"),
                     Pair("motion", "➚ Motion"),
@@ -997,7 +1014,11 @@ internal fun RemixStudio(
                     modifier = Modifier
                         .clip(RoundedCornerShape(8.dp))
                         .background(if (selected) Color(0xFFD8FF4A) else Color(0xFF21262D))
-                        .clickable { activeTool = toolId }
+                        .clickable {
+                            // Cropping a moving frame is a fight; freeze it first.
+                            if (toolId == "transform") isPlaying = false
+                            activeTool = toolId
+                        }
                         .padding(horizontal = 14.dp, vertical = 8.dp)
                 ) {
                     Text(
