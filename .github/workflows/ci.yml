@@ -1,11 +1,7 @@
 name: CI
 
-# Fast checks that must pass before merging: the native app's host tests
-# (native/, the main app) and, for the original React Native app, TypeScript
-# type-checking and the Jest unit tests (chiefly the shared-link → media
-# resolver, so the X/Tenor/generic download paths can't silently break). Runs
-# on every PR and on pushes to main and the working branches — keeps the repo
-# green without needing the full Android APK build.
+# Native Android host tests on pull requests and pushes. The retired Expo app
+# no longer needs Node, TypeScript, or Jest in this workflow.
 
 on:
   pull_request:
@@ -20,32 +16,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  check:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          # 22, not 20: src/memeSql.test.ts runs the real meme upsert statements
-          # against `node:sqlite`, which only exists from Node 22.5. Those tests
-          # are what stop a merge from quietly restoring the INSERT OR REPLACE
-          # that used to wipe every VLM caption and transcript on re-index.
-          node-version: 22
-          cache: npm
-
-      - name: Install dependencies
-        run: npm install --legacy-peer-deps
-
-      - name: Typecheck
-        run: npm run typecheck
-
-      - name: Test
-        run: npm test
-
   native:
     runs-on: ubuntu-latest
     timeout-minutes: 45

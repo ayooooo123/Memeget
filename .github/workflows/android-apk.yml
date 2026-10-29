@@ -10,10 +10,8 @@ name: Android APK
 #   * Manual run on any other branch     -> host tests and the APK as a short-lived
 #                                          workflow artifact; nothing is published.
 #
-# The release build signs with the repository's pinned key
-# (signing/debug.keystore, the original app's key too), so every build installs
-# over the last one and keeps the library. The original React Native app has
-# its own manual workflow, android-apk-original.yml.
+# The release build uses the pinned signing key in signing/debug.keystore,
+# preserving in-place updates and each installed library.
 
 on:
   push:
@@ -145,7 +143,7 @@ jobs:
           body: |
             Memeget for Android (`com.memeget.nativeapp`) · version `${{ steps.apk.outputs.version_name }}` · commit `${{ github.sha }}`.
 
-            Install: download the `.apk` on the phone and open it (allow "Install unknown apps" for your browser or Files app). It updates an earlier release install in place and keeps its library; don't uninstall first. It installs next to the original React Native app (`com.memeget.app`) and doesn't touch it.
+            Install: download the `.apk` on the phone and open it (allow "Install unknown apps" for your browser or Files app). It updates an earlier native release install in place and keeps its library; don't uninstall first.
 
             > The `latest` pre-release always tracks the newest build on `main`. For a pinned version, use a tagged release.
           files: ${{ steps.apk.outputs.path }}
