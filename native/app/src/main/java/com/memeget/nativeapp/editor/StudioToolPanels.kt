@@ -465,6 +465,16 @@ internal fun TransformInspectorPanel(
             .verticalScroll(rememberScrollState())
             .padding(16.dp)
     ) {
+        Text("CROP", color = Color(0xFF8B949E), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+        Spacer(modifier = Modifier.height(4.dp))
+        Text(
+            "Drag a corner to resize, drag inside the frame to move it. The dimmed area is cut on export.",
+            color = Color(0xFF8B949E),
+            fontSize = 11.sp
+        )
+
+        Spacer(modifier = Modifier.height(12.dp))
+
         Text("ASPECT RATIO", color = Color(0xFF8B949E), fontSize = 11.sp, fontWeight = FontWeight.Bold)
         Spacer(modifier = Modifier.height(8.dp))
 
@@ -542,7 +552,7 @@ internal fun TransformInspectorPanel(
 
         OutlinedButton(
             onClick = {
-                onUpdateBase(BaseTransform(outputAspect = "source", crop = NormalizedRect.Full))
+                onUpdateBase(BaseTransform())
             },
             modifier = Modifier.fillMaxWidth(),
             colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFF8B949E))
