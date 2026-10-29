@@ -31,8 +31,8 @@ import kotlin.math.sqrt
 /**
  * Full-resolution still renderer for a meme edit project.
  *
- * The JS side (src/memeImageRenderCore.ts) resolves every layer into output
- * pixels ahead of time, so this file only decodes, transforms and draws — it
+ * The native RenderPlanBuilder resolves every layer into output pixels ahead
+ * of time, so this renderer only decodes, transforms and draws — it
  * never re-derives geometry. Text goes through the same [MemeTextLayout]
  * StaticLayout path the on-device preview uses, which is what keeps the
  * exported PNG and the editor canvas in agreement.
@@ -45,9 +45,9 @@ import kotlin.math.sqrt
 internal object MemeImageRenderer {
   const val PLAN_VERSION = 1
 
-  // Mirrors MAX_IMAGE_RENDER_PIXELS in src/memeImageRenderCore.ts. The plan
-  // builder downscales past this itself, so a plan arriving above it is
-  // malformed — reject it instead of letting createBitmap raise OutOfMemoryError.
+  // Match RenderPlanBuilder.MAX_IMAGE_RENDER_PIXELS. The native plan builder
+  // downscales past this itself, so an oversized plan must be rejected rather
+  // than passed to createBitmap to trigger OutOfMemoryError.
   private const val MAX_OUTPUT_PIXELS = 16_000_000L
 
   // Absolute ceiling on a decoded source, whatever the destination asks for.
@@ -61,7 +61,7 @@ internal object MemeImageRenderer {
   // crop (width 1e-6) would otherwise demand a 200-million-pixel edge.
   private const val MAX_SOURCE_EDGE = 1_000_000L
 
-  // Mirrors MAX_MOSAIC_CELLS in src/memeImageRenderCore.ts.
+  // Match RenderPlanBuilder.MAX_MOSAIC_CELLS.
   private const val MAX_MOSAIC_CELLS = 65_536L
 
   /**
@@ -564,10 +564,8 @@ internal object MemeImageRenderer {
     (index.toLong() * extent.toLong() / count.toLong()).toInt().coerceIn(0, extent)
 
   /**
-   * The cell the mosaic will really use. Mirrors mosaicCellFloorPx() in
-   * src/memeImageRenderCore.ts, so the cell the plan states and the cell that
-   * gets drawn agree — and bounds the work of a hand-built plan independently,
-   * because cell COUNT, not region area, is what a mosaic pays for.
+   * Bound the rendered mosaic independently of the plan's requested cell
+   * size: cell COUNT, not region area, determines the pixel work.
    */
   internal fun mosaicCellPx(regionWidth: Int, regionHeight: Int, requestedCellPx: Int): Int {
     val area = regionWidth.toLong() * regionHeight.toLong()
@@ -749,11 +747,9 @@ internal object MemeImageRenderer {
   /**
    * Draw a subject cutout: shadow, outline, then the subject itself.
    *
-   * The alpha lives in the PNG the segmenter wrote, so there is no mask
-   * arithmetic here — this scales that bitmap into the rect the plan resolved,
-   * which is the same rect the preview resolved from the same function
-   * (resolveCutoutPlacement in src/memeImageRenderCore.ts) against the preview
-   * canvas. Effect sizes arrive in OUTPUT pixels for exactly the same reason.
+   * The alpha lives in the PNG the segmenter wrote, so no mask arithmetic
+   * belongs here. Scale the bitmap into the rect already resolved by the
+   * native plan; effect sizes arrive in output pixels for the same reason.
    */
   private fun drawSubject(context: Context, canvas: Canvas, layer: JSONObject) {
     val rect = readRect(layer.getJSONObject("rect")) ?: return
@@ -938,10 +934,9 @@ internal object MemeImageRenderer {
   /**
    * Freehand and shape annotations, drawn straight onto the output canvas.
    *
-   * The plan already resolved every point and stroke width into OUTPUT pixels
-   * (drawPlan in src/memeImageRenderCore.ts), so this only picks the Paint and
-   * the primitive - it never re-derives geometry. The still export and the
-   * video overlay reach it through the same `"draw"` case, which is what keeps
+   * The native plan resolves every point and stroke width into output pixels.
+   * This renderer selects the Paint and primitive without re-deriving geometry.
+   * Still export and video overlay reach the same `"draw"` case, keeping
    * an annotation identical whether it is burned into a PNG or composited over
    * every frame of an exported clip.
    *

@@ -1,12 +1,12 @@
 # Memeget Native
 
-Memeget's main app: an Android app in Kotlin, Compose, SQLite and a JNI inference adapter. Application ID: `com.memeget.nativeapp`; launcher label: **Memeget Native**. It installs alongside the original React Native app (the repository root) and does not replace its package, database or private files; that app is kept for moving a library here (see Local use and migration).
+Memeget's native Android app uses Kotlin, Compose, SQLite and a JNI inference adapter. Application ID: `com.memeget.nativeapp`; launcher label: **Memeget Native**. It installs alongside any existing legacy React Native install, but does not replace that app's package, database or private files. The legacy source has been retired; see Local use and migration for importing an existing library.
 
 Every push to `main` builds a release APK in GitHub Actions (`../.github/workflows/android-apk.yml`), runs the host tests first, and publishes it as the rolling `latest` release: https://github.com/ayooooo123/Memeget/releases/download/latest/memeget-latest.apk. Tags `vX.Y.Z` publish permanent releases. Evidence so far and the checks still open are listed under Verification record.
 
 ## Build
 
-Build from this directory, within the repository checkout. The build reads an explicit allowlist of existing Kotlin media utilities and fonts from `../modules/memeget-bg/android/src/main`; it copies them into generated build directories without modifying the original module. No React, Expo or JavaScript runtime is included in the APK.
+Build from this directory, within the repository checkout. The build compiles an explicit allowlist of reusable Kotlin media utilities and fonts from `../modules/memeget-bg/android/src/main` into generated build directories. These are plain native sources; the old Expo module wrapper and React Native application are no longer included.
 
 Requirements:
 
@@ -31,6 +31,7 @@ Build policy for the owner's phones: the dedicated test phone, a Pixel 5a, stays
 ## Local use and migration
 
 - Link a folder with Android's document picker, or import/share media, supported links, ZIP collections or teaching files. Temporary shared content is copied into private storage before its temporary permission expires.
+- Sharing an Imgflip `/memegenerator/<id>` or `/memetemplate/<id>` link saves the full-size blank template from its template page without the Imgflip watermark (for example, `https://imgflip.com/memegenerator/129385783/Do-you-see`); a finished `/i/<id>` post saves its published image, including any watermark already baked into it.
 - Browse immediately while analysis is pending. Waiting tiles show **Queued**; only the coordinator's active meme animates **Analyzing**. Failed indexing has a persisted **Analysis failed** status, cleared by retry or successful analysis; tapping **Index** retries failed items along with pending ones, while background work does not. Search runs against a revision-synced resident RAM index (up to 6,000 items, streaming above that) plus a 64-entry LRU query-embedding cache: the lexical pass lands at 0 ms delay while typing, and the semantic pass fuses whole-word IDF-weighted text/tag coverage, modality-bridged `OpenVocabConcepts` prototypes, multi-scene/panel vectors, social-slang/reaction-intent cues (`SocialReplyIntent`: *"cooked"*, *"joever"*, *"copium"*, *"cinema"*, *"caught in 4k"*), pasted-post distillation (stripping `@handles`, links and conversational filler) and battle-tested copy frequency on MobileCLIP's cosine scale. Pagination uses stable keyset cursors, 2-letter terms (`ai`, `tv`, `fr`) stay live across both passes, and typo/prefix expansions from the `fts4aux` word list never hijack exact BM25 weights.
 - The Library keeps its search, filters, loaded pages and scroll position while **Label** or **Settings** is open; Back on those tabs returns to it, and Back in selection mode clears the selection. Library writes (indexing, a re-tag) reload it after a short settle and never cancel a load under way, so searches finish and a deleted meme leaves the grid while work runs. Only a search you start pauses background work.
 - A meme shared or imported while a session transcribes or captions is indexed once the clip in progress finishes, before the rest of that backlog; a background session still stops at its item cap.

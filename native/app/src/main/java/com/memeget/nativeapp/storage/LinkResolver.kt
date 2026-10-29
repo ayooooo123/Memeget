@@ -385,6 +385,27 @@ internal object LinkResolver {
         return ref.copy(fileName = ref.fileName ?: "memedepot_$slug")
     }
 
+    private fun resolveImgflip(url: String, client: OkHttpClient): MediaRef {
+        val path = url.toHttpUrlOrNull()?.encodedPath.orEmpty()
+        val template = Regex("""^/(?:memegenerator|memetemplate)/(\d+)(?:/|$)""", RegexOption.IGNORE_CASE)
+            .find(path) ?: return resolveGeneric(url, client)
+        val id = template.groupValues[1]
+        val page = if (path.startsWith("/memetemplate/", ignoreCase = true)) url
+            else "https://imgflip.com/memetemplate/$id"
+        val html = fetchText(page, client)
+        // The template page marks its full-size image; generator pages only
+        // contain a thumbnail among unrelated icons and trending memes.
+        val tag = Regex("""<img\b[^>]*\s+id=["']mtm-img["'][^>]*>""", RegexOption.IGNORE_CASE)
+            .find(html)?.value
+        val src = tag?.let {
+            Regex("""\s+src=["']([^"']+)["']""", RegexOption.IGNORE_CASE).find(it)?.groupValues?.get(1)
+        }
+        if (src.isNullOrBlank() || !MEDIA_EXT_RE.matcher(src).find()) {
+            throw IOException("No template image found at that Imgflip link.")
+        }
+        return MediaRef(url = absolutize(decodeEntities(src), page), fileName = "imgflip_$id")
+    }
+
     fun resolveMediaRef(rawUrl: String, client: OkHttpClient = defaultClient): MediaRef {
         var url = sanitizeUrl(rawUrl) ?: throw IOException("Invalid web link: $rawUrl")
         if (isShortlink(url)) {
@@ -394,6 +415,8 @@ internal object LinkResolver {
         return when {
             MEDIA_EXT_RE.matcher(url).find() -> MediaRef(url = url)
             isTwitter(url) -> resolveTwitter(url, client)
+            Pattern.compile("""https?://(?:www\.)?imgflip\.com/""", Pattern.CASE_INSENSITIVE).matcher(url).find() ->
+                resolveImgflip(url, client)
             isTenor(url) -> resolveGeneric(url, client)
             isMemedepot(url) -> resolveMemedepot(url, client)
             else -> resolveGeneric(url, client)

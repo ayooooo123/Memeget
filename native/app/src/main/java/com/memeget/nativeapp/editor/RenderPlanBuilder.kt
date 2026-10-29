@@ -13,9 +13,9 @@ import kotlin.math.sqrt
 /**
  * Builds the JSON plan consumed by [expo.modules.memegetbg.MemeImageRenderer].
  *
- * Field layout mirrors `src/memeImageRenderCore.ts` so the still renderer, PNG
- * export, and [NativeImagePreview] share one geometry path. Text measurements
- * are unscaled; the renderer applies keyframe scale once.
+ * The still renderer, PNG export, and [NativeImagePreview] share this native
+ * geometry path. Text measurements are unscaled; the renderer applies
+ * keyframe scale once.
  */
 internal object RenderPlanBuilder {
 
@@ -90,8 +90,7 @@ internal object RenderPlanBuilder {
                 maxPixels = cap
             )
         }
-        // Round the scale factor first so floor(full * scale) stays inside the cap
-        // the same way src/memeImageRenderCore.ts planOutput does.
+        // Round before floor(full * scale) so the result stays within the cap.
         val scale = round4(sqrt(cap.toDouble() / total.toDouble())).toFloat()
         var w = max(1, floor(fullWidthPx * scale.toDouble()).toInt())
         var h = max(1, floor(fullHeightPx * scale.toDouble()).toInt())

@@ -1,7 +1,6 @@
-# Dependencies
+# Local dependencies and retired Expo build artifacts; keep old installs and
+# untracked generated trees out of the native-only repository.
 node_modules/
-
-# Expo
 .expo/
 dist/
 web-build/

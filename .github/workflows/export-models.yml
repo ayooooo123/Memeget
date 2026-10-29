@@ -1,10 +1,8 @@
 name: Export models
 
 # Exports MobileCLIP-S2 (image+text) and DINOv2-base to ExecuTorch .pte and
-# publishes them as assets on the fixed "models-v1"
-# release. The APK workflow
-# points the app's EXPO_PUBLIC_MEMEGET_* model sources at these assets; the app
-# downloads them once on first launch, same as every other model it uses.
+# publishes them as assets on the fixed "models-v1" release. The native Android
+# and iOS apps download these pinned models on demand.
 #
 # Runs in CI because the models must be pulled from Hugging Face and exported
 # with a real PyTorch/ExecuTorch toolchain. Verification (load each .pte with
@@ -14,7 +12,6 @@ name: Export models
 on:
   push:
     branches:
-      - claude/gemma-local-vl-model-7viqpi
       - main
     paths:
       - 'tools/model-export/**'
@@ -29,11 +26,8 @@ permissions:
   contents: write
 
 env:
-  # ExecuTorch python package used for export. The .pte flatbuffer schema is
-  # versioned; if the app fails to LOAD these models on-device (a load-time
-  # "program/version" style error, not a download error), the runtime bundled
-  # in react-native-executorch is older than this exporter — drop this pin
-  # (e.g. to 0.7.0) and re-run.
+  # ExecuTorch python export must remain compatible with the native apps'
+  # bundled runtime; verify loadability before updating pinned model digests.
   ET_VERSION: '1.0.0'
   MODELS_TAG: models-v1
 
