@@ -99,6 +99,7 @@
 		E394D7F5B7F98CF1E9033906 /* LibrarySearchView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibrarySearchView.swift; sourceTree = "<group>"; };
 		E9E941F170E40A0D410F8CE7 /* Memeget-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Memeget-Bridging-Header.h"; sourceTree = "<group>"; };
 		EE652925C84F49EDE5712C21 /* KnowledgeCore.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = KnowledgeCore.cpp; sourceTree = "<group>"; };
+		F2F33F6568E26FA7F050516B /* version.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = version.xcconfig; sourceTree = "<group>"; };
 		F4562702FE103DBEE05125AD /* LlamaDecisionRunner.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = LlamaDecisionRunner.cpp; sourceTree = "<group>"; };
 		FBF4F9FFFA1C134DB12630A0 /* MemeViewerSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemeViewerSheet.swift; sourceTree = "<group>"; };
 		FC02D39A734A3B2203E8C175 /* SqliteMemeStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SqliteMemeStore.swift; sourceTree = "<group>"; };
@@ -194,6 +195,7 @@
 		60D931966991D39882A96F6C /* memeget */ = {
 			isa = PBXGroup;
 			children = (
+				F2F33F6568E26FA7F050516B /* version.xcconfig */,
 				9558CF51E6A28CEA2C593C43 /* native */,
 			);
 			name = memeget;
@@ -479,6 +481,7 @@
 		};
 		51510D6392D57DD38D99D42F /* Debug */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = F2F33F6568E26FA7F050516B /* version.xcconfig */;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				CLANG_ANALYZER_NONNULL = YES;
@@ -573,6 +576,7 @@
 		};
 		92FEE7C735FDA4F46D534319 /* Release */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = F2F33F6568E26FA7F050516B /* version.xcconfig */;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				CLANG_ANALYZER_NONNULL = YES;
