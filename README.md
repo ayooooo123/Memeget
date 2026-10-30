@@ -3,7 +3,7 @@
 Private, on-device meme search for images and videos. The maintained apps are native:
 
 - **Android:** [`native/`](native/) — Kotlin, Jetpack Compose, C++/JNI, SQLite. See the [Android build, usage, and verification guide](native/README.md). [Download the latest APK](https://github.com/ayooooo123/Memeget/releases/download/latest/memeget-latest.apk).
-- **iOS:** [`ios/`](ios/) — SwiftUI, Objective-C++, Metal, PhotoKit, and the shared C++ meme gate in [`native/core/`](native/core/). Generate the Xcode project with `cd ios && xcodegen generate`; build and test the `Memeget` scheme in Xcode or with `xcodebuild`.
+- **iOS:** [`ios/`](ios/) — SwiftUI, Objective-C++, Metal, PhotoKit, and the shared C++ meme gate in [`native/core/`](native/core/). Generate the Xcode project with `cd ios && xcodegen generate`; build and test the `Memeget` scheme in Xcode or with `xcodebuild`. [Download the latest IPA](https://github.com/ayooooo123/Memeget/releases/download/latest/memeget-latest.ipa) (unsigned; install with AltStore or SideStore).
 
 The apps index media locally. Optional cloud assistance requires an explicit opt-in; see each app's settings. Android supports sharing image/video files and post links directly into the collection, including X posts and unwatermarked blank Imgflip templates from `/memegenerator/<id>` links. An Imgflip `/i/<id>` post saves the published image, including any watermark already baked into it.
 
@@ -16,7 +16,11 @@ cd native
 ./gradlew :app:assembleDebug :app:testDebugUnitTest
 ```
 
-Requires JDK 17 and the Android SDK/NDK versions listed in [`native/README.md`](native/README.md). `main` builds a signed release APK in [GitHub Actions](.github/workflows/android-apk.yml); tagged `vX.Y.Z` releases are permanent.
+Requires JDK 17 and the Android SDK/NDK versions listed in [`native/README.md`](native/README.md). `main` builds a signed release APK and an unsigned iOS IPA in [GitHub Actions](.github/workflows/release.yml) and publishes both as the rolling `latest` pre-release; tagged `vX.Y.Z` releases are permanent.
+
+## Versioning
+
+[`version.xcconfig`](version.xcconfig) holds the one release version (`MARKETING_VERSION = X.Y.Z`) both apps carry. iOS uses it for `CFBundleShortVersionString` and `CFBundleVersion`; Android uses it for `versionName` and derives `versionCode` as `X*10000 + Y*100 + Z`. To release, bump it, push to `main`, then tag `vX.Y.Z`; the workflow refuses a tag that doesn't match.
 
 ## Source layout
 
