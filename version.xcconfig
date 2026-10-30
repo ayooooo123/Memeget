@@ -1,4 +1,4 @@
 // The one release version for both apps. Bump it before tagging vX.Y.Z; the release workflow refuses a tag
 // that disagrees. iOS reads it as an Xcode build setting (CFBundleShortVersionString and CFBundleVersion).
 // Android reads it in native/app/build.gradle.kts: versionName, and versionCode = X*10000 + Y*100 + Z.
-MARKETING_VERSION = 1.1.0
+MARKETING_VERSION = 1.1.1
