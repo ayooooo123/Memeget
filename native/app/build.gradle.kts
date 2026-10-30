@@ -23,7 +23,15 @@ val syncReusableFonts by tasks.registering(Sync::class) {
     from(File(mediaSource, "assets")) { include("fonts/**") }
     into(layout.buildDirectory.dir("generated/reusableAssets"))
 }
-// Every release says 1.0-native, so a release also names the commit it was built from (Settings shows it).
+// One release version for Android and iOS lives in ../version.xcconfig. Rolling `latest` builds share it, so a
+// release build also names the commit it was built from (Settings shows it).
+val marketingVersion: String = rootProject.file("../version.xcconfig").readLines()
+    .firstNotNullOfOrNull { Regex("""^\s*MARKETING_VERSION\s*=\s*(\S+)\s*$""").find(it)?.groupValues?.get(1) }
+    ?: error("version.xcconfig has no MARKETING_VERSION")
+val marketingVersionCode: Int = marketingVersion.split(".").map { it.toInt() }.let { parts ->
+    require(parts.size == 3 && parts.all { it in 0..99 }) { "MARKETING_VERSION must be X.Y.Z with parts 0-99: $marketingVersion" }
+    parts[0] * 10000 + parts[1] * 100 + parts[2]
+}
 val buildCommit: String = runCatching {
     providers.exec { commandLine("git", "-C", rootDir.path, "rev-parse", "--short=7", "HEAD") }.standardOutput.asText.get().trim()
 }.getOrDefault("")
@@ -36,8 +44,8 @@ android {
         applicationId = "com.memeget.nativeapp"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "1.0-native"
+        versionCode = marketingVersionCode
+        versionName = marketingVersion
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk { abiFilters += "arm64-v8a" }
         externalNativeBuild {

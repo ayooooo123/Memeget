@@ -6,6 +6,11 @@ options:
   xcodeVersion: "16.0"
   createIntermediateGroups: true
 
+# The release version shared with Android (MARKETING_VERSION).
+configFiles:
+  Debug: ../version.xcconfig
+  Release: ../version.xcconfig
+
 settings:
   base:
     CLANG_CXX_LANGUAGE_STANDARD: c++20
