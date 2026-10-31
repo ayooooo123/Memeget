@@ -53,6 +53,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -258,8 +259,19 @@ internal fun LibraryScreen(
         if (browseMode == BrowseMode.Grid) leaveFolder()
         selectBrowseMode(BrowseMode.Folders)
     }
-    // A tag folder being checked, with the memes to ask about.
-    var folderCheck by remember { mutableStateOf<Pair<MemeFolder, List<Meme>>?>(null) }
+    // A tag folder being checked: its label and the memes to ask about, in order. The label and ids are saved, so
+    // turning the phone mid-check brings the same queue back (FolderReview keeps its answers the same way).
+    var checkLabel by rememberSaveable { mutableStateOf<String?>(null) }
+    var checkIds by rememberSaveable { mutableStateOf<LongArray?>(null) }
+    var checkMemes by remember { mutableStateOf<List<Meme>?>(null) }
+    LaunchedEffect(checkIds) {
+        val ids = checkIds
+        if (ids == null) {
+            checkMemes = null
+        } else if (checkMemes?.map { it.id } != ids.toList()) {
+            checkMemes = withContext(Dispatchers.IO) { ids.toList().mapNotNull { store.meme(it) } }
+        }
+    }
     fun startFolderCheck(folder: MemeFolder) {
         scope.launch {
             val toCheck = withContext(Dispatchers.IO) {
@@ -282,7 +294,9 @@ internal fun LibraryScreen(
             if (toCheck.isEmpty()) {
                 Toast.makeText(context, "Everything in “${folder.label}” is already checked", Toast.LENGTH_SHORT).show()
             } else {
-                folderCheck = folder to toCheck
+                checkMemes = toCheck
+                checkIds = toCheck.map { it.id }.toLongArray()
+                checkLabel = folder.label
             }
         }
     }
@@ -1214,19 +1228,23 @@ internal fun LibraryScreen(
         )
     }
 
-    folderCheck?.let { (folder, toCheck) ->
+    val label = checkLabel
+    val toCheck = checkMemes
+    if (label != null && toCheck != null) {
+        val labelKey = TagMerge.normalizeTagLabel(label)
         FolderReview(
-            label = folder.label,
+            label = label,
             memes = toCheck,
             onClose = { answers ->
-                folderCheck = null
+                checkLabel = null
+                checkIds = null
                 if (answers.isNotEmpty()) scope.launch {
                     // In order, each finished before the next, and all before the re-tag that learns from them.
                     val failed = withContext(NonCancellable) {
                         answers.count { (meme, right) ->
-                            val category = meme.tags.firstOrNull { TagMerge.normalizeTagLabel(it.label) == folder.key }?.category ?: "topic"
+                            val category = meme.tags.firstOrNull { TagMerge.normalizeTagLabel(it.label) == labelKey }?.category ?: "topic"
                             try {
-                                onTeach(meme.id, folder.label, category, right)
+                                onTeach(meme.id, label, category, right)
                                 false
                             } catch (e: Exception) {
                                 if (e is CancellationException) throw e
@@ -1238,7 +1256,7 @@ internal fun LibraryScreen(
                     Toast.makeText(
                         context,
                         if (failed > 0) "$failed of ${answers.size} answers couldn't be saved"
-                        else if (wrong > 0) "Took $wrong out of “${folder.label}”"
+                        else if (wrong > 0) "Took $wrong out of “$label”"
                         else "Saved ${answers.size} answers",
                         Toast.LENGTH_SHORT,
                     ).show()

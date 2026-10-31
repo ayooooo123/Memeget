@@ -28,6 +28,10 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.listSaver
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.snapshots.SnapshotStateList
+import androidx.compose.runtime.toMutableStateList
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -64,13 +68,21 @@ internal fun FolderReview(
     onClose: (answers: List<Pair<Meme, Boolean>>) -> Unit,
 ) {
     val scope = rememberCoroutineScope()
-    var index by remember { mutableIntStateOf(0) }
-    // Answers given, newest last: (meme, true = right, false = wrong, null = skipped).
-    val history = remember { mutableStateListOf<Pair<Meme, Boolean?>>() }
+    // Answers given, newest last, by meme id: true = right, false = wrong, null = skipped. Saved, so turning the
+    // phone mid-check keeps them.
+    val history = rememberSaveable(saver = HistorySaver) { mutableStateListOf() }
+    // The card on screen: the first one not yet answered (a meme deleted meanwhile is simply gone).
+    var index by remember {
+        val given = history.mapTo(HashSet()) { it.first }
+        mutableIntStateOf(memes.indexOfFirst { it.id !in given }.let { if (it < 0) memes.size else it })
+    }
     val answered = history.count { it.second != null }
     val offset = remember { Animatable(0f) }
     var busy by remember { mutableStateOf(false) }
-    fun close() = onClose(history.mapNotNull { (meme, verdict) -> verdict?.let { meme to it } })
+    fun close() {
+        val byId = memes.associateBy { it.id }
+        onClose(history.mapNotNull { (id, verdict) -> verdict?.let { byId[id]?.let { meme -> meme to verdict } } })
+    }
 
     Dialog(
         onDismissRequest = ::close,
@@ -84,7 +96,7 @@ internal fun FolderReview(
                 if (busy) return
                 busy = true
                 // Counted the moment it's given, so closing mid-animation still saves it.
-                history += meme to verdict
+                history += meme.id to verdict
                 scope.launch {
                     // The card leaves the way it was judged; a skip drops it straight away.
                     val target = when (verdict) { true -> width * 1.3f; false -> -width * 1.3f; null -> 0f }
@@ -99,8 +111,8 @@ internal fun FolderReview(
             }
             fun undo() {
                 if (busy || history.isEmpty()) return
-                history.removeAt(history.lastIndex)
-                index--
+                val (id, _) = history.removeAt(history.lastIndex)
+                memes.indexOfFirst { it.id == id }.takeIf { it >= 0 }?.let { index = it }
             }
 
             Column(Modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 12.dp)) {
@@ -201,6 +213,14 @@ internal fun FolderReview(
         }
     }
 }
+
+/** Answers as a flat list of longs: id, then 0 skipped / 1 right / 2 wrong. */
+private val HistorySaver = listSaver<SnapshotStateList<Pair<Long, Boolean?>>, Long>(
+    save = { list -> list.flatMap { (id, verdict) -> listOf(id, when (verdict) { null -> 0L; true -> 1L; false -> 2L }) } },
+    restore = { flat ->
+        flat.chunked(2).map { (id, code) -> id to when (code) { 1L -> true; 2L -> false; else -> null } }.toMutableStateList()
+    },
+)
 
 @Composable
 private fun ReviewCard(meme: Meme, modifier: Modifier = Modifier) {
