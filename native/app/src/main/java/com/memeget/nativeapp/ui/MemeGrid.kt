@@ -70,7 +70,10 @@ internal fun MemeGrid(
     copiedMemeId: Long? = null,
     copyingMemeId: Long? = null,
     onQuickCopy: ((Meme) -> Unit)? = null,
+    // Floats over the bottom of the grid; the grid leaves room for it below the last row.
+    bottomBar: (@Composable () -> Unit)? = null,
 ) {
+    val bottomBarSpace = if (bottomBar != null) BROWSE_BAR_SPACE else 0.dp
     val coroutineScope = rememberCoroutineScope()
     val showTopButton by remember {
         derivedStateOf {
@@ -107,6 +110,7 @@ internal fun MemeGrid(
                 contentAlignment = Alignment.Center,
             ) {
                 emptyContent()
+                if (bottomBar != null) Box(Modifier.align(Alignment.BottomCenter).padding(bottom = 12.dp)) { bottomBar() }
             }
         }
     } else {
@@ -114,7 +118,7 @@ internal fun MemeGrid(
             LazyVerticalGrid(
                 columns = GridCells.Fixed(3),
                 state = gridState,
-                contentPadding = PaddingValues(2.dp),
+                contentPadding = PaddingValues(start = 2.dp, top = 2.dp, end = 2.dp, bottom = 2.dp + bottomBarSpace),
                 horizontalArrangement = Arrangement.spacedBy(2.dp),
                 verticalArrangement = Arrangement.spacedBy(2.dp),
                 modifier = Modifier.fillMaxSize(),
@@ -192,6 +196,7 @@ internal fun MemeGrid(
                     )
                 }
             }
+            if (bottomBar != null) Box(Modifier.align(Alignment.BottomCenter).padding(bottom = 12.dp)) { bottomBar() }
         }
     }
 }

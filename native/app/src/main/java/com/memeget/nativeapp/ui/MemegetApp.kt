@@ -67,6 +67,10 @@ internal fun MemegetApp(
 
     var currentTab by remember { mutableStateOf(AppTab.Library) }
     var activeViewerMeme by remember { mutableStateOf<Meme?>(null) }
+    // The list the viewer opened from: a sideways swipe moves through it.
+    var viewerPages by remember { mutableStateOf<List<Meme>>(emptyList()) }
+    // The search or quoted line the viewer was opened for.
+    var viewerSearchText by remember { mutableStateOf("") }
     var activeRemixMeme by remember { mutableStateOf<Meme?>(null) }
     // Set by a tag tap in the viewer/Settings or by highlighting/sharing a social post from another app.
     var tagSearchRequest by remember { mutableStateOf<String?>(null) }
@@ -138,7 +142,11 @@ internal fun MemegetApp(
                         engine = engine,
                         knowledge = knowledge,
                         coordinator = coordinator,
-                        onOpenViewer = { meme -> activeViewerMeme = meme },
+                        onOpenViewer = { meme, pages, searchText ->
+                            viewerPages = pages
+                            viewerSearchText = searchText
+                            activeViewerMeme = meme
+                        },
                         onOpenSettings = { selectTab(AppTab.Settings) },
                         active = libraryActive,
                         tagSearchRequest = tagSearchRequest,
@@ -173,6 +181,8 @@ internal fun MemegetApp(
         activeViewerMeme?.let { meme ->
             ViewerModal(
                 meme = meme,
+                pages = viewerPages,
+                searchText = viewerSearchText,
                 files = files,
                 store = store,
                 cloud = cloud,
@@ -222,6 +232,7 @@ internal fun MemegetApp(
                             snackbarHostState.showSnackbar("Remix saved to library")
                             val savedMeme = store.meme(newMemeId)
                             if (savedMeme != null) {
+                                viewerPages = listOf(savedMeme)
                                 activeViewerMeme = savedMeme
                             }
                         }
@@ -233,7 +244,7 @@ internal fun MemegetApp(
 }
 
 /** Measures the content but places it only when [visible]; unplaced, it is neither drawn nor hit-tested. */
-private fun Modifier.placedOnlyWhen(visible: Boolean): Modifier = layout { measurable, constraints ->
+internal fun Modifier.placedOnlyWhen(visible: Boolean): Modifier = layout { measurable, constraints ->
     val placeable = measurable.measure(constraints)
     layout(placeable.width, placeable.height) {
         if (visible) placeable.place(0, 0)

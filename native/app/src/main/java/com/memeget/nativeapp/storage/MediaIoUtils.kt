@@ -442,6 +442,52 @@ internal object MediaIoUtils {
         }
     }
 
+    /**
+     * Width over height of the picture as shown upright, read from the file header without decoding pixels; null when
+     * the file can't be read. Video sizes come from the container, with its rotation applied.
+     */
+    fun uprightAspect(context: Context, uri: Uri, video: Boolean): Float? {
+        if (video) {
+            val retriever = android.media.MediaMetadataRetriever()
+            return try {
+                retriever.setDataSource(context, uri)
+                val width = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 0
+                val height = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 0
+                val rotation = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)?.toIntOrNull() ?: 0
+                when {
+                    width <= 0 || height <= 0 -> null
+                    rotation % 180 != 0 -> height.toFloat() / width
+                    else -> width.toFloat() / height
+                }
+            } catch (_: Exception) {
+                null
+            } finally {
+                retriever.release()
+            }
+        }
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        try {
+            context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
+        } catch (_: Exception) {
+            return null
+        }
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+        // Only JPEG and HEIF carry an orientation the decoder doesn't apply; reading EXIF is a second open.
+        val mime = bounds.outMimeType.orEmpty()
+        val quarterTurned = (mime == "image/jpeg" || mime == "image/heif" || mime == "image/heic") && try {
+            context.contentResolver.openInputStream(uri)?.use { stream ->
+                when (ExifInterface(stream).getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)) {
+                    ExifInterface.ORIENTATION_ROTATE_90, ExifInterface.ORIENTATION_ROTATE_270,
+                    ExifInterface.ORIENTATION_TRANSPOSE, ExifInterface.ORIENTATION_TRANSVERSE -> true
+                    else -> false
+                }
+            } ?: false
+        } catch (_: Exception) {
+            false
+        }
+        return if (quarterTurned) bounds.outHeight.toFloat() / bounds.outWidth else bounds.outWidth.toFloat() / bounds.outHeight
+    }
+
     /** EXIF-upright bitmap; [sampleSize] > 1 decodes a power-of-two subsample. */
     fun decodeUprightBitmap(context: Context, uri: Uri, sampleSize: Int = 1): Bitmap? {
         val orientation = try {

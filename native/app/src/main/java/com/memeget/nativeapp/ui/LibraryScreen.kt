@@ -72,6 +72,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import com.memeget.nativeapp.data.SocialReplyIntent
+import com.memeget.nativeapp.data.TagMerge
 import com.memeget.nativeapp.storage.CameraRollScanner
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
@@ -79,6 +80,7 @@ import kotlinx.coroutines.flow.first
 private const val PAGE_SIZE = 90
 private const val UI_PREFS = "memeget_ui"
 private const val BANNER_DISMISSED = "libraryBannerDismissed"
+private const val BROWSE_MODE = "browseMode"
 
 @Composable
 internal fun LibraryScreen(
@@ -87,7 +89,11 @@ internal fun LibraryScreen(
     engine: InferenceEngine,
     knowledge: LocalKnowledge,
     coordinator: IndexCoordinator,
-    onOpenViewer: (Meme) -> Unit,
+    /**
+     * Opens a meme in the viewer; a swipe there moves through [pages], the list it was opened from. [searchText] is
+     * the search or quoted line it was opened for.
+     */
+    onOpenViewer: (meme: Meme, pages: List<Meme>, searchText: String) -> Unit,
     onOpenSettings: () -> Unit,
     // False while Label or Settings shows: the screen stays composed then, but must not take Back.
     active: Boolean = true,
@@ -170,6 +176,93 @@ internal fun LibraryScreen(
 
     val uiPrefs = remember { context.getSharedPreferences(UI_PREFS, Context.MODE_PRIVATE) }
     var bannerDismissed by remember { mutableStateOf(uiPrefs.getBoolean(BANNER_DISMISSED, false)) }
+    var browseMode by remember { mutableStateOf(BrowseMode.fromKey(uiPrefs.getString(BROWSE_MODE, null))) }
+    fun selectBrowseMode(mode: BrowseMode) {
+        browseMode = mode
+        uiPrefs.edit().putString(BROWSE_MODE, mode.key).apply()
+    }
+    val canvasState = remember { MemeCanvasState() }
+    var folders by remember { mutableStateOf<List<MemeFolder>?>(null) }
+    // Reaction folders run a search each, so they load once and are kept while the other kinds reload.
+    var reactionFolders by remember { mutableStateOf<List<MemeFolder>?>(null) }
+    // The folder the canvas was opened on; its filter holds until Back or another filter replaces it.
+    var openFolder by remember { mutableStateOf<MemeFolder?>(null) }
+    // A quote or format folder shows exactly these memes, in this order.
+    var folderIds by remember { mutableStateOf<List<Long>?>(null) }
+    // The search the memes on screen answer; changes only when they're published, unlike the query as typed.
+    var publishedKey by remember { mutableStateOf<Any?>(null) }
+    // Near-copies and formats, worked out from the search index; the store keeps them until the index changes.
+    var memeGroups by remember { mutableStateOf(MemeGroups.Empty) }
+    LaunchedEffect(revision, active) {
+        if (!active) return@LaunchedEffect
+        memeGroups = try {
+            store.memeGroups()
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            memeGroups
+        }
+    }
+    // Folders reload with the library while they're on screen; the canvas only needs them once, as morph targets.
+    LaunchedEffect(revision, browseMode, active) {
+        if (!active || browseMode == BrowseMode.Grid) return@LaunchedEffect
+        if (browseMode == BrowseMode.Canvas && folders != null) return@LaunchedEffect
+        // Each kind loads on its own: one failing (say, the search index still building) leaves the others.
+        suspend fun kind(load: suspend () -> List<MemeFolder>): List<MemeFolder> = try {
+            load()
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            emptyList()
+        }
+        val loaded = kind { loadMemeFolders(store) } + kind { loadQuoteFolders(store) } + kind { loadFormatFolders(store) }
+        folders = loaded + reactionFolders.orEmpty()
+        if (reactionFolders == null) {
+            val reactions = kind { loadReactionFolders(store) { text -> engine.embedText(text) } }
+            reactionFolders = reactions
+            folders = loaded + reactions
+        }
+    }
+    // Typing a search on the folders shows its results on the canvas.
+    LaunchedEffect(query) {
+        if (query.isNotBlank() && browseMode == BrowseMode.Folders) selectBrowseMode(BrowseMode.Canvas)
+    }
+    // Another filter replacing the open folder's closes it.
+    LaunchedEffect(selectedTag, query, folderIds, usedOnly) {
+        // A search, tag or the Used chip replaces a folder's fixed list.
+        if (folderIds != null && (query.isNotBlank() || selectedTag != null || usedOnly)) folderIds = null
+        val folder = openFolder ?: return@LaunchedEffect
+        val stillOpen = when (folder.kind) {
+            FolderKind.Tag -> selectedTag?.let(TagMerge::normalizeTagLabel) == folder.key
+            FolderKind.Quote, FolderKind.Reaction, FolderKind.Format -> folderIds == folder.ids
+        }
+        if (!stillOpen) openFolder = null
+    }
+    fun openFolderFilter(folder: MemeFolder) {
+        usedOnly = false
+        selectedTag = null
+        query = ""
+        folderIds = null
+        when (folder.kind) {
+            FolderKind.Tag -> selectedTag = folder.label
+            FolderKind.Quote, FolderKind.Reaction, FolderKind.Format -> folderIds = folder.ids
+        }
+        openFolder = folder
+    }
+    fun leaveFolder() {
+        val folder = openFolder ?: return
+        openFolder = null
+        when (folder.kind) {
+            FolderKind.Tag -> selectedTag = null
+            FolderKind.Quote, FolderKind.Reaction, FolderKind.Format -> folderIds = null
+        }
+    }
+    // From the canvas, the folder's filter holds until its tiles have flown home (see the browser's onSettled):
+    // reloading the whole library mid-flight stalls the morph.
+    fun backToFolders() {
+        if (browseMode == BrowseMode.Grid) leaveFolder()
+        selectBrowseMode(BrowseMode.Folders)
+    }
+    BackHandler(enabled = active && browseMode == BrowseMode.Canvas && openFolder != null) { backToFolders() }
+    BackHandler(enabled = active && browseMode == BrowseMode.Folders) { selectBrowseMode(BrowseMode.Canvas) }
 
     // Multi-select state
     var selectionMode by remember { mutableStateOf(false) }
@@ -268,14 +361,18 @@ internal fun LibraryScreen(
 
     // A library revision must not collapse the pages the user has already loaded.
     // Reuse unchanged row objects so a metadata write does not invalidate every cell.
-    LaunchedEffect(query, kindFilter, selectedTag, usedOnly, revision, active) {
+    LaunchedEffect(query, kindFilter, selectedTag, usedOnly, folderIds, revision, active) {
         if (!active) return@LaunchedEffect
         resultGeneration++
         val generation = resultGeneration
         loadInFlight = true
         pageJob?.cancel()
         isLoadingMore = false
-        val effectiveTag = if (usedOnly) "__USED__" else selectedTag
+        val effectiveTag = when {
+            usedOnly -> "__USED__"
+            folderIds != null -> "__IDS__:${folderIds.hashCode()}"
+            else -> selectedTag
+        }
         val key = Triple(query.trim(), kindFilter, effectiveTag)
         userSearching = resultKey != key && key.first.isNotEmpty()
         // Same query, re-run by a library write (a tag edit, or the library-wide re-tag one starts).
@@ -300,6 +397,7 @@ internal fun LibraryScreen(
         isSearching = key.first.isNotEmpty()
         searchError = null
         fun publish(rows: List<Meme>, more: Boolean) {
+            publishedKey = key
             val fresh = rows.filterNot { it.id in deletedIds }
             // A re-tag rewrites tags across the whole library for minutes, re-running this search every settle with
             // slightly different scores. Re-sorting each time kept the grid shuffling under the user's thumb, so a
@@ -337,6 +435,8 @@ internal fun LibraryScreen(
                     if (usedOnly) {
                         val usedRows = store.recentlyCopied(limit = minOf(256, wanted + 1), kind = key.second)
                         if (usedRows.size > wanted) usedRows.subList(0, wanted).toList() to true else usedRows to false
+                    } else if (folderIds != null) {
+                        folderIds.orEmpty().mapNotNull { store.meme(it) }.filter { key.second == null || it.kind == key.second } to false
                     } else {
                         val loaded = ArrayList<Meme>(wanted + 1)
                         var cursor: PageCursor? = null
@@ -438,6 +538,14 @@ internal fun LibraryScreen(
                 }
             }
         }
+    }
+
+    // What the grid, canvas, viewer and every batch action work on: near-copies show once. Selection is pruned to
+    // it, so All, Share, Tag and Delete never reach a copy hidden behind the one on screen.
+    val shownMemes = remember(memes, memeGroups) { withoutHiddenCopies(memes, memeGroups.duplicateOf) }
+    LaunchedEffect(shownMemes) {
+        val visible = shownMemes.mapTo(HashSet(shownMemes.size)) { it.id }
+        if (selectedIds.any { it !in visible }) selectedIds = selectedIds.filterTo(HashSet()) { it in visible }
     }
 
     Column(
@@ -765,10 +873,10 @@ internal fun LibraryScreen(
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     TextButton(
                         onClick = {
-                            selectedIds = if (selectedIds.size == memes.size) emptySet() else memes.map { it.id }.toSet()
+                            selectedIds = if (selectedIds.size == shownMemes.size) emptySet() else shownMemes.mapTo(HashSet()) { it.id }
                         },
                     ) {
-                        Text(if (selectedIds.size == memes.size) "Deselect" else "All", style = MaterialTheme.typography.labelSmall)
+                        Text(if (selectedIds.size == shownMemes.size) "Deselect" else "All", style = MaterialTheme.typography.labelSmall)
                     }
 
                     Button(
@@ -785,7 +893,7 @@ internal fun LibraryScreen(
 
                     Button(
                         onClick = {
-                            val selectedMemes = memes.filter { selectedIds.contains(it.id) }
+                            val selectedMemes = shownMemes.filter { selectedIds.contains(it.id) }
                             scope.launch {
                                 try {
                                     files.share(context, selectedMemes)
@@ -828,39 +936,60 @@ internal fun LibraryScreen(
             }
         }
 
+        val quickCopy: (Meme) -> Unit = { meme ->
+            if (copyingMemeId == null) {
+                copyingMemeId = meme.id
+                scope.launch {
+                    try {
+                        files.copyToClipboard(meme.uri, meme.name)
+                        runCatching { store.recordCopy(meme.id, query.trim()) }
+                        copiedMemeId = meme.id
+                        Toast.makeText(
+                            context,
+                            if (meme.kind == "video") "✓ Video copied — paste into reply" else "✓ Meme copied — paste into reply",
+                            Toast.LENGTH_SHORT,
+                        ).show()
+                        delay(1400)
+                        if (copiedMemeId == meme.id) copiedMemeId = null
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (failure: Exception) {
+                        Toast.makeText(context, "Could not copy: ${failure.message}", Toast.LENGTH_LONG).show()
+                    } finally {
+                        if (copyingMemeId == meme.id) copyingMemeId = null
+                    }
+                }
+            }
+        }
+        val switcher: @Composable () -> Unit = {
+            BrowseModeSwitcher(
+                mode = browseMode,
+                onSelect = { mode ->
+                    selectionMode = false
+                    selectedIds = emptySet()
+                    // Folders from a folder's canvas goes back into that folder's stack.
+                    if (mode == BrowseMode.Folders && openFolder != null) backToFolders() else selectBrowseMode(mode)
+                },
+            )
+        }
+        // The grid also carries the onboarding and empty-result states for every mode.
+        val useGrid = browseMode == BrowseMode.Grid || (memes.isEmpty() && (browseMode == BrowseMode.Canvas || libraryCount == 0))
+        val showSwitcher = !selectionMode && libraryCount > 0
+
+        // What the viewer was opened for: the search, or the line of an open quote folder. The viewer starts a video
+        // where it's said, and a copy made there is remembered against it.
+        val viewerText = openFolder?.takeIf { it.kind == FolderKind.Quote }?.query ?: query.trim()
+
         // Meme Grid
-        MemeGrid(
-            memes = memes,
+        if (useGrid) MemeGrid(
+            memes = shownMemes,
             selectionMode = selectionMode,
             selectedIds = selectedIds,
             activeMemeId = indexProgress.memeId.takeIf { indexProgress.running },
             copiedMemeId = copiedMemeId,
             copyingMemeId = copyingMemeId,
-            onQuickCopy = { meme ->
-                if (copyingMemeId == null) {
-                    copyingMemeId = meme.id
-                    scope.launch {
-                        try {
-                            files.copyToClipboard(meme.uri, meme.name)
-                            runCatching { store.recordCopy(meme.id) }
-                            copiedMemeId = meme.id
-                            Toast.makeText(
-                                context,
-                                if (meme.kind == "video") "✓ Video copied — paste into reply" else "✓ Meme copied — paste into reply",
-                                Toast.LENGTH_SHORT,
-                            ).show()
-                            delay(1400)
-                            if (copiedMemeId == meme.id) copiedMemeId = null
-                        } catch (cancelled: CancellationException) {
-                            throw cancelled
-                        } catch (failure: Exception) {
-                            Toast.makeText(context, "Could not copy: ${failure.message}", Toast.LENGTH_LONG).show()
-                        } finally {
-                            if (copyingMemeId == meme.id) copyingMemeId = null
-                        }
-                    }
-                }
-            },
+            onQuickCopy = quickCopy,
+            bottomBar = switcher.takeIf { showSwitcher },
             onItemClick = { meme ->
                 if (selectionMode) {
                     selectedIds = if (selectedIds.contains(meme.id)) {
@@ -871,7 +1000,7 @@ internal fun LibraryScreen(
                 } else {
                     // Closing the viewer must not bring the search keyboard back over the results.
                     focusManager.clearFocus()
-                    onOpenViewer(meme)
+                    onOpenViewer(meme, shownMemes, viewerText)
                 }
             },
             onItemLongClick = { meme ->
@@ -900,7 +1029,7 @@ internal fun LibraryScreen(
                             verticalArrangement = Arrangement.spacedBy(2.dp),
                         ) {
                             val q = query.trim()
-                            val countStr = if (hasMore) "${memes.size}+ matches" else "${memes.size} match${if (memes.size == 1) "" else "es"}"
+                            val countStr = if (hasMore) "${shownMemes.size}+ matches" else "${shownMemes.size} match${if (shownMemes.size == 1) "" else "es"}"
                             Text(
                                 text = "$countStr for “$q”",
                                 style = MaterialTheme.typography.bodySmall,
@@ -1037,6 +1166,31 @@ internal fun LibraryScreen(
                 }
             },
         )
+        else MemeBrowser(
+            mode = browseMode,
+            onModeChange = ::selectBrowseMode,
+            memes = shownMemes,
+            memesKey = publishedKey,
+            canvasState = canvasState,
+            hasMore = hasMore,
+            isLoadingMore = isLoadingMore,
+            onLoadMore = onLoadMore,
+            onOpen = { meme ->
+                focusManager.clearFocus()
+                onOpenViewer(meme, shownMemes, viewerText)
+            },
+            onLongPress = quickCopy,
+            folders = folders,
+            openFolderKey = openFolder?.key,
+            onOpenFolder = { folder ->
+                focusManager.clearFocus()
+                openFolderFilter(folder)
+            },
+            onBackToFolders = ::backToFolders,
+            onSettled = { settled -> if (settled == BrowseMode.Folders) leaveFolder() },
+            bottomBar = { if (showSwitcher) switcher() },
+            modifier = Modifier.weight(1f),
+        )
     }
 
     // Batch Tag Dialog
@@ -1048,7 +1202,7 @@ internal fun LibraryScreen(
             onConfirm = { label, category, spread ->
                 showBatchTagDialog = false
                 scope.launch {
-                    val count = store.manualTag(selectedIds.toList(), label, category, spread)
+                    val count = store.manualTag(shownMemes.filter { it.id in selectedIds }.map { it.id }, label, category, spread)
                     Toast.makeText(context, "Tagged $count memes", Toast.LENGTH_SHORT).show()
                     selectionMode = false
                     selectedIds = emptySet()
@@ -1064,7 +1218,7 @@ internal fun LibraryScreen(
             onDismiss = { showBatchDeleteDialog = false },
             onConfirmDelete = {
                 showBatchDeleteDialog = false
-                val targets = memes.filter { it.id in selectedIds }
+                val targets = shownMemes.filter { it.id in selectedIds }
                 scope.launch {
                     try {
                         val filesDeleted = files.deleteMemes(targets)
@@ -1270,4 +1424,14 @@ private fun rememberSettledRevision(revision: StateFlow<Long>, settleMillis: Lon
         }
     }
     return settled
+}
+
+/**
+ * [memes] without the near-copies whose kept copy ([duplicateOf]) is in the list too. A copy whose keeper isn't in
+ * the list (a search that found only the copy) stays.
+ */
+internal fun withoutHiddenCopies(memes: List<Meme>, duplicateOf: Map<Long, Long>): List<Meme> {
+    if (duplicateOf.isEmpty()) return memes
+    val inList = memes.mapTo(HashSet(memes.size)) { it.id }
+    return memes.filter { meme -> duplicateOf[meme.id]?.let { it !in inList } ?: true }
 }
