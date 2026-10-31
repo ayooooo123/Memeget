@@ -50,6 +50,19 @@ class PhraseMiningTest {
     }
 
     @Test
+    fun piecesThatSitApartInAnotherMemeAreNotJoinedIntoALineItNeverSays() {
+        val phrases = PhraseMining.sharedPhrases(
+            listOf(
+                1L to "alpha beta gamma delta apple",
+                2L to "alpha beta gamma xenon beta gamma delta zebra",
+            ),
+            minRarity = 0.0,
+        )
+        // Meme 2 says "alpha beta gamma" and "beta gamma delta", never "alpha beta gamma delta".
+        assertEquals(setOf("alpha beta gamma", "beta gamma delta"), phrases.map { it.phrase }.toSet())
+    }
+
+    @Test
     fun everydayFragmentsGiveWayToRareLines() {
         val phrases = PhraseMining.sharedPhrases(
             listOf(

@@ -920,10 +920,13 @@ internal fun LibraryScreen(
         val quickCopy: (Meme) -> Unit = { meme ->
             if (copyingMemeId == null) {
                 copyingMemeId = meme.id
+                // The search this copy answers, taken now: the copy can take a while (a WebM is converted), and a
+                // search typed meanwhile must not be taught this meme.
+                val copiedFrom = query.trim()
                 scope.launch {
                     try {
                         files.copyToClipboard(meme.uri, meme.name)
-                        runCatching { store.recordCopy(meme.id, query.trim()) }
+                        runCatching { store.recordCopy(meme.id, copiedFrom) }
                         copiedMemeId = meme.id
                         Toast.makeText(
                             context,

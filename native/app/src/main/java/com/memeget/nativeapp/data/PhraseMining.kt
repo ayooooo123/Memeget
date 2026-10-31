@@ -78,20 +78,26 @@ internal object PhraseMining {
             .groupBy({ it.value.sorted() }, { it.key })
             .filterKeys { ids -> distinctByMemes.getOrPut(ids) { distinctMemes(ids) } >= minMemes }
         // Join each group's runs into whole lines, read off the first meme's words: runs shared by exactly the same
-        // memes that overlap by two words or more are one line cut into pieces by the matching window.
+        // memes that overlap by two words or more are usually one line cut into pieces by the matching window. The
+        // joined line must appear in every member; when it doesn't (the runs sit apart in another meme), its pieces
+        // are kept as they are, since each of those is said by all the members.
+        fun says(id: Long, line: String) = " ${words.getValue(id).joinToString(" ")} ".contains(" $line ")
         val lines = groups.flatMap { (ids, phrases) ->
             val tokens = words.getValue(ids.first())
             val spans = phrases.flatMap { phrase ->
                 val gram = phrase.split(' ')
                 (0..tokens.size - gram.size).filter { tokens.subList(it, it + gram.size) == gram }.map { it until it + gram.size }
             }.sortedBy { it.first }
-            val merged = ArrayList<IntRange>()
+            val merged = ArrayList<MutableList<IntRange>>()
             for (span in spans) {
                 val last = merged.lastOrNull()
-                if (last != null && span.first <= last.last - 1) merged[merged.lastIndex] = last.first..maxOf(last.last, span.last)
-                else merged += span
+                if (last != null && span.first <= last.maxOf { it.last } - 1) last += span else merged += mutableListOf(span)
             }
-            merged.map { Triple(tokens.subList(it.first, it.last + 1).joinToString(" "), ids, distinctByMemes.getValue(ids)) }
+            fun text(range: IntRange) = tokens.subList(range.first, range.last + 1).joinToString(" ")
+            merged.flatMap { parts ->
+                val whole = text(parts.minOf { it.first }..parts.maxOf { it.last })
+                if (ids.all { says(it, whole) }) listOf(whole) else parts.map(::text)
+            }.map { Triple(it, ids, distinctByMemes.getValue(ids)) }
         }.distinctBy { it.first }
 
         val docFreq = HashMap<String, Int>()
