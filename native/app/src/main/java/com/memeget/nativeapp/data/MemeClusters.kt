@@ -23,6 +23,10 @@ internal object MemeClusters {
         labels: List<List<String>>,
         rabit64: LongArray? = null,
         hasVector: BooleanArray? = null,
+        /** "image" or "video" per meme; null treats every meme as an image. */
+        kinds: List<String>? = null,
+        /** Normalized transcript per meme ([SearchText.phraseKey]); null treats every transcript as blank. */
+        transcriptKeys: List<String>? = null,
     ): MemeGroups {
         val n = ids.size
         if (n == 0) return MemeGroups.Empty
@@ -68,15 +72,21 @@ internal object MemeClusters {
             return dot.toFloat() / (normI * normJ)
         }
 
-        // 1. Near-copies: cosine >= 0.97 AND equal OCR keys (including both blank)
-        val ocrBuckets = HashMap<String, ArrayList<Int>>()
+        // 1. Near-copies: cosine >= 0.97 between memes of the same kind with the same OCR text. A video is a copy
+        //    only when its words match too: the picture says nothing about the audio, so two clips that look alike
+        //    can say different things. A video without a transcript can't be checked and is never hidden.
+        val copyBuckets = HashMap<String, ArrayList<Int>>()
         for (i in 0 until n) {
             if (!valid[i]) continue
-            ocrBuckets.getOrPut(ocrKeys[i]) { ArrayList() }.add(i)
+            val video = kinds?.get(i) == "video"
+            val speech = transcriptKeys?.get(i).orEmpty()
+            if (video && speech.isBlank()) continue
+            val key = if (video) "video\u0000${ocrKeys[i]}\u0000$speech" else "image\u0000${ocrKeys[i]}"
+            copyBuckets.getOrPut(key) { ArrayList() }.add(i)
         }
 
         val nearCopyDsu = DisjointSet(n)
-        for ((_, bucket) in ocrBuckets) {
+        for ((_, bucket) in copyBuckets) {
             val bSize = bucket.size
             if (bSize < 2) continue
             for (a in 0 until bSize) {
