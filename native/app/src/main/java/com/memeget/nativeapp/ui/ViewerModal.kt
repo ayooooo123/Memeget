@@ -238,11 +238,15 @@ internal fun ViewerModal(
     fun copyCurrent() {
         if (copying) return
         copying = true
+        // The meme and search this copy is for, taken at the tap: the copy can take a while, and a swipe meanwhile
+        // moves the viewer to another meme.
+        val target = currentMeme
+        val copiedFrom = searchText
         scope.launch {
             try {
-                files.copyToClipboard(currentMeme.uri, currentMeme.name)
-                runCatching { store.recordCopy(currentMeme.id, searchText) }
-                val message = if (currentMeme.kind == "video") {
+                files.copyToClipboard(target.uri, target.name)
+                runCatching { store.recordCopy(target.id, copiedFrom) }
+                val message = if (target.kind == "video") {
                     "Video copied — paste in apps that accept videos"
                 } else {
                     "Meme copied — paste it in another app"
