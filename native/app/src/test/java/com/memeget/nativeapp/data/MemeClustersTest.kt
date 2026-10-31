@@ -58,6 +58,48 @@ class MemeClustersTest {
         assertEquals(mapOf(30L to 40L), tieGroups.duplicateOf)
     }
 
+    private fun twoIdenticalPictures(): ByteArray {
+        val v = makeVector { bytes -> for (i in 0 until 20) bytes[i] = 100 }
+        return ByteArray(2 * 512).also {
+            System.arraycopy(v, 0, it, 0, 512)
+            System.arraycopy(v, 0, it, 512, 512)
+        }
+    }
+
+    private fun groupPair(kinds: List<String>, transcripts: List<String>) = MemeClusters.group(
+        ids = longArrayOf(10L, 20L),
+        modifiedAt = longArrayOf(1000L, 2000L),
+        vectors = twoIdenticalPictures(),
+        ocrKeys = listOf("", ""),
+        labels = listOf(emptyList(), emptyList()),
+        kinds = kinds,
+        transcriptKeys = transcripts,
+    )
+
+    @Test
+    fun videosThatLookAlikeButSayDifferentThingsAreBothShown() {
+        val groups = groupPair(listOf("video", "video"), listOf("im home honey", "get out of my house"))
+        assertTrue(groups.duplicateOf.isEmpty())
+    }
+
+    @Test
+    fun videosWithoutTranscriptsAreNeverHidden() {
+        val groups = groupPair(listOf("video", "video"), listOf("", ""))
+        assertTrue(groups.duplicateOf.isEmpty())
+    }
+
+    @Test
+    fun anImageIsNeverACopyOfAVideo() {
+        val groups = groupPair(listOf("image", "video"), listOf("", "im home honey"))
+        assertTrue(groups.duplicateOf.isEmpty())
+    }
+
+    @Test
+    fun videosThatLookAndSoundTheSameCollapse() {
+        val groups = groupPair(listOf("video", "video"), listOf("im home honey", "im home honey"))
+        assertEquals(mapOf(10L to 20L), groups.duplicateOf)
+    }
+
     @Test
     fun samePictureDifferentTextFormsFormatGroup() {
         // Three memes with identical image vector but different OCR text

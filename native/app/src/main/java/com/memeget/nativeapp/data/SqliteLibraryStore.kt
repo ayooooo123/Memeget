@@ -553,6 +553,8 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
                 labels = labels,
                 rabit64 = resident.imageRabit64,
                 hasVector = resident.hasImage,
+                kinds = entries.map { it.meme.kind },
+                transcriptKeys = entries.map { SearchText.phraseKey(it.meme.transcript) },
             )
             resident.memeGroups = groups
             groups
