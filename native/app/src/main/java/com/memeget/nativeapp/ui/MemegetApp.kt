@@ -153,6 +153,11 @@ internal fun MemegetApp(
                         onTagSearchApplied = { tagSearchRequest = null },
                         deletedMemeIds = deletedMemeIds,
                         onInteractionChange = { searching = it },
+                        onTeach = { memeId, label, category, right ->
+                            cloud.recordTeaching(memeId, label, category, right, emptyList())
+                            runCatching { knowledge.recordVerifierTeaching(memeId) }
+                        },
+                        onTaught = { labelsChanged = true },
                     )
                 }
                 when (currentTab) {

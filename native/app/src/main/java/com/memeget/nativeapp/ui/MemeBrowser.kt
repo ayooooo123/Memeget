@@ -265,6 +265,8 @@ internal fun MemeBrowser(
     openFolderKey: String?,
     onOpenFolder: (MemeFolder) -> Unit,
     onBackToFolders: () -> Unit,
+    /** Opens the check of the open folder's memes; null when the open folder can't be checked. */
+    onCheckFolder: (() -> Unit)?,
     /** A morph finished and [BrowseMode] is now on screen. */
     onSettled: (BrowseMode) -> Unit,
     bottomBar: @Composable () -> Unit,
@@ -394,24 +396,43 @@ internal fun MemeBrowser(
             val folder = folders?.firstOrNull { it.key == openFolderKey }
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier
-                    .padding(start = 12.dp, top = 12.dp)
-                    .clip(RoundedCornerShape(50))
-                    .background(MemegetColors.Surface.copy(alpha = 0.9f))
-                    .border(1.dp, MemegetColors.Border, RoundedCornerShape(50))
-                    .clickable { onBackToFolders() }
-                    .padding(start = 8.dp, end = 12.dp, top = 6.dp, bottom = 6.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.padding(start = 12.dp, top = 12.dp, end = 12.dp),
             ) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back to folders", tint = MemegetColors.TextPrimary, modifier = Modifier.size(16.dp))
-                Spacer(Modifier.width(6.dp))
-                Text(
-                    text = folder?.let { if (it.count >= 0) "${it.label} · ${it.count}" else it.label } ?: "Folders",
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    style = MaterialTheme.typography.labelMedium,
-                    fontWeight = FontWeight.Bold,
-                    color = MemegetColors.TextPrimary,
-                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .weight(1f, fill = false)
+                        .clip(RoundedCornerShape(50))
+                        .background(MemegetColors.Surface.copy(alpha = 0.9f))
+                        .border(1.dp, MemegetColors.Border, RoundedCornerShape(50))
+                        .clickable { onBackToFolders() }
+                        .padding(start = 8.dp, end = 12.dp, top = 6.dp, bottom = 6.dp),
+                ) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back to folders", tint = MemegetColors.TextPrimary, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        text = folder?.let { if (it.count >= 0) "${it.label} · ${it.count}" else it.label } ?: "Folders",
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = MemegetColors.TextPrimary,
+                    )
+                }
+                if (onCheckFolder != null) {
+                    Text(
+                        text = "✓✗ Check",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = MemegetColors.Background,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(50))
+                            .background(MemegetColors.Volt)
+                            .clickable(onClick = onCheckFolder)
+                            .padding(horizontal = 12.dp, vertical = 7.dp),
+                    )
+                }
             }
         }
         Box(Modifier.align(Alignment.BottomCenter).padding(bottom = 12.dp)) { bottomBar() }

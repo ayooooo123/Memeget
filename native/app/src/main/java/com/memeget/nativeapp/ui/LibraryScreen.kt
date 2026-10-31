@@ -67,6 +67,7 @@ import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -103,6 +104,10 @@ internal fun LibraryScreen(
     deletedMemeIds: Set<Long> = emptySet(),
     modifier: Modifier = Modifier,
     onInteractionChange: (Boolean) -> Unit = {},
+    /** Saves a teaching: [right] says whether [label] fits the meme. */
+    onTeach: suspend (memeId: Long, label: String, category: String, right: Boolean) -> Unit = { _, _, _, _ -> },
+    /** Teachings were given here: the library should re-tag so look-alikes learn from them. */
+    onTaught: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -195,20 +200,23 @@ internal fun LibraryScreen(
     LaunchedEffect(revision, browseMode, active) {
         if (!active || browseMode == BrowseMode.Grid) return@LaunchedEffect
         if (browseMode == BrowseMode.Canvas && folders != null) return@LaunchedEffect
-        // Each kind loads on its own: one failing (say, the search index still building) leaves the others.
-        suspend fun kind(load: suspend () -> List<MemeFolder>): List<MemeFolder> = try {
-            load()
-        } catch (e: Exception) {
-            if (e is CancellationException) throw e
-            emptyList()
+        // Each kind loads on its own and shows as soon as it's ready: formats and reactions wait for the search index,
+        // which takes a while on a fresh launch, and one failing leaves the others.
+        suspend fun show(kind: FolderKind, load: suspend () -> List<MemeFolder>) {
+            val loaded = try {
+                load()
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                emptyList()
+            }
+            folders = folders.orEmpty().filter { it.kind != kind } + loaded
         }
-        val loaded = kind { loadMemeFolders(store) } + kind { loadQuoteFolders(store) } + kind { loadFormatFolders(store) }
-        folders = loaded + reactionFolders.orEmpty()
-        if (reactionFolders == null) {
-            val reactions = kind { loadReactionFolders(store) { text -> engine.embedText(text) } }
-            reactionFolders = reactions
-            folders = loaded + reactions
+        show(FolderKind.Tag) { loadMemeFolders(store) }
+        show(FolderKind.Quote) { loadQuoteFolders(store) }
+        show(FolderKind.Reaction) {
+            reactionFolders ?: loadReactionFolders(store) { text -> engine.embedText(text) }.also { reactionFolders = it }
         }
+        show(FolderKind.Format) { loadFormatFolders(store) }
     }
     // Typing a search on the folders shows its results on the canvas.
     LaunchedEffect(query) {
@@ -249,6 +257,34 @@ internal fun LibraryScreen(
     fun backToFolders() {
         if (browseMode == BrowseMode.Grid) leaveFolder()
         selectBrowseMode(BrowseMode.Folders)
+    }
+    // A tag folder being checked, with the memes to ask about.
+    var folderCheck by remember { mutableStateOf<Pair<MemeFolder, List<Meme>>?>(null) }
+    fun startFolderCheck(folder: MemeFolder) {
+        scope.launch {
+            val toCheck = withContext(Dispatchers.IO) {
+                val all = ArrayList<Meme>()
+                var cursor: PageCursor? = null
+                while (true) {
+                    val page = store.page(256, cursor, null, folder.label)
+                    all += page
+                    if (page.size < 256) break
+                    cursor = page.last().let { PageCursor(it.modifiedAt, it.id) }
+                }
+                // Answers you gave in this app are settled. Imported "confirmed" tags (an old collection, a
+                // teaching pack) are someone else's say-so, so they're asked too, after the machine's guesses,
+                // which come least certain first.
+                all.mapNotNull { meme ->
+                    val tag = meme.tags.firstOrNull { TagMerge.normalizeTagLabel(it.label) == folder.key } ?: return@mapNotNull null
+                    if (TagMerge.isHumanTag(tag) && tag.provenance == "user") null else meme to tag
+                }.sortedWith(compareBy({ TagMerge.isHumanTag(it.second) }, { it.second.score })).map { it.first }
+            }
+            if (toCheck.isEmpty()) {
+                Toast.makeText(context, "Everything in “${folder.label}” is already checked", Toast.LENGTH_SHORT).show()
+            } else {
+                folderCheck = folder to toCheck
+            }
+        }
     }
     BackHandler(enabled = active && browseMode == BrowseMode.Canvas && openFolder != null) { backToFolders() }
     BackHandler(enabled = active && browseMode == BrowseMode.Folders) { selectBrowseMode(BrowseMode.Canvas) }
@@ -1171,9 +1207,44 @@ internal fun LibraryScreen(
                 openFolderFilter(folder)
             },
             onBackToFolders = ::backToFolders,
+            onCheckFolder = openFolder?.takeIf { it.kind == FolderKind.Tag }?.let { folder -> { startFolderCheck(folder) } },
             onSettled = { settled -> if (settled == BrowseMode.Folders) leaveFolder() },
             bottomBar = { if (showSwitcher) switcher() },
             modifier = Modifier.weight(1f),
+        )
+    }
+
+    folderCheck?.let { (folder, toCheck) ->
+        FolderReview(
+            label = folder.label,
+            memes = toCheck,
+            onClose = { answers ->
+                folderCheck = null
+                if (answers.isNotEmpty()) scope.launch {
+                    // In order, each finished before the next, and all before the re-tag that learns from them.
+                    val failed = withContext(NonCancellable) {
+                        answers.count { (meme, right) ->
+                            val category = meme.tags.firstOrNull { TagMerge.normalizeTagLabel(it.label) == folder.key }?.category ?: "topic"
+                            try {
+                                onTeach(meme.id, folder.label, category, right)
+                                false
+                            } catch (e: Exception) {
+                                if (e is CancellationException) throw e
+                                true
+                            }
+                        }
+                    }
+                    val wrong = answers.count { !it.second }
+                    Toast.makeText(
+                        context,
+                        if (failed > 0) "$failed of ${answers.size} answers couldn't be saved"
+                        else if (wrong > 0) "Took $wrong out of “${folder.label}”"
+                        else "Saved ${answers.size} answers",
+                        Toast.LENGTH_SHORT,
+                    ).show()
+                    if (failed < answers.size) onTaught()
+                }
+            },
         )
     }
 
