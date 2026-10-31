@@ -94,16 +94,6 @@ internal data class Exemplar(
 internal data class SearchHit(val meme: Meme, val score: Float)
 internal data class PageCursor(val modifiedAt: Long, val id: Long)
 internal data class SearchCursor(val score: Float, val modifiedAt: Long, val id: Long)
-internal data class MemeGroups(
-    /** Meme id -> id of the near-copy shown in its place (the group's newest member by modified_at, then id). Keepers are not keys. */
-    val duplicateOf: Map<Long, Long>,
-    /** Same-template groups of 3+ distinct pictures, largest first. */
-    val formats: List<FormatGroup>,
-) {
-    companion object {
-        val Empty = MemeGroups(emptyMap(), emptyList())
-    }
-}
 internal data class FormatGroup(
     /** The tag label at least half the group's members carry (most common such), else "". */
     val label: String,
@@ -282,8 +272,8 @@ internal interface LibraryStore {
     suspend fun ocrTexts(): List<Pair<Long, String>>
     /** Counts a copy of [id]. A non-blank [query] is the search it was copied from: copies are remembered per search so the same search ranks that meme higher next time. */
     suspend fun recordCopy(id: Long, query: String = "")
-    /** Near-copies and shared-template groups among indexed memes; computed from the resident index and cached until it changes. */
-    suspend fun memeGroups(): MemeGroups
+    /** Groups of memes sharing one picture with different words; computed from the resident index and cached until it changes. */
+    suspend fun memeFormats(): List<FormatGroup>
     suspend fun recentlyCopied(limit: Int = 90, kind: String? = null): List<Meme> = emptyList()
     suspend fun copiedCount(): Int = recentlyCopied(limit = 256).size
     suspend fun taughtLabelNames(): List<String> = exemplars().map { it.label }.distinct()

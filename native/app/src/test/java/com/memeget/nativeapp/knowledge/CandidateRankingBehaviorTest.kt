@@ -13,7 +13,7 @@ import com.memeget.nativeapp.LocalAnalysis
 import com.memeget.nativeapp.LocalKnowledge
 import com.memeget.nativeapp.Meme
 import com.memeget.nativeapp.ModelProgress
-import com.memeget.nativeapp.MemeGroups
+import com.memeget.nativeapp.FormatGroup
 import com.memeget.nativeapp.PageCursor
 import com.memeget.nativeapp.SearchCursor
 import com.memeget.nativeapp.SearchHit
@@ -175,7 +175,7 @@ class CandidateRankingBehaviorTest {
         override suspend fun transcripts(): List<Pair<Long, String>> = emptyList()
         override suspend fun ocrTexts(): List<Pair<Long, String>> = emptyList()
         override suspend fun recordCopy(id: Long, query: String) {}
-        override suspend fun memeGroups(): MemeGroups = MemeGroups.Empty
+        override suspend fun memeFormats(): List<FormatGroup> = emptyList()
     }
 
     private class TestEngine : InferenceEngine {

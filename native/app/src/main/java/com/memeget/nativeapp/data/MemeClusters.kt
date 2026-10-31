@@ -1,20 +1,22 @@
 package com.memeget.nativeapp.data
 
 import com.memeget.nativeapp.FormatGroup
-import com.memeget.nativeapp.MemeGroups
 import kotlin.math.sqrt
 
 /**
- * Pure clustering algorithm for near-duplicate and shared-template (format) meme detection.
- *
- * Uses Hamming distance on 512-bit RaBit sign codes as a safe O(1) prefilter:
- * for cosine >= 0.86, theoretical mean Hamming distance is 512 * arccos(0.86)/pi ~ 87.3 bits
- * (sigma ~ 8.5 bits). A threshold of 128 bits (~4.78 sigma, cosine ~0.707) safely discards
- * >99.9% of unrelated pairs without dropping valid format edges.
+ * Format groups: memes that share one picture with different words on it (a template, or an original and its
+ * remixes). Uses Hamming distance on 512-bit sign codes as a prefilter before the exact int8 cosine: for cosine
+ * >= 0.86 the expected Hamming distance is 512 * arccos(0.86) / pi ~ 87 bits (sigma ~ 8.5), so a 128-bit cut
+ * (~4.8 sigma, cosine ~0.71) discards nearly all unrelated pairs without dropping real edges.
  */
 internal object MemeClusters {
+    private const val FORMAT_COS = 0.86f
+    private const val PREFILTER_BITS = 128
+    private const val MIN_GROUP = 3
+    /** A larger component is a chain of loosely similar pictures, not one template. */
+    private const val MAX_GROUP = 120
 
-    fun group(
+    fun formats(
         ids: LongArray,
         modifiedAt: LongArray,
         vectors: ByteArray,
@@ -23,13 +25,9 @@ internal object MemeClusters {
         labels: List<List<String>>,
         rabit64: LongArray? = null,
         hasVector: BooleanArray? = null,
-        /** "image" or "video" per meme; null treats every meme as an image. */
-        kinds: List<String>? = null,
-        /** Normalized transcript per meme ([SearchText.phraseKey]); null treats every transcript as blank. */
-        transcriptKeys: List<String>? = null,
-    ): MemeGroups {
+    ): List<FormatGroup> {
         val n = ids.size
-        if (n == 0) return MemeGroups.Empty
+        if (n == 0) return emptyList()
         require(modifiedAt.size == n) { "modifiedAt size ${modifiedAt.size} != ids size $n" }
         require(ocrKeys.size == n) { "ocrKeys size ${ocrKeys.size} != ids size $n" }
         require(labels.size == n) { "labels size ${labels.size} != ids size $n" }
@@ -50,169 +48,70 @@ internal object MemeClusters {
                 valid[i] = true
             }
         }
-
         val codes: LongArray? = if (dim == 512) {
-            if (rabit64 != null && rabit64.size >= n * 8) {
-                rabit64
-            } else {
-                computeRabit(vectors, n, valid)
-            }
+            if (rabit64 != null && rabit64.size >= n * 8) rabit64 else computeSignCodes(vectors, n, valid)
         } else null
 
         fun cosine(i: Int, j: Int): Float {
-            val normI = norms[i]
-            val normJ = norms[j]
-            if (normI <= 0f || normJ <= 0f) return 0f
             val offI = i * dim
             val offJ = j * dim
             var dot = 0
-            for (d in 0 until dim) {
-                dot += vectors[offI + d].toInt() * vectors[offJ + d].toInt()
-            }
-            return dot.toFloat() / (normI * normJ)
+            for (d in 0 until dim) dot += vectors[offI + d].toInt() * vectors[offJ + d].toInt()
+            return dot.toFloat() / (norms[i] * norms[j])
         }
 
-        // 1. Near-copies: cosine >= 0.97 between memes of the same kind with the same OCR text. A video is a copy
-        //    only when its words match too: the picture says nothing about the audio, so two clips that look alike
-        //    can say different things. A video without a transcript can't be checked and is never hidden.
-        val copyBuckets = HashMap<String, ArrayList<Int>>()
+        // Same picture, different words: an edge needs the OCR text to differ, and at least one meme to have some.
+        val sets = DisjointSet(n)
         for (i in 0 until n) {
             if (!valid[i]) continue
-            val video = kinds?.get(i) == "video"
-            val speech = transcriptKeys?.get(i).orEmpty()
-            if (video && speech.isBlank()) continue
-            val key = if (video) "video\u0000${ocrKeys[i]}\u0000$speech" else "image\u0000${ocrKeys[i]}"
-            copyBuckets.getOrPut(key) { ArrayList() }.add(i)
-        }
-
-        val nearCopyDsu = DisjointSet(n)
-        for ((_, bucket) in copyBuckets) {
-            val bSize = bucket.size
-            if (bSize < 2) continue
-            for (a in 0 until bSize) {
-                val i = bucket[a]
-                for (b in a + 1 until bSize) {
-                    val j = bucket[b]
-                    if (codes != null && hammingDistance(codes, i, j, 70) > 70) continue
-                    if (cosine(i, j) >= 0.97f) {
-                        nearCopyDsu.union(i, j)
-                    }
-                }
-            }
-        }
-
-        val nearComponents = HashMap<Int, ArrayList<Int>>()
-        for (i in 0 until n) {
-            if (!valid[i]) continue
-            val root = nearCopyDsu.find(i)
-            nearComponents.getOrPut(root) { ArrayList() }.add(i)
-        }
-
-        val duplicateOf = HashMap<Long, Long>()
-        val keeperIndices = ArrayList<Int>(nearComponents.size)
-
-        for ((_, members) in nearComponents) {
-            if (members.isEmpty()) continue
-            var keeperIdx = members[0]
-            for (k in 1 until members.size) {
-                val m = members[k]
-                if (modifiedAt[m] > modifiedAt[keeperIdx] ||
-                    (modifiedAt[m] == modifiedAt[keeperIdx] && ids[m] > ids[keeperIdx])
-                ) {
-                    keeperIdx = m
-                }
-            }
-            keeperIndices.add(keeperIdx)
-            val keeperId = ids[keeperIdx]
-            for (m in members) {
-                if (m != keeperIdx) {
-                    duplicateOf[ids[m]] = keeperId
-                }
-            }
-        }
-
-        // 2. Formats: among keepers, cosine >= 0.86 where OCR keys differ and at least one is non-blank
-        val kCount = keeperIndices.size
-        val formatDsu = DisjointSet(kCount)
-        for (a in 0 until kCount) {
-            val i = keeperIndices[a]
-            val ocrI = ocrKeys[i]
-            for (b in a + 1 until kCount) {
-                val j = keeperIndices[b]
+            for (j in i + 1 until n) {
+                if (!valid[j]) continue
+                val ocrI = ocrKeys[i]
                 val ocrJ = ocrKeys[j]
-                if (ocrI == ocrJ || (ocrI.isEmpty() && ocrJ.isEmpty())) continue
-                if (codes != null && hammingDistance(codes, i, j, 128) > 128) continue
-                if (cosine(i, j) >= 0.86f) {
-                    formatDsu.union(a, b)
-                }
+                if (ocrI == ocrJ) continue
+                if (codes != null && hammingDistance(codes, i, j, PREFILTER_BITS) > PREFILTER_BITS) continue
+                if (cosine(i, j) >= FORMAT_COS) sets.union(i, j)
             }
         }
+        val components = HashMap<Int, ArrayList<Int>>()
+        for (i in 0 until n) if (valid[i]) components.getOrPut(sets.find(i)) { ArrayList() }.add(i)
 
-        val formatComponents = HashMap<Int, ArrayList<Int>>()
-        for (a in 0 until kCount) {
-            val root = formatDsu.find(a)
-            formatComponents.getOrPut(root) { ArrayList() }.add(a)
+        val groups = ArrayList<FormatGroup>()
+        for (members in components.values) {
+            if (members.size < MIN_GROUP || members.size > MAX_GROUP) continue
+            val newestFirst = members.sortedWith(compareByDescending<Int> { modifiedAt[it] }.thenByDescending { ids[it] })
+            groups += FormatGroup(label = sharedLabel(newestFirst, labels), ids = newestFirst.map { ids[it] })
         }
-
-        val formatGroups = ArrayList<FormatGroup>()
-        for ((_, members) in formatComponents) {
-            if (members.size < 3 || members.size > 120) continue
-            val sortedKeepers = members.map { keeperIndices[it] }.sortedWith(
-                compareByDescending<Int> { modifiedAt[it] }.thenByDescending { ids[it] }
-            )
-            val memberIds = sortedKeepers.map { ids[it] }
-
-            val tagCounts = LinkedHashMap<String, Int>()
-            val originalLabels = HashMap<String, String>()
-            for (kIdx in sortedKeepers) {
-                val seenNorm = HashSet<String>()
-                for (rawLabel in labels[kIdx]) {
-                    val norm = TagMerge.normalizeTagLabel(rawLabel)
-                    if (norm.isNotEmpty() && seenNorm.add(norm)) {
-                        tagCounts[norm] = (tagCounts[norm] ?: 0) + 1
-                        if (!originalLabels.containsKey(norm)) {
-                            originalLabels[norm] = rawLabel
-                        }
-                    }
-                }
-            }
-
-            var bestNorm: String? = null
-            var bestCount = 0
-            for ((norm, count) in tagCounts) {
-                if (count > bestCount) {
-                    bestCount = count
-                    bestNorm = norm
-                }
-            }
-
-            val groupLabel = if (bestNorm != null && bestCount * 2 >= members.size) {
-                originalLabels[bestNorm] ?: ""
-            } else {
-                ""
-            }
-
-            formatGroups.add(FormatGroup(label = groupLabel, ids = memberIds))
-        }
-
-        formatGroups.sortWith(
-            compareByDescending<FormatGroup> { it.ids.size }
-                .thenByDescending { it.ids.firstOrNull() ?: 0L }
-        )
-
-        return MemeGroups(duplicateOf = duplicateOf, formats = formatGroups)
+        groups.sortWith(compareByDescending<FormatGroup> { it.ids.size }.thenByDescending { it.ids.first() })
+        return groups
     }
 
-    private fun computeRabit(vectors: ByteArray, n: Int, valid: BooleanArray): LongArray {
+    /** The tag at least half the members carry (the most common such), as one member spells it; else "". */
+    private fun sharedLabel(members: List<Int>, labels: List<List<String>>): String {
+        val counts = LinkedHashMap<String, Int>()
+        val spelling = HashMap<String, String>()
+        for (m in members) {
+            val seen = HashSet<String>()
+            for (raw in labels[m]) {
+                val key = TagMerge.normalizeTagLabel(raw)
+                if (key.isNotEmpty() && seen.add(key)) {
+                    counts[key] = (counts[key] ?: 0) + 1
+                    spelling.putIfAbsent(key, raw)
+                }
+            }
+        }
+        val best = counts.maxByOrNull { it.value } ?: return ""
+        return if (best.value * 2 >= members.size) spelling.getValue(best.key) else ""
+    }
+
+    private fun computeSignCodes(vectors: ByteArray, n: Int, valid: BooleanArray): LongArray {
         val dst = LongArray(n * 8)
         for (i in 0 until n) {
             if (!valid[i]) continue
             val vOff = i * 512
             val rOff = i * 8
             for (d in 0 until 512) {
-                if (vectors[vOff + d] >= 0) {
-                    dst[rOff + (d ushr 6)] = dst[rOff + (d ushr 6)] or (1L shl (d and 63))
-                }
+                if (vectors[vOff + d] >= 0) dst[rOff + (d ushr 6)] = dst[rOff + (d ushr 6)] or (1L shl (d and 63))
             }
         }
         return dst
@@ -230,8 +129,8 @@ internal object MemeClusters {
     }
 
     private class DisjointSet(n: Int) {
-        val parent = IntArray(n) { it }
-        val rank = IntArray(n)
+        private val parent = IntArray(n) { it }
+        private val rank = IntArray(n)
 
         fun find(x: Int): Int {
             var root = x
@@ -245,19 +144,18 @@ internal object MemeClusters {
             return root
         }
 
-        fun union(x: Int, y: Int): Boolean {
+        fun union(x: Int, y: Int) {
             val rootX = find(x)
             val rootY = find(y)
-            if (rootX == rootY) return false
-            if (rank[rootX] < rank[rootY]) {
-                parent[rootX] = rootY
-            } else if (rank[rootX] > rank[rootY]) {
-                parent[rootY] = rootX
-            } else {
-                parent[rootY] = rootX
-                rank[rootX]++
+            if (rootX == rootY) return
+            when {
+                rank[rootX] < rank[rootY] -> parent[rootX] = rootY
+                rank[rootX] > rank[rootY] -> parent[rootY] = rootX
+                else -> {
+                    parent[rootY] = rootX
+                    rank[rootX]++
+                }
             }
-            return true
         }
     }
 }

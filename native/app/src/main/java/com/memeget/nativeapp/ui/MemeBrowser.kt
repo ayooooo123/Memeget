@@ -206,7 +206,7 @@ internal suspend fun loadQuoteFolders(store: LibraryStore): List<MemeFolder> = w
 
 /** Memes sharing one picture with different words, each group a folder. */
 internal suspend fun loadFormatFolders(store: LibraryStore): List<MemeFolder> = withContext(Dispatchers.Default) {
-    store.memeGroups().formats.take(MAX_FOLDERS).mapIndexedNotNull { i, group ->
+    store.memeFormats().take(MAX_FOLDERS).mapIndexedNotNull { i, group ->
         val covers = coversOf(store, group.ids)
         if (covers.isEmpty()) null
         else MemeFolder(group.label.ifBlank { "Format ${i + 1}" }, "format:${group.ids.first()}", group.ids.size, covers, kind = FolderKind.Format, ids = group.ids)
