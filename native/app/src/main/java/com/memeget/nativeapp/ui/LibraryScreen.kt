@@ -191,17 +191,6 @@ internal fun LibraryScreen(
     var folderIds by remember { mutableStateOf<List<Long>?>(null) }
     // The search the memes on screen answer; changes only when they're published, unlike the query as typed.
     var publishedKey by remember { mutableStateOf<Any?>(null) }
-    // Near-copies and formats, worked out from the search index; the store keeps them until the index changes.
-    var memeGroups by remember { mutableStateOf(MemeGroups.Empty) }
-    LaunchedEffect(revision, active) {
-        if (!active) return@LaunchedEffect
-        memeGroups = try {
-            store.memeGroups()
-        } catch (e: Exception) {
-            if (e is CancellationException) throw e
-            memeGroups
-        }
-    }
     // Folders reload with the library while they're on screen; the canvas only needs them once, as morph targets.
     LaunchedEffect(revision, browseMode, active) {
         if (!active || browseMode == BrowseMode.Grid) return@LaunchedEffect
@@ -540,14 +529,6 @@ internal fun LibraryScreen(
         }
     }
 
-    // What the grid, canvas, viewer and every batch action work on: near-copies show once. Selection is pruned to
-    // it, so All, Share, Tag and Delete never reach a copy hidden behind the one on screen.
-    val shownMemes = remember(memes, memeGroups) { withoutHiddenCopies(memes, memeGroups.duplicateOf) }
-    LaunchedEffect(shownMemes) {
-        val visible = shownMemes.mapTo(HashSet(shownMemes.size)) { it.id }
-        if (selectedIds.any { it !in visible }) selectedIds = selectedIds.filterTo(HashSet()) { it in visible }
-    }
-
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -873,10 +854,10 @@ internal fun LibraryScreen(
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     TextButton(
                         onClick = {
-                            selectedIds = if (selectedIds.size == shownMemes.size) emptySet() else shownMemes.mapTo(HashSet()) { it.id }
+                            selectedIds = if (selectedIds.size == memes.size) emptySet() else memes.mapTo(HashSet()) { it.id }
                         },
                     ) {
-                        Text(if (selectedIds.size == shownMemes.size) "Deselect" else "All", style = MaterialTheme.typography.labelSmall)
+                        Text(if (selectedIds.size == memes.size) "Deselect" else "All", style = MaterialTheme.typography.labelSmall)
                     }
 
                     Button(
@@ -893,7 +874,7 @@ internal fun LibraryScreen(
 
                     Button(
                         onClick = {
-                            val selectedMemes = shownMemes.filter { selectedIds.contains(it.id) }
+                            val selectedMemes = memes.filter { selectedIds.contains(it.id) }
                             scope.launch {
                                 try {
                                     files.share(context, selectedMemes)
@@ -982,7 +963,7 @@ internal fun LibraryScreen(
 
         // Meme Grid
         if (useGrid) MemeGrid(
-            memes = shownMemes,
+            memes = memes,
             selectionMode = selectionMode,
             selectedIds = selectedIds,
             activeMemeId = indexProgress.memeId.takeIf { indexProgress.running },
@@ -1000,7 +981,7 @@ internal fun LibraryScreen(
                 } else {
                     // Closing the viewer must not bring the search keyboard back over the results.
                     focusManager.clearFocus()
-                    onOpenViewer(meme, shownMemes, viewerText)
+                    onOpenViewer(meme, memes, viewerText)
                 }
             },
             onItemLongClick = { meme ->
@@ -1029,7 +1010,7 @@ internal fun LibraryScreen(
                             verticalArrangement = Arrangement.spacedBy(2.dp),
                         ) {
                             val q = query.trim()
-                            val countStr = if (hasMore) "${shownMemes.size}+ matches" else "${shownMemes.size} match${if (shownMemes.size == 1) "" else "es"}"
+                            val countStr = if (hasMore) "${memes.size}+ matches" else "${memes.size} match${if (memes.size == 1) "" else "es"}"
                             Text(
                                 text = "$countStr for “$q”",
                                 style = MaterialTheme.typography.bodySmall,
@@ -1169,7 +1150,7 @@ internal fun LibraryScreen(
         else MemeBrowser(
             mode = browseMode,
             onModeChange = ::selectBrowseMode,
-            memes = shownMemes,
+            memes = memes,
             memesKey = publishedKey,
             canvasState = canvasState,
             hasMore = hasMore,
@@ -1177,7 +1158,7 @@ internal fun LibraryScreen(
             onLoadMore = onLoadMore,
             onOpen = { meme ->
                 focusManager.clearFocus()
-                onOpenViewer(meme, shownMemes, viewerText)
+                onOpenViewer(meme, memes, viewerText)
             },
             onLongPress = quickCopy,
             folders = folders,
@@ -1202,7 +1183,7 @@ internal fun LibraryScreen(
             onConfirm = { label, category, spread ->
                 showBatchTagDialog = false
                 scope.launch {
-                    val count = store.manualTag(shownMemes.filter { it.id in selectedIds }.map { it.id }, label, category, spread)
+                    val count = store.manualTag(selectedIds.toList(), label, category, spread)
                     Toast.makeText(context, "Tagged $count memes", Toast.LENGTH_SHORT).show()
                     selectionMode = false
                     selectedIds = emptySet()
@@ -1218,7 +1199,7 @@ internal fun LibraryScreen(
             onDismiss = { showBatchDeleteDialog = false },
             onConfirmDelete = {
                 showBatchDeleteDialog = false
-                val targets = shownMemes.filter { it.id in selectedIds }
+                val targets = memes.filter { it.id in selectedIds }
                 scope.launch {
                     try {
                         val filesDeleted = files.deleteMemes(targets)
@@ -1424,14 +1405,4 @@ private fun rememberSettledRevision(revision: StateFlow<Long>, settleMillis: Lon
         }
     }
     return settled
-}
-
-/**
- * [memes] without the near-copies whose kept copy ([duplicateOf]) is in the list too. A copy whose keeper isn't in
- * the list (a search that found only the copy) stays.
- */
-internal fun withoutHiddenCopies(memes: List<Meme>, duplicateOf: Map<Long, Long>): List<Meme> {
-    if (duplicateOf.isEmpty()) return memes
-    val inList = memes.mapTo(HashSet(memes.size)) { it.id }
-    return memes.filter { meme -> duplicateOf[meme.id]?.let { it !in inList } ?: true }
 }

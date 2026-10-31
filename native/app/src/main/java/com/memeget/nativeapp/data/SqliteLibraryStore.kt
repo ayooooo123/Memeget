@@ -485,7 +485,7 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
         val hasCaption: BooleanArray,
         val capHubness: FloatArray,
     ) {
-        @Volatile var memeGroups: MemeGroups? = null
+        @Volatile var formats: List<FormatGroup>? = null
     }
 
     @Volatile private var cachedCslsBank: FloatArray? = null
@@ -517,47 +517,27 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
         Unit
     }
 
-    override suspend fun memeGroups(): MemeGroups {
+    override suspend fun memeFormats(): List<FormatGroup> {
         // Wait for the index rather than answer "no groups": a caller asking before it was built (the Folders
         // screen on a fresh launch) would keep that empty answer until the library next changed.
         val resident = cachedResidentIndex
             ?: withContext(Dispatchers.IO) { residentIndexIfEligible(getReadableDb(), CancellationSignal()) }
-            ?: return MemeGroups.Empty
-        val cached = resident.memeGroups
-        if (cached != null) return cached
+            ?: return emptyList()
+        resident.formats?.let { return it }
         return withContext(Dispatchers.Default) {
             val entries = resident.entries
-            val n = entries.size
-            if (n == 0) {
-                val empty = MemeGroups.Empty
-                resident.memeGroups = empty
-                return@withContext empty
-            }
-            val ids = LongArray(n)
-            val modifiedAt = LongArray(n)
-            val ocrKeys = ArrayList<String>(n)
-            val labels = ArrayList<List<String>>(n)
-            for (i in 0 until n) {
-                val e = entries[i]
-                ids[i] = e.meme.id
-                modifiedAt[i] = e.meme.modifiedAt
-                ocrKeys.add(SearchText.phraseKey(e.meme.ocr))
-                labels.add(e.labels)
-            }
-            val groups = MemeClusters.group(
-                ids = ids,
-                modifiedAt = modifiedAt,
+            val formats = MemeClusters.formats(
+                ids = LongArray(entries.size) { entries[it].meme.id },
+                modifiedAt = LongArray(entries.size) { entries[it].meme.modifiedAt },
                 vectors = resident.imageMatInt8,
                 dim = 512,
-                ocrKeys = ocrKeys,
-                labels = labels,
+                ocrKeys = entries.map { SearchText.phraseKey(it.meme.ocr) },
+                labels = entries.map { it.labels },
                 rabit64 = resident.imageRabit64,
                 hasVector = resident.hasImage,
-                kinds = entries.map { it.meme.kind },
-                transcriptKeys = entries.map { SearchText.phraseKey(it.meme.transcript) },
             )
-            resident.memeGroups = groups
-            groups
+            resident.formats = formats
+            formats
         }
     }
 
