@@ -13,13 +13,17 @@ import com.memeget.nativeapp.data.SocialReplyIntent
 import com.memeget.nativeapp.data.SqliteLibraryDbHelper
 import com.memeget.nativeapp.data.TagMerge
 import com.memeget.nativeapp.data.TagPropagation
+import com.memeget.nativeapp.data.MemeClusters
 import com.memeget.nativeapp.inference.ModelRegistry
 import com.memeget.nativeapp.knowledge.CuratedLabels
 import com.memeget.nativeapp.knowledge.LookalikeVote
 import com.memeget.nativeapp.knowledge.OpenVocabConcepts
 import com.memeget.nativeapp.knowledge.Titles
 import com.memeget.nativeapp.storage.TeachingPackIo
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.InternalCoroutinesApi
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -47,6 +51,26 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
     override val revision: StateFlow<Long> = _revision.asStateFlow()
     private val _labelRevision = MutableStateFlow(0L)
     override val labelRevision: StateFlow<Long> = _labelRevision.asStateFlow()
+
+    private val copyQueryCache = java.util.concurrent.ConcurrentHashMap<String, Map<Long, Int>>()
+
+    private fun getCopyCountsForQuery(key: String): Map<Long, Int> {
+        if (key.isBlank()) return emptyMap()
+        return copyQueryCache.computeIfAbsent(key) {
+            val out = HashMap<Long, Int>()
+            try {
+                getReadableDb().rawQuery(
+                    "SELECT meme_id, count FROM copy_queries WHERE query = ?",
+                    arrayOf(key),
+                ).use { c ->
+                    while (c.moveToNext()) {
+                        out[c.getLong(0)] = c.getInt(1)
+                    }
+                }
+            } catch (_: Exception) {}
+            out
+        }
+    }
 
     @Volatile private var cachedVocab: SearchVocab? = null
     @Volatile private var cachedVocabRevision: Long = -1L
@@ -460,7 +484,9 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
         val captionMatInt8: ByteArray?,
         val hasCaption: BooleanArray,
         val capHubness: FloatArray,
-    )
+    ) {
+        @Volatile var memeGroups: MemeGroups? = null
+    }
 
     @Volatile private var cachedCslsBank: FloatArray? = null
     private fun ensureCslsBank(): FloatArray {
@@ -489,6 +515,48 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
         }
         residentIndexIfEligible(db, CancellationSignal())
         Unit
+    }
+
+    override suspend fun memeGroups(): MemeGroups {
+        // Wait for the index rather than answer "no groups": a caller asking before it was built (the Folders
+        // screen on a fresh launch) would keep that empty answer until the library next changed.
+        val resident = cachedResidentIndex
+            ?: withContext(Dispatchers.IO) { residentIndexIfEligible(getReadableDb(), CancellationSignal()) }
+            ?: return MemeGroups.Empty
+        val cached = resident.memeGroups
+        if (cached != null) return cached
+        return withContext(Dispatchers.Default) {
+            val entries = resident.entries
+            val n = entries.size
+            if (n == 0) {
+                val empty = MemeGroups.Empty
+                resident.memeGroups = empty
+                return@withContext empty
+            }
+            val ids = LongArray(n)
+            val modifiedAt = LongArray(n)
+            val ocrKeys = ArrayList<String>(n)
+            val labels = ArrayList<List<String>>(n)
+            for (i in 0 until n) {
+                val e = entries[i]
+                ids[i] = e.meme.id
+                modifiedAt[i] = e.meme.modifiedAt
+                ocrKeys.add(SearchText.phraseKey(e.meme.ocr))
+                labels.add(e.labels)
+            }
+            val groups = MemeClusters.group(
+                ids = ids,
+                modifiedAt = modifiedAt,
+                vectors = resident.imageMatInt8,
+                dim = 512,
+                ocrKeys = ocrKeys,
+                labels = labels,
+                rabit64 = resident.imageRabit64,
+                hasVector = resident.hasImage,
+            )
+            resident.memeGroups = groups
+            groups
+        }
     }
 
     override suspend fun copiedCount(): Int = withContext(Dispatchers.IO) {
@@ -533,6 +601,7 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
         withResidentLock {
             cachedResidentIndex = null
         }
+        copyQueryCache.clear()
     }
 
     private fun buildResidentEntry(meme: Meme, img: FloatArray, cap: FloatArray?, scn: FloatArray?, compat: Boolean): ResidentSearchEntry {
@@ -1107,6 +1176,7 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
         }
         val phrase = SearchText.phraseKey(distilled.cleanedText)
         val hasPhrase = !distilled.isPastedPost && !distilled.pureSlangReaction && SearchText.phraseTokenCount(phrase) >= 2
+        val copyCounts = getCopyCountsForQuery(SearchText.phraseKey(text))
         val comparator = compareBy<SearchHit>({ it.score }, { it.meme.modifiedAt }, { it.meme.id })
         val top = PriorityQueue(limit, comparator)
         val signal = CancellationSignal()
@@ -1196,10 +1266,16 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
                         pureSlangReaction = distilled.pureSlangReaction,
                         copyCount = meme.copyCount,
                     )
-                    if (!score.isFinite()) continue
-                    val finalScore = if (!semantic && score <= 0f) {
-                        if (!anyWholeOrFuzzyMatch && exactTerms.any { entry.document.contains(it) }) 0.05f else continue
-                    } else score
+                    val count = copyCounts[meme.id] ?: 0
+                    val sentBoost = SearchRanking.copyQueryBoost(count)
+                    val finalScore = when {
+                        sentBoost > 0f && (!score.isFinite() || score <= 0f) -> sentBoost
+                        !score.isFinite() -> continue
+                        !semantic && score <= 0f -> {
+                            if (!anyWholeOrFuzzyMatch && exactTerms.any { entry.document.contains(it) }) 0.05f + sentBoost else continue
+                        }
+                        else -> score + sentBoost
+                    }
                     if (after != null) {
                         val comparison = compareValues(finalScore, after.score).takeIf { it != 0 }
                             ?: compareValues(meme.modifiedAt, after.modifiedAt).takeIf { it != 0 }
@@ -1235,6 +1311,7 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
                 if (term in SocialReplyIntent.SCAFFOLD_WORDS && exactTerms.size >= 2) w *= 0.22f
                 w
             }
+            val seenIds = HashSet<Long>()
             fun scan(useFts: Boolean) {
                 val args = ArrayList<String>()
                 val filters = ArrayList<String>()
@@ -1287,6 +1364,7 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
                     while (cursor.moveToNext()) {
                         if (++count % 32 == 0) coroutine.ensureActive()
                         val meme = cursorToMeme(cursor)
+                        seenIds.add(meme.id)
                         if (tagKey != null && meme.tags.none { TagMerge.normalizeTagLabel(it.label) == tagKey }) continue
                         val labels = meme.tags.map { it.label }
                         val compatible = semantic && !cursor.isNull(modelColumn) && ModelRegistry.isCompatiblePrimaryModel(cursor.getString(modelColumn))
@@ -1317,14 +1395,16 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
                             phraseMatched = phraseHit,
                             copyCount = meme.copyCount,
                         )
-                        if (!score.isFinite()) continue
-                        if (!semantic && score <= 0f) {
-                            // Substring fallback only when no whole-word/typo/prefix match existed at all
-                            if (!useFts && exactTerms.any { document.contains(it) }) {
-                                // minimal fallback score for raw filename substring
-                            } else continue
+                        val count = copyCounts[meme.id] ?: 0
+                        val sentBoost = SearchRanking.copyQueryBoost(count)
+                        val finalScore = when {
+                            sentBoost > 0f && (!score.isFinite() || score <= 0f) -> sentBoost
+                            !score.isFinite() -> continue
+                            !semantic && score <= 0f -> {
+                                if (!useFts && exactTerms.any { document.contains(it) }) 0.05f + sentBoost else continue
+                            }
+                            else -> score + sentBoost
                         }
-                        val finalScore = if (!semantic && score <= 0f) 0.05f else score
                         if (after != null) {
                             val comparison = compareValues(finalScore, after.score).takeIf { it != 0 }
                                 ?: compareValues(meme.modifiedAt, after.modifiedAt).takeIf { it != 0 }
@@ -1363,6 +1443,26 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
                 }
             }
             scan(useFts)
+            for ((boostId, count) in copyCounts) {
+                if (boostId in seenIds) continue
+                val meme = meme(boostId) ?: continue
+                if (!kind.isNullOrBlank() && meme.kind != kind) continue
+                if (tagKey != null && meme.tags.none { TagMerge.normalizeTagLabel(it.label) == tagKey }) continue
+                val sentBoost = SearchRanking.copyQueryBoost(count)
+                val finalScore = sentBoost
+                if (after != null) {
+                    val comparison = compareValues(finalScore, after.score).takeIf { it != 0 }
+                        ?: compareValues(meme.modifiedAt, after.modifiedAt).takeIf { it != 0 }
+                        ?: compareValues(meme.id, after.id)
+                    if (comparison >= 0) continue
+                }
+                val candidate = SearchHit(meme, finalScore)
+                if (top.size < limit) top.offer(candidate)
+                else if (comparator.compare(candidate, top.peek()) > 0) {
+                    top.poll()
+                    top.offer(candidate)
+                }
+            }
             val rows = ArrayList<SearchHit>(top.size)
             while (top.isNotEmpty()) rows.add(top.poll())
             rows.reverse()
@@ -1700,20 +1800,77 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
         }
     }
 
-    override suspend fun recordCopy(id: Long) = withContext(Dispatchers.IO) {
+    override suspend fun recordCopy(id: Long, query: String) = withContext(Dispatchers.IO) {
         val now = System.currentTimeMillis()
+        val key = SearchText.phraseKey(query)
         writeMutex.withLock {
-            getWritableDb().compileStatement(
+            val db = getWritableDb()
+            val memeUpdated = db.compileStatement(
                 "UPDATE memes SET copy_count = copy_count + 1, last_copied_at = ? WHERE id = ?"
             ).use {
                 it.bindLong(1, now)
                 it.bindLong(2, id)
-                if (it.executeUpdateDelete() > 0) {
-                    patchResidentCopyCount(id, now)
-                    bumpRevision()
+                it.executeUpdateDelete() > 0
+            }
+            if (memeUpdated) {
+                patchResidentCopyCount(id, now)
+                if (key.isNotBlank()) {
+                    val updated = db.compileStatement(
+                        "UPDATE copy_queries SET count = count + 1, last_at = ? WHERE query = ? AND meme_id = ?"
+                    ).use { stmt ->
+                        stmt.bindLong(1, now)
+                        stmt.bindString(2, key)
+                        stmt.bindLong(3, id)
+                        stmt.executeUpdateDelete()
+                    }
+                    if (updated == 0) {
+                        try {
+                            db.compileStatement(
+                                "INSERT INTO copy_queries (query, meme_id, count, last_at) VALUES (?, ?, 1, ?)"
+                            ).use { stmt ->
+                                stmt.bindString(1, key)
+                                stmt.bindLong(2, id)
+                                stmt.bindLong(3, now)
+                                stmt.executeInsert()
+                            }
+                        } catch (_: Exception) {
+                            db.compileStatement(
+                                "UPDATE copy_queries SET count = count + 1, last_at = ? WHERE query = ? AND meme_id = ?"
+                            ).use { stmt ->
+                                stmt.bindLong(1, now)
+                                stmt.bindString(2, key)
+                                stmt.bindLong(3, id)
+                                stmt.executeUpdateDelete()
+                            }
+                        }
+                    }
+                    copyQueryCache.clear()
+                }
+                bumpRevision()
+            }
+        }
+    }
+
+    override suspend fun ocrTexts(): List<Pair<Long, String>> = withContext(Dispatchers.IO) {
+        val out = ArrayList<Pair<Long, String>>()
+        getReadableDb().rawQuery("SELECT id, ocr_text FROM memes WHERE ocr_text != ''", null).use { c ->
+            while (c.moveToNext()) out += c.getLong(0) to c.getString(1)
+        }
+        out
+    }
+
+    override suspend fun transcripts(): List<Pair<Long, String>> = withContext(Dispatchers.IO) {
+        val db = getReadableDb()
+        val out = ArrayList<Pair<Long, String>>()
+        db.rawQuery("SELECT id, transcript FROM memes WHERE transcript != ''", null).use { c ->
+            while (c.moveToNext()) {
+                val t = c.getString(1).orEmpty()
+                if (t.isNotEmpty()) {
+                    out.add(c.getLong(0) to t)
                 }
             }
         }
+        out
     }
 
     override suspend fun recentlyCopied(limit: Int, kind: String?): List<Meme> = withContext(Dispatchers.IO) {
@@ -2940,6 +3097,7 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
             db.beginTransaction()
             try {
                 val idList = ids.joinToString(",")
+                db.execSQL("DELETE FROM copy_queries WHERE meme_id IN ($idList)")
                 db.execSQL("DELETE FROM vectors WHERE id IN ($idList)")
                 db.execSQL("DELETE FROM meme_search_fts WHERE rowid IN ($idList)")
                 db.execSQL("DELETE FROM memes WHERE id IN ($idList)")
@@ -2948,6 +3106,7 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
                 db.endTransaction()
             }
             evictResidentIds(ids)
+            copyQueryCache.clear()
             bumpRevision()
             bumpLabels()
         }
@@ -2958,6 +3117,7 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
             val db = getWritableDb()
             db.beginTransaction()
             try {
+                db.execSQL("DELETE FROM copy_queries")
                 db.execSQL("DELETE FROM vectors")
                 db.execSQL("DELETE FROM meme_search_fts")
                 db.execSQL("DELETE FROM content_hashes")
@@ -3097,6 +3257,18 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
             }
         }
         counts
+    }
+
+    override suspend fun tagKeySets(): List<Set<String>> = withContext(Dispatchers.IO) {
+        val sets = ArrayList<Set<String>>()
+        getReadableDb().rawQuery("SELECT tags FROM memes WHERE tags != '[]'", null).use { c ->
+            while (c.moveToNext()) {
+                val keys = deserializeTags(c.getString(0))
+                    .mapNotNullTo(HashSet()) { tag -> TagMerge.normalizeTagLabel(tag.label).takeIf { it.isNotBlank() } }
+                if (keys.isNotEmpty()) sets += keys
+            }
+        }
+        sets
     }
 
     override suspend fun restore(meme: Meme, vectors: VectorRecord?): Boolean = withContext(Dispatchers.IO) {
@@ -3311,6 +3483,7 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
                 }
                 db.update("camera_roll_gate", gcvUri, "uri = ?", arrayOf(existing.uri))
 
+                db.delete("copy_queries", "meme_id = ?", arrayOf(id.toString()))
                 db.delete("meme_search_fts", "rowid = ?", arrayOf(id.toString()))
                 db.delete("vectors", "id = ?", arrayOf(id.toString()))
                 db.delete("memes", "id = ?", arrayOf(id.toString()))
@@ -3322,6 +3495,7 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
                 db.endTransaction()
             }
             evictResidentIds(listOf(id))
+            copyQueryCache.clear()
             bumpRevision()
             bumpLabels()
             true

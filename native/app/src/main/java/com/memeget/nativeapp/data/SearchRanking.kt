@@ -31,6 +31,9 @@ internal object SearchRanking {
     const val DENSE_DOC_FULL_BOOST = 0.22f
     const val DENSE_TAG_FULL_BOOST = 0.30f
     const val DENSE_PHRASE_BOOST = 0.45f
+
+    fun copyQueryBoost(count: Int): Float =
+        if (count > 0) min(0.35f, 0.18f * ln(1f + count.toFloat())) else 0f
     const val DENSE_SEMANTIC_EXPAND_BOOST = 0.045f
     const val DENSE_TYPO_FALLBACK_BOOST = 0.08f
     const val DENSE_PREFIX_TIEBREAK = 0.015f

@@ -94,6 +94,22 @@ internal data class Exemplar(
 internal data class SearchHit(val meme: Meme, val score: Float)
 internal data class PageCursor(val modifiedAt: Long, val id: Long)
 internal data class SearchCursor(val score: Float, val modifiedAt: Long, val id: Long)
+internal data class MemeGroups(
+    /** Meme id -> id of the near-copy shown in its place (the group's newest member by modified_at, then id). Keepers are not keys. */
+    val duplicateOf: Map<Long, Long>,
+    /** Same-template groups of 3+ distinct pictures, largest first. */
+    val formats: List<FormatGroup>,
+) {
+    companion object {
+        val Empty = MemeGroups(emptyMap(), emptyList())
+    }
+}
+internal data class FormatGroup(
+    /** The tag label at least half the group's members carry (most common such), else "". */
+    val label: String,
+    /** Member ids, newest first, one per near-copy group (keepers only). */
+    val ids: List<Long>,
+)
 internal data class TextRegion(
     val text: String,
     val confidence: Float,
@@ -260,7 +276,14 @@ internal interface LibraryStore {
         if (vlmOcr.isNotBlank()) setVlmOcr(id, vlmOcr)
         setCaption(id, caption, tags, vector, state)
     }
-    suspend fun recordCopy(id: Long) {}
+    /** Every meme's transcript that isn't blank, as (id, transcript). */
+    suspend fun transcripts(): List<Pair<Long, String>>
+    /** Every meme's on-image text (OCR) that isn't blank, as (id, text). */
+    suspend fun ocrTexts(): List<Pair<Long, String>>
+    /** Counts a copy of [id]. A non-blank [query] is the search it was copied from: copies are remembered per search so the same search ranks that meme higher next time. */
+    suspend fun recordCopy(id: Long, query: String = "")
+    /** Near-copies and shared-template groups among indexed memes; computed from the resident index and cached until it changes. */
+    suspend fun memeGroups(): MemeGroups
     suspend fun recentlyCopied(limit: Int = 90, kind: String? = null): List<Meme> = emptyList()
     suspend fun copiedCount(): Int = recentlyCopied(limit = 256).size
     suspend fun taughtLabelNames(): List<String> = exemplars().map { it.label }.distinct()
@@ -369,6 +392,8 @@ internal interface LibraryStore {
     suspend fun tagLabels(): List<String>
     /** How many memes carry each tag, keyed by normalized label, whatever the tag's source. */
     suspend fun tagCounts(): Map<String, Int>
+    /** Each meme's tags, normalized as [tagCounts] keys them; one set per meme that has any. */
+    suspend fun tagKeySets(): List<Set<String>>
     suspend fun restore(meme: Meme, vectors: VectorRecord?): Boolean
     suspend fun markNotAMeme(id: Long): Boolean = false
     suspend fun cameraRollSeenModifiedAt(): Map<String, Long> = emptyMap()

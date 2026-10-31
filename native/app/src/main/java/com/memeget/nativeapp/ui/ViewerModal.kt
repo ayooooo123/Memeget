@@ -5,6 +5,7 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.net.Uri
 import android.widget.Toast
+import android.view.LayoutInflater
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -28,6 +29,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -54,7 +56,11 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -94,6 +100,10 @@ import java.util.Locale
 @Composable
 internal fun ViewerModal(
     meme: Meme,
+    /** The memes a sideways swipe moves through, in order; [meme] is among them. */
+    pages: List<Meme>,
+    /** The search or quoted line the viewer was opened for: a video starts where it's said; copies are remembered against it. */
+    searchText: String,
     files: LibraryFiles,
     store: LibraryStore,
     cloud: CloudAssistant,
@@ -225,6 +235,95 @@ internal fun ViewerModal(
             ConfidenceState.Loaded(entries)
         }
     }
+    fun copyCurrent() {
+        if (copying) return
+        copying = true
+        scope.launch {
+            try {
+                files.copyToClipboard(currentMeme.uri, currentMeme.name)
+                runCatching { store.recordCopy(currentMeme.id, searchText) }
+                val message = if (currentMeme.kind == "video") {
+                    "Video copied — paste in apps that accept videos"
+                } else {
+                    "Meme copied — paste it in another app"
+                }
+                Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                Toast.makeText(context, "Could not copy: ${failure.message}", Toast.LENGTH_LONG).show()
+            } finally {
+                copying = false
+            }
+        }
+    }
+
+    // The memes a swipe moves through: the list the viewer opened from, plus any look-alike opened from inside it,
+    // placed right after the meme it was opened from.
+    var pageList by remember { mutableStateOf(pages.ifEmpty { listOf(meme) }) }
+    val pagerState = rememberPagerState(initialPage = pageList.indexOfFirst { it.id == meme.id }.coerceAtLeast(0)) { pageList.size }
+    LaunchedEffect(meme.id) {
+        val index = pageList.indexOfFirst { it.id == meme.id }
+        if (index < 0) {
+            val at = (pagerState.currentPage + 1).coerceAtMost(pageList.size)
+            pageList = pageList.take(at) + meme + pageList.drop(at)
+            // The pager lays the longer list out on the next frame; scrolling before then lands on the old list's
+            // page at that index, and the settle would open that meme instead.
+            withFrameNanos { }
+            withFrameNanos { }
+            pagerState.scrollToPage(at)
+        } else if (index != pagerState.currentPage) {
+            pagerState.scrollToPage(index)
+        }
+    }
+    val navigateToMeme by rememberUpdatedState(onNavigateToMeme)
+    // The meme the viewer's details belong to right now. `currentMeme` is a new state for each meme, so this
+    // long-lived collector must not read it: it would keep the first meme's, and swiping back to that meme would
+    // never switch the details back.
+    val shownId by rememberUpdatedState(meme.id)
+    LaunchedEffect(pagerState) {
+        snapshotFlow { pagerState.settledPage }.collect { page ->
+            pageList.getOrNull(page)?.let { if (it.id != shownId) navigateToMeme(it) }
+        }
+    }
+
+    // "More like this": the memes after this one become its closest look-alikes, and the list keeps growing with the
+    // look-alikes of whatever it ends on, skipping any meme already in it.
+    var lookalikeTrail by remember { mutableStateOf(false) }
+    var closeSheetSignal by remember { mutableIntStateOf(0) }
+    fun startLookalikeTrail() {
+        val here = pagerState.currentPage
+        val inList = pageList.take(here + 1).mapTo(HashSet()) { it.id }
+        val next = similarHits.map { it.meme }.filter { inList.add(it.id) }
+        if (next.isEmpty()) {
+            Toast.makeText(context, "No look-alikes to show", Toast.LENGTH_SHORT).show()
+            return
+        }
+        pageList = pageList.take(here + 1) + next
+        lookalikeTrail = true
+        closeSheetSignal++
+        scope.launch {
+            // As when a look-alike is opened: the pager takes the new list on the next frame.
+            withFrameNanos { }
+            withFrameNanos { }
+            pagerState.animateScrollToPage(here + 1)
+        }
+    }
+    LaunchedEffect(lookalikeTrail) {
+        if (!lookalikeTrail) return@LaunchedEffect
+        snapshotFlow { pagerState.settledPage }.collect { page ->
+            if (page < pageList.size - 3) return@collect
+            val last = pageList.last()
+            val more = withContext(Dispatchers.IO) { store.similar(last.id, limit = 24) }
+            val inList = pageList.mapTo(HashSet()) { it.id }
+            val fresh = more.map { it.meme }.filter { inList.add(it.id) }
+            if (fresh.isNotEmpty()) pageList = pageList + fresh
+        }
+    }
+    val dockTitle = currentMeme.tags.maxByOrNull { it.score }?.label
+        ?: currentMeme.caption.takeIf { it.isNotBlank() }?.substringBefore(',')?.take(40)
+        ?: if (currentMeme.kind == "video") "Video" else "Meme"
+    val dockSubtitle = currentMeme.modifiedAt.takeIf { it > 0 }?.let { DateFormat.getDateInstance(DateFormat.MEDIUM).format(Date(it)) }.orEmpty()
 
     Dialog(
         onDismissRequest = onClose,
@@ -233,65 +332,19 @@ internal fun ViewerModal(
             dismissOnBackPress = true,
         ),
     ) {
-        Surface(
-            modifier = Modifier.fillMaxSize(),
-            color = MemegetColors.Background,
-        ) {
-            Column(modifier = Modifier.fillMaxSize()) {
-                // Top Header / Chrome
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(MemegetColors.Surface)
-                        .padding(horizontal = 8.dp, vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    IconButton(onClick = onClose) {
-                        Text(
-                            text = "✕",
-                            color = MemegetColors.TextPrimary,
-                            fontSize = 18.sp,
-                            fontWeight = FontWeight.Bold,
-                        )
-                    }
-
-                    Column(
-                        modifier = Modifier
-                            .weight(1f)
-                            .padding(horizontal = 4.dp),
-                    ) {
-                        Text(
-                            text = currentMeme.name,
-                            style = MaterialTheme.typography.titleSmall,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            color = MemegetColors.TextPrimary,
-                        )
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Box(
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(3.dp))
-                                    .background(MemegetColors.SurfaceBright)
-                                    .padding(horizontal = 4.dp, vertical = 1.dp),
-                            ) {
-                                Text(
-                                    text = currentMeme.kind.uppercase(),
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MemegetColors.Volt,
-                                    fontWeight = FontWeight.Bold,
-                                )
-                            }
-                            if (currentMeme.legacyImported) {
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text(
-                                    text = "Legacy Imported",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MemegetColors.TextMuted,
-                                )
-                            }
-                        }
-                    }
-
+        SwipeViewerFrame(
+            pages = pageList,
+            pagerState = pagerState,
+            current = currentMeme,
+            title = dockTitle,
+            subtitle = dockSubtitle,
+            copying = copying,
+            onCopy = ::copyCurrent,
+            onClose = onClose,
+            searchText = searchText,
+            closeSheetSignal = closeSheetSignal,
+            topActions = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
                     // Action buttons
                     Row(
                         horizontalArrangement = Arrangement.spacedBy(4.dp),
@@ -415,48 +468,9 @@ internal fun ViewerModal(
                         }
                     }
                 }
-
-                // Scrollable content: Media display on top, metadata sheet below
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .weight(1f)
-                        .verticalScroll(rememberScrollState()),
-                ) {
-                    // Media Viewer
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .heightIn(min = 240.dp, max = 380.dp)
-                            .background(Color.Black),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        if (currentMeme.kind == "video") {
-                            VideoPlayerView(uri = currentMeme.uri)
-                        } else {
-                            SubcomposeAsyncImage(
-                                model = ImageRequest.Builder(context)
-                                    .data(currentMeme.uri)
-                                    .crossfade(true)
-                                    .build(),
-                                contentDescription = currentMeme.name,
-                                contentScale = ContentScale.Fit,
-                                modifier = Modifier.fillMaxSize(),
-                                loading = {
-                                    Box(
-                                        modifier = Modifier.fillMaxSize(),
-                                        contentAlignment = Alignment.Center,
-                                    ) {
-                                        CircularProgressIndicator(
-                                            color = MemegetColors.Volt,
-                                            modifier = Modifier.size(32.dp),
-                                        )
-                                    }
-                                },
-                            )
-                        }
-                    }
-
+            },
+            sheetContent = {
+                Column(modifier = Modifier.fillMaxWidth()) {
                     // Actions Bar below media
                     FlowRow(
                         modifier = Modifier
@@ -468,29 +482,7 @@ internal fun ViewerModal(
                     ) {
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             OutlinedButton(
-                                onClick = {
-                                    if (!copying) {
-                                        copying = true
-                                        scope.launch {
-                                            try {
-                                                files.copyToClipboard(currentMeme.uri, currentMeme.name)
-                                                runCatching { store.recordCopy(currentMeme.id) }
-                                                val message = if (currentMeme.kind == "video") {
-                                                    "Video copied — paste in apps that accept videos"
-                                                } else {
-                                                    "Meme copied — paste it in another app"
-                                                }
-                                                Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
-                                            } catch (cancelled: CancellationException) {
-                                                throw cancelled
-                                            } catch (failure: Exception) {
-                                                Toast.makeText(context, "Could not copy: ${failure.message}", Toast.LENGTH_LONG).show()
-                                            } finally {
-                                                copying = false
-                                            }
-                                        }
-                                    }
-                                },
+                                onClick = { copyCurrent() },
                                 enabled = !copying,
                                 contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
                             ) {
@@ -807,7 +799,11 @@ internal fun ViewerModal(
                         }
 
                         // Visually Similar Memes
-                        DetailSection(title = "Visually Similar Memes") {
+                        DetailSection(
+                            title = "Visually Similar Memes",
+                            actionLabel = if (similarHits.isNotEmpty()) "More like this ▶" else null,
+                            onAction = ::startLookalikeTrail,
+                        ) {
                             if (loadingSimilar) {
                                 Box(
                                     modifier = Modifier
@@ -848,7 +844,7 @@ internal fun ViewerModal(
                     }
                 }
             }
-        }
+        )
     }
 
     // Tag Dialog
@@ -1266,8 +1262,9 @@ internal fun ViewerModal(
     }
 }
 
+/** Plays [uri] on a loop. [startAt], a fraction of the clip, starts it a second before that point instead of the top. */
 @Composable
-private fun VideoPlayerView(uri: String) {
+internal fun VideoPlayerView(uri: String, startAt: Float? = null) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val exoPlayer = remember(uri) {
@@ -1283,6 +1280,22 @@ private fun VideoPlayerView(uri: String) {
 
     DisposableEffect(exoPlayer) {
         onDispose { exoPlayer.release() }
+    }
+
+    DisposableEffect(exoPlayer, startAt) {
+        if (startAt == null) return@DisposableEffect onDispose { }
+        val listener = object : Player.Listener {
+            override fun onPlaybackStateChanged(playbackState: Int) {
+                if (playbackState != Player.STATE_READY) return
+                exoPlayer.removeListener(this)
+                val duration = exoPlayer.duration
+                // A second early so the line isn't clipped; near the top, the top it is.
+                val position = (duration * startAt).toLong() - 1_000L
+                if (duration > 0 && position > 1_500L) exoPlayer.seekTo(position)
+            }
+        }
+        exoPlayer.addListener(listener)
+        onDispose { exoPlayer.removeListener(listener) }
     }
 
     // A looping meme must not keep playing once Memeget leaves the screen; it carries on when Memeget comes back.
@@ -1304,7 +1317,8 @@ private fun VideoPlayerView(uri: String) {
 
     AndroidView(
         factory = { ctx ->
-            PlayerView(ctx).apply {
+            // From a layout so the player draws on a TextureView, which the viewer's rounded card can clip.
+            (LayoutInflater.from(ctx).inflate(R.layout.viewer_player_view, null) as PlayerView).apply {
                 useController = true
                 setShowNextButton(false)
                 setShowPreviousButton(false)

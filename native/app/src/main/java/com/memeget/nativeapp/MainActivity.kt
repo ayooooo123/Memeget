@@ -12,6 +12,8 @@ import androidx.core.content.ContextCompat
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.ui.ComposeUiFlags
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -39,6 +41,11 @@ class MainActivity : ComponentActivity() {
         if (BuildConfig.DEBUG) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         enableEdgeToEdge()
         handled = savedInstanceState?.getBoolean("intakeHandled") ?: false
+        // Rect tracking feeds only onLayoutRectChanged / onVisibilityChanged, which the app doesn't use, and it
+        // re-measures every node under a layer whose transform changes: each frame of a canvas pinch or drag
+        // re-walked every tile, about a third of the main thread on the 5a.
+        @OptIn(ExperimentalComposeUiApi::class)
+        ComposeUiFlags.isRectTrackingEnabled = false
         setContent {
             MemegetApp(
                 store = graph.store,

@@ -133,6 +133,18 @@ internal class SqliteLibraryDbHelper(context: Context, dbName: String = DATABASE
             );
             """.trimIndent()
         )
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS copy_queries (
+                query TEXT NOT NULL,
+                meme_id INTEGER NOT NULL,
+                count INTEGER NOT NULL DEFAULT 0,
+                last_at INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY(query, meme_id)
+            );
+            """.trimIndent()
+        )
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_copy_queries_meme_id ON copy_queries(meme_id);")
 
 
         db.execSQL(
@@ -329,6 +341,18 @@ internal class SqliteLibraryDbHelper(context: Context, dbName: String = DATABASE
             );
             """.trimIndent()
         )
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS copy_queries (
+                query TEXT NOT NULL,
+                meme_id INTEGER NOT NULL,
+                count INTEGER NOT NULL DEFAULT 0,
+                last_at INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY(query, meme_id)
+            );
+            """.trimIndent()
+        )
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_copy_queries_meme_id ON copy_queries(meme_id);")
     }
 
     companion object {
