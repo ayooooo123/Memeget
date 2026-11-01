@@ -56,6 +56,16 @@ internal object CameraRollScanner {
         return ContextCompat.checkSelfPermission(context, Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
     }
 
+    /** Full photo and video access. With partial (user-selected) access, unselected items look deleted. */
+    fun hasFullMediaAccess(context: Context): Boolean {
+        fun granted(permission: String) = ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
+        return if (Build.VERSION.SDK_INT >= 33) {
+            granted(Manifest.permission.READ_MEDIA_IMAGES) && granted(Manifest.permission.READ_MEDIA_VIDEO)
+        } else {
+            granted(Manifest.permission.READ_EXTERNAL_STORAGE)
+        }
+    }
+
     suspend fun enumerateAssets(context: Context, limit: Int = 25_000): List<CameraRollAsset> = withContext(Dispatchers.IO) {
         if (!hasMediaAccess(context)) return@withContext emptyList()
         val out = ArrayList<CameraRollAsset>(minOf(limit, 2048))

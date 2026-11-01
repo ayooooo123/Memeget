@@ -425,6 +425,8 @@ internal class IndexCoordinator(
                                 gaps.note("index", unavailable)
                                 break
                             } catch (failure: Exception) {
+                                // A file deleted or trashed in another app leaves the library instead of failing again.
+                                if (files.forgetIfGone(meme)) continue
                                 failed++
                                 store.markIndexFailed(meme.id, failure.message ?: "Media embedding failed")
                             }
@@ -552,7 +554,10 @@ internal class IndexCoordinator(
                                         throw cancelled
                                     } catch (failure: Exception) {
                                         // One unreadable item must not end every session before the rest are enriched.
-                                        store.addError(meme.name, "enrichment", failure.message ?: "Media could not be prepared")
+                                        // A file that is gone leaves the library instead of failing every session.
+                                        if (!files.forgetIfGone(meme)) {
+                                            store.addError(meme.name, "enrichment", failure.message ?: "Media could not be prepared")
+                                        }
                                     }
                                 }
                                 // One call per batch, so each model loads once per batch rather than once per meme.
