@@ -188,6 +188,7 @@ internal fun LibraryScreen(
         uiPrefs.edit().putString(BROWSE_MODE, mode.key).apply()
     }
     val canvasState = remember { MemeCanvasState() }
+    val globeState = remember { MemeGlobeState() }
     var folders by remember { mutableStateOf<List<MemeFolder>?>(null) }
     // Reaction folders run a search each, so they load once and are kept while the other kinds reload.
     var reactionFolders by remember { mutableStateOf<List<MemeFolder>?>(null) }
@@ -1206,6 +1207,8 @@ internal fun LibraryScreen(
             memes = memes,
             memesKey = publishedKey,
             canvasState = canvasState,
+            globeState = globeState,
+            loadVectors = { store.imageVectors() },
             hasMore = hasMore,
             isLoadingMore = isLoadingMore,
             onLoadMore = onLoadMore,

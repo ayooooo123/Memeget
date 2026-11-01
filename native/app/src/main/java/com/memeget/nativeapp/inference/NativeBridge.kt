@@ -191,4 +191,24 @@ internal object NativeBridge {
         cslsFloor: Float,
         outScores: FloatArray,
     ): Int
+
+    /**
+     * The library globe's tiles on screen for one frame (see GlobeKernels.cpp): writes four corners per tile to
+     * [verts], its atlas corners from [tex] to [texs], its item to [items] and its (column, row) to [cellsOut], and
+     * returns the tile count. [view]: centerU, centerV, cell px, flatness, centre x, centre y, width, height, tile
+     * half-size in cells.
+     */
+    external fun nativeGlobeMesh(
+        cells: IntArray,
+        gridCols: Int,
+        gridRows: Int,
+        cols: Int,
+        rows: Int,
+        tex: FloatArray,
+        view: FloatArray,
+        verts: FloatArray,
+        texs: FloatArray,
+        items: IntArray,
+        cellsOut: IntArray,
+    ): Int
 }

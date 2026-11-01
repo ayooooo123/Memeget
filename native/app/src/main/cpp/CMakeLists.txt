@@ -129,6 +129,7 @@ add_library(memeget_inference SHARED
   ProjectorConversion.cpp
   ImageProcessing.cpp
   VectorKernels.cpp
+  GlobeKernels.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/../../../../core/MemeGateCore.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/../../../../core/LlamaDecisionRunner.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/../../../../core/ResidentSearchCore.cpp
@@ -141,9 +142,10 @@ add_library(memeget_inference SHARED
   ${ET_COMMON_DIR}/rnexecutorch/models/ocr/CTCLabelConverter.cpp
   ${ET_COMMON_DIR}/rnexecutorch/utils/computer_vision/Processing.cpp
 )
-# Hot search, gate, and look-alike kernels stay compiled at -O3 even inside debug APKs.
+# Hot search, gate, look-alike and globe kernels stay compiled at -O3 even inside debug APKs.
 set_source_files_properties(
   VectorKernels.cpp
+  GlobeKernels.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/../../../../core/MemeGateCore.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/../../../../core/ResidentSearchCore.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/../../../../core/KnowledgeCore.cpp
