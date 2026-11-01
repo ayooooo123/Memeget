@@ -256,6 +256,8 @@ internal fun MemeBrowser(
     memes: List<Meme>,
     memesKey: Any?,
     canvasState: MemeCanvasState,
+    globeState: MemeGlobeState,
+    loadVectors: suspend () -> Map<Long, FloatArray>,
     hasMore: Boolean,
     isLoadingMore: Boolean,
     onLoadMore: () -> Unit,
@@ -336,9 +338,7 @@ internal fun MemeBrowser(
         val before = currentMemesKey
         // Burst once the folder's memes are on the board; a slow load just switches.
         withTimeoutOrNull(1_500) {
-            snapshotFlow {
-                currentMemesKey != before && canvasState.boardMemes === currentMemes && canvasState.board.tiles.isNotEmpty()
-            }.first { it }
+            snapshotFlow { currentMemesKey != before }.first { it }
         }
         morphTo(BrowseMode.Canvas, only = folder.key)
         burstFolder = null
@@ -375,13 +375,15 @@ internal fun MemeBrowser(
                 },
         )
         if (memes.isNotEmpty()) {
-            MemeCanvas(
+            MemeGlobe(
                 memes = memes,
-                state = canvasState,
+                state = globeState,
                 resetKey = memesKey,
                 hasMore = hasMore,
                 isLoadingMore = isLoadingMore,
                 onLoadMore = onLoadMore,
+                loadVectors = loadVectors,
+                visible = showCanvas,
                 onOpen = onOpen,
                 onLongPress = onLongPress,
                 bottomInset = bottomInset,
