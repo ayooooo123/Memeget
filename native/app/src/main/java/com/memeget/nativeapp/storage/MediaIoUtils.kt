@@ -11,6 +11,7 @@ import android.graphics.Matrix
 import android.media.ExifInterface
 import android.net.Uri
 import android.os.Build
+import android.os.Bundle
 import android.os.Environment
 import android.provider.DocumentsContract
 import android.provider.MediaStore
@@ -18,6 +19,7 @@ import android.provider.OpenableColumns
 import androidx.core.content.FileProvider
 import androidx.documentfile.provider.DocumentFile
 import java.io.File
+import java.io.FileNotFoundException
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.IOException
@@ -107,7 +109,17 @@ internal object MediaIoUtils {
         val kind: String
     )
 
-    fun listFilesFast(context: Context, treeUri: Uri, mediaOnly: Boolean): List<SafDocument> {
+    /** A folder's children; [complete] is true only when the provider answered and every row could be read. */
+    data class FolderListing(val docs: List<SafDocument>, val complete: Boolean)
+
+    fun listFilesFast(context: Context, treeUri: Uri, mediaOnly: Boolean): List<SafDocument> =
+        listFolder(context, treeUri, mediaOnly).docs
+
+    /**
+     * Lists [treeUri]'s direct children. An unreadable folder, a failed query or a row that can't be read gives an
+     * incomplete listing, so a child missing from it must not be taken as deleted.
+     */
+    fun listFolder(context: Context, treeUri: Uri, mediaOnly: Boolean): FolderListing {
         val results = mutableListOf<SafDocument>()
         val contentResolver = context.contentResolver
 
@@ -119,7 +131,7 @@ internal object MediaIoUtils {
             }
         } catch (_: Exception) {
             null
-        } ?: return emptyList()
+        } ?: return FolderListing(emptyList(), complete = false)
 
         val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, parentDocId)
         val projection = arrayOf(
@@ -131,53 +143,58 @@ internal object MediaIoUtils {
         )
 
         var cursor: Cursor? = null
+        var complete = true
         try {
-            cursor = contentResolver.query(childrenUri, projection, null, null, null)
-            if (cursor != null) {
-                val idIdx = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
-                val nameIdx = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
-                val mimeIdx = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_MIME_TYPE)
-                val modIdx = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_LAST_MODIFIED)
-                val sizeIdx = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_SIZE)
+            // The query-args form is what document providers implement; the five-argument form wraps it.
+            cursor = contentResolver.query(childrenUri, projection, null as Bundle?, null)
+                ?: return FolderListing(emptyList(), complete = false)
+            val idIdx = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
+            val nameIdx = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+            val mimeIdx = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_MIME_TYPE)
+            val modIdx = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_LAST_MODIFIED)
+            val sizeIdx = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_SIZE)
 
-                while (cursor.moveToNext()) {
-                    val docId = if (idIdx >= 0) cursor.getString(idIdx) else null ?: continue
-                    val displayName = if (nameIdx >= 0) cursor.getString(nameIdx) else null ?: continue
-                    val mimeType = if (mimeIdx >= 0) cursor.getString(mimeIdx) else null ?: ""
-                    val lastModified = if (modIdx >= 0) cursor.getLong(modIdx) else 0L
-                    val size = if (sizeIdx >= 0) cursor.getLong(sizeIdx) else 0L
-
-                    if (mimeType == DocumentsContract.Document.MIME_TYPE_DIR || displayName.startsWith(".")) {
-                        continue
-                    }
-
-                    val kind = kindOf(displayName) ?: when {
-                        mimeType.startsWith("image/") -> "image"
-                        mimeType.startsWith("video/") -> "video"
-                        else -> null
-                    }
-                    if (mediaOnly && kind == null) continue
-
-                    val itemUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, docId)
-                    results.add(
-                        SafDocument(
-                            documentId = docId,
-                            uri = itemUri,
-                            displayName = displayName,
-                            mimeType = mimeType,
-                            lastModified = lastModified,
-                            size = size,
-                            kind = kind ?: "file"
-                        )
-                    )
+            while (cursor.moveToNext()) {
+                val docId = if (idIdx >= 0) cursor.getString(idIdx) else null
+                val displayName = if (nameIdx >= 0) cursor.getString(nameIdx) else null
+                if (docId == null || displayName == null) {
+                    complete = false
+                    continue
                 }
+                val mimeType = (if (mimeIdx >= 0) cursor.getString(mimeIdx) else null) ?: ""
+                val lastModified = if (modIdx >= 0) cursor.getLong(modIdx) else 0L
+                val size = if (sizeIdx >= 0) cursor.getLong(sizeIdx) else 0L
+
+                if (mimeType == DocumentsContract.Document.MIME_TYPE_DIR || displayName.startsWith(".")) {
+                    continue
+                }
+
+                val kind = kindOf(displayName) ?: when {
+                    mimeType.startsWith("image/") -> "image"
+                    mimeType.startsWith("video/") -> "video"
+                    else -> null
+                }
+                if (mediaOnly && kind == null) continue
+
+                val itemUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, docId)
+                results.add(
+                    SafDocument(
+                        documentId = docId,
+                        uri = itemUri,
+                        displayName = displayName,
+                        mimeType = mimeType,
+                        lastModified = lastModified,
+                        size = size,
+                        kind = kind ?: "file"
+                    )
+                )
             }
         } catch (_: Exception) {
             return listFilesFallback(context, treeUri, childrenUri, mediaOnly)
         } finally {
             cursor?.close()
         }
-        return results
+        return FolderListing(results, complete)
     }
 
     private fun listFilesFallback(
@@ -185,23 +202,28 @@ internal object MediaIoUtils {
         treeUri: Uri,
         childrenUri: Uri,
         mediaOnly: Boolean,
-    ): List<SafDocument> {
+    ): FolderListing {
         val results = mutableListOf<SafDocument>()
+        var complete = true
         // Query IDs only when a provider rejects the full projection. Retain the
         // selected child directory; fromTreeUri would enumerate the grant root.
         try {
-            context.contentResolver.query(
+            val cursor = context.contentResolver.query(
                 childrenUri,
                 arrayOf(DocumentsContract.Document.COLUMN_DOCUMENT_ID),
                 null, null, null,
-            )?.use { cursor ->
+            ) ?: return FolderListing(emptyList(), complete = false)
+            cursor.use {
                 while (cursor.moveToNext()) {
-                    val docId = cursor.getString(0) ?: continue
-                    val uri = DocumentsContract.buildDocumentUriUsingTree(treeUri, docId)
-                    val file = DocumentFile.fromSingleUri(context, uri) ?: continue
+                    val docId = cursor.getString(0)
+                    val file = docId?.let { DocumentFile.fromSingleUri(context, DocumentsContract.buildDocumentUriUsingTree(treeUri, it)) }
+                    val name = file?.name
+                    if (docId == null || file == null || name == null) {
+                        complete = false
+                        continue
+                    }
                     val mimeType = file.type.orEmpty()
                     if (mimeType == DocumentsContract.Document.MIME_TYPE_DIR) continue
-                    val name = file.name ?: continue
                     if (name.startsWith(".")) continue
                     val kind = kindOf(name) ?: when {
                         mimeType.startsWith("video/") -> "video"
@@ -212,7 +234,7 @@ internal object MediaIoUtils {
                     results.add(
                         SafDocument(
                             documentId = docId,
-                            uri = uri,
+                            uri = file.uri,
                             displayName = name,
                             mimeType = mimeType.ifBlank { mimeForName(name) },
                             lastModified = file.lastModified(),
@@ -223,9 +245,58 @@ internal object MediaIoUtils {
                 }
             }
         } catch (_: Exception) {
-            return emptyList()
+            return FolderListing(emptyList(), complete = false)
         }
-        return results
+        return FolderListing(results, complete)
+    }
+
+    /**
+     * True only on positive evidence that [uriString]'s file no longer exists, e.g. it was deleted or trashed in
+     * another app. A missing permission, unmounted storage, an unknown provider error or partial photo access all
+     * return false, so the caller keeps the item.
+     */
+    fun isGone(context: Context, uriString: String): Boolean {
+        val uri = Uri.parse(uriString)
+        return try {
+            when {
+                uriString.startsWith("/") || uri.scheme == "file" -> {
+                    // Only the app's own folders: shared storage hides other apps' files from File, so a missing one
+                    // there may still exist.
+                    val file = File(if (uri.scheme == "file") uri.path.orEmpty() else uriString).canonicalFile
+                    val owned = listOfNotNull(context.filesDir, context.cacheDir, context.getExternalFilesDir(null))
+                        .any { file.startsWith(it.canonicalFile) }
+                    owned && !file.exists() && file.parentFile?.isDirectory == true
+                }
+                uri.scheme != "content" -> false
+                // With only user-selected photo access, unselected items look exactly like deleted ones.
+                uri.authority == MediaStore.AUTHORITY ->
+                    CameraRollScanner.hasFullMediaAccess(context) && rowCount(context, uri) == 0
+                DocumentsContract.isTreeUri(uri) && DocumentsContract.isDocumentUri(context, uri) -> {
+                    // The linked folder must still answer, so an unmounted card or a revoked grant isn't a deletion.
+                    val root = DocumentsContract.buildDocumentUriUsingTree(uri, DocumentsContract.getTreeDocumentId(uri))
+                    (rowCount(context, root) ?: 0) > 0 && documentMissing(context, uri)
+                }
+                else -> false
+            }
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    /** Rows [uri] answers with, or null when the query fails or the provider is absent. */
+    private fun rowCount(context: Context, uri: Uri): Int? = try {
+        context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null as Bundle?, null)?.use { it.count }
+    } catch (_: Exception) {
+        null
+    }
+
+    private fun documentMissing(context: Context, uri: Uri): Boolean = try {
+        context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null as Bundle?, null)?.use { it.count == 0 } ?: false
+    } catch (failure: Exception) {
+        // Local storage reports a missing document as "Missing file for <id> at <path>", as a FileNotFoundException
+        // or wrapped in the IllegalArgumentException of its tree check; other failures prove nothing.
+        (failure is FileNotFoundException || failure is IllegalArgumentException) &&
+            failure.message.orEmpty().contains("Missing file for")
     }
 
     fun findChildSafDocument(context: Context, parentFolderUri: Uri, displayName: String): Uri? {

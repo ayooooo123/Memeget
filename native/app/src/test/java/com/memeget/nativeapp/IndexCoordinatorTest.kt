@@ -930,20 +930,38 @@ class IndexCoordinatorTest {
 
     @Test(timeout = 30_000)
     fun chargingSessionWithoutProgressQueuesNothing() = runBlocking {
-        val file = createValidBitmapFile("gone.png")
-        val id = store.insertPending(Uri.fromFile(file).toString(), "gone.png", "image", 100L, "hashG")
+        val file = createValidBitmapFile("broken.png")
+        val id = store.insertPending(Uri.fromFile(file).toString(), "broken.png", "image", 100L, "hashG")
         plugInCharger()
         val coordinator = IndexCoordinator(context, store, files, testEngine, knowledge, cloud, sessionTimeoutMillis = 10_000L)
         coordinator.runPending()
         assertFalse(requireNotNull(store.meme(id)).pending)
 
-        // Captions turn on after the file is gone, so the one remaining caption fails every time.
-        assertTrue(file.delete())
+        // Captions turn on after the file stops being readable, so the one remaining caption fails every time. (A
+        // deleted file would leave the library instead.)
+        assertTrue(file.setReadable(false))
         store.setSetting("vision.enabled", "1")
         coordinator.runPending()
 
         assertEquals("pending", requireNotNull(store.meme(id)).visionState)
         assertTrue(queuedHandovers().isEmpty())
+    }
+
+    @Test(timeout = 30_000)
+    fun aMemeWhoseFileWasDeletedLeavesTheLibraryInsteadOfFailingEverySession() = runBlocking {
+        val file = createValidBitmapFile("trashed.png")
+        val id = store.insertPending(Uri.fromFile(file).toString(), "trashed.png", "image", 100L, "hashT")
+        val coordinator = IndexCoordinator(context, store, files, testEngine, knowledge, cloud, sessionTimeoutMillis = 10_000L)
+        coordinator.runPending()
+        store.clearErrors()
+
+        // Deleted or trashed in another app while its caption still waits.
+        assertTrue(file.delete())
+        store.setSetting("vision.enabled", "1")
+        coordinator.runPending()
+
+        assertNull(store.meme(id))
+        assertEquals(emptyList<String>(), store.errors())
     }
 
     @Test(timeout = 30_000)

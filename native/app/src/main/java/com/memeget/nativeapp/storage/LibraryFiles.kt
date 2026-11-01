@@ -142,10 +142,10 @@ internal class LibraryFiles(
 
     private suspend fun scanLocked(folder: Folder): List<Long> = withContext(Dispatchers.IO) {
         val folderUri = Uri.parse(folder.uri)
-        val discovered = MediaIoUtils.listFilesFast(context, folderUri, mediaOnly = true)
+        val listing = MediaIoUtils.listFolder(context, folderUri, mediaOnly = true)
         val newIds = mutableListOf<Long>()
 
-        for (doc in discovered) {
+        for (doc in listing.docs) {
             val uriStr = doc.uri.toString()
             val existing = store.memeByUri(uriStr)
             if (existing == null) {
@@ -159,7 +159,33 @@ internal class LibraryFiles(
                 if (id > 0) newIds.add(id)
             }
         }
+        if (listing.complete) forgetVanishedLocked(folder, listing.docs)
         newIds
+    }
+
+    /**
+     * Forgets the folder's memes whose file was deleted or trashed in another app; kept, each would fail every
+     * session and log an error. Only a complete listing is trusted, and a meme missing from it must also fail a
+     * direct check, so a folder that can't be read never empties the library.
+     */
+    private suspend fun forgetVanishedLocked(folder: Folder, listed: List<MediaIoUtils.SafDocument>) {
+        val present = listed.mapTo(HashSet()) { it.uri.toString() }
+        val prefix = folder.uri + "/document/"
+        val unlisted = ArrayList<Meme>()
+        store.allMemes().collect { meme ->
+            if (meme.uri.startsWith(prefix) && meme.uri !in present) unlisted += meme
+        }
+        val gone = unlisted.filter { MediaIoUtils.isGone(context, it.uri) }
+        if (gone.isNotEmpty()) forgetLocked(gone)
+    }
+
+    /** Forgets [meme] when its file is confirmed gone; false keeps it, and the caller's failure stands. */
+    suspend fun forgetIfGone(meme: Meme): Boolean = intakeGate.withLock {
+        withContext(NonCancellable + Dispatchers.IO) {
+            if (!MediaIoUtils.isGone(context, meme.uri)) return@withContext false
+            forgetLocked(listOf(meme))
+            true
+        }
     }
 
     suspend fun link(uri: Uri): Folder = withContext(Dispatchers.IO) {
@@ -1197,16 +1223,23 @@ internal class LibraryFiles(
         // Not cancellable once started: files deleted without their rows would leave memes that can't be shown.
         withContext(NonCancellable + Dispatchers.IO) {
             var deleted = 0
-            val thumbs = File(context.filesDir, "thumbs")
             for (meme in memes) {
                 if (deleteFile(meme.uri)) deleted++
-                // Posters are the app's own files.
-                Uri.parse(meme.thumbUri).takeIf { it.scheme == "file" }?.path?.let(::File)
-                    ?.takeIf { it.parentFile == thumbs }?.delete()
             }
-            store.delete(memes.map { it.id })
+            forgetLocked(memes)
             deleted
         }
+    }
+
+    /** Removes memes and their posters from the library, leaving their files alone. Runs under the intake lock. */
+    private suspend fun forgetLocked(memes: List<Meme>) {
+        val thumbs = File(context.filesDir, "thumbs")
+        for (meme in memes) {
+            // Posters are the app's own files.
+            Uri.parse(meme.thumbUri).takeIf { it.scheme == "file" }?.path?.let(::File)
+                ?.takeIf { it.parentFile == thumbs }?.delete()
+        }
+        store.delete(memes.map { it.id })
     }
 
     suspend fun deleteFile(uriStr: String): Boolean = withContext(Dispatchers.IO) {
