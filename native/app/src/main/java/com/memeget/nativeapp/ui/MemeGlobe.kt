@@ -47,6 +47,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -136,7 +137,8 @@ internal class MemeGlobeState {
     /** Which memes the layout holds and whether each was still waiting for indexing (see [globeLayoutKey]). */
     internal var layoutSignature: String? = null
     /** The result set (search, filter, folder) on the globe; a new one starts back on the whole globe. */
-    private var layoutKey: Any? = null
+    var layoutKey by mutableStateOf<Any?>(null)
+        private set
     internal var vectors: Map<Long, FloatArray> = emptyMap()
     internal var viewport by mutableStateOf(IntSize.Zero)
     internal var padBottom = 0f
@@ -178,6 +180,13 @@ internal class MemeGlobeState {
         atlas = GlobeAtlas(memes.size)
         if (key != layoutKey || cell <= 0f) needsPlacement = true
         layoutKey = key
+    }
+
+    /** New results that hold exactly the memes on the globe: keep the layout, start back on the whole globe. */
+    internal fun adopt(key: Any?) {
+        if (key == layoutKey) return
+        layoutKey = key
+        needsPlacement = true
     }
 
     /**
@@ -486,6 +495,7 @@ internal fun MemeGlobe(
                 if (signature == state.layoutSignature) {
                     val changed = state.refresh(list)
                     if (changed != null) {
+                        state.adopt(currentResetKey)
                         if (changed.isNotEmpty()) state.atlas?.fill(context, state.gridMemes, changed)
                         return@collect
                     }
@@ -504,7 +514,10 @@ internal fun MemeGlobe(
                 }
                 val how = if (saved != null) "read" else "laid out"
                 Log.i("MemeGlobe", "$how ${list.size} memes as ${grid.cols}x${grid.rows} in ${SystemClock.uptimeMillis() - started} ms")
-                state.publish(grid, list, signature, key)
+                // The results may have moved on while this ran (another search, a filter): the layout is saved for
+                // when they come back, but only the current results go on screen; theirs is next in line.
+                if (currentHasMore || globeLayoutKey(currentMemes) != signature) return@collect
+                state.publish(grid, list, signature, currentResetKey)
             }
     }
     val atlas = state.atlas
@@ -551,13 +564,14 @@ internal fun MemeGlobe(
             .pointerInput(state) {
                 detectTapGestures(
                     onTap = { point ->
-                        if (state.touchStoppedMotion) return@detectTapGestures
+                        // A globe still showing earlier results (the new ones are loading) is dimmed and inert.
+                        if (state.touchStoppedMotion || state.layoutKey != currentResetKey) return@detectTapGestures
                         val hit = frame.hitAt(point) ?: return@detectTapGestures
                         if (state.flatness() < 0.5f) state.flyTo(scope, hit.col + 0.5f, hit.row + 0.5f)
                         else state.gridMemes.getOrNull(hit.item)?.let { currentOnOpen(it) }
                     },
                     onLongPress = { point ->
-                        if (state.touchStoppedMotion || state.flatness() < 0.5f) return@detectTapGestures
+                        if (state.touchStoppedMotion || state.layoutKey != currentResetKey || state.flatness() < 0.5f) return@detectTapGestures
                         val hit = frame.hitAt(point) ?: return@detectTapGestures
                         state.gridMemes.getOrNull(hit.item)?.let { currentOnLongPress(it) }
                     },
@@ -606,8 +620,13 @@ internal fun MemeGlobe(
                 }
             },
     ) {
-        Spacer(Modifier.fillMaxSize().drawBehind { drawGlobe(state, sharp, frame) })
-        if (state.gridMemes.isEmpty()) {
+        Spacer(
+            Modifier
+                .fillMaxSize()
+                .graphicsLayer { alpha = if (state.layoutKey != currentResetKey) 0.3f else 1f }
+                .drawBehind { drawGlobe(state, sharp, frame) },
+        )
+        if (state.gridMemes.isEmpty() || state.layoutKey != resetKey) {
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(12.dp),
