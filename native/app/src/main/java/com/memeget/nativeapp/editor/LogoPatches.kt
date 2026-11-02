@@ -4,6 +4,8 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
+import android.graphics.ColorMatrix
+import android.graphics.ColorMatrixColorFilter
 import android.graphics.Matrix
 import android.graphics.Paint
 import android.net.Uri
@@ -31,7 +33,24 @@ internal class LogoPatches private constructor(
     private var cachedFrame = -1
     private var cachedBitmap: Bitmap? = null
     private val matrix = Matrix()
-    private val paint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG)
+    /**
+     * Smooth scaling still, but each drawn pixel's alpha snapped to fully on or off. Media3 blends the overlay canvas
+     * as straight alpha while Android draws it premultiplied, so any half-transparent pixel at the patch's edge came
+     * out too dark: a thin outline of the removed logo's shape in preview and export. The colour matrix works on
+     * unpremultiplied values, so the colours stay right.
+     */
+    private val paint = Paint(Paint.FILTER_BITMAP_FLAG).apply {
+        colorFilter = ColorMatrixColorFilter(
+            ColorMatrix(
+                floatArrayOf(
+                    1f, 0f, 0f, 0f, 0f,
+                    0f, 1f, 0f, 0f, 0f,
+                    0f, 0f, 1f, 0f, 0f,
+                    0f, 0f, 0f, ALPHA_SNAP, 127.5f - ALPHA_SNAP * 127.5f,
+                )
+            )
+        )
+    }
     private val src = FloatArray(6)
     private val dst = FloatArray(6)
 
@@ -147,6 +166,8 @@ internal class LogoPatches private constructor(
     companion object {
         /** Slack (µs) for a time the player rounded to just before a frame's own timestamp (time bases round to µs). */
         private const val TIME_SLACK_US = 100L
+        /** Steepness of the alpha snap: alpha within 1/[ALPHA_SNAP] of half on either side is all that stays partial. */
+        private const val ALPHA_SNAP = 64f
 
         /**
          * The frame of [frameTimesUs] (sorted start times) shown at [sourceUs]: the one that starts exactly then,
