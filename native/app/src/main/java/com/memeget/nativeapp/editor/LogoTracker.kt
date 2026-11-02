@@ -4,6 +4,10 @@ import android.content.Context
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.IOException
+import java.util.concurrent.Callable
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.Executors
+import java.util.concurrent.Future
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
@@ -32,6 +36,8 @@ internal object LogoTracker {
     private const val FADE_FRAMES = 8
     private const val REFERENCE_SCORE = 0.9f
     private const val MIN_TEMPLATE_PX = 8
+    /** Threads matching frames while decoding goes on. */
+    private const val MATCH_THREADS = 3
 
     /** Frames [startFrame] until [endFrame] show the logo at [sourceRect] (source coordinates), or not at all. */
     class Run(val startFrame: Int, val endFrame: Int, val sourceRect: NormalizedRect?)
@@ -86,30 +92,51 @@ internal object LogoTracker {
         val patch = logoPatch(templateFrame, analysisW, analysisH, boxX, boxY, boxW, boxH, mask, maskWidth, maskHeight)
             ?: throw IOException("The painted logo is too small to track")
 
-        // Every frame is checked: a sampled pass misses a logo that shows up, or moves, between two samples.
+        // Every frame is checked: a sampled pass misses a logo that shows up, or moves, between two samples. Frames
+        // are matched on a few threads while decoding goes on, and the matches land in decode order, so the result
+        // is the same as matching them one by one.
         val core = coreOf(patch)
         val count = frameTimes.size
         val xs = FloatArray(count)
         val ys = FloatArray(count)
         val scores = FloatArray(count) { -1f }
         val coreDiffs = FloatArray(count) { Float.MAX_VALUE }
-        val scratch = FloatArray(3)
+        class Match(val frame: Int, val x: Float, val y: Float, val score: Float, val coreDiff: Float)
         var decoded = 0
-        VideoFrames.decode(context, uri, 0L) { timeUs, image, _ ->
-            val grey = VideoFrames.luma(image, video)
-            val searched = LogoRemovalNative.nativeMatchTemplate(
-                grey, analysisW, analysisH, patch.pixels, patch.width, patch.height, patch.mask, scratch
-            )
-            if (!searched) throw IOException("A video frame could not be searched for the logo")
-            val found = frameTimes.binarySearch(timeUs)
-            val frame = if (found >= 0) found else (-found - 1).coerceAtMost(count - 1)
-            xs[frame] = scratch[0]
-            ys[frame] = scratch[1]
-            scores[frame] = scratch[2]
-            coreDiffs[frame] = coreDifference(grey, analysisW, analysisH, patch, core, scratch[0].roundToInt(), scratch[1].roundToInt())
+        fun land(match: Match) {
+            xs[match.frame] = match.x
+            ys[match.frame] = match.y
+            scores[match.frame] = match.score
+            coreDiffs[match.frame] = match.coreDiff
             decoded++
             onProgress(decoded.toFloat() / count)
-            true
+        }
+        val matchers = Executors.newFixedThreadPool(MATCH_THREADS)
+        val pending = ArrayDeque<Future<Match>>()
+        try {
+            VideoFrames.decode(context, uri, 0L) { timeUs, image, _ ->
+                val grey = VideoFrames.luma(image, video)
+                val found = frameTimes.binarySearch(timeUs)
+                val frame = if (found >= 0) found else (-found - 1).coerceAtMost(count - 1)
+                pending.addLast(matchers.submit(Callable {
+                    val scratch = FloatArray(3)
+                    val searched = LogoRemovalNative.nativeMatchTemplate(
+                        grey, analysisW, analysisH, patch.pixels, patch.width, patch.height, patch.mask, scratch
+                    )
+                    if (!searched) throw IOException("A video frame could not be searched for the logo")
+                    Match(
+                        frame, scratch[0], scratch[1], scratch[2],
+                        coreDifference(grey, analysisW, analysisH, patch, core, scratch[0].roundToInt(), scratch[1].roundToInt())
+                    )
+                }))
+                while (pending.size > 2 * MATCH_THREADS) land(pending.removeFirst().get())
+                true
+            }
+            while (pending.isNotEmpty()) land(pending.removeFirst().get())
+        } catch (failure: ExecutionException) {
+            throw failure.cause ?: failure
+        } finally {
+            matchers.shutdownNow()
         }
         val templateIndex = frameTimes.indices.minBy { abs(frameTimes[it] - templateTimeUs) }
         val nearby = (max(0, templateIndex - REFERENCE_FRAMES)..min(count - 1, templateIndex + REFERENCE_FRAMES))

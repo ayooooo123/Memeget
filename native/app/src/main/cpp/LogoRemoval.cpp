@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <exception>
 #include <vector>
 
@@ -383,6 +384,85 @@ Java_com_memeget_nativeapp_editor_LogoRemovalNative_nativeRefineMask(
     } catch (const std::exception& e) {
         throwJava(env, e.what());
         return nullptr;
+    }
+}
+
+// MI-GAN's input for [rgb] ([w]×[h], 3 bytes a pixel) with [hole] (nonzero: fill) in [tensor] (4 × size × size):
+// the picture padded to a square by repeating its edge pixels (the padding is kept, not filled), scaled to the
+// model's size (area-averaged down, bilinear up), as concat(mask − 0.5, rgb · mask) channels first with rgb in
+// [−1, 1] and mask 1 to keep. A scaled pixel any part of the hole reaches is filled.
+JNIEXPORT void JNICALL
+Java_com_memeget_nativeapp_editor_LogoRemovalNative_nativeMiganInput(
+    JNIEnv* env, jobject /* thiz */, jbyteArray rgbArray, jint w, jint h, jbyteArray holeArray, jint size,
+    jfloatArray tensorArray) {
+    try {
+        const int side = std::max(w, h);
+        const int ox = (side - w) / 2;
+        const int oy = (side - h) / 2;
+        std::vector<uint8_t> rgb(static_cast<size_t>(w) * h * 3);
+        std::vector<uint8_t> hole(static_cast<size_t>(w) * h);
+        env->GetByteArrayRegion(rgbArray, 0, static_cast<jsize>(rgb.size()), reinterpret_cast<jbyte*>(rgb.data()));
+        env->GetByteArrayRegion(holeArray, 0, static_cast<jsize>(hole.size()), reinterpret_cast<jbyte*>(hole.data()));
+        cv::Mat square;
+        cv::copyMakeBorder(cv::Mat(h, w, CV_8UC3, rgb.data()), square, oy, side - h - oy, ox, side - w - ox,
+                           cv::BORDER_REPLICATE);
+        cv::Mat squareHole;
+        cv::copyMakeBorder(cv::Mat(h, w, CV_8UC1, hole.data()) != 0, squareHole, oy, side - h - oy, ox, side - w - ox,
+                           cv::BORDER_CONSTANT, cv::Scalar(0));
+        const int interpolation = side > size ? cv::INTER_AREA : cv::INTER_LINEAR;
+        cv::Mat scaled;
+        cv::Mat scaledHole;
+        cv::resize(square, scaled, cv::Size(size, size), 0, 0, interpolation);
+        cv::resize(squareHole, scaledHole, cv::Size(size, size), 0, 0, interpolation);
+        const size_t plane = static_cast<size_t>(size) * size;
+        std::vector<float> tensor(4 * plane);
+        for (size_t i = 0; i < plane; ++i) {
+            const float keep = scaledHole.data[i] > 0 ? 0.0f : 1.0f;
+            tensor[i] = keep - 0.5f;
+            for (int c = 0; c < 3; ++c) tensor[(c + 1) * plane + i] = (scaled.data[i * 3 + c] / 127.5f - 1.0f) * keep;
+        }
+        env->SetFloatArrayRegion(tensorArray, 0, static_cast<jsize>(tensor.size()), tensor.data());
+    } catch (const std::exception& e) {
+        throwJava(env, e.what());
+    }
+}
+
+// [rgb] ([w]×[h]) with its [hole] pixels taken from MI-GAN's output [generated] (3 × size × size, channels first, in
+// [−1, 1]), scaled back over the padded square of nativeMiganInput, into [out].
+JNIEXPORT void JNICALL
+Java_com_memeget_nativeapp_editor_LogoRemovalNative_nativeMiganOutput(
+    JNIEnv* env, jobject /* thiz */, jfloatArray generatedArray, jint size, jbyteArray rgbArray, jint w, jint h,
+    jbyteArray holeArray, jbyteArray outArray) {
+    try {
+        const int side = std::max(w, h);
+        const int ox = (side - w) / 2;
+        const int oy = (side - h) / 2;
+        const size_t plane = static_cast<size_t>(size) * size;
+        std::vector<float> generated(3 * plane);
+        env->GetFloatArrayRegion(generatedArray, 0, static_cast<jsize>(generated.size()), generated.data());
+        cv::Mat picture(size, size, CV_8UC3);
+        for (size_t i = 0; i < plane; ++i) {
+            for (int c = 0; c < 3; ++c) {
+                picture.data[i * 3 + c] = static_cast<uint8_t>(std::clamp(static_cast<int>((generated[c * plane + i] + 1.0f) * 127.5f), 0, 255));
+            }
+        }
+        cv::Mat back;
+        cv::resize(picture, back, cv::Size(side, side), 0, 0, side > size ? cv::INTER_LINEAR : cv::INTER_AREA);
+        std::vector<uint8_t> rgb(static_cast<size_t>(w) * h * 3);
+        std::vector<uint8_t> hole(static_cast<size_t>(w) * h);
+        env->GetByteArrayRegion(rgbArray, 0, static_cast<jsize>(rgb.size()), reinterpret_cast<jbyte*>(rgb.data()));
+        env->GetByteArrayRegion(holeArray, 0, static_cast<jsize>(hole.size()), reinterpret_cast<jbyte*>(hole.data()));
+        for (int y = 0; y < h; ++y) {
+            const uint8_t* row = back.ptr<uint8_t>(y + oy) + static_cast<size_t>(ox) * 3;
+            for (int x = 0; x < w; ++x) {
+                const size_t i = static_cast<size_t>(y) * w + x;
+                if (!hole[i]) continue;
+                std::memcpy(rgb.data() + i * 3, row + static_cast<size_t>(x) * 3, 3);
+            }
+        }
+        env->SetByteArrayRegion(outArray, 0, static_cast<jsize>(rgb.size()), reinterpret_cast<const jbyte*>(rgb.data()));
+    } catch (const std::exception& e) {
+        throwJava(env, e.what());
     }
 }
 

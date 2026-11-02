@@ -3,6 +3,8 @@ package com.memeget.nativeapp.editor
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Rect
+import android.os.SystemClock
+import android.util.Log
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
@@ -12,6 +14,11 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.IOException
+import java.util.concurrent.Callable
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.Executors
+import java.util.concurrent.Future
+import java.util.concurrent.TimeUnit
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -22,6 +29,8 @@ import kotlin.math.roundToInt
  * time. Still images: MI-GAN.
  */
 internal object LogoFill {
+    private const val TAG = "LogoFill"
+
     /**
      * Scratch space for one region: every frame's crop (3 bytes a pixel) and two half-resolution flows (16 bytes
      * per 4 pixels). Regions are worked at the video's own resolution unless that would exceed this; resampling
@@ -89,6 +98,8 @@ internal object LogoFill {
                     }
                 }
                 try {
+                    var mark = SystemClock.uptimeMillis()
+                    fun lap(): Long = SystemClock.uptimeMillis().let { now -> (now - mark).also { mark = now } }
                     var decoded = 0
                     // A frame the decoder skips takes the one before, so it never counts as a known black frame.
                     var last = -1
@@ -116,28 +127,69 @@ internal object LogoFill {
                     }
                     if (last < 0) throw IOException("The video could not be decoded")
                     for (gap in last + 1 until frameCount) VideoCompletionNative.nativeAddFrame(handle, gap, lastRgb, lastHole)
+                    val decodeMs = lap()
                     VideoCompletionNative.nativeSeal(handle)
+                    val motionMs = lap()
                     onProgress(base + share * 0.45f)
                     VideoCompletionNative.nativePropagate(handle)
+                    val realMs = lap()
                     onProgress(base + share * 0.55f)
-                    val rgb = ByteArray(cw * ch * 3)
-                    val hole = ByteArray(cw * ch)
+                    var modelled = 0
                     if (inpainter != null) {
-                        // Each frame's own invention, with its trusted real fill as context; a failure leaves this and
-                        // the remaining frames to the plain fill.
-                        for (frame in 0 until frameCount) {
-                            ensureActive()
-                            if (!VideoCompletionNative.nativeFillRequest(handle, frame, rgb, hole)) continue
-                            val filled = try {
-                                inpainter.inpaint(rgb, cw, ch, hole)
-                            } catch (failure: Exception) {
-                                break
+                        // Each frame's own invention, with its trusted real fill as context. The model runs on a
+                        // thread of its own while the next frame is requested and prepared here: a request reads
+                        // only real pixels of other frames, never what another frame's fill replaces, so the overlap
+                        // changes nothing. Two buffer sets alternate, so the frame on the model is never written
+                        // over. A failure leaves that frame and the rest to the plain fill.
+                        val model = Executors.newSingleThreadExecutor()
+                        val buffers = Array(2) { Triple(ByteArray(cw * ch * 3), ByteArray(cw * ch), MiganInpainter.newTensor()) }
+                        var running: Future<FloatArray>? = null
+                        var runningFrame = -1
+                        var runningSet = 0
+                        var set = 0
+                        // The frame on the model, written back once its run ends; false when the model failed.
+                        fun land(): Boolean {
+                            val pending = running ?: return true
+                            running = null
+                            val generated = try {
+                                pending.get()
+                            } catch (failure: ExecutionException) {
+                                return false
                             }
-                            VideoCompletionNative.nativeSetComplete(handle, frame, filled)
-                            onProgress(base + share * (0.55f + 0.3f * (frame + 1) / frameCount))
+                            val (frameRgb, frameHole, _) = buffers[runningSet]
+                            VideoCompletionNative.nativeSetComplete(
+                                handle, runningFrame, inpainter.write(generated, frameRgb, cw, ch, frameHole)
+                            )
+                            modelled++
+                            onProgress(base + share * (0.55f + 0.3f * (runningFrame + 1) / frameCount))
+                            return true
+                        }
+                        try {
+                            for (frame in 0 until frameCount) {
+                                ensureActive()
+                                val (frameRgb, frameHole, tensor) = buffers[set]
+                                if (!VideoCompletionNative.nativeFillRequest(handle, frame, frameRgb, frameHole)) continue
+                                try {
+                                    inpainter.prepare(frameRgb, cw, ch, frameHole, tensor)
+                                } catch (failure: Exception) {
+                                    break
+                                }
+                                if (!land()) break
+                                running = model.submit(Callable { inpainter.run(tensor) })
+                                runningFrame = frame
+                                runningSet = set
+                                set = 1 - set
+                            }
+                            land()
+                        } finally {
+                            // A run still on the model finishes before the model can be closed.
+                            model.shutdown()
+                            model.awaitTermination(1, TimeUnit.MINUTES)
                         }
                     }
+                    val modelMs = lap()
                     VideoCompletionNative.nativeFinish(handle)
+                    val finishMs = lap()
                     onProgress(base + share * 0.9f)
 
                     // Where the frames are covered once each logo piece sits where it really is (see nativeSeal).
@@ -152,12 +204,19 @@ internal object LogoFill {
                         box.height() / scale / video.height
                     )
                     val region = writer.addRegion(regionRect, alpha, box.width(), box.height())
+                    val rgb = ByteArray(cw * ch * 3)
                     for (frame in 0 until frameCount) {
                         if (runOf[frame] !in inGroup) continue
                         ensureActive()
                         VideoCompletionNative.nativeResult(handle, frame, rgb)
                         writer.addFrame(frame, region, cut(rgb, cw, box), box.width(), box.height())
                     }
+                    Log.i(
+                        TAG,
+                        "region ${cw}x$ch over $frameCount frames: decode $decodeMs ms, motion $motionMs ms, " +
+                            "real fill $realMs ms, fill model $modelMs ms on $modelled frames, " +
+                            "plain fill and smoothing $finishMs ms, patches ${lap()} ms"
+                    )
                 } catch (failure: RuntimeException) {
                     if (failure.message == "cancelled") throw CancellationException("Stopped")
                     throw failure
