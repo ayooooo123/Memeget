@@ -1208,6 +1208,8 @@ internal fun LibraryScreen(
             memesKey = publishedKey,
             canvasState = canvasState,
             globeState = globeState,
+            // The published results answer a search (not just a filter): they come best first.
+            rankedResults = ((publishedKey as? Triple<*, *, *>)?.first as? String)?.isNotEmpty() == true,
             loadVectors = { store.imageVectors() },
             hasMore = hasMore,
             isLoadingMore = isLoadingMore,

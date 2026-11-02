@@ -398,7 +398,7 @@ internal fun ImportUrlDialog(
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(
-                    text = "Paste a link to an image, video, X/Twitter post, or Tenor GIF.",
+                    text = "Paste a video or meme link (YouTube, Shorts, TikTok, Reddit, Instagram, X, Twitch/Kick, Bluesky, Imgflip, Tenor, or direct URL).",
                     style = MaterialTheme.typography.bodySmall,
                     color = MemegetColors.TextSecondary,
                 )

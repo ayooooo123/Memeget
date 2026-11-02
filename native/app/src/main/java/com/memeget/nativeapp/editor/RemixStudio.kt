@@ -25,10 +25,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Redo
-import androidx.compose.material.icons.filled.Undo
+import com.memeget.nativeapp.ui.MemegetIcons
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -490,7 +487,7 @@ internal fun RemixStudio(
                 if (currentHistory.past.isNotEmpty()) showDiscardConfirmDialog = true
                 else exitStudio()
             }) {
-                Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.White)
+                Icon(MemegetIcons.Close, contentDescription = "Close", tint = Color.White)
             }
 
             Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -516,7 +513,7 @@ internal fun RemixStudio(
                     enabled = canUndo(currentHistory)
                 ) {
                     Icon(
-                        Icons.Default.Undo,
+                        MemegetIcons.Undo,
                         contentDescription = "Undo",
                         tint = if (canUndo(currentHistory)) Color.White else Color(0xFF484F58)
                     )
@@ -528,7 +525,7 @@ internal fun RemixStudio(
                     enabled = canRedo(currentHistory)
                 ) {
                     Icon(
-                        Icons.Default.Redo,
+                        MemegetIcons.Redo,
                         contentDescription = "Redo",
                         tint = if (canRedo(currentHistory)) Color.White else Color(0xFF484F58)
                     )

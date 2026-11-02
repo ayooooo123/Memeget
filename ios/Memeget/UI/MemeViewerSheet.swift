@@ -1,3 +1,4 @@
+import AVKit
 import SwiftUI
 import UIKit
 
@@ -18,8 +19,12 @@ public struct MemeViewerSheet: View {
 
                 ScrollView {
                     VStack(alignment: .leading, spacing: 16) {
-                        // Full Meme Preview
-                        if let img = MemeImageResolver.loadUIImage(for: meme, fullResolution: true) {
+                        // Full Video or Image Meme Preview
+                        if meme.kind == "video", let videoURL = MemeImageResolver.resolveLocalMediaURL(for: meme.uri) {
+                            VideoPlayer(player: AVPlayer(url: videoURL))
+                                .frame(maxWidth: .infinity, minHeight: 280, maxHeight: 420)
+                                .clipShape(RoundedRectangle(cornerRadius: 12))
+                        } else if let img = MemeImageResolver.loadUIImage(for: meme, fullResolution: true) {
                             Image(uiImage: img)
                                 .resizable()
                                 .scaledToFit()
@@ -30,7 +35,13 @@ public struct MemeViewerSheet: View {
                         // Primary Actions + 1-Tap "Not a meme" Quick-Fix
                         HStack(spacing: 10) {
                             Button(action: {
-                                if let img = MemeImageResolver.loadUIImage(for: meme, fullResolution: true) {
+                                if meme.kind == "video",
+                                   let vidURL = MemeImageResolver.resolveLocalMediaURL(for: meme.uri),
+                                   let data = try? Data(contentsOf: vidURL) {
+                                    UIPasteboard.general.setData(data, forPasteboardType: "public.mpeg-4")
+                                    coordinator.store.recordCopy(id: meme.id)
+                                    copiedBanner = true
+                                } else if let img = MemeImageResolver.loadUIImage(for: meme, fullResolution: true) {
                                     UIPasteboard.general.image = img
                                     coordinator.store.recordCopy(id: meme.id)
                                     copiedBanner = true
@@ -191,10 +202,28 @@ public struct SettingsSheet: View {
     @State private var cloudConfig = IosCloudConfig()
     @State private var cfToken: String = ""
     @State private var vlmToken: String = ""
+    @State private var linkInput: String = ""
 
     public var body: some View {
         NavigationStack {
             Form {
+                Section("Download Video or Meme Link (uBit)") {
+                    TextField("Paste YouTube, TikTok, Reddit, IG, X, Twitch link…", text: $linkInput)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    Button(coordinator.isDownloadingLink ? "Downloading…" : "Download to Library") {
+                        let target = linkInput.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !target.isEmpty else { return }
+                        linkInput = ""
+                        Task {
+                            if (try? await coordinator.importSharedLink(target)) != nil {
+                                dismiss()
+                            }
+                        }
+                    }
+                    .disabled(coordinator.isDownloadingLink || linkInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+
                 Section("Camera Roll & 3-Stage Meme Gate") {
                     HStack {
                         Text("Indexed Memes")

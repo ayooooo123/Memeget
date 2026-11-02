@@ -3,25 +3,42 @@ import Photos
 import UIKit
 
 public enum MemeImageResolver {
-    public static func loadUIImage(for meme: MemeItem, fullResolution: Bool = false) -> UIImage? {
-        let candidates = fullResolution ? [meme.uri, meme.thumbUri] : [meme.thumbUri, meme.uri]
-        for raw in candidates where !raw.isEmpty && !raw.hasPrefix("photokit:") {
-            if let url = URL(string: raw), url.isFileURL, let img = UIImage(contentsOfFile: url.path) {
-                return img
-            }
-            if let img = UIImage(contentsOfFile: raw) {
-                return img
-            }
-            // Re-base photokit_thumbs/<filename> across iOS app-update container UUID rotations
-            let fileName = URL(string: raw)?.lastPathComponent ?? (raw as NSString).lastPathComponent
-            if !fileName.isEmpty {
+    public static func resolveLocalMediaURL(for raw: String) -> URL? {
+        guard !raw.isEmpty, !raw.hasPrefix("photokit:") else { return nil }
+        if let u = URL(string: raw), u.isFileURL, FileManager.default.fileExists(atPath: u.path) {
+            return u
+        }
+        if FileManager.default.fileExists(atPath: raw) {
+            return URL(fileURLWithPath: raw)
+        }
+        let fileName = URL(string: raw)?.lastPathComponent ?? (raw as NSString).lastPathComponent
+        if !fileName.isEmpty {
+            for folder in ["imports", "photokit_thumbs"] {
                 for domain in [FileManager.SearchPathDirectory.applicationSupportDirectory, .cachesDirectory] {
                     if let base = FileManager.default.urls(for: domain, in: .userDomainMask).first {
-                        let p = base.appendingPathComponent("photokit_thumbs").appendingPathComponent(fileName).path
-                        if let img = UIImage(contentsOfFile: p) {
-                            return img
+                        let cand = base.appendingPathComponent(folder).appendingPathComponent(fileName)
+                        if FileManager.default.fileExists(atPath: cand.path) {
+                            return cand
                         }
                     }
+                }
+            }
+        }
+        return nil
+    }
+
+    public static func loadUIImage(for meme: MemeItem, fullResolution: Bool = false) -> UIImage? {
+        let candidates = (meme.kind == "video")
+            ? [meme.thumbUri, meme.uri]
+            : (fullResolution ? [meme.uri, meme.thumbUri] : [meme.thumbUri, meme.uri])
+        for raw in candidates where !raw.isEmpty && !raw.hasPrefix("photokit:") {
+            if let resolved = resolveLocalMediaURL(for: raw) {
+                if let img = UIImage(contentsOfFile: resolved.path) {
+                    return img
+                }
+                if ["mp4", "mov", "m4v", "webm"].contains(resolved.pathExtension.lowercased()),
+                   let cg = IosInferenceEngine.extractVideoPoster(from: resolved) {
+                    return UIImage(cgImage: cg)
                 }
             }
         }
@@ -53,7 +70,11 @@ public final class MemeLibraryCoordinator: ObservableObject {
     @Published public var progressTotal: Int = 0
     @Published public var photoAccessGranted: Bool = false
     @Published public var libraryRevision: Int = 0
+    @Published public var isDownloadingLink: Bool = false
+    @Published public var linkDownloadStatus: String = ""
+    @Published public var linkDownloadError: String = ""
 
+    public static let appGroupID = "group.com.memeget.iosapp"
     public let store: SqliteMemeStore
     public let engine: IosInferenceEngine
     public let cloud: IosCloudAssistant
@@ -99,6 +120,217 @@ public final class MemeLibraryCoordinator: ObservableObject {
                 self.libraryRevision &+= 1
             }
         }
+    }
+
+    public static var importsDirectory: URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let dir = base.appendingPathComponent("imports", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    public static var thumbsDirectory: URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let dir = base.appendingPathComponent("photokit_thumbs", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    private static func persistPosterJPEG(_ cgImage: CGImage, stem: String) -> URL? {
+        let safe = stem.replacingOccurrences(of: "[^a-zA-Z0-9._-]", with: "_", options: .regularExpression)
+        let dst = thumbsDirectory.appendingPathComponent("poster_\(safe).jpg")
+        if let jpg = UIImage(cgImage: cgImage).jpegData(compressionQuality: 0.88) {
+            try? jpg.write(to: dst, options: .atomic)
+            return dst
+        }
+        return nil
+    }
+
+    public func handleIncomingURL(_ url: URL) {
+        if url.isFileURL {
+            Task {
+                let ext = url.pathExtension.lowercased().isEmpty ? "mp4" : url.pathExtension.lowercased()
+                let dst = Self.importsDirectory.appendingPathComponent("shared_\(Int(Date().timeIntervalSince1970))_\(url.deletingPathExtension().lastPathComponent).\(ext)")
+                _ = url.startAccessingSecurityScopedResource()
+                try? FileManager.default.copyItem(at: url, to: dst)
+                url.stopAccessingSecurityScopedResource()
+                if FileManager.default.fileExists(atPath: dst.path) {
+                    _ = await indexExplicitLocalFile(dst, titleHint: nil, siteHint: nil, authorHint: nil, sha256: (try? UbitLinkDownloader.sha256Hex(of: dst)) ?? "")
+                }
+            }
+            return
+        }
+
+        if url.scheme?.lowercased() == "memeget" {
+            let comps = URLComponents(url: url, resolvingAgainstBaseURL: false)
+            if let link = comps?.queryItems?.first(where: { $0.name == "url" })?.value, !link.isEmpty {
+                Task { _ = try? await importSharedLink(link) }
+            }
+            drainSharedExtensionQueue()
+            return
+        }
+
+        if let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" {
+            Task { _ = try? await importSharedLink(url.absoluteString) }
+        }
+    }
+
+    public func drainSharedExtensionQueue() {
+        guard let groupRoot = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: Self.appGroupID) else {
+            return
+        }
+        let inbox = groupRoot.appendingPathComponent("share_inbox", isDirectory: true)
+        guard let items = try? FileManager.default.contentsOfDirectory(at: inbox, includingPropertiesForKeys: nil), !items.isEmpty else {
+            return
+        }
+        Task {
+            for file in items {
+                defer { try? FileManager.default.removeItem(at: file) }
+                let ext = file.pathExtension.lowercased()
+                if ext == "txt", let body = try? String(contentsOf: file, encoding: .utf8) {
+                    for line in body.components(separatedBy: .newlines) {
+                        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !trimmed.isEmpty {
+                            _ = try? await importSharedLink(trimmed)
+                        }
+                    }
+                } else if ["mp4", "mov", "m4v", "webm", "jpg", "jpeg", "png", "webp", "gif", "heic"].contains(ext) {
+                    let dst = Self.importsDirectory.appendingPathComponent(file.lastPathComponent)
+                    try? FileManager.default.copyItem(at: file, to: dst)
+                    if FileManager.default.fileExists(atPath: dst.path) {
+                        let sha = (try? UbitLinkDownloader.sha256Hex(of: dst)) ?? ""
+                        _ = await indexExplicitLocalFile(dst, titleHint: nil, siteHint: nil, authorHint: nil, sha256: sha)
+                    }
+                }
+            }
+        }
+    }
+
+    @discardableResult
+    public func importSharedLink(
+        _ rawInput: String,
+        outputDirectory: URL? = nil,
+        sessionConfiguration: URLSessionConfiguration? = nil
+    ) async throws -> Int64 {
+        isDownloadingLink = true
+        linkDownloadError = ""
+        linkDownloadStatus = "Resolving link…"
+        defer {
+            isDownloadingLink = false
+        }
+
+        do {
+            let targetDir = outputDirectory ?? Self.importsDirectory
+            let downloaded = try await UbitLinkDownloader.download(
+                rawInput: rawInput,
+                outputDirectory: targetDir,
+                sessionConfiguration: sessionConfiguration
+            ) { [weak self] step in
+                Task { @MainActor in self?.linkDownloadStatus = step }
+            }
+
+            if let dupId = store.memeId(forContentHash: downloaded.sha256) {
+                try? FileManager.default.removeItem(at: downloaded.fileURL)
+                linkDownloadStatus = "✓ Already in your library"
+                libraryRevision &+= 1
+                return dupId
+            }
+
+            linkDownloadStatus = "Indexing \(downloaded.site) \(downloaded.kind)…"
+            let memeId = await indexExplicitLocalFile(
+                downloaded.fileURL,
+                titleHint: downloaded.title,
+                siteHint: downloaded.site,
+                authorHint: downloaded.author,
+                sha256: downloaded.sha256
+            )
+            linkDownloadStatus = "✓ Saved from \(downloaded.site)"
+            return memeId
+        } catch {
+            linkDownloadStatus = ""
+            linkDownloadError = error.localizedDescription
+            throw error
+        }
+    }
+
+    // Indexes an explicitly shared/downloaded video or image immediately (never gated out by Camera Roll photo rejection,
+    // and graceful even before MobileCLIP-S2 weights finish downloading).
+    private func indexExplicitLocalFile(
+        _ url: URL,
+        titleHint: String?,
+        siteHint: String?,
+        authorHint: String?,
+        sha256: String
+    ) async -> Int64 {
+        let ext = url.pathExtension.lowercased()
+        let isVideo = ["mp4", "mov", "m4v", "webm", "m4a", "mp3"].contains(ext)
+        let cgImage = isVideo ? IosInferenceEngine.extractVideoPoster(from: url) : IosInferenceEngine.loadUprightCGImage(from: url)
+
+        var fullOcr = ""
+        var thumbURLString = url.absoluteString
+        var imgVec = [Float](repeating: 0, count: 512)
+        var extraTags: [MemeTag] = []
+        var metaTerms = [siteHint, authorHint, titleHint]
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+
+        if let cg = cgImage {
+            let (ocrRegions, recognized) = IosInferenceEngine.recognizeText(in: cg)
+            fullOcr = recognized
+            if isVideo, let posterURL = Self.persistPosterJPEG(cg, stem: sha256.isEmpty ? url.deletingPathExtension().lastPathComponent : String(sha256.prefix(16))) {
+                thumbURLString = posterURL.absoluteString
+            }
+            if let embedded = try? await engine.embedCGImage(cg) {
+                imgVec = embedded
+                let boxInputs: [MGOcrBoxInput] = ocrRegions.map { r in
+                    let b = MGOcrBoxInput()
+                    b.left = r.left; b.top = r.top; b.right = r.right; b.bottom = r.bottom
+                    b.confidence = r.confidence; b.text = r.text
+                    return b
+                }
+                let stage1 = embedded.withUnsafeBufferPointer { ptr in
+                    engine.bridge.evaluateStage1(
+                        withImageVec: ptr.baseAddress!,
+                        width: cg.width,
+                        height: cg.height,
+                        isVideo: isVideo,
+                        durationMs: 0,
+                        isScreenshotHint: false,
+                        panelCount: 1,
+                        hasGutter: false,
+                        ordinaryAnchorCos: 0.0,
+                        userRejectedCos: -1.0,
+                        ocrBoxes: boxInputs,
+                        fullOcrText: fullOcr
+                    )
+                }
+                extraTags = stage1.conceptHits.map {
+                    MemeTag(label: $0.label, category: $0.category, score: $0.score, source: "open_vocab", scoreDomain: "open-vocab", confirmation: "unreviewed", provenance: "open-vocab")
+                }
+                if !stage1.extraTerms.isEmpty {
+                    metaTerms = [metaTerms, stage1.extraTerms].filter { !$0.isEmpty }.joined(separator: " ")
+                }
+            }
+        }
+
+        let memeId = store.upsertIndexedMeme(
+            uri: url.absoluteString,
+            name: url.lastPathComponent,
+            kind: isVideo ? "video" : "image",
+            modifiedAt: Int64(Date().timeIntervalSince1970 * 1000),
+            ocr: fullOcr,
+            caption: titleHint ?? "",
+            tags: extraTags,
+            extraTerms: metaTerms,
+            thumbUri: thumbURLString,
+            imageVec: imgVec,
+            contentHash: sha256
+        )
+        let storeRef = self.store
+        _ = await Task.detached(priority: .utility) { storeRef.propagateClusterIdentities() }.value
+        libraryRevision &+= 1
+        return memeId
     }
 
     private func identifyAcceptedLocally(_ image: CGImage, ocr: String, hints: [MemeTag]) async -> TwoDomainParsed? {
@@ -215,6 +447,12 @@ public final class MemeLibraryCoordinator: ObservableObject {
 
 
             if finalAccepted {
+                let resolvedThumb: String
+                if isVideo, let posterURL = Self.persistPosterJPEG(cgImage, stem: url.deletingPathExtension().lastPathComponent) {
+                    resolvedThumb = posterURL.absoluteString
+                } else {
+                    resolvedThumb = url.absoluteString
+                }
                 let memeId = store.upsertIndexedMeme(
                     uri: url.absoluteString,
                     name: url.lastPathComponent,
@@ -224,7 +462,7 @@ public final class MemeLibraryCoordinator: ObservableObject {
                     caption: twoDomainCaption,
                     tags: extraTags,
                     extraTerms: extraTerms,
-                    thumbUri: url.absoluteString,
+                    thumbUri: resolvedThumb,
                     imageVec: imgVec,
                     sceneVecs: sceneVecs
                 )

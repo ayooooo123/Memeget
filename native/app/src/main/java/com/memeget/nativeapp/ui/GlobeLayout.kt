@@ -11,8 +11,17 @@ import kotlin.math.sqrt
 /**
  * The globe's grid: [cols] by [rows] cells that wrap both ways (a torus), so panning never meets an edge. [cells] holds
  * each cell's item index (row-major), or -1 for an empty cell. Twice as wide as tall, so a cell is square on the globe.
+ * The globe first turns to face the focal cell ([focusCol], [focusRow]).
  */
-internal class GlobeGrid(val cols: Int, val rows: Int, val cells: IntArray) {
+internal class GlobeGrid(
+    val cols: Int,
+    val rows: Int,
+    val cells: IntArray,
+    val focusCol: Int = cols / 2,
+    val focusRow: Int = rows / 2,
+    /** Search results around their best match, which the globe holds facing the viewer until touched. */
+    val ranked: Boolean = false,
+) {
     companion object {
         val Empty = GlobeGrid(1, 1, intArrayOf(-1))
     }
@@ -23,6 +32,28 @@ internal fun globeGridSize(count: Int): Pair<Int, Int> {
     if (count <= 0) return 1 to 1
     val rows = max(1, sqrt(count / 2.0).roundToInt())
     return ceil(count / rows.toDouble()).toInt() to rows
+}
+
+/**
+ * Search results, best first, around a focal point: item 0 takes the middle cell and each next item the nearest free
+ * cell, ring by ring, so the best matches sit together where the globe first faces and relevance falls off with
+ * distance. Ring cells fill in angle order, so a ring's matches stay side by side.
+ */
+internal fun layoutRankedGlobeGrid(count: Int): GlobeGrid {
+    if (count <= 0) return GlobeGrid.Empty
+    val (cols, rows) = globeGridSize(count)
+    val focusCol = cols / 2
+    val focusRow = rows / 2
+    val order = (0 until cols * rows).sortedWith(
+        compareBy<Int> { cell ->
+            val dx = cell % cols - focusCol
+            val dy = cell / cols - focusRow
+            dx * dx + dy * dy
+        }.thenBy { cell -> kotlin.math.atan2((cell / cols - focusRow).toDouble(), (cell % cols - focusCol).toDouble()) },
+    )
+    val cells = IntArray(cols * rows) { -1 }
+    for (item in 0 until count) cells[order[item]] = item
+    return GlobeGrid(cols, rows, cells, focusCol, focusRow, ranked = true)
 }
 
 private const val PROJECTED_DIM = 16
@@ -277,12 +308,17 @@ internal fun readGlobeGrid(file: java.io.File, ids: List<Long>): GlobeGrid? = ru
 }.getOrNull()
 
 /**
- * Names a layout by the set of memes it holds, in any order, and which of them were still waiting for indexing: a
- * meme laid out before its picture was read sits at a random spot, so when its vector arrives the key changes and the
- * globe is laid out again with it among its look-alikes.
+ * Names a layout. A look-alike layout is named by the set of memes it holds, in any order, and which of them were
+ * still waiting for indexing: a meme laid out before its picture was read sits at a random spot, so when its vector
+ * arrives the key changes and the globe is laid out again with it among its look-alikes. A [ranked] layout (search
+ * results around their best match) is named by the memes in order, since order is where they sit.
  */
-internal fun globeLayoutKey(memes: List<Meme>): String {
+internal fun globeLayoutKey(memes: List<Meme>, ranked: Boolean): String {
     var h = 1125899906842597L
+    if (ranked) {
+        for (meme in memes) h = 31 * h + meme.id
+        return "r${memes.size}_${java.lang.Long.toHexString(h)}"
+    }
     for (key in memes.map { it.id * 2 + if (it.pending) 1 else 0 }.sorted()) h = 31 * h + key
     return "${memes.size}_${java.lang.Long.toHexString(h)}"
 }

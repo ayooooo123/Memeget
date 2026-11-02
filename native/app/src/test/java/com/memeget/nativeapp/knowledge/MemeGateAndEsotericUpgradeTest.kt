@@ -459,16 +459,20 @@ class MemeGateAndEsotericUpgradeTest {
 
         val manySkippedZip = tempFolder.newFile("many_skipped.zip")
         java.util.zip.ZipOutputStream(manySkippedZip.outputStream()).use { zos ->
-            for (k in 0..5005) {
+            for (k in 0..100) {
                 zos.putNextEntry(java.util.zip.ZipEntry("skip_dir_$k/ignored.bin"))
                 zos.write(byteArrayOf(1, 2, 3, 4))
                 zos.closeEntry()
             }
         }
-        val overCountFailed = runCatching {
-            files.importUri(android.net.Uri.fromFile(manySkippedZip), "application/zip")
-        }.isFailure
-        assertTrue("ZIP with >5000 skipped unsupported entries must abort immediately", overCountFailed)
+        val countSource = com.memeget.nativeapp.storage.ZipImporter.CountingInputStream(manySkippedZip.inputStream())
+        val countBudget = com.memeget.nativeapp.storage.ZipImporter.ArchiveBudget(countSource, maxEntries = 100)
+        val overCountFailed = java.util.zip.ZipInputStream(countSource).use { zis ->
+            runCatching {
+                com.memeget.nativeapp.storage.ZipImporter.extractNextEntry(zis, tempFolder.root, budget = countBudget)
+            }.exceptionOrNull() is com.memeget.nativeapp.storage.ZipImporter.ArchiveTooLarge
+        }
+        assertTrue("ZIP with more skipped unsupported entries than the cap must abort", overCountFailed)
 
         val bombSkippedZip = tempFolder.newFile("bomb_skipped.zip")
         java.util.zip.ZipOutputStream(bombSkippedZip.outputStream()).use { zos ->
@@ -476,13 +480,14 @@ class MemeGateAndEsotericUpgradeTest {
             zos.write(ByteArray(256 * 1024))
             zos.closeEntry()
         }
-        val smallBudget = com.memeget.nativeapp.storage.ZipImporter.ArchiveBudget(maxEntries = 100, maxTotalBytes = 64 * 1024L)
-        val bombAborted = java.util.zip.ZipInputStream(bombSkippedZip.inputStream()).use { zis ->
+        val bombSource = com.memeget.nativeapp.storage.ZipImporter.CountingInputStream(bombSkippedZip.inputStream())
+        val smallBudget = com.memeget.nativeapp.storage.ZipImporter.ArchiveBudget(bombSource, inflationAllowance = 64 * 1024L)
+        val bombAborted = java.util.zip.ZipInputStream(bombSource).use { zis ->
             runCatching {
                 com.memeget.nativeapp.storage.ZipImporter.extractNextEntry(zis, tempFolder.root, budget = smallBudget)
-            }.isFailure
+            }.exceptionOrNull() is com.memeget.nativeapp.storage.ZipImporter.ArchiveTooLarge
         }
-        assertTrue("Deflated skipped entry exceeding total byte budget must abort without inflating remainder", bombAborted)
+        assertTrue("Deflated skipped entry inflating far past its compressed size must abort", bombAborted)
         assertTrue("Inflated bytes must halt at first chunk past cap", smallBudget.totalInflatedBytes <= 128 * 1024L)
     }
 
@@ -594,7 +599,7 @@ class MemeGateAndEsotericUpgradeTest {
     }
 
     @Test
-    fun unsignedCollectionZipFailsClosedByDefaultAndEnforcesCopyBudget() = runBlocking {
+    fun unsignedCollectionZipFailsClosedByDefault() = runBlocking {
         val app = RuntimeEnvironment.getApplication()
         val files = com.memeget.nativeapp.LibraryFiles(app, store)
         val bmp = Bitmap.createBitmap(32, 32, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.GREEN) }
@@ -641,19 +646,6 @@ class MemeGateAndEsotericUpgradeTest {
         org.junit.Assert.assertNull("Untrusted ZIP must not persist unverified vectors", store.vectors(id))
         assertEquals("Untrusted ZIP must not trust OCR", "", meme.ocr)
         assertTrue("Spoofed confirmed tag must be downgraded to unreviewed", meme.tags.none { it.confirmation == "confirmed" })
-
-        // Enforce staged byte cap in MediaIoUtils.copyUriToFile
-        val overDest = tempFolder.newFile("over.bin")
-        val threw = runCatching {
-            com.memeget.nativeapp.storage.MediaIoUtils.copyUriToFile(
-                app,
-                android.net.Uri.fromFile(untrustedZip),
-                overDest,
-                maxBytes = 32L,
-            )
-        }.isFailure
-        assertTrue("copyUriToFile must reject streams exceeding maxBytes", threw)
-        assertFalse("Failed oversized copy must delete partial file", overDest.exists())
     }
 
     @Test

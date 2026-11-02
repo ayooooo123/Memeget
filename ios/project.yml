@@ -87,9 +87,33 @@ targets:
       - sdk: Vision.framework
       - sdk: Photos.framework
       - sdk: AVFoundation.framework
+      - sdk: JavaScriptCore.framework
       - sdk: Security.framework
       - sdk: libsqlite3.tbd
       - sdk: libz.tbd
+      - target: MemegetShareExtension
+        embed: true
+
+  MemegetShareExtension:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: MemegetShareExtension
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.memeget.iosapp.ShareExtension
+        INFOPLIST_FILE: MemegetShareExtension/Info.plist
+        APPLICATION_EXTENSION_API_ONLY: "YES"
+        SKIP_INSTALL: "YES"
+        OTHER_LDFLAGS[sdk=iphonesimulator*]:
+          - $(inherited)
+        OTHER_LDFLAGS[sdk=iphoneos*]:
+          - $(inherited)
+        CODE_SIGNING_ALLOWED[sdk=iphonesimulator*]: "NO"
+        CODE_SIGNING_REQUIRED[sdk=iphonesimulator*]: "NO"
+    dependencies:
+      - sdk: UIKit.framework
+      - sdk: UniformTypeIdentifiers.framework
 
   MemegetTests:
     type: bundle.unit-test

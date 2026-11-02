@@ -6,7 +6,7 @@ plugins {
 
 val mediaSource = rootProject.file("../modules/memeget-bg/android/src/main")
 val reusableMediaFiles = listOf(
-    "AudioExtractor.kt", "VideoFrameExtractor.kt", "VideoPlayerFrameExtractor.kt",
+    "AudioExtractor.kt", "VideoFrameExtractor.kt",
     "MemeMediaProbe.kt", "MemeMediaEditor.kt",
     "MemeVideoExporter.kt", "VideoExportPlan.kt",
     "MemeDynamicOverlay.kt", "MemeDrawPrimitives.kt", "MemeDrawPreviewView.kt",
@@ -114,31 +114,39 @@ kotlin { jvmToolchain(17) }
 dependencies {
     implementation(platform("androidx.compose:compose-bom:2025.08.01"))
     implementation("androidx.compose.ui:ui")
-    implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.foundation:foundation")
     implementation("androidx.compose.material3:material3")
-    implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.activity:activity-compose:1.10.1")
     implementation("androidx.core:core-ktx:1.16.0")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.9.3")
     implementation("androidx.lifecycle:lifecycle-process:2.9.3")
-    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.9.3")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
     implementation("androidx.work:work-runtime-ktx:2.10.3")
     implementation("androidx.documentfile:documentfile:1.1.0")
     implementation("androidx.media3:media3-exoplayer:1.9.0")
     implementation("androidx.media3:media3-ui:1.9.0")
-    implementation("androidx.media3:media3-transformer:1.9.0")
-    implementation("androidx.media3:media3-effect:1.9.0")
-    implementation("androidx.media3:media3-inspector:1.9.0")
+    // MemeDynamicOverlay uses BitmapOverlay, never LottieOverlay; strip Lottie + AppCompat + Fragment transitive bloat.
+    implementation("androidx.media3:media3-transformer:1.9.0") {
+        exclude(group = "com.airbnb.android", module = "lottie")
+        exclude(group = "androidx.appcompat")
+        exclude(group = "androidx.fragment")
+    }
+    implementation("androidx.media3:media3-effect:1.9.0") {
+        exclude(group = "com.airbnb.android", module = "lottie")
+        exclude(group = "androidx.appcompat")
+        exclude(group = "androidx.fragment")
+    }
     implementation("io.coil-kt:coil-compose:2.7.0")
     implementation("io.coil-kt:coil-gif:2.7.0")
     implementation("io.coil-kt:coil-video:2.7.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("com.facebook.fbjni:fbjni:0.7.0")
-    // MI-GAN runs on LiteRT's GPU accelerator, which 2.2 bundles. 2.3 is built with Kotlin 2.4 metadata, which this
-    // project's Kotlin 2.2 compiler can't read.
-    implementation("com.google.ai.edge.litert:litert:2.2.0")
+    // MI-GAN runs on LiteRT's GPU accelerator from a local file; strip Google Play dynamic-delivery & GMS bloat.
+    implementation("com.google.ai.edge.litert:litert:2.2.0") {
+        exclude(group = "com.google.android.play")
+        exclude(group = "com.google.android.gms")
+        exclude(group = "androidx.fragment")
+    }
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.robolectric:robolectric:4.15.1")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.2")
@@ -148,5 +156,5 @@ dependencies {
     androidTestImplementation("androidx.test:runner:1.6.2")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
     androidTestImplementation("androidx.test.uiautomator:uiautomator:2.3.0")
-    debugImplementation("androidx.compose.ui:ui-tooling")
+    // Keep UI tooling strictly out of shipping builds.
 }

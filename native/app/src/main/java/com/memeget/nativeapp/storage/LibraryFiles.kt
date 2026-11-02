@@ -7,6 +7,10 @@ import android.content.Intent
 import android.net.Uri
 import android.provider.DocumentsContract
 import android.provider.OpenableColumns
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
+import android.widget.Toast
 import androidx.documentfile.provider.DocumentFile
 import androidx.core.content.FileProvider
 import com.memeget.nativeapp.editor.MediaEditKind
@@ -21,17 +25,24 @@ import com.memeget.nativeapp.storage.SidecarFormat
 import com.memeget.nativeapp.storage.TeachingPackIo
 import com.memeget.nativeapp.storage.ZipImporter
 import expo.modules.memegetbg.MemeMediaProbe
+import expo.modules.memegetbg.KeepAliveLease
 import expo.modules.memegetbg.VideoFrameExtractor
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
-import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.IOException
 import java.io.InputStream
@@ -51,6 +62,10 @@ internal class LibraryFiles(
      * adding and copy the same file twice.
      */
     private val intakeGate = Mutex()
+    /** Imports picked in Settings run here, so leaving Settings doesn't stop one. */
+    private val importScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val mutableImportStatus = MutableStateFlow(ImportStatus())
+    val importStatus: StateFlow<ImportStatus> = mutableImportStatus.asStateFlow()
 
     private fun allocateUniqueFile(dir: File, baseName: String): File {
         val candidate = File(dir, baseName)
@@ -64,6 +79,46 @@ internal class LibraryFiles(
             counter++
         } while (unique.exists())
         return unique
+    }
+
+    /** Byte size, or -1 when it can't be told cheaply (an import item is then hashed whatever its size). */
+    private fun sizeOf(uri: String): Long = try {
+        val parsed = Uri.parse(uri)
+        if (parsed.scheme == "file") {
+            File(parsed.path ?: "").takeIf(File::isFile)?.length() ?: -1L
+        } else {
+            context.contentResolver.query(parsed, arrayOf(OpenableColumns.SIZE), null, null, null)?.use { c ->
+                if (c.moveToFirst() && !c.isNull(0)) c.getLong(0) else -1L
+            } ?: -1L
+        }
+    } catch (_: Exception) {
+        -1L
+    }
+
+    /**
+     * Imports [uri] in the background, reporting through [importStatus]; false, starting nothing, while another
+     * import started here is still running. Call from the main thread.
+     */
+    fun startImport(uri: Uri): Boolean {
+        val previous = mutableImportStatus.value
+        if (previous.running) return false
+        val id = previous.id + 1
+        mutableImportStatus.value = ImportStatus(id = id, running = true)
+        importScope.launch {
+            val outcome = try {
+                mutableImportStatus.update { it.copy(totalBytes = sizeOf(uri.toString())) }
+                val ids = intakeGate.withLock {
+                    importUriLocked(uri, null, onZipProgress = { read, saved ->
+                        mutableImportStatus.update { it.copy(readBytes = read, saved = saved) }
+                    })
+                }
+                mutableImportStatus.value.copy(saved = ids.size, outcome = "Imported ${ids.size} items")
+            } catch (failure: Exception) {
+                mutableImportStatus.value.copy(outcome = "Import failed: ${failure.message}", failed = true)
+            }
+            mutableImportStatus.value = outcome.copy(running = false)
+        }
+        return true
     }
 
     /**
@@ -113,20 +168,6 @@ internal class LibraryFiles(
             }
             byHash = known
             return known
-        }
-
-        /** Byte size, or -1 when it can't be told cheaply (the item is then hashed whatever its size). */
-        private fun sizeOf(uri: String): Long = try {
-            val parsed = Uri.parse(uri)
-            if (parsed.scheme == "file") {
-                File(parsed.path ?: "").takeIf(File::isFile)?.length() ?: -1L
-            } else {
-                context.contentResolver.query(parsed, arrayOf(OpenableColumns.SIZE), null, null, null)?.use { c ->
-                    if (c.moveToFirst() && !c.isNull(0)) c.getLong(0) else -1L
-                } ?: -1L
-            }
-        } catch (_: Exception) {
-            -1L
         }
 
         private fun hashOf(uri: String): String? = try {
@@ -224,13 +265,15 @@ internal class LibraryFiles(
         mime: String?,
         trustManifestMetadata: Boolean = false,
         fromExternalShare: Boolean = false,
+        /** Called after each ZIP entry with the archive bytes read so far and the items saved before it. */
+        onZipProgress: ((readBytes: Long, saved: Int) -> Unit)? = null,
     ): List<Long> = withContext(Dispatchers.IO) {
         val displayName = MediaIoUtils.getDisplayName(context, uri)
         val resolvedMime = mime ?: context.contentResolver.getType(uri) ?: MediaIoUtils.mimeForName(displayName)
 
         // ZIP import handling
         if (resolvedMime == "application/zip" || displayName.lowercase(Locale.ROOT).endsWith(".zip")) {
-            return@withContext importZip(uri, trustManifestMetadata = trustManifestMetadata, fromExternalShare = fromExternalShare)
+            return@withContext importZip(uri, trustManifestMetadata = trustManifestMetadata, fromExternalShare = fromExternalShare, onProgress = onZipProgress)
         }
         if (resolvedMime == "application/json" || displayName.lowercase(Locale.ROOT).endsWith(".json")) {
             importTeaching(uri)
@@ -294,21 +337,28 @@ internal class LibraryFiles(
         }
     }
 
-    private suspend fun importZip(zipUri: Uri, trustManifestMetadata: Boolean = false, fromExternalShare: Boolean = false): List<Long> {
-        val stagedZip = File(context.cacheDir, "zip_${System.currentTimeMillis()}.zip")
+    private suspend fun importZip(
+        zipUri: Uri,
+        trustManifestMetadata: Boolean = false,
+        fromExternalShare: Boolean = false,
+        onProgress: ((readBytes: Long, saved: Int) -> Unit)? = null,
+    ): List<Long> {
         var manifest: File? = null
         try {
-            MediaIoUtils.copyUriToFile(context, zipUri, stagedZip, maxBytes = ZipImporter.MAX_STAGED_ZIP_BYTES)
-            val zis = ZipInputStream(FileInputStream(stagedZip))
             val importedIds = mutableListOf<Long>()
             val idByEntry = HashMap<String, Long>()
             val folders = store.folders()
             val targetFolder = folders.firstOrNull()
             var manifestProblem: String? = null
             val library = LibraryContent()
-            val archiveBudget = ZipImporter.ArchiveBudget()
+            // Read straight from the source: staging a copy first would need the archive's size again in free space.
+            val source = ZipImporter.CountingInputStream(
+                context.contentResolver.openInputStream(zipUri)
+                    ?: throw IllegalStateException("Could not open input stream for $zipUri")
+            )
+            val archiveBudget = ZipImporter.ArchiveBudget(source)
 
-            zis.use { stream ->
+            ZipInputStream(source.buffered(1 shl 16)).use { stream ->
                 while (true) {
                     val extracted = try {
                         ZipImporter.extractNextEntry(stream, context.cacheDir, budget = archiveBudget)
@@ -316,6 +366,7 @@ internal class LibraryFiles(
                         manifestProblem = unreadable.message
                         continue
                     } ?: break
+                    onProgress?.invoke(source.count, importedIds.size)
                     if (extracted.kind == ZipImporter.MANIFEST_KIND) {
                         manifest?.delete()
                         manifest = extracted.tempFile
@@ -390,12 +441,99 @@ internal class LibraryFiles(
             manifestProblem?.let { throw IOException("Imported ${importedIds.size} items without their labels: $it") }
             return importedIds
         } finally {
-            stagedZip.delete()
             manifest?.delete()
         }
     }
 
-    suspend fun importIntent(intent: Intent): List<Long> = withContext(Dispatchers.IO) {
+    /**
+     * Runs an incoming share [intent] inside [importScope] under a foreground [KeepAliveLease] acquired synchronously
+     * while the receiving Activity is still visible. Swiping Back to YouTube / X / Reddit immediately after sharing
+     * never cancels the download, and [onSaved] starts indexing before the download lease lets go so the foreground
+     * service never drops in between.
+     */
+    fun startIntentIntake(
+        intent: Intent,
+        onSaved: (List<Long>) -> Unit = {},
+    ) {
+        val isLinkShare = intent.action == Intent.ACTION_SEND &&
+            intent.data == null &&
+            !intent.hasExtra(Intent.EXTRA_STREAM) &&
+            LinkResolver.extractUrl(intent.getStringExtra(Intent.EXTRA_TEXT), intent.getStringExtra(Intent.EXTRA_SUBJECT)) != null
+
+        val appCtx = context.applicationContext
+        KeepAliveLease.acquire(
+            appCtx,
+            "Memeget Native",
+            if (isLinkShare) "Downloading shared link…" else "Saving shared media…"
+        )
+        if (isLinkShare) {
+            Toast.makeText(appCtx, "Downloading link in background — safe to leave app", Toast.LENGTH_SHORT).show()
+        }
+
+        importScope.launch {
+            var lastProgressMs = 0L
+            val progressCb: (Long, Long, String) -> Unit = { done, total, stage ->
+                val now = SystemClock.elapsedRealtime()
+                if (now - lastProgressMs >= 250L || (total > 0L && done >= total)) {
+                    lastProgressMs = now
+                    val pct = if (total > 0L) ((done * 100L) / total).toInt().coerceIn(0, 100) else -1
+                    val max = if (total > 0L) 100 else -1
+                    val label = if (pct >= 0) "$stage ($pct%)" else stage
+                    KeepAliveLease.update(appCtx, "Memeget Native", label, pct, max)
+                }
+            }
+            try {
+                val before = store.countAll()
+                val ids = importIntent(intent, progressCb)
+                if (ids.isNotEmpty()) {
+                    val added = store.countAll() - before
+                    val duplicates = (ids.distinct().size - added).coerceAtLeast(0)
+                    val msg = buildIntakeMessage(added, duplicates)
+                    // Start coordinator BEFORE releasing KeepAliveLease so holders goes 1 -> 2 -> 1 seamlessly.
+                    onSaved(ids)
+                    Handler(Looper.getMainLooper()).post {
+                        Toast.makeText(appCtx, msg, Toast.LENGTH_LONG).show()
+                    }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                val errMsg = failure.message ?: "The selected media could not be imported. Already saved items remain in the library."
+                val nextId = mutableImportStatus.value.id + 1
+                mutableImportStatus.value = ImportStatus(id = nextId, running = false, outcome = errMsg, failed = true)
+                Handler(Looper.getMainLooper()).post {
+                    Toast.makeText(appCtx, "Link download failed: $errMsg", Toast.LENGTH_LONG).show()
+                }
+            } finally {
+                KeepAliveLease.release(appCtx)
+            }
+        }
+    }
+
+    fun startLinkImport(
+        url: String,
+        onSaved: (List<Long>) -> Unit = {},
+    ) {
+        val synthetic = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_TEXT, url)
+        }
+        startIntentIntake(synthetic, onSaved)
+    }
+
+    private suspend fun buildIntakeMessage(added: Int, duplicates: Int): String {
+        if (added <= 0) {
+            return if (duplicates <= 1) "✓ Already in your library" else "✓ Already in your library ($duplicates duplicates)"
+        }
+        val place = store.folders().firstOrNull()?.name?.let { "“$it”" } ?: "your library"
+        val note = if (duplicates > 0) " ($duplicates already saved)" else ""
+        return "✓ Saved $added to $place — indexing in background$note"
+    }
+
+    suspend fun importIntent(
+        intent: Intent,
+        onProgress: ((downloadedBytes: Long, totalBytes: Long, stage: String) -> Unit)? = null,
+    ): List<Long> = withContext(Dispatchers.IO) {
         val action = intent.action
         val type = intent.type
 
@@ -412,11 +550,10 @@ internal class LibraryFiles(
                     return@withContext intakeGate.withLock { importUriLocked(streamUri, type, trustManifestMetadata = false, fromExternalShare = true) }
                 }
                 val text = intent.getStringExtra(Intent.EXTRA_TEXT)
-                if (!text.isNullOrBlank()) {
-                    val url = LinkResolver.extractUrl(text)
-                    if (url != null) {
-                        return@withContext importLink(url)
-                    }
+                val subject = intent.getStringExtra(Intent.EXTRA_SUBJECT)
+                val url = LinkResolver.extractUrl(text, subject)
+                if (url != null) {
+                    return@withContext importLink(url, onProgress)
                 }
                 emptyList()
             }
@@ -438,13 +575,17 @@ internal class LibraryFiles(
         }
     }
 
-    suspend fun importLink(text: String): List<Long> = intakeGate.withLock { importLinkLocked(text) }
+    suspend fun importLink(
+        text: String,
+        onProgress: ((downloadedBytes: Long, totalBytes: Long, stage: String) -> Unit)? = null,
+    ): List<Long> = intakeGate.withLock { importLinkLocked(text, onProgress) }
 
-    private suspend fun importLinkLocked(text: String): List<Long> = withContext(Dispatchers.IO) {
+    private suspend fun importLinkLocked(
+        text: String,
+        onProgress: ((downloadedBytes: Long, totalBytes: Long, stage: String) -> Unit)? = null,
+    ): List<Long> = withContext(Dispatchers.IO) {
         val url = LinkResolver.extractUrl(text) ?: throw IllegalArgumentException("No valid link found in input")
-        val ref = LinkResolver.resolveMediaRef(url)
-        val downloaded = LinkResolver.download(ref, context.cacheDir)
-
+        val downloaded = LinkResolver.downloadUrl(url, context.cacheDir, onProgress = onProgress)
         try {
             val duplicate = LibraryContent().find(downloaded.sha256, downloaded.file.length())
             if (duplicate != null) {

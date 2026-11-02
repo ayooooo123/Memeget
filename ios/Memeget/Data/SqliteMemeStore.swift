@@ -589,6 +589,20 @@ public final class SqliteMemeStore: @unchecked Sendable {
         return Self.readMemeRow(stmt)
     }
 
+    public func memeId(forContentHash sha256: String) -> Int64? {
+        guard !sha256.isEmpty else { return nil }
+        lock.lock()
+        defer { lock.unlock() }
+        var stmt: OpaquePointer?
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_prepare_v2(db, "SELECT id FROM memes WHERE content_hash = ? LIMIT 1;", -1, &stmt, nil) == SQLITE_OK else {
+            return nil
+        }
+        sqlite3_bind_text(stmt, 1, sha256, -1, SQLITE_TRANSIENT_SWIFT)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        return sqlite3_column_int64(stmt, 0)
+    }
+
     public func imageVector(for id: Int64) -> [Float]? {
         lock.lock()
         defer { lock.unlock() }

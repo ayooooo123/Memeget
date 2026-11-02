@@ -79,6 +79,7 @@ internal fun SettingsScreen(
     val revision by store.revision.collectAsState()
     val modelProgress by engine.progress.collectAsState()
     val indexProgress by coordinator.progress.collectAsState()
+    val importStatus by files.importStatus.collectAsState()
 
     var folders by remember { mutableStateOf<List<Folder>>(emptyList()) }
     val backupAt by lastBackupAt.collectAsState()
@@ -122,15 +123,8 @@ internal fun SettingsScreen(
     val importFileLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri ->
-        if (uri != null) {
-            scope.launch {
-                try {
-                    val added = files.importUri(uri)
-                    Toast.makeText(context, "Imported ${added.size} items", Toast.LENGTH_SHORT).show()
-                } catch (e: Exception) {
-                    Toast.makeText(context, "Import failed: ${e.message}", Toast.LENGTH_LONG).show()
-                }
-            }
+        if (uri != null && !files.startImport(uri)) {
+            Toast.makeText(context, "An import is already running", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -562,6 +556,7 @@ internal fun SettingsScreen(
                 ) {
                     OutlinedButton(
                         onClick = { importFileLauncher.launch(arrayOf("image/*", "video/*", "application/zip")) },
+                        enabled = !importStatus.running,
                         modifier = Modifier.weight(1f),
                     ) {
                         Text("Import Files/ZIP", style = MaterialTheme.typography.labelSmall)
@@ -574,6 +569,8 @@ internal fun SettingsScreen(
                         Text("Import Link", style = MaterialTheme.typography.labelSmall)
                     }
                 }
+
+                if (importStatus.id > 0) ImportStatusLine(importStatus)
 
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -718,13 +715,8 @@ internal fun SettingsScreen(
             onDismiss = { showImportUrlDialog = false },
             onConfirm = { url ->
                 showImportUrlDialog = false
-                scope.launch {
-                    try {
-                        val added = files.importLink(url)
-                        Toast.makeText(context, "Imported ${added.size} items from link", Toast.LENGTH_SHORT).show()
-                    } catch (e: Exception) {
-                        Toast.makeText(context, "Link import failed: ${e.message}", Toast.LENGTH_LONG).show()
-                    }
+                files.startLinkImport(url) { added ->
+                    if (added.isNotEmpty()) coordinator.start(added)
                 }
             },
         )
@@ -771,6 +763,42 @@ internal fun SettingsScreen(
                 }
             },
         )
+    }
+}
+
+/** The latest Settings import: how far it has read while running, then how it ended. */
+@Composable
+private fun ImportStatusLine(status: ImportStatus) {
+    val mib = 1024 * 1024
+    if (status.running) {
+        val read = status.readBytes / mib
+        val text = buildString {
+            append("Importing")
+            if (status.readBytes > 0) {
+                append(" · ").append(read)
+                if (status.totalBytes > 0) append(" of ").append(status.totalBytes / mib)
+                append(" MB read · ").append(status.saved).append(" saved")
+            }
+            append(". You can leave this screen.")
+        }
+        Text(text, style = MaterialTheme.typography.bodySmall, color = MemegetColors.TextMuted)
+        if (status.totalBytes > 0) {
+            LinearProgressIndicator(
+                progress = { (status.readBytes.toFloat() / status.totalBytes).coerceIn(0f, 1f) },
+                modifier = Modifier.fillMaxWidth(),
+                color = MemegetColors.Volt,
+            )
+        } else {
+            LinearProgressIndicator(modifier = Modifier.fillMaxWidth(), color = MemegetColors.Volt)
+        }
+    } else {
+        status.outcome?.let {
+            Text(
+                it,
+                style = MaterialTheme.typography.bodySmall,
+                color = if (status.failed) MemegetColors.Danger else MemegetColors.TextMuted,
+            )
+        }
     }
 }
 

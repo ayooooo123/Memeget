@@ -67,9 +67,6 @@ set_target_properties(opencv_photo_a PROPERTIES IMPORTED_LOCATION "${ET_LIBS_DIR
 add_library(opencv_video_a STATIC IMPORTED)
 set_target_properties(opencv_video_a PROPERTIES IMPORTED_LOCATION "${ET_LIBS_DIR}/opencv/${ANDROID_ABI}/libopencv_video.a")
 
-add_library(opencv_features2d_a STATIC IMPORTED)
-set_target_properties(opencv_features2d_a PROPERTIES IMPORTED_LOCATION "${ET_LIBS_DIR}/opencv/${ANDROID_ABI}/libopencv_features2d.a")
-
 add_library(opencv_highgui_a STATIC IMPORTED)
 set_target_properties(opencv_highgui_a PROPERTIES IMPORTED_LOCATION "${ET_LIBS_DIR}/opencv/${ANDROID_ABI}/libopencv_highgui.a")
 
@@ -91,6 +88,8 @@ endif()
 if(NOT "$ENV{HOME}" STREQUAL "")
   add_compile_options("-ffile-prefix-map=$ENV{HOME}=~")
 endif()
+# Emit per-function/per-data sections across llama.cpp, mtmd, ggml, and memeget_inference so --gc-sections drops unreferenced C++ code.
+add_compile_options(-ffunction-sections -fdata-sections -fvisibility=hidden)
 
 # Pinned llama.cpp/libmtmd (bootstrap.sh) for MiniCPM-V 4.7 captions: static, CPU-only libraries without
 # tools, network code or OpenMP (OpenCV's private static OpenMP runtime stays the only one in this library).
@@ -159,7 +158,8 @@ set_source_files_properties(
 target_link_options(memeget_inference PRIVATE
   -fopenmp
   -static-openmp
-  -Wl,--exclude-libs,libomp.a
+  -Wl,--gc-sections
+  -Wl,--exclude-libs,ALL
 )
 
 target_link_libraries(memeget_inference
@@ -173,7 +173,6 @@ target_link_libraries(memeget_inference
   opencv_imgproc_a
   opencv_photo_a
   opencv_video_a
-  opencv_features2d_a
   opencv_highgui_a
   opencv_core_a
   ${KLEIDICV_LIBS}

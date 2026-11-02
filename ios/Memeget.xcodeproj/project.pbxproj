@@ -8,8 +8,13 @@
 
 /* Begin PBXBuildFile section */
 		02B7889D4EFE280DC3E9FBB6 /* pairwise_verifier.bin in Resources */ = {isa = PBXBuildFile; fileRef = 49E5A5B8C2119A133FD9311E /* pairwise_verifier.bin */; };
+		0A506250A8DC5EE1A0640697 /* SitesB.swift in Sources */ = {isa = PBXBuildFile; fileRef = DCE7FCF1BFF56EDB0A741830 /* SitesB.swift */; };
+		12E71D97B0009B5288272E57 /* UbitLinkDownloader.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD6AE9ADC888BA677E559461 /* UbitLinkDownloader.swift */; };
 		1302F9DB1F1116DFAB98CBA5 /* MemegetIosApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = CBE4AA3CCC3AA51A5D712692 /* MemegetIosApp.swift */; };
+		16B97481882C4C7F0B110263 /* SitesA.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3304E8B82C42A40336C46CF /* SitesA.swift */; };
+		190395075919B3FBF46AFA63 /* YouTubeExtractor.swift in Sources */ = {isa = PBXBuildFile; fileRef = B6CFA4CE017EFC7A62A80BBE /* YouTubeExtractor.swift */; };
 		1C97E9BC7EE295080A596F81 /* IosInferenceEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6788A7FDC9D8F2EC2F1C1187 /* IosInferenceEngine.swift */; };
+		1DCCA03694D0F294F447BD7A /* JavaScriptCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 6F00B3ADAFBFD298A1846EEC /* JavaScriptCore.framework */; };
 		205F4A2CF2B20ECD81429F08 /* MemeModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D78F91DE6F25FC311616AFD /* MemeModels.swift */; };
 		227517F72880334F44DB7944 /* MemeViewerSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = FBF4F9FFFA1C134DB12630A0 /* MemeViewerSheet.swift */; };
 		28D2D0356370752E8BDC2655 /* Photos.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 3071760B28EF9D3F01BDCCE6 /* Photos.framework */; };
@@ -20,28 +25,46 @@
 		39B4413A5C8FAD9BAC76BB52 /* Accelerate.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 2634FDBC4550EAE1108E84CC /* Accelerate.framework */; };
 		42BEE15EA273084D4C5F4580 /* label-prompts.json in Resources */ = {isa = PBXBuildFile; fileRef = 821268A5D3CA42D08695E99A /* label-prompts.json */; };
 		44A699DD5E832E33CDF2672B /* ProjectorConversion.cpp in Sources */ = {isa = PBXBuildFile; fileRef = C3F5EB2E893E9B89A2888361 /* ProjectorConversion.cpp */; };
+		456BB06DC808FA318EBC01E3 /* UbitExtractorRegistry.swift in Sources */ = {isa = PBXBuildFile; fileRef = 189B5CD9F26356FD78C8B178 /* UbitExtractorRegistry.swift */; };
 		45D8578D620ABB9A47B763E9 /* AVFoundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 2E6D574EBB0B0B4838251C45 /* AVFoundation.framework */; };
+		4C5C4F6D95BD4CA5BCA8B42C /* UniformTypeIdentifiers.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = BB2F7363CB82F7C026142BAB /* UniformTypeIdentifiers.framework */; };
 		5BA92EC52C0130A7544AB9AB /* MemegetCoreBridge.mm in Sources */ = {isa = PBXBuildFile; fileRef = 2BF38A5DAC6F41549182BEA5 /* MemegetCoreBridge.mm */; };
+		65E1A9757321E43BF168533A /* UIKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 20040A22E8331919BDAB71A7 /* UIKit.framework */; };
 		78FE25D0769BF3E7B878CC10 /* PhotoKitScannerAndCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0965662D0B481185C5B9C8FA /* PhotoKitScannerAndCoordinator.swift */; };
 		7E707CE02AA0DE7D33F9F333 /* ResidentSearchCore.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 6EE760E05A0216C347992523 /* ResidentSearchCore.cpp */; };
 		802FEF4399D5BBA0DD49DD8E /* libsqlite3.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = 33B6C99CD7CC3670F42ED474 /* libsqlite3.tbd */; };
 		803E3ABACCE85170E35F90AD /* LlamaDecisionRunner.cpp in Sources */ = {isa = PBXBuildFile; fileRef = F4562702FE103DBEE05125AD /* LlamaDecisionRunner.cpp */; };
 		80BEC3B24A3F5F57D1B66BE9 /* Vision.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 06FAE6A43CFE42C3E30AD126 /* Vision.framework */; };
+		80FE06709949C4ECBFB3FE38 /* DASH.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE87268AF52932370CB2E587 /* DASH.swift */; };
+		84BE4732A2449AE0B7DE498E /* MP4Box.swift in Sources */ = {isa = PBXBuildFile; fileRef = C435C3CC8FF654EBC9000952 /* MP4Box.swift */; };
 		957ACA70ED188F134F8A8A01 /* open_vocab_concepts.bin in Resources */ = {isa = PBXBuildFile; fileRef = A8572B11D9625F545B4AF9F8 /* open_vocab_concepts.bin */; };
 		994A52515E0852ADA8BB48E7 /* libz.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = 26867A48512658545C6E9E21 /* libz.tbd */; };
+		9D70347FC164A89A8286667F /* UbitCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49CB14FB7CA95A50E9E9DABF /* UbitCore.swift */; };
 		9F970625D1250DE724BD49D9 /* SqliteMemeStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC02D39A734A3B2203E8C175 /* SqliteMemeStore.swift */; };
 		9FF5B122C7011C47AC5E0C73 /* KnowledgeCore.cpp in Sources */ = {isa = PBXBuildFile; fileRef = EE652925C84F49EDE5712C21 /* KnowledgeCore.cpp */; };
 		AD694F0D68BE8FE7AE27ADA4 /* LibrarySearchView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E394D7F5B7F98CF1E9033906 /* LibrarySearchView.swift */; };
 		B140B6EE09CDBAE96428267E /* LlamaVisionRunner.cpp in Sources */ = {isa = PBXBuildFile; fileRef = AAD1C5C2FA52C4424F3DAE2A /* LlamaVisionRunner.cpp */; };
 		B6818E49A25322BFE5466FF4 /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 0D6431FD5A39C19EB853E1A7 /* Security.framework */; };
 		BC1B1E4B7CECC4EAF41AB131 /* Metal.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 48E16AA0DB7ECFEEEE31AC5B /* Metal.framework */; };
+		BDD20C56A62E6418B4FBE387 /* ShareViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 88FC9732FC34AD84C17B6A0E /* ShareViewController.swift */; };
 		DAB04815107DFFF1F702F8B4 /* IosCloudAssistant.swift in Sources */ = {isa = PBXBuildFile; fileRef = 859EC49858B313BEC08D706C /* IosCloudAssistant.swift */; };
+		DE2226083E09F7558C7E559E /* HLS.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5765126D38FE3D0462B2534 /* HLS.swift */; };
+		DED7D32D0EC23FD3096D0C33 /* TSDemuxer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 05D9D551C8F5A199A0FD055B /* TSDemuxer.swift */; };
 		E49D543A6C2A8D81AD1CA07D /* ClipTokenizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = CAB53EF0B66FC3BF50ABC189 /* ClipTokenizer.swift */; };
 		E858FF29E4E9CCD68F2CA0B4 /* MemegetPipelineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D37B7EB9377BC53BECE2146 /* MemegetPipelineTests.swift */; };
+		F269A2B84AAA2DD89C05DD6B /* UbitVideoDownloadTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 88BBE742C7A981B87CD3055D /* UbitVideoDownloadTests.swift */; };
+		F3EE4476F2CDA84AE958D838 /* MemegetShareExtension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 38AEA70EDE1421AE9C746A1B /* MemegetShareExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		F6BE7F83C7DEABB4ED1E7FB7 /* ExecutorchLib.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = C2AE2AE7993A55439BA07555 /* ExecutorchLib.xcframework */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
+		080C7575F6CCC286D87B6E45 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 465230B0CDCE5FFBD8E257B0 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = ACAF6C1140F26BA4857CE406;
+			remoteInfo = MemegetShareExtension;
+		};
 		EC2BB8AAF08626EC4D5DC46D /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = 465230B0CDCE5FFBD8E257B0 /* Project object */;
@@ -52,6 +75,17 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXCopyFilesBuildPhase section */
+		93DAA396791303D6273F42A3 /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				F3EE4476F2CDA84AE958D838 /* MemegetShareExtension.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		B4A9A962662582CEF9EDEFF3 /* Embed Frameworks */ = {
 			isa = PBXCopyFilesBuildPhase;
 			buildActionMask = 2147483647;
@@ -66,11 +100,14 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		05D9D551C8F5A199A0FD055B /* TSDemuxer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TSDemuxer.swift; sourceTree = "<group>"; };
 		06FAE6A43CFE42C3E30AD126 /* Vision.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Vision.framework; path = System/Library/Frameworks/Vision.framework; sourceTree = SDKROOT; };
 		0965662D0B481185C5B9C8FA /* PhotoKitScannerAndCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoKitScannerAndCoordinator.swift; sourceTree = "<group>"; };
 		0D0539F58FB7A3CA99A3C99F /* meme_gate_anchors.bin */ = {isa = PBXFileReference; lastKnownFileType = archive.macbinary; path = meme_gate_anchors.bin; sourceTree = "<group>"; };
 		0D37B7EB9377BC53BECE2146 /* MemegetPipelineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemegetPipelineTests.swift; sourceTree = "<group>"; };
 		0D6431FD5A39C19EB853E1A7 /* Security.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Security.framework; path = System/Library/Frameworks/Security.framework; sourceTree = SDKROOT; };
+		189B5CD9F26356FD78C8B178 /* UbitExtractorRegistry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UbitExtractorRegistry.swift; sourceTree = "<group>"; };
+		20040A22E8331919BDAB71A7 /* UIKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = UIKit.framework; path = System/Library/Frameworks/UIKit.framework; sourceTree = SDKROOT; };
 		2634FDBC4550EAE1108E84CC /* Accelerate.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Accelerate.framework; path = System/Library/Frameworks/Accelerate.framework; sourceTree = SDKROOT; };
 		26867A48512658545C6E9E21 /* libz.tbd */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.text-based-dylib-definition"; name = libz.tbd; path = usr/lib/libz.tbd; sourceTree = SDKROOT; };
 		2BF38A5DAC6F41549182BEA5 /* MemegetCoreBridge.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = MemegetCoreBridge.mm; sourceTree = "<group>"; };
@@ -78,25 +115,39 @@
 		3071760B28EF9D3F01BDCCE6 /* Photos.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Photos.framework; path = System/Library/Frameworks/Photos.framework; sourceTree = SDKROOT; };
 		339D138C650FD9F95E1E7B5B /* SocialReplyIntent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SocialReplyIntent.swift; sourceTree = "<group>"; };
 		33B6C99CD7CC3670F42ED474 /* libsqlite3.tbd */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.text-based-dylib-definition"; name = libsqlite3.tbd; path = usr/lib/libsqlite3.tbd; sourceTree = SDKROOT; };
+		38AEA70EDE1421AE9C746A1B /* MemegetShareExtension.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = MemegetShareExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		3D78F91DE6F25FC311616AFD /* MemeModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemeModels.swift; sourceTree = "<group>"; };
 		408BED8512B9BB128FD9354D /* MemeGateCore.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = MemeGateCore.cpp; sourceTree = "<group>"; };
 		48E16AA0DB7ECFEEEE31AC5B /* Metal.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Metal.framework; path = System/Library/Frameworks/Metal.framework; sourceTree = SDKROOT; };
+		49CB14FB7CA95A50E9E9DABF /* UbitCore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UbitCore.swift; sourceTree = "<group>"; };
 		49E5A5B8C2119A133FD9311E /* pairwise_verifier.bin */ = {isa = PBXFileReference; lastKnownFileType = archive.macbinary; path = pairwise_verifier.bin; sourceTree = "<group>"; };
 		4C962767205EE76476AA0EB9 /* Memeget.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Memeget.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		4D70C3FD52B4CE112D671C51 /* MemegetTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = MemegetTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		6788A7FDC9D8F2EC2F1C1187 /* IosInferenceEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IosInferenceEngine.swift; sourceTree = "<group>"; };
 		6EE760E05A0216C347992523 /* ResidentSearchCore.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = ResidentSearchCore.cpp; sourceTree = "<group>"; };
+		6F00B3ADAFBFD298A1846EEC /* JavaScriptCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = JavaScriptCore.framework; path = System/Library/Frameworks/JavaScriptCore.framework; sourceTree = SDKROOT; };
 		821268A5D3CA42D08695E99A /* label-prompts.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "label-prompts.json"; sourceTree = "<group>"; };
 		859EC49858B313BEC08D706C /* IosCloudAssistant.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IosCloudAssistant.swift; sourceTree = "<group>"; };
+		88BBE742C7A981B87CD3055D /* UbitVideoDownloadTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UbitVideoDownloadTests.swift; sourceTree = "<group>"; };
+		88FC9732FC34AD84C17B6A0E /* ShareViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareViewController.swift; sourceTree = "<group>"; };
 		A6FF0A3FF3E212DDF214D0CC /* MemegetCoreBridge.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = MemegetCoreBridge.h; sourceTree = "<group>"; };
 		A8572B11D9625F545B4AF9F8 /* open_vocab_concepts.bin */ = {isa = PBXFileReference; lastKnownFileType = archive.macbinary; path = open_vocab_concepts.bin; sourceTree = "<group>"; };
 		AAD1C5C2FA52C4424F3DAE2A /* LlamaVisionRunner.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = LlamaVisionRunner.cpp; sourceTree = "<group>"; };
+		B3304E8B82C42A40336C46CF /* SitesA.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SitesA.swift; sourceTree = "<group>"; };
 		B67333540BE97D961DCACCFD /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		B6CFA4CE017EFC7A62A80BBE /* YouTubeExtractor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = YouTubeExtractor.swift; sourceTree = "<group>"; };
+		BB2F7363CB82F7C026142BAB /* UniformTypeIdentifiers.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = UniformTypeIdentifiers.framework; path = System/Library/Frameworks/UniformTypeIdentifiers.framework; sourceTree = SDKROOT; };
 		C2AE2AE7993A55439BA07555 /* ExecutorchLib.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = ExecutorchLib.xcframework; path = "../native/runtime/build/executorch/third-party/ios/ExecutorchLib.xcframework"; sourceTree = "<group>"; };
 		C3F5EB2E893E9B89A2888361 /* ProjectorConversion.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = ProjectorConversion.cpp; sourceTree = "<group>"; };
+		C435C3CC8FF654EBC9000952 /* MP4Box.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MP4Box.swift; sourceTree = "<group>"; };
 		CAB53EF0B66FC3BF50ABC189 /* ClipTokenizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipTokenizer.swift; sourceTree = "<group>"; };
 		CBE4AA3CCC3AA51A5D712692 /* MemegetIosApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemegetIosApp.swift; sourceTree = "<group>"; };
+		DCE7FCF1BFF56EDB0A741830 /* SitesB.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SitesB.swift; sourceTree = "<group>"; };
+		DD6AE9ADC888BA677E559461 /* UbitLinkDownloader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UbitLinkDownloader.swift; sourceTree = "<group>"; };
+		DE87268AF52932370CB2E587 /* DASH.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DASH.swift; sourceTree = "<group>"; };
 		E394D7F5B7F98CF1E9033906 /* LibrarySearchView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibrarySearchView.swift; sourceTree = "<group>"; };
+		E5765126D38FE3D0462B2534 /* HLS.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HLS.swift; sourceTree = "<group>"; };
+		E85AD40313B473B181675A30 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		E9E941F170E40A0D410F8CE7 /* Memeget-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Memeget-Bridging-Header.h"; sourceTree = "<group>"; };
 		EE652925C84F49EDE5712C21 /* KnowledgeCore.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = KnowledgeCore.cpp; sourceTree = "<group>"; };
 		F2F33F6568E26FA7F050516B /* version.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = version.xcconfig; sourceTree = "<group>"; };
@@ -116,9 +167,19 @@
 				80BEC3B24A3F5F57D1B66BE9 /* Vision.framework in Frameworks */,
 				28D2D0356370752E8BDC2655 /* Photos.framework in Frameworks */,
 				45D8578D620ABB9A47B763E9 /* AVFoundation.framework in Frameworks */,
+				1DCCA03694D0F294F447BD7A /* JavaScriptCore.framework in Frameworks */,
 				B6818E49A25322BFE5466FF4 /* Security.framework in Frameworks */,
 				802FEF4399D5BBA0DD49DD8E /* libsqlite3.tbd in Frameworks */,
 				994A52515E0852ADA8BB48E7 /* libz.tbd in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		2230D5F0AD80B29AE9B55ACA /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				65E1A9757321E43BF168533A /* UIKit.framework in Frameworks */,
+				4C5C4F6D95BD4CA5BCA8B42C /* UniformTypeIdentifiers.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -133,10 +194,28 @@
 			path = Cloud;
 			sourceTree = "<group>";
 		};
+		06A5B498277A89CCC2339E04 /* Ubit */ = {
+			isa = PBXGroup;
+			children = (
+				DE87268AF52932370CB2E587 /* DASH.swift */,
+				E5765126D38FE3D0462B2534 /* HLS.swift */,
+				C435C3CC8FF654EBC9000952 /* MP4Box.swift */,
+				B3304E8B82C42A40336C46CF /* SitesA.swift */,
+				DCE7FCF1BFF56EDB0A741830 /* SitesB.swift */,
+				05D9D551C8F5A199A0FD055B /* TSDemuxer.swift */,
+				49CB14FB7CA95A50E9E9DABF /* UbitCore.swift */,
+				189B5CD9F26356FD78C8B178 /* UbitExtractorRegistry.swift */,
+				DD6AE9ADC888BA677E559461 /* UbitLinkDownloader.swift */,
+				B6CFA4CE017EFC7A62A80BBE /* YouTubeExtractor.swift */,
+			);
+			path = Ubit;
+			sourceTree = "<group>";
+		};
 		09478E1590D633F53FC84DB6 /* Products */ = {
 			isa = PBXGroup;
 			children = (
 				4C962767205EE76476AA0EB9 /* Memeget.app */,
+				38AEA70EDE1421AE9C746A1B /* MemegetShareExtension.appex */,
 				4D70C3FD52B4CE112D671C51 /* MemegetTests.xctest */,
 			);
 			name = Products;
@@ -146,6 +225,7 @@
 			isa = PBXGroup;
 			children = (
 				0D37B7EB9377BC53BECE2146 /* MemegetPipelineTests.swift */,
+				88BBE742C7A981B87CD3055D /* UbitVideoDownloadTests.swift */,
 			);
 			path = MemegetTests;
 			sourceTree = "<group>";
@@ -182,11 +262,14 @@
 				2634FDBC4550EAE1108E84CC /* Accelerate.framework */,
 				2E6D574EBB0B0B4838251C45 /* AVFoundation.framework */,
 				C2AE2AE7993A55439BA07555 /* ExecutorchLib.xcframework */,
+				6F00B3ADAFBFD298A1846EEC /* JavaScriptCore.framework */,
 				33B6C99CD7CC3670F42ED474 /* libsqlite3.tbd */,
 				26867A48512658545C6E9E21 /* libz.tbd */,
 				48E16AA0DB7ECFEEEE31AC5B /* Metal.framework */,
 				3071760B28EF9D3F01BDCCE6 /* Photos.framework */,
 				0D6431FD5A39C19EB853E1A7 /* Security.framework */,
+				20040A22E8331919BDAB71A7 /* UIKit.framework */,
+				BB2F7363CB82F7C026142BAB /* UniformTypeIdentifiers.framework */,
 				06FAE6A43CFE42C3E30AD126 /* Vision.framework */,
 			);
 			name = Frameworks;
@@ -223,6 +306,7 @@
 				778A31C2D14A8E15DB3382F6 /* Inference */,
 				E3E88A72391A2B0F91C4E06C /* Models */,
 				30FE75A4C38CBC66E6F5B3FF /* Storage */,
+				06A5B498277A89CCC2339E04 /* Ubit */,
 				CFC0B50E5C37E738E203F2BB /* UI */,
 			);
 			path = Memeget;
@@ -242,6 +326,15 @@
 				E9AC95A072F239BA84605229 /* src */,
 			);
 			path = app;
+			sourceTree = "<group>";
+		};
+		71043BC580250CC9FD59E2F3 /* MemegetShareExtension */ = {
+			isa = PBXGroup;
+			children = (
+				E85AD40313B473B181675A30 /* Info.plist */,
+				88FC9732FC34AD84C17B6A0E /* ShareViewController.swift */,
+			);
+			path = MemegetShareExtension;
 			sourceTree = "<group>";
 		};
 		778A31C2D14A8E15DB3382F6 /* Inference */ = {
@@ -267,6 +360,7 @@
 			children = (
 				66938624031AC3C00A97AD9C /* Memeget */,
 				60D931966991D39882A96F6C /* memeget */,
+				71043BC580250CC9FD59E2F3 /* MemegetShareExtension */,
 				2496EFEED0F97A856140FEB9 /* MemegetTests */,
 				5183ADBE8303CF4307C3AF58 /* Frameworks */,
 				09478E1590D633F53FC84DB6 /* Products */,
@@ -350,6 +444,24 @@
 			productReference = 4D70C3FD52B4CE112D671C51 /* MemegetTests.xctest */;
 			productType = "com.apple.product-type.bundle.unit-test";
 		};
+		ACAF6C1140F26BA4857CE406 /* MemegetShareExtension */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = AE636F354DD2869ADB2E3750 /* Build configuration list for PBXNativeTarget "MemegetShareExtension" */;
+			buildPhases = (
+				820BCBE4CDC9A0792884A094 /* Sources */,
+				2230D5F0AD80B29AE9B55ACA /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = MemegetShareExtension;
+			packageProductDependencies = (
+			);
+			productName = MemegetShareExtension;
+			productReference = 38AEA70EDE1421AE9C746A1B /* MemegetShareExtension.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
 		B3AD5383DEFC0E0F5B53718D /* Memeget */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = 6C25A15F066F6FC52C85D4AC /* Build configuration list for PBXNativeTarget "Memeget" */;
@@ -357,11 +469,13 @@
 				568515F6B11B9CF39D1C2535 /* Sources */,
 				0DE95C9538D77973226D244D /* Resources */,
 				06DD96EB40A478FF0E70CF54 /* Frameworks */,
+				93DAA396791303D6273F42A3 /* Embed Foundation Extensions */,
 				B4A9A962662582CEF9EDEFF3 /* Embed Frameworks */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				445F9740401C12E68040B8D3 /* PBXTargetDependency */,
 			);
 			name = Memeget;
 			packageProductDependencies = (
@@ -396,6 +510,7 @@
 			projectRoot = "";
 			targets = (
 				B3AD5383DEFC0E0F5B53718D /* Memeget */,
+				ACAF6C1140F26BA4857CE406 /* MemegetShareExtension */,
 				979D7F0E087CAA3FF571FDDF /* MemegetTests */,
 			);
 		};
@@ -421,6 +536,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				E858FF29E4E9CCD68F2CA0B4 /* MemegetPipelineTests.swift in Sources */,
+				F269A2B84AAA2DD89C05DD6B /* UbitVideoDownloadTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -429,12 +545,15 @@
 			buildActionMask = 2147483647;
 			files = (
 				E49D543A6C2A8D81AD1CA07D /* ClipTokenizer.swift in Sources */,
+				80FE06709949C4ECBFB3FE38 /* DASH.swift in Sources */,
+				DE2226083E09F7558C7E559E /* HLS.swift in Sources */,
 				DAB04815107DFFF1F702F8B4 /* IosCloudAssistant.swift in Sources */,
 				1C97E9BC7EE295080A596F81 /* IosInferenceEngine.swift in Sources */,
 				9FF5B122C7011C47AC5E0C73 /* KnowledgeCore.cpp in Sources */,
 				AD694F0D68BE8FE7AE27ADA4 /* LibrarySearchView.swift in Sources */,
 				803E3ABACCE85170E35F90AD /* LlamaDecisionRunner.cpp in Sources */,
 				B140B6EE09CDBAE96428267E /* LlamaVisionRunner.cpp in Sources */,
+				84BE4732A2449AE0B7DE498E /* MP4Box.swift in Sources */,
 				2F17832D1838421D2E8EF86E /* MemeGateCore.cpp in Sources */,
 				205F4A2CF2B20ECD81429F08 /* MemeModels.swift in Sources */,
 				227517F72880334F44DB7944 /* MemeViewerSheet.swift in Sources */,
@@ -443,14 +562,34 @@
 				78FE25D0769BF3E7B878CC10 /* PhotoKitScannerAndCoordinator.swift in Sources */,
 				44A699DD5E832E33CDF2672B /* ProjectorConversion.cpp in Sources */,
 				7E707CE02AA0DE7D33F9F333 /* ResidentSearchCore.cpp in Sources */,
+				16B97481882C4C7F0B110263 /* SitesA.swift in Sources */,
+				0A506250A8DC5EE1A0640697 /* SitesB.swift in Sources */,
 				291CA2DCC3462A054930D372 /* SocialReplyIntent.swift in Sources */,
 				9F970625D1250DE724BD49D9 /* SqliteMemeStore.swift in Sources */,
+				DED7D32D0EC23FD3096D0C33 /* TSDemuxer.swift in Sources */,
+				9D70347FC164A89A8286667F /* UbitCore.swift in Sources */,
+				456BB06DC808FA318EBC01E3 /* UbitExtractorRegistry.swift in Sources */,
+				12E71D97B0009B5288272E57 /* UbitLinkDownloader.swift in Sources */,
+				190395075919B3FBF46AFA63 /* YouTubeExtractor.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		820BCBE4CDC9A0792884A094 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				BDD20C56A62E6418B4FBE387 /* ShareViewController.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
+		445F9740401C12E68040B8D3 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = ACAF6C1140F26BA4857CE406 /* MemegetShareExtension */;
+			targetProxy = 080C7575F6CCC286D87B6E45 /* PBXContainerItemProxy */;
+		};
 		FE92E05A5276AAE4936EB6BB /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			target = B3AD5383DEFC0E0F5B53718D /* Memeget */;
@@ -459,6 +598,31 @@
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
+		019716F2120A6E86EFF92AA2 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				"CODE_SIGNING_ALLOWED[sdk=iphonesimulator*]" = NO;
+				"CODE_SIGNING_REQUIRED[sdk=iphonesimulator*]" = NO;
+				INFOPLIST_FILE = MemegetShareExtension/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				"OTHER_LDFLAGS[sdk=iphoneos*]" = (
+					"$(inherited)",
+				);
+				"OTHER_LDFLAGS[sdk=iphonesimulator*]" = (
+					"$(inherited)",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.memeget.iosapp.ShareExtension;
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
 		11EA09B26357508638E59636 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -734,6 +898,31 @@
 			};
 			name = Debug;
 		};
+		DC3D66B63E2332447DCB3B41 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				"CODE_SIGNING_ALLOWED[sdk=iphonesimulator*]" = NO;
+				"CODE_SIGNING_REQUIRED[sdk=iphonesimulator*]" = NO;
+				INFOPLIST_FILE = MemegetShareExtension/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				"OTHER_LDFLAGS[sdk=iphoneos*]" = (
+					"$(inherited)",
+				);
+				"OTHER_LDFLAGS[sdk=iphonesimulator*]" = (
+					"$(inherited)",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.memeget.iosapp.ShareExtension;
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -760,6 +949,15 @@
 			buildConfigurations = (
 				CE33F1C6078A4A0DBB5709FA /* Debug */,
 				C11F19E3ACE6C5720F2787DC /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		AE636F354DD2869ADB2E3750 /* Build configuration list for PBXNativeTarget "MemegetShareExtension" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				019716F2120A6E86EFF92AA2 /* Debug */,
+				DC3D66B63E2332447DCB3B41 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;

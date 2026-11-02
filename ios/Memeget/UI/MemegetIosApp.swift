@@ -18,7 +18,7 @@ public enum MemegetPalette {
 @main
 struct MemegetIosApp: App {
     @StateObject private var coordinator: MemeLibraryCoordinator
-
+    @Environment(\.scenePhase) private var scenePhase
     init() {
         let engine = IosInferenceEngine()
         let store = try! SqliteMemeStore(bridge: engine.bridge)
@@ -31,8 +31,16 @@ struct MemegetIosApp: App {
         WindowGroup {
             LibrarySearchView(coordinator: coordinator)
                 .preferredColorScheme(.dark)
+                .onOpenURL { incomingURL in
+                    coordinator.handleIncomingURL(incomingURL)
+                }
+                .onChange(of: scenePhase) { _, phase in
+                    if phase == .active {
+                        coordinator.drainSharedExtensionQueue()
+                    }
+                }
                 .task {
-                    // Support deterministic Simulator E2E fixture directory via MEMEGET_SEED_DIR
+                    coordinator.drainSharedExtensionQueue()
                     if let seedDir = ProcessInfo.processInfo.environment["MEMEGET_SEED_DIR"],
                        !seedDir.isEmpty {
                         let folder = URL(fileURLWithPath: seedDir)
