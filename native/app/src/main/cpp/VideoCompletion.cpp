@@ -1,8 +1,9 @@
-// Video completion for logo removal: rebuilds what a logo covers in every frame from what the other frames show
-// there. Optical flow follows the background through time, so each covered pixel takes the real pixel it lines up
-// with in the nearest frame that saw it. What no frame ever shows is filled once on a keyframe (the caller runs a
-// learned inpainting model on it) and carried through time the same way, so the fill moves with the footage and
-// doesn't flicker. Leftovers get the plain directional fill.
+// Video completion for logo removal: rebuilds what a logo covers in every frame. Real background comes first: whole
+// matching frames, optical flow and camera motion find the real pixel each covered pixel lines up with elsewhere in
+// the clip. A frame keeps that real fill only where it continues the footage across the edge of the area; the rest
+// is invented per frame by a learned inpainting model (run by the caller), or the plain directional fill without
+// one. The finished fill is then smoothed through time along the flow, so it moves with the footage and doesn't
+// flicker.
 //
 // All frames are crops of one region around the logo at native resolution, held in memory-mapped scratch files.
 #include <jni.h>
@@ -15,6 +16,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <cstdint>
@@ -97,17 +99,40 @@ constexpr double kOwnMotionLevel = 1.0;
 constexpr float kOwnMotionMissLevel = 6.0f;
 constexpr double kOwnMotionMissShare = 0.05;
 constexpr double kOwnMotionVideoShare = 0.015;
-// Polish of the filled area: median size (odd) against speckle, and the share of the previous result carried along
-// the flow into each frame against shimmer.
-constexpr int kPolishMedianPx = 5;
-constexpr float kCarriedShare = 0.5f;
+// A frame's real fill is used only when it continues the footage across the edge of the covered area: the median
+// step from a filled pixel to the real pixel next to it may exceed the footage's own step between the next two
+// real pixels by at most this much (brightness, of 255), over at least this share of the area. Real fill that is
+// shifted or comes from a frame where something else was there (a leg, a sign seen from elsewhere) jumps at the
+// edge; on a ski clip, Sintel and a camera pan, frames below the level were 2.2 from the truth against the fill
+// model's 3.8, frames above it 17.3 against 12.1.
+constexpr float kTrustSeamLevel = 2.5f;
+constexpr double kTrustRealShare = 0.5;
+// Smoothing of the finished fill through time, both ways. A neighbour that repeats the frame (a duplicate from a
+// frame-rate change: mean colour difference outside the area at most kRepeatLevel, full resolution; 51 of a
+// re-encoded clip's duplicates fell below it, a slow pan over flat sky never below 0.38) is carried whole, so the
+// repeat shows the same fill instead of a twitch. Any other neighbour is carried unmoved or along the flow, whichever
+// lines up better with the frame in a band around the area (mean brightness miss, of 255, half resolution):
+// kCloseShare of it when that misses by at most kCloseMiss, kFarShare up to kFarMiss, and not at all beyond (a cut,
+// or motion the flow can't follow). Carrying along the flow where the footage holds still drags the fill about.
+constexpr float kRepeatLevel = 0.25f;
+constexpr float kCloseMiss = 3.0f;
+constexpr float kCloseShare = 0.6f;
+constexpr float kFarMiss = 12.0f;
+constexpr float kFarShare = 0.3f;
+// Each separate piece of a frame's covered area may move this far (full-resolution pixels) onto where that piece of
+// the logo really is (see alignHoles), when that matches the piece's usual look by this factor better than where
+// tracking put it; pieces smaller than the last value are left alone. On a sticker that slides 4 px into place over
+// its first frames, next to a still part of the same watermark, exactly those frames moved, and only the sticker.
+constexpr int kHoleShiftPx = 5;
+constexpr float kHoleShiftGain = 0.7f;
+constexpr int kHoleShiftMinPx = 30;
 // Frames this far apart are also aligned directly, so long jumps compose few motions and drift less.
 constexpr int kAnchorStride = 8;
 // Neighbouring frames whose flows there and back agree on less than this share of the picture are a hard cut.
 constexpr float kCutConsistentShare = 0.2f;
 // How many frames away, at most, camera motion looks for a frame that shows a covered pixel. Footage where the
 // logo's area is never shown would otherwise check every pair of frames, which on a minute-long clip takes hours;
-// what is that far away has usually changed anyway, and the keyframes cover it.
+// what is that far away has usually changed anyway, and the fill model covers it.
 constexpr int kMaxCameraReach = 90;
 // Matching whole frames as sources (see matchFrames): the ring around the covered area compared (pixels wide, full
 // resolution), how many ring and area points are sampled, how much a brightness change counts against a match,
@@ -331,7 +356,7 @@ Motion refineAlignment(const cv::Mat& from, const cv::Mat& to, const cv::Mat& va
 class Completion {
 public:
     Completion(int width, int height, int frames, const std::string& dir)
-        : w_(width), h_(height), n_(frames), px_(static_cast<size_t>(width) * height),
+        : w_(width), h_(height), n_(frames), px_(static_cast<size_t>(width) * height), dir_(dir),
           rgb_(dir + "/completion_rgb", static_cast<size_t>(frames) * px_ * 3),
           holes_(dir + "/completion_holes", static_cast<size_t>(frames) * px_),
           complete_(frames, 0), holeCount_(frames, 0) {
@@ -349,8 +374,9 @@ public:
         holeCount_[t] = count;
     }
 
-    /** Lays out the per-pixel sources once every frame is in. */
-    void seal(const std::string& dir) {
+    /** Lays out the per-pixel sources once every frame is in (after moving the covered areas, see alignHoles). */
+    void seal(const std::string& dir, const std::atomic<bool>* cancelled) {
+        alignHoles(cancelled);
         offsets_.assign(n_ + 1, 0);
         for (int t = 0; t < n_; ++t) offsets_[t + 1] = offsets_[t] + static_cast<size_t>(holeCount_[t]);
         indices_ = std::make_unique<Scratch>(dir + "/completion_index", offsets_[n_] * sizeof(int32_t));
@@ -364,6 +390,117 @@ public:
             }
         }
         std::memset(sources_->data(), 0, offsets_[n_] * sizeof(Source));
+    }
+
+    /**
+     * Moves each separate piece of every frame's covered area, within kHoleShiftPx, onto where that piece of the logo
+     * really is in the frame. Tracking places the whole logo at once, so a piece that slides in on its own (an
+     * animated sticker beside a still handle) leaves its edge uncovered. An overlay's pixels look the same in every
+     * frame: a piece's usual look is the median over the frames covering it at the same place, and a frame takes the
+     * shift that matches that look clearly better (kHoleShiftGain) than where tracking put it.
+     */
+    void alignHoles(const std::atomic<bool>* cancelled) {
+        // Frames covered at the same place, by their covered area's contents.
+        std::unordered_map<uint64_t, std::vector<int>> groups;
+        for (int t = 0; t < n_; ++t) {
+            if (holeCount_[t] == 0) continue;
+            const uint8_t* hole = holeOf(t);
+            uint64_t hash = 1469598103934665603ull;
+            for (size_t i = 0; i < px_; ++i) hash = (hash ^ hole[i]) * 1099511628211ull;
+            auto& frames = groups[hash];
+            if (!frames.empty() && std::memcmp(holeOf(frames.front()), hole, px_) != 0) continue;
+            frames.push_back(t);
+        }
+        std::vector<uint8_t> moved(px_);
+        for (const auto& entry : groups) {
+            if (cancelled && cancelled->load()) throw std::runtime_error("cancelled");
+            const std::vector<int>& frames = entry.second;
+            cv::Mat labels;
+            const int pieces = cv::connectedComponents(
+                cv::Mat(h_, w_, CV_8UC1, const_cast<uint8_t*>(holeOf(frames.front()))), labels, 8, CV_32S);
+            std::vector<std::vector<int>> pixels(pieces);
+            for (int i = 0; i < static_cast<int>(px_); ++i) {
+                const int label = labels.at<int>(i / w_, i % w_);
+                if (label > 0) pixels[label].push_back(i);
+            }
+            std::vector<std::array<int, 2>> shift(frames.size() * pieces, {0, 0});
+            bool any = false;
+            for (int piece = 1; piece < pieces; ++piece) {
+                const std::vector<int>& at = pixels[piece];
+                if (static_cast<int>(at.size()) < kHoleShiftMinPx) continue;
+                // The usual look: per pixel and channel, the median over up to 64 frames spread through the group.
+                const size_t step = std::max<size_t>(1, frames.size() / 64);
+                std::vector<uint8_t> values;
+                std::vector<float> look(at.size() * 3);
+                for (size_t k = 0; k < at.size() * 3; ++k) {
+                    values.clear();
+                    for (size_t f = 0; f < frames.size(); f += step) {
+                        values.push_back(frameRgb(frames[f])[static_cast<size_t>(at[k / 3]) * 3 + k % 3]);
+                    }
+                    std::nth_element(values.begin(), values.begin() + values.size() / 2, values.end());
+                    look[k] = values[values.size() / 2];
+                }
+                int left = w_, top = h_, right = -1, bottom = -1;
+                for (int i : at) {
+                    left = std::min(left, i % w_); right = std::max(right, i % w_);
+                    top = std::min(top, i / w_); bottom = std::max(bottom, i / w_);
+                }
+                for (size_t f = 0; f < frames.size(); ++f) {
+                    const uint8_t* frame = frameRgb(frames[f]);
+                    auto miss = [&](int dx, int dy) {
+                        double sum = 0;
+                        for (size_t k = 0; k < at.size(); ++k) {
+                            const uint8_t* p = frame + static_cast<size_t>(at[k] + dy * w_ + dx) * 3;
+                            for (int c = 0; c < 3; ++c) sum += std::abs(p[c] - look[k * 3 + c]);
+                        }
+                        return sum;
+                    };
+                    const double inPlace = miss(0, 0);
+                    double best = inPlace;
+                    std::array<int, 2> bestShift = {0, 0};
+                    for (int dy = -kHoleShiftPx; dy <= kHoleShiftPx; ++dy) {
+                        for (int dx = -kHoleShiftPx; dx <= kHoleShiftPx; ++dx) {
+                            if ((dx == 0 && dy == 0) || left + dx < 0 || top + dy < 0 || right + dx >= w_ ||
+                                bottom + dy >= h_) {
+                                continue;
+                            }
+                            const double m = miss(dx, dy);
+                            if (m < best) {
+                                best = m;
+                                bestShift = {dx, dy};
+                            }
+                        }
+                    }
+                    if (best < kHoleShiftGain * inPlace) {
+                        shift[f * pieces + piece] = bestShift;
+                        any = true;
+                    }
+                }
+            }
+            if (!any) continue;
+            for (size_t f = 0; f < frames.size(); ++f) {
+                bool shifted = false;
+                for (int piece = 1; piece < pieces; ++piece) shifted = shifted || shift[f * pieces + piece] != std::array<int, 2>{0, 0};
+                if (!shifted) continue;
+                std::fill(moved.begin(), moved.end(), 0);
+                for (int piece = 1; piece < pieces; ++piece) {
+                    const auto [dx, dy] = shift[f * pieces + piece];
+                    for (int i : pixels[piece]) moved[i + dy * w_ + dx] = 1;
+                }
+                uint8_t* hole = holes_.data() + static_cast<size_t>(frames[f]) * px_;
+                std::memcpy(hole, moved.data(), px_);
+                holeCount_[frames[f]] = static_cast<int>(std::count(moved.begin(), moved.end(), 1));
+            }
+        }
+    }
+
+    /** Every pixel any frame covers (after alignHoles), into [out]. */
+    void coveredUnion(uint8_t* out) const {
+        std::memset(out, 0, px_);
+        for (int t = 0; t < n_; ++t) {
+            const uint8_t* hole = holeOf(t);
+            for (size_t i = 0; i < px_; ++i) out[i] |= hole[i];
+        }
     }
 
     /** Flow between every pair of neighbouring frames, both ways, kept at half resolution. */
@@ -396,7 +533,7 @@ public:
             backwardGood_[t + 1] = forwardGood_[t];
             backwardMotion_[t + 1] = forwardMotion_[t].inverse();
             // A hard cut: the flows there and back don't agree on most of the picture. Nothing is carried across
-            // one, by flow, camera motion or the polish.
+            // one, by flow, camera motion or the smoothing.
             cutAfter_[t] = consistentShare(forward, backward, nearHole(t) | nearHole(t + 1)) < kCutConsistentShare;
             if (cutAfter_[t]) {
                 forwardGood_[t] = false;
@@ -463,7 +600,7 @@ public:
     /** Half-resolution mask of the pixels near frame [t]'s covered area (where flow follows the logo). */
     cv::Mat nearHole(int t) const {
         cv::Mat near = cv::Mat::zeros(fh_, fw_, CV_8UC1);
-        if (complete_[t] || holeCount_[t] == 0) return near;
+        if (holeCount_[t] == 0) return near;
         cv::Mat hole(h_, w_, CV_8UC1, const_cast<uint8_t*>(holeOf(t)));
         cv::Mat smallHole;
         cv::resize(hole, smallHole, cv::Size(fw_, fh_), 0, 0, cv::INTER_NEAREST);
@@ -675,19 +812,19 @@ public:
                 const int y16 = static_cast<int>(std::lround(qy * 16));
                 sources[k] = Source{static_cast<int16_t>(s), static_cast<int16_t>(x16), static_cast<int16_t>(y16),
                                     static_cast<uint8_t>(std::min(std::abs(s - t), 254)),
-                                    static_cast<uint8_t>(readsInvented(s, x16, y16) ? 2 : 1)};
+                                    1};
             }
             matched_[t] = 1;
             matchFrom_[t] = s;
         }
     }
 
-    /** One forward and one backward pass; returns each frame's count of covered pixels with no source yet. */
-    std::vector<int> propagate(const std::atomic<bool>* cancelled) {
-        if (!matchedOnce_) {
-            matchFrames(cancelled);
-            matchedOnce_ = true;
-        }
+    /**
+     * Real background for each covered pixel (whole matched frames, flow, camera motion). A frame whose real fill
+     * doesn't continue the footage across the area's edge (see trusted) drops it: the fill model does better there.
+     */
+    void propagate(const std::atomic<bool>* cancelled) {
+        matchFrames(cancelled);
         for (int t = 1; t < n_; ++t) {
             if (cancelled && cancelled->load()) throw std::runtime_error("cancelled");
             step(t, t - 1);
@@ -697,13 +834,12 @@ public:
             step(t, t + 1);
         }
         sampleAlongCameraMotion(cancelled);
-        std::vector<int> unfilled(n_, 0);
+        // Judged once every frame has its sources (frames read each other's sources while propagating).
+        std::vector<uint8_t> keep(n_, 1);
+        for (int t = 0; t < n_; ++t) keep[t] = complete_[t] || holeCount_[t] == 0 || trusted(t);
         for (int t = 0; t < n_; ++t) {
-            if (complete_[t]) continue;
-            const Source* src = sourcesOf(t);
-            for (int i = 0; i < holeCount_[t]; ++i) unfilled[t] += src[i].found ? 0 : 1;
+            if (!keep[t]) std::fill(sourcesOf(t), sourcesOf(t) + holeCount_[t], Source{});
         }
-        return unfilled;
     }
 
     /** Frame [t] with every covered pixel that has a source filled in, and [holeOut] marking those still open. */
@@ -723,24 +859,28 @@ public:
         }
     }
 
-    /** [rgb] is frame [t] with nothing covered any more (a keyframe after inpainting); it becomes a full source. */
+    /**
+     * What frame [t] needs from the fill model: [rgbOut] with its real fill blended in, [holeOut] marking what is
+     * still open. False when nothing is open (or the frame is already complete).
+     */
+    bool fillRequest(int t, uint8_t* rgbOut, uint8_t* holeOut) const {
+        composite(t, rgbOut, holeOut);
+        if (complete_[t]) return false;
+        matchSeams(t, rgbOut);
+        return std::any_of(holeOut, holeOut + px_, [](uint8_t open) { return open != 0; });
+    }
+
+    /** [rgb] is frame [t] with nothing covered any more (the fill model's output, or the plain fill). */
     void setComplete(int t, const uint8_t* rgb) {
-        // What the keyframe still lacked real background for is invented from here on.
-        if (!complete_[t] && holeCount_[t] > 0) {
-            std::vector<uint8_t> invented(px_, 0);
-            const Source* src = sourcesOf(t);
-            const int32_t* index = indicesOf(t);
-            for (int i = 0; i < holeCount_[t]; ++i) {
-                if (src[i].found != 1) invented[index[i]] = 1;
-            }
-            invented_[t] = std::move(invented);
-        }
         std::memcpy(frameRgb(t), rgb, px_ * 3);
-        // The covered mask stays: everything that reads it checks complete_ first, and the polish needs it.
+        // The covered mask stays: everything that reads it checks complete_ first, and the smoothing needs it.
         complete_[t] = 1;
     }
 
-    /** Fills whatever is still open in each frame from its surroundings, so every frame is complete. */
+    /**
+     * Completes every frame the fill model didn't (real fill, the rest filled from its surroundings), then smooths
+     * the fill through time.
+     */
     void finish(const std::atomic<bool>* cancelled) {
         std::vector<uint8_t> rgb(px_ * 3);
         std::vector<uint8_t> open(px_);
@@ -754,6 +894,7 @@ public:
             if (cv::countNonZero(hole) > 0) memeget::fillFromSurroundings(image, hole, 0, 0, std::max(w_, h_));
             setComplete(t, rgb.data());
         }
+        smooth(cancelled);
     }
 
     /**
@@ -855,81 +996,202 @@ public:
         }
     }
 
+    /** Frame [t], finished (see finish). */
+    void result(int t, uint8_t* rgbOut) const { std::memcpy(rgbOut, frameRgb(t), px_ * 3); }
+
     /**
-     * Frame [t] with its covered area filled, then polished where the fill is a mix rather than one piece of real
-     * footage: pixels nothing real was found for (inpainted keyframes carried through time, a patchwork of
-     * neighbouring keyframes) and, where the footage moves on its own and no single frame could stand in, the
-     * whole area. A small median removes the speckle, and half of the previous result, carried along the flow, is
-     * blended in so the fill moves smoothly instead of shimmering. Real footage is left as it is (the median would
-     * soften its texture), except that a frame whose source jumps to another frame gets the blend too, so the
-     * change doesn't pop. Call in frame order for the blend to apply.
+     * Whether frame [t]'s real fill continues the footage across the edge of its covered area (see
+     * kTrustSeamLevel): real sources for at least kTrustRealShare of the area, and a median step from a filled
+     * pixel into the real pixel next to it no larger than the footage's own step between the next two, give or
+     * take the level.
      */
-    void result(int t, uint8_t* rgbOut) {
-        std::vector<uint8_t> open(px_);
-        composite(t, rgbOut, open.data());
-        if (holeCount_[t] == 0) {
-            polishedFrame_ = -1;
-            return;
-        }
+    bool trusted(int t) const {
+        const Source* src = sourcesOf(t);
+        const int32_t* index = indicesOf(t);
         const uint8_t* hole = holeOf(t);
-        const auto invented = invented_.find(t);
-        const bool jumped = matched_[t] && t > 0 && (matchFrom_[t] != matchFrom_[t - 1] + 1 ||
-            (t > 1 && matched_[t - 1] && matchFrom_[t - 1] != matchFrom_[t - 2] + 1));
-        std::vector<uint8_t> rough(px_, 0);
-        std::vector<uint8_t> carry(px_, 0);
-        size_t carryCount = 0;
-        for (size_t i = 0; i < px_; ++i) {
-            if (!hole[i]) continue;
-            rough[i] = (movesOnOwn_[t] && !matched_[t]) || (invented != invented_.end() && invented->second[i]);
-            carry[i] = rough[i] || jumped;
-            carryCount += carry[i];
-        }
-        if (carryCount == 0) {
-            // Kept for the next frame's blend (it may jump to another source).
-            polished_.assign(rgbOut, rgbOut + px_ * 3);
-            polishedFrame_ = t;
-            return;
-        }
-        cv::Mat image(h_, w_, CV_8UC3, rgbOut);
-        cv::Mat smooth;
-        cv::medianBlur(image, smooth, kPolishMedianPx);
-        for (size_t i = 0; i < px_; ++i) {
-            if (rough[i]) std::memcpy(rgbOut + i * 3, smooth.data + i * 3, 3);
-        }
-        // Carried only within a shot, and only where the flow lands inside the frame and leads back again.
-        if (polishedFrame_ == t - 1 && t > 0 && !cutAfter_[t - 1]) {
-            const cv::Mat back = flowAt(t, false);
-            const cv::Mat ahead = flowAt(t - 1, true);
-            for (int y = 0; y < h_; ++y) {
-                for (int x = 0; x < w_; ++x) {
-                    const size_t i = static_cast<size_t>(y) * w_ + x;
-                    if (!carry[i]) continue;
-                    const cv::Vec2f f = flowSample(back, static_cast<float>(x), static_cast<float>(y));
-                    const float px = x + f[0];
-                    const float py = y + f[1];
-                    if (px < 0 || py < 0 || px > w_ - 1 || py > h_ - 1) continue;
-                    const cv::Vec2f g = flowSample(ahead, px, py);
-                    if (std::abs(px + g[0] - x) + std::abs(py + g[1] - y) > kConsistencyPx) continue;
-                    const int x0 = static_cast<int>(px);
-                    const int y0 = static_cast<int>(py);
-                    const int x1 = std::min(x0 + 1, w_ - 1);
-                    const int y1 = std::min(y0 + 1, h_ - 1);
-                    const float fx = px - x0;
-                    const float fy = py - y0;
-                    for (int c = 0; c < 3; ++c) {
-                        const float top = polished_[(static_cast<size_t>(y0) * w_ + x0) * 3 + c] * (1 - fx) +
-                                          polished_[(static_cast<size_t>(y0) * w_ + x1) * 3 + c] * fx;
-                        const float bottom = polished_[(static_cast<size_t>(y1) * w_ + x0) * 3 + c] * (1 - fx) +
-                                             polished_[(static_cast<size_t>(y1) * w_ + x1) * 3 + c] * fx;
-                        const float carried = top * (1 - fy) + bottom * fy;
-                        rgbOut[i * 3 + c] = static_cast<uint8_t>(
-                            (rgbOut[i * 3 + c] * (1 - kCarriedShare) + carried * kCarriedShare) + 0.5f);
-                    }
+        const uint8_t* frame = frameRgb(t);
+        static const int kDx[4] = {1, -1, 0, 0};
+        static const int kDy[4] = {0, 0, 1, -1};
+        int real = 0;
+        std::vector<float> excess;
+        for (int i = 0; i < holeCount_[t]; ++i) {
+            if (src[i].found != 1) continue;
+            ++real;
+            const int x = index[i] % w_;
+            const int y = index[i] / w_;
+            uint8_t filled[3];
+            bool sampled = false;
+            for (int d = 0; d < 4; ++d) {
+                const int x1 = x + kDx[d], y1 = y + kDy[d];
+                const int x2 = x + 2 * kDx[d], y2 = y + 2 * kDy[d];
+                if (x2 < 0 || y2 < 0 || x2 >= w_ || y2 >= h_ || hole[y1 * w_ + x1] || hole[y2 * w_ + x2]) continue;
+                if (!sampled) {
+                    sample(src[i], filled);
+                    sampled = true;
                 }
+                const uint8_t* a = frame + (static_cast<size_t>(y1) * w_ + x1) * 3;
+                const uint8_t* b = frame + (static_cast<size_t>(y2) * w_ + x2) * 3;
+                int jump = 0;
+                int own = 0;
+                for (int c = 0; c < 3; ++c) {
+                    jump += std::abs(filled[c] - a[c]);
+                    own += std::abs(a[c] - b[c]);
+                }
+                excess.push_back((jump - own) / 3.0f);
             }
         }
-        polished_.assign(rgbOut, rgbOut + px_ * 3);
-        polishedFrame_ = t;
+        if (real < kTrustRealShare * holeCount_[t] || excess.size() < 20) return false;
+        std::nth_element(excess.begin(), excess.begin() + excess.size() / 2, excess.end());
+        return excess[excess.size() / 2] < kTrustSeamLevel;
+    }
+
+    /** How a neighbour's fill is carried into a frame when smoothing: its share, and whether it stays unmoved. */
+    struct Carry {
+        float share = 0;
+        bool still = true;
+    };
+
+    /** How frame [u]'s fill is carried into its neighbour [t] (see kRepeatLevel). */
+    Carry carryOf(int t, int u) const {
+        if (cutAfter_[std::min(t, u)]) return {};
+        if (repeatDifference(t, u) <= kRepeatLevel) return {1.0f, true};
+        const float still = ringMiss(t, u, true);
+        const float moved = ringMiss(t, u, false);
+        const float miss = std::min(still, moved);
+        const float share = miss <= kCloseMiss ? kCloseShare : miss <= kFarMiss ? kFarShare : 0.0f;
+        return {share, still <= moved};
+    }
+
+    /**
+     * Blends each frame's fill with its neighbours' fills carried into it (see carryOf), one pass forwards and one
+     * backwards, averaged: the fill model invents every frame on its own, and this takes out the flicker without
+     * trailing the footage.
+     */
+    void smooth(const std::atomic<bool>* cancelled) {
+        if (offsets_[n_] == 0) return;
+        std::vector<Carry> fromPrevious(n_);
+        std::vector<Carry> fromNext(n_);
+        for (int t = 0; t < n_; ++t) {
+            if (cancelled && cancelled->load()) throw std::runtime_error("cancelled");
+            if (holeCount_[t] == 0) continue;
+            if (t > 0) fromPrevious[t] = carryOf(t, t - 1);
+            if (t + 1 < n_) fromNext[t] = carryOf(t, t + 1);
+        }
+        // The forward pass's covered pixels, for the average.
+        Scratch forward(dir_ + "/completion_smooth", offsets_[n_] * 3);
+        std::vector<float> previous(px_ * 3);
+        std::vector<float> current(px_ * 3);
+        // Frame [t]'s fill (dense) into [out], blended with [carried] (frame u's pass result) as [carry] says.
+        auto pass = [&](int t, int u, const Carry& carry, const std::vector<float>& carried, std::vector<float>& out) {
+            const uint8_t* frame = frameRgb(t);
+            for (size_t i = 0; i < px_ * 3; ++i) out[i] = frame[i];
+            if (carry.share <= 0) return;
+            const cv::Mat flow = carry.still ? cv::Mat() : flowAt(t, u > t);
+            const int32_t* index = indicesOf(t);
+            for (int i = 0; i < holeCount_[t]; ++i) {
+                const int p = index[i];
+                const int x = p % w_;
+                const int y = p / w_;
+                float qx = static_cast<float>(x);
+                float qy = static_cast<float>(y);
+                if (!carry.still) {
+                    const cv::Vec2f f = flowSample(flow, qx, qy);
+                    qx = std::clamp(qx + f[0], 0.0f, static_cast<float>(w_ - 1));
+                    qy = std::clamp(qy + f[1], 0.0f, static_cast<float>(h_ - 1));
+                }
+                const int x0 = static_cast<int>(qx);
+                const int y0 = static_cast<int>(qy);
+                const int x1 = std::min(x0 + 1, w_ - 1);
+                const int y1 = std::min(y0 + 1, h_ - 1);
+                const float fx = qx - x0;
+                const float fy = qy - y0;
+                for (int c = 0; c < 3; ++c) {
+                    const float top = carried[(static_cast<size_t>(y0) * w_ + x0) * 3 + c] * (1 - fx) +
+                                      carried[(static_cast<size_t>(y0) * w_ + x1) * 3 + c] * fx;
+                    const float bottom = carried[(static_cast<size_t>(y1) * w_ + x0) * 3 + c] * (1 - fx) +
+                                         carried[(static_cast<size_t>(y1) * w_ + x1) * 3 + c] * fx;
+                    float& v = out[static_cast<size_t>(p) * 3 + c];
+                    v = v * (1 - carry.share) + (top * (1 - fy) + bottom * fy) * carry.share;
+                }
+            }
+        };
+        for (int t = 0; t < n_; ++t) {
+            if (cancelled && cancelled->load()) throw std::runtime_error("cancelled");
+            pass(t, t - 1, fromPrevious[t], previous, current);
+            uint8_t* kept = forward.data() + offsets_[t] * 3;
+            const int32_t* index = indicesOf(t);
+            for (int i = 0; i < holeCount_[t]; ++i) {
+                for (int c = 0; c < 3; ++c) {
+                    kept[i * 3 + c] = static_cast<uint8_t>(std::clamp(current[static_cast<size_t>(index[i]) * 3 + c], 0.0f, 255.0f) + 0.5f);
+                }
+            }
+            std::swap(previous, current);
+        }
+        // The backward pass reads each frame's own fill before it is replaced by the average.
+        for (int t = n_ - 1; t >= 0; --t) {
+            if (cancelled && cancelled->load()) throw std::runtime_error("cancelled");
+            pass(t, t + 1, fromNext[t], previous, current);
+            uint8_t* frame = frameRgb(t);
+            const uint8_t* kept = forward.data() + offsets_[t] * 3;
+            const int32_t* index = indicesOf(t);
+            for (int i = 0; i < holeCount_[t]; ++i) {
+                const size_t p = static_cast<size_t>(index[i]) * 3;
+                for (int c = 0; c < 3; ++c) {
+                    frame[p + c] = static_cast<uint8_t>(std::clamp((kept[i * 3 + c] + current[p + c]) * 0.5f, 0.0f, 255.0f) + 0.5f);
+                }
+            }
+            std::swap(previous, current);
+        }
+    }
+
+    /**
+     * Mean colour difference (of 255, full resolution) between frames [t] and [u] outside t's covered area and the
+     * band around it where flow follows the logo.
+     */
+    float repeatDifference(int t, int u) const {
+        cv::Mat near;
+        cv::dilate(cv::Mat(h_, w_, CV_8UC1, const_cast<uint8_t*>(holeOf(t))), near,
+                   cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(2 * kFlowHoleGrowPx + 1, 2 * kFlowHoleGrowPx + 1)));
+        return memeget::colourDifference(frameRgb(t), frameRgb(u), near.data, px_);
+    }
+
+    /**
+     * How far (mean brightness, of 255, half resolution) frame [u], carried to its neighbour [t] along the flow (or
+     * left where it is: [still]), misses the footage in a band just outside t's covered area.
+     */
+    float ringMiss(int t, int u, bool still) const {
+        const cv::Mat near = nearHole(t);
+        cv::Mat ring;
+        cv::dilate(near, ring, cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(9, 9)));
+        ring &= ~near;
+        const cv::Mat flow = still ? cv::Mat() : flowAt(t, u > t);
+        const cv::Mat here = smallGrey(t);
+        const cv::Mat there = smallGrey(u);
+        double sum = 0;
+        int count = 0;
+        for (int y = 0; y < fh_; ++y) {
+            for (int x = 0; x < fw_; ++x) {
+                if (!ring.at<uint8_t>(y, x)) continue;
+                float qx = static_cast<float>(x);
+                float qy = static_cast<float>(y);
+                if (!still) {
+                    const auto f = flow.at<cv::Vec2f>(y, x);
+                    qx = std::clamp(qx + f[0], 0.0f, static_cast<float>(fw_ - 1));
+                    qy = std::clamp(qy + f[1], 0.0f, static_cast<float>(fh_ - 1));
+                }
+                const int x0 = static_cast<int>(qx);
+                const int y0 = static_cast<int>(qy);
+                const int x1 = std::min(x0 + 1, fw_ - 1);
+                const int y1 = std::min(y0 + 1, fh_ - 1);
+                const float fx = qx - x0;
+                const float fy = qy - y0;
+                const float carried = (there.at<uint8_t>(y0, x0) * (1 - fx) + there.at<uint8_t>(y0, x1) * fx) * (1 - fy) +
+                                      (there.at<uint8_t>(y1, x0) * (1 - fx) + there.at<uint8_t>(y1, x1) * fx) * fy;
+                sum += std::abs(carried - here.at<uint8_t>(y, x));
+                ++count;
+            }
+        }
+        return count ? static_cast<float>(sum / count) : 0.0f;
     }
 
     int frames() const { return n_; }
@@ -940,14 +1202,6 @@ private:
     const uint8_t* holeOf(int t) const { return holes_.data() + static_cast<size_t>(t) * px_; }
     Source* sourcesOf(int t) const { return reinterpret_cast<Source*>(sources_->data()) + offsets_[t]; }
     const int32_t* indicesOf(int t) const { return reinterpret_cast<const int32_t*>(indices_->data()) + offsets_[t]; }
-
-    /** Whether a read of frame [frame] at ([x16], [y16]) in 1/16 pixel weighs any pixel its keyframe invented. */
-    bool readsInvented(int frame, int x16, int y16) const {
-        if (!complete_[frame]) return false;
-        const auto found = invented_.find(frame);
-        return found != invented_.end() &&
-            !memeget::footprintClear(found->second.data(), w_, h_, x16 / 16.0f, y16 / 16.0f);
-    }
 
     /** The source pixel, read with Catmull-Rom (bilinear reads soften fine texture into a visible blurry patch). */
     void sample(const Source& s, uint8_t* out) const {
@@ -1137,8 +1391,7 @@ private:
      * nearest frame that shows it. Composing the per-pair motions avoids the drift of following flow through
      * dozens of frames, which blurs and shifts fine texture. That holds only where the footage around the area
      * moves with the camera. Where it moves on its own (a person, a curtain passing in front), camera motion points
-     * at whatever was behind it, not at what is there now, so those frames are left to flow and the inpainted
-     * keyframes.
+     * at whatever was behind it, not at what is there now, so those frames are left to flow and the fill model.
      */
     void sampleAlongCameraMotion(const std::atomic<bool>* cancelled) {
         for (int t = 0; t < n_; ++t) {
@@ -1179,7 +1432,7 @@ private:
                             const Source candidate{static_cast<int16_t>(s), static_cast<int16_t>(qx16),
                                                    static_cast<int16_t>(qy16),
                                                    static_cast<uint8_t>(std::min(k, 254)),
-                                                   static_cast<uint8_t>(readsInvented(s, qx16, qy16) ? 2 : 1)};
+                                                   1};
                             if (better(candidate, sources[i])) sources[i] = candidate;
                         }
                         if (sources[i].found == 1 && sources[i].age <= k) {
@@ -1255,7 +1508,7 @@ private:
             }
             // The read must stay clear of the source frame's covered pixels, all taps of it, not just the centre.
             if (!clearRead(candidate.frame, candidate.x16, candidate.y16)) continue;
-            candidate.found = static_cast<uint8_t>(readsInvented(candidate.frame, candidate.x16, candidate.y16) ? 2 : 1);
+            candidate.found = 1;
             if (better(candidate, sources[i])) sources[i] = candidate;
         }
     }
@@ -1264,13 +1517,12 @@ private:
     int h_;
     int n_;
     size_t px_;
+    std::string dir_;
     Scratch rgb_;
     Scratch holes_;
     std::unique_ptr<Scratch> indices_;
     std::unique_ptr<Scratch> sources_;
     std::vector<uint8_t> complete_;
-    // For each inpainted keyframe, the pixels it had no real background for.
-    std::unordered_map<int, std::vector<uint8_t>> invented_;
     std::vector<int> holeCount_;
     std::vector<size_t> offsets_;
     std::vector<int> slots_;
@@ -1291,7 +1543,6 @@ private:
     // Per frame, whether its covered area was taken whole from another frame (see matchFrames), and from which.
     std::vector<uint8_t> matched_;
     std::vector<int> matchFrom_;
-    bool matchedOnce_ = false;
     std::vector<float> matchScratch_;
     // Per frame, whether the footage around the covered area moves on its own rather than with the camera.
     std::vector<uint8_t> movesOnOwn_;
@@ -1300,9 +1551,6 @@ private:
     // Per cached flow (see slotOf), the camera motion fitted to it at half resolution and whether it fitted.
     std::vector<Motion> slotMotion_;
     std::vector<bool> slotGood_;
-    // The last polished result (full size) and its frame, for the temporal blend; -1 when there is none.
-    std::vector<uint8_t> polished_;
-    int polishedFrame_ = -1;
     int fw_ = 0;
     int fh_ = 0;
     cv::Ptr<cv::DISOpticalFlow> flow_;
@@ -1368,40 +1616,52 @@ JNIEXPORT void JNICALL
 Java_com_memeget_nativeapp_editor_VideoCompletionNative_nativeSeal(JNIEnv* env, jobject, jlong handle) {
     try {
         auto* j = job(handle);
-        j->completion->seal(j->dir);
+        j->completion->seal(j->dir, &j->cancelled);
         j->completion->computeFlows(j->dir, &j->cancelled);
     } catch (const std::exception& e) {
         throwJava(env, e.what());
     }
 }
 
-JNIEXPORT jintArray JNICALL
-Java_com_memeget_nativeapp_editor_VideoCompletionNative_nativePropagate(JNIEnv* env, jobject, jlong handle) {
+JNIEXPORT void JNICALL
+Java_com_memeget_nativeapp_editor_VideoCompletionNative_nativeCoveredUnion(
+    JNIEnv* env, jobject, jlong handle, jbyteArray holeOut) {
     try {
         auto* j = job(handle);
-        const auto unfilled = j->completion->propagate(&j->cancelled);
-        jintArray out = env->NewIntArray(static_cast<jsize>(unfilled.size()));
-        if (out) env->SetIntArrayRegion(out, 0, static_cast<jsize>(unfilled.size()), unfilled.data());
-        return out;
+        std::vector<uint8_t> covered(j->completion->pixels());
+        j->completion->coveredUnion(covered.data());
+        env->SetByteArrayRegion(holeOut, 0, static_cast<jsize>(covered.size()), reinterpret_cast<const jbyte*>(covered.data()));
     } catch (const std::exception& e) {
         throwJava(env, e.what());
-        return nullptr;
     }
 }
 
 JNIEXPORT void JNICALL
-Java_com_memeget_nativeapp_editor_VideoCompletionNative_nativeComposite(
+Java_com_memeget_nativeapp_editor_VideoCompletionNative_nativePropagate(JNIEnv* env, jobject, jlong handle) {
+    try {
+        auto* j = job(handle);
+        j->completion->propagate(&j->cancelled);
+    } catch (const std::exception& e) {
+        throwJava(env, e.what());
+    }
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_memeget_nativeapp_editor_VideoCompletionNative_nativeFillRequest(
     JNIEnv* env, jobject, jlong handle, jint index, jbyteArray rgbOut, jbyteArray holeOut) {
     try {
         auto* j = job(handle);
+        if (index < 0 || index >= j->completion->frames()) throw std::runtime_error("Frame index out of range");
         const size_t px = j->completion->pixels();
         std::vector<uint8_t> rgb(px * 3);
         std::vector<uint8_t> hole(px);
-        j->completion->composite(index, rgb.data(), hole.data());
+        const bool open = j->completion->fillRequest(index, rgb.data(), hole.data());
         env->SetByteArrayRegion(rgbOut, 0, static_cast<jsize>(rgb.size()), reinterpret_cast<const jbyte*>(rgb.data()));
         env->SetByteArrayRegion(holeOut, 0, static_cast<jsize>(hole.size()), reinterpret_cast<const jbyte*>(hole.data()));
+        return open ? JNI_TRUE : JNI_FALSE;
     } catch (const std::exception& e) {
         throwJava(env, e.what());
+        return JNI_FALSE;
     }
 }
 

@@ -12,21 +12,34 @@ internal object VideoCompletionNative {
     /** Frame [index]'s crop: [rgb] (3 bytes a pixel) and [hole] (nonzero where the logo covers it). */
     external fun nativeAddFrame(handle: Long, index: Int, rgb: ByteArray, hole: ByteArray)
 
-    /** Call once every frame is in, before [nativePropagate]. */
+    /**
+     * Call once every frame is in, before [nativePropagate]. Each separate piece of a frame's covered area may move a
+     * few pixels onto where that piece of the logo really is.
+     */
     external fun nativeSeal(handle: Long)
 
-    /** Carries real background through time; returns each frame's count of covered pixels still open. */
-    external fun nativePropagate(handle: Long): IntArray
+    /** Every pixel any frame covers, after [nativeSeal], into [holeOut]. */
+    external fun nativeCoveredUnion(handle: Long, holeOut: ByteArray)
 
-    /** Frame [index] with what is known so far filled in, and [holeOut] marking what is still open. */
-    external fun nativeComposite(handle: Long, index: Int, rgbOut: ByteArray, holeOut: ByteArray)
+    /**
+     * Finds real background for the covered pixels (matching frames, flow, camera motion); a frame keeps it only
+     * where it continues the footage across the edge of the area.
+     */
+    external fun nativePropagate(handle: Long)
 
-    /** Frame [index] filled completely (after inpainting); it becomes a source for the other frames. */
+    /**
+     * Frame [index] with its real fill in [rgbOut], and [holeOut] marking what the fill model must still fill. False
+     * when nothing is open.
+     */
+    external fun nativeFillRequest(handle: Long, index: Int, rgbOut: ByteArray, holeOut: ByteArray): Boolean
+
+    /** Frame [index] filled completely (the fill model's output for [nativeFillRequest]). */
     external fun nativeSetComplete(handle: Long, index: Int, rgb: ByteArray)
 
-    /** Fills whatever is still open from its surroundings. */
+    /** Completes the frames the fill model didn't (plain fill) and smooths the fill through time. */
     external fun nativeFinish(handle: Long)
 
+    /** Frame [index], finished. */
     external fun nativeResult(handle: Long, index: Int, rgbOut: ByteArray)
 
     external fun nativeCancel(handle: Long)

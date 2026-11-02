@@ -2,11 +2,30 @@
 // rework. Kept free of OpenCV so it can be tested on its own.
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <limits>
 #include <utility>
 #include <vector>
 
 namespace memeget {
+
+/**
+ * Mean colour difference (of 255, per channel) between RGB frames [a] and [b] of [count] pixels, over the pixels
+ * where [skip] is 0; infinity when every pixel is skipped. Colour, not brightness: two frames of equal brightness
+ * and different hue are not the same picture.
+ */
+inline float colourDifference(const uint8_t* a, const uint8_t* b, const uint8_t* skip, size_t count) {
+    uint64_t sum = 0;
+    size_t counted = 0;
+    for (size_t i = 0; i < count; ++i) {
+        if (skip[i]) continue;
+        for (int c = 0; c < 3; ++c) sum += static_cast<uint64_t>(std::abs(a[i * 3 + c] - b[i * 3 + c]));
+        ++counted;
+    }
+    return counted ? static_cast<float>(static_cast<double>(sum) / (counted * 3.0)) : std::numeric_limits<float>::infinity();
+}
 
 /** Where a covered pixel's colour comes from: a frame and a position there, in 1/16 pixel. */
 struct Source {
@@ -14,15 +33,13 @@ struct Source {
     int16_t x16;
     int16_t y16;
     uint8_t age;   // frames between the pixel and its source
-    uint8_t found; // 0: nothing yet, 1: real background, 2: invented (an inpainted keyframe)
+    uint8_t found; // 0: nothing yet, 1: real background
 };
 static_assert(sizeof(Source) == 8, "Source is packed into scratch space");
 
-/** Real background beats invented; between two of a kind, the nearer frame wins. */
+/** Any source beats none; between two, the nearer frame wins. */
 inline bool better(const Source& candidate, const Source& current) {
-    if (!current.found) return true;
-    if (candidate.found != current.found) return candidate.found == 1;
-    return candidate.age < current.age;
+    return !current.found || candidate.age < current.age;
 }
 
 /**

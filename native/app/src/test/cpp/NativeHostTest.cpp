@@ -3,6 +3,7 @@
 #include "MatchPath.hpp"
 #include "SampleFootprint.hpp"
 
+#include <cmath>
 #include <cstdio>
 #include <limits>
 #include <vector>
@@ -108,6 +109,32 @@ void cameraPassKeepsWholeFrameMatches() {
     expect(flowFrame[0].frame == 3, "a long flow chain gives way to a nearer camera source");
 }
 
+// A repeated frame is told by colour: equal brightness in another hue is a different picture, and pixels under the
+// skip mask (the logo and the band around it) don't count.
+void repeatsAreToldByColour() {
+    // Reddish and greenish grey of the same brightness (0.299 R + 0.587 G + 0.114 B = 129.9 for both).
+    const uint8_t reddish[3] = {200, 100, 100};
+    const uint8_t greenish[3] = {100, 151, 100};
+    std::vector<uint8_t> a(4 * 3), b(4 * 3);
+    for (int i = 0; i < 4; ++i) {
+        for (int c = 0; c < 3; ++c) {
+            a[i * 3 + c] = reddish[c];
+            b[i * 3 + c] = greenish[c];
+        }
+    }
+    const std::vector<uint8_t> none(4, 0);
+    expect(memeget::colourDifference(a.data(), b.data(), none.data(), 4) > 30.0f,
+           "equal brightness in another colour is not a repeat");
+    std::vector<uint8_t> same = a;
+    same[0] = 0;                        // only a skipped pixel differs
+    const std::vector<uint8_t> skipFirst = {1, 0, 0, 0};
+    expect(memeget::colourDifference(a.data(), same.data(), skipFirst.data(), 4) == 0.0f,
+           "skipped pixels don't count");
+    const std::vector<uint8_t> all(4, 1);
+    expect(std::isinf(memeget::colourDifference(a.data(), b.data(), all.data(), 4)),
+           "nothing left to compare is never a repeat");
+}
+
 } // namespace
 
 int main() {
@@ -116,6 +143,7 @@ int main() {
     shotChangeStartsAfresh();
     footprintSeesTheWholeRead();
     cameraPassKeepsWholeFrameMatches();
+    repeatsAreToldByColour();
     if (failures == 0) std::printf("native host tests passed\n");
     return failures == 0 ? 0 : 1;
 }
