@@ -3,6 +3,8 @@ package com.memeget.nativeapp.editor
 import android.content.Context
 import android.graphics.Bitmap
 import android.net.Uri
+import android.os.SystemClock
+import android.util.Log
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -801,8 +803,10 @@ internal fun RemixStudio(
                             val atUs = playheadUs
                             val uri = project.materializedSourceUri ?: project.source.uri
                             report("Finding the logo…", 0f)
+                            val startedMs = SystemClock.uptimeMillis()
                             val built = LogoMask.build(context, project, maskStrokes, atUs)
                                 ?: throw IOException("Paint over the logo first")
+                            val maskMs = SystemClock.uptimeMillis() - startedMs
                             report("Getting the fill model…", 0f)
                             var fallbackNote: String? = null
                             val inpainter = try {
@@ -813,8 +817,10 @@ internal fun RemixStudio(
                                 fallbackNote = "Detailed fill unavailable (${failure.message ?: "model error"}); used the simple fill"
                                 null
                             }
+                            val modelMs = SystemClock.uptimeMillis() - startedMs - maskMs
                             val layer = try {
                                 if (project.source.kind == MediaEditKind.VIDEO) {
+                                    val trackingStartedMs = SystemClock.uptimeMillis()
                                     val followed = if (track) {
                                         LogoTracker.track(
                                             context = context,
@@ -830,6 +836,11 @@ internal fun RemixStudio(
                                     } else {
                                         LogoTracker.fixed(context, uri, built.sourceRect)
                                     }
+                                    Log.i(
+                                        "LogoFill",
+                                        "mask $maskMs ms, fill model opened in $modelMs ms, " +
+                                            "tracking ${SystemClock.uptimeMillis() - trackingStartedMs} ms"
+                                    )
                                     val patchUri = LogoFill.video(
                                         context, uri, followed, built.pixels, built.width, built.height, inpainter
                                     ) { report("Rebuilding the background", it) }

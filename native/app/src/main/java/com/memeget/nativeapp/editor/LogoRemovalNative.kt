@@ -34,6 +34,17 @@ internal object LogoRemovalNative {
      */
     external fun nativeRefineMask(bitmap: Bitmap, mask: ByteArray, whole: Bitmap): ByteArray?
 
+    /**
+     * MI-GAN's input [tensor] (4 × [size] × [size]) for [rgb] ([w]×[h], 3 bytes a pixel) with [hole] (nonzero: fill):
+     * padded to a square by repeating edge pixels, scaled, concat(mask − 0.5, rgb · mask) channels first.
+     */
+    external fun nativeMiganInput(rgb: ByteArray, w: Int, h: Int, hole: ByteArray, size: Int, tensor: FloatArray)
+
+    /** [rgb] with its [hole] pixels from MI-GAN's [generated] output (3 × [size] × [size]) scaled back, into [out]. */
+    external fun nativeMiganOutput(
+        generated: FloatArray, size: Int, rgb: ByteArray, w: Int, h: Int, hole: ByteArray, out: ByteArray,
+    )
+
     private external fun nativeInpaint(
         bitmap: Bitmap,
         left: Int,

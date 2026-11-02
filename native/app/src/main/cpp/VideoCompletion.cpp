@@ -23,10 +23,13 @@
 #include <cstring>
 #include <exception>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 #include <limits>
 #include <unordered_map>
+#include <thread>
 #include <vector>
 
 #include "JniStrings.hpp"
@@ -68,6 +71,59 @@ private:
     size_t bytes_;
     uint8_t* data_ = nullptr;
 };
+
+/**
+ * Runs [work](i, worker) for every i below [count] on up to kWorkers threads (worker below the thread count, for
+ * per-thread tools). Items must not write anything another item touches. The first failure is rethrown once every
+ * thread has stopped; a raised [cancelled] stops the rest and throws "cancelled". OpenCV's own threading is held to
+ * one thread meanwhile: each worker starting a full team of its own (OpenMP on Android) overloads the cores.
+ */
+constexpr int kWorkers = 4;
+
+inline int workerCount() {
+    return static_cast<int>(std::clamp(std::thread::hardware_concurrency(), 1u, static_cast<unsigned>(kWorkers)));
+}
+
+template <typename Work>
+void inParallel(int count, const std::atomic<bool>* cancelled, Work&& work) {
+    const int threads = std::min(workerCount(), std::max(count, 1));
+    std::atomic<int> next{0};
+    std::atomic<bool> stop{false};
+    std::exception_ptr failure;
+    std::mutex failureLock;
+    auto run = [&](int worker) {
+        for (int i = next++; i < count && !stop.load(); i = next++) {
+            if (cancelled && cancelled->load()) {
+                stop = true;
+                return;
+            }
+            try {
+                work(i, worker);
+            } catch (...) {
+                std::lock_guard<std::mutex> guard(failureLock);
+                if (!failure) failure = std::current_exception();
+                stop = true;
+            }
+        }
+    };
+    struct OpenCvThreads {
+        int saved = cv::getNumThreads();
+        explicit OpenCvThreads(int threads) { if (threads > 1) cv::setNumThreads(1); }
+        ~OpenCvThreads() { cv::setNumThreads(saved); }
+    } held(threads);
+    std::vector<std::thread> helpers;
+    for (int k = 1; k < threads; ++k) {
+        try {
+            helpers.emplace_back(run, k);
+        } catch (const std::system_error&) {
+            break;  // fewer threads; the items are shared out all the same
+        }
+    }
+    run(0);
+    for (auto& helper : helpers) helper.join();
+    if (failure) std::rethrow_exception(failure);
+    if (cancelled && cancelled->load()) throw std::runtime_error("cancelled");
+}
 
 using memeget::Source;
 using memeget::better;
@@ -359,9 +415,7 @@ public:
         : w_(width), h_(height), n_(frames), px_(static_cast<size_t>(width) * height), dir_(dir),
           rgb_(dir + "/completion_rgb", static_cast<size_t>(frames) * px_ * 3),
           holes_(dir + "/completion_holes", static_cast<size_t>(frames) * px_),
-          complete_(frames, 0), holeCount_(frames, 0) {
-        flow_ = cv::DISOpticalFlow::create(cv::DISOpticalFlow::PRESET_MEDIUM);
-    }
+          complete_(frames, 0), holeCount_(frames, 0) {}
 
     void addFrame(int t, const uint8_t* rgb, const uint8_t* hole) {
         std::memcpy(frameRgb(t), rgb, px_ * 3);
@@ -424,7 +478,6 @@ public:
                 if (label > 0) pixels[label].push_back(i);
             }
             std::vector<std::array<int, 2>> shift(frames.size() * pieces, {0, 0});
-            bool any = false;
             for (int piece = 1; piece < pieces; ++piece) {
                 const std::vector<int>& at = pixels[piece];
                 if (static_cast<int>(at.size()) < kHoleShiftMinPx) continue;
@@ -445,7 +498,7 @@ public:
                     left = std::min(left, i % w_); right = std::max(right, i % w_);
                     top = std::min(top, i / w_); bottom = std::max(bottom, i / w_);
                 }
-                for (size_t f = 0; f < frames.size(); ++f) {
+                inParallel(static_cast<int>(frames.size()), cancelled, [&](int f, int) {
                     const uint8_t* frame = frameRgb(frames[f]);
                     auto miss = [&](int dx, int dy) {
                         double sum = 0;
@@ -471,12 +524,11 @@ public:
                             }
                         }
                     }
-                    if (best < kHoleShiftGain * inPlace) {
-                        shift[f * pieces + piece] = bestShift;
-                        any = true;
-                    }
-                }
+                    if (best < kHoleShiftGain * inPlace) shift[static_cast<size_t>(f) * pieces + piece] = bestShift;
+                });
             }
+            const bool any = std::any_of(shift.begin(), shift.end(),
+                                         [](const std::array<int, 2>& s) { return s != std::array<int, 2>{0, 0}; });
             if (!any) continue;
             for (size_t f = 0; f < frames.size(); ++f) {
                 bool shifted = false;
@@ -503,45 +555,61 @@ public:
         }
     }
 
-    /** Flow between every pair of neighbouring frames, both ways, kept at half resolution. */
+    /**
+     * Flow between every pair of neighbouring frames, both ways, kept at half resolution. Pairs, frames and anchors
+     * are each worked in parallel (one optical-flow instance per thread); every item writes only its own slots.
+     */
     void computeFlows(const std::string& dir, const std::atomic<bool>* cancelled) {
         fw_ = (w_ + kFlowScale - 1) / kFlowScale;
         fh_ = (h_ + kFlowScale - 1) / kFlowScale;
         const size_t flowBytes = static_cast<size_t>(fw_) * fh_ * 2 * sizeof(float);
-        flows_ = std::make_unique<Scratch>(dir + "/completion_flows", static_cast<size_t>(std::max(n_ - 1, 1)) * 2 * flowBytes);
+        const size_t slots = static_cast<size_t>(std::max(n_ - 1, 1)) * 2;
+        flows_ = std::make_unique<Scratch>(dir + "/completion_flows", slots * flowBytes);
         forwardMotion_.assign(n_, Motion());
         movesOnOwn_.assign(n_, 0);
         missedShare_.assign(n_, 0.0f);
-        slotMotion_.assign(static_cast<size_t>(std::max(n_ - 1, 1)) * 2, Motion());
-        slotGood_.assign(static_cast<size_t>(std::max(n_ - 1, 1)) * 2, false);
+        slotMotion_.assign(slots, Motion());
+        slotGood_.assign(slots, 0);
+        slotOwn_.assign(slots, 0);
+        slotMissed_.assign(slots, 0.0f);
         backwardMotion_.assign(n_, Motion());
-        forwardGood_.assign(n_, false);
-        backwardGood_.assign(n_, false);
-        cutAfter_.assign(n_, false);
+        forwardGood_.assign(n_, 0);
+        backwardGood_.assign(n_, 0);
+        cutAfter_.assign(n_, 0);
         matched_.assign(n_, 0);
         matchFrom_.assign(n_, -1);
-        cv::Mat previous = smallGrey(0);
-        for (int t = 0; t + 1 < n_; ++t) {
-            if (cancelled && cancelled->load()) throw std::runtime_error("cancelled");
-            cv::Mat current = smallGrey(t + 1);
+        std::vector<cv::Ptr<cv::DISOpticalFlow>> dis(workerCount());
+        for (auto& instance : dis) instance = cv::DISOpticalFlow::create(cv::DISOpticalFlow::PRESET_MEDIUM);
+        inParallel(n_ - 1, cancelled, [&](int t, int worker) {
+            const cv::Mat previous = smallGrey(t);
+            const cv::Mat current = smallGrey(t + 1);
             bool good = false;
-            cv::Mat forward = flowOf(t, true, previous, current, forwardMotion_[t], good, true);
+            cv::Mat forward = flowOf(t, true, previous, current, forwardMotion_[t], good, true, *dis[worker]);
             forwardGood_[t] = good;
             // The way back is the inverse motion (aligned once); its flow is still computed for consistency checks.
             Motion unused;
-            cv::Mat backward = flowOf(t + 1, false, current, previous, unused, good, false);
+            cv::Mat backward = flowOf(t + 1, false, current, previous, unused, good, false, *dis[worker]);
             backwardGood_[t + 1] = forwardGood_[t];
             backwardMotion_[t + 1] = forwardMotion_[t].inverse();
             // A hard cut: the flows there and back don't agree on most of the picture. Nothing is carried across
             // one, by flow, camera motion or the smoothing.
             cutAfter_[t] = consistentShare(forward, backward, nearHole(t) | nearHole(t + 1)) < kCutConsistentShare;
             if (cutAfter_[t]) {
-                forwardGood_[t] = false;
-                backwardGood_[t + 1] = false;
+                forwardGood_[t] = 0;
+                backwardGood_[t + 1] = 0;
             }
             forward.copyTo(flowAt(t, true));
             backward.copyTo(flowAt(t + 1, false));
-            previous = current;
+        });
+        for (int t = 0; t < n_; ++t) {
+            if (t + 1 < n_) {
+                movesOnOwn_[t] |= slotOwn_[slotOf(t, true)];
+                missedShare_[t] = std::max(missedShare_[t], slotMissed_[slotOf(t, true)]);
+            }
+            if (t > 0) {
+                movesOnOwn_[t] |= slotOwn_[slotOf(t, false)];
+                missedShare_[t] = std::max(missedShare_[t], slotMissed_[slotOf(t, false)]);
+            }
         }
         // Footage that moves on its own in most frames (a person in front of a still camera) does so throughout;
         // a share of misses that small elsewhere is texture the flow overfits.
@@ -556,28 +624,29 @@ public:
                 if (throughout || missedShare_[t] > kOwnMotionMissShare) movesOnOwn_[t] = 1;
             }
         }
-        for (int t = 0; t < n_; ++t) {
+        inParallel(n_, cancelled, [&](int t, int) {
             if (t + 1 < n_) completeHoleFlow(t, true);
             if (t > 0) completeHoleFlow(t, false);
-        }
+        });
         // Frames kAnchorStride apart, aligned directly (they still overlap) starting from the composed motion.
         anchorMotion_.assign(n_, Motion());
-        anchorGood_.assign(n_, false);
-        for (int a = 0; a + kAnchorStride < n_; a += kAnchorStride) {
-            if (cancelled && cancelled->load()) throw std::runtime_error("cancelled");
+        anchorGood_.assign(n_, 0);
+        inParallel((n_ - 1) / kAnchorStride, cancelled, [&](int k, int) {
+            const int a = k * kAnchorStride;
             const int b = a + kAnchorStride;
+            if (b >= n_) return;
             Motion composed;
             bool good = true;
-            for (int k = a; k < b; ++k) {
-                good = good && forwardGood_[k];
-                composed = Motion::compose(forwardMotion_[k], composed);
+            for (int i = a; i < b; ++i) {
+                good = good && forwardGood_[i];
+                composed = Motion::compose(forwardMotion_[i], composed);
             }
-            if (!good) continue;
+            if (!good) return;
             cv::Mat valid;
             cv::bitwise_not(nearHole(a) | nearHole(b), valid);
             anchorMotion_[a] = refineAlignment(smallGrey(a), smallGrey(b), valid, composed.scaled(1.0 / kFlowScale)).scaled(kFlowScale);
-            anchorGood_[a] = true;
-        }
+            anchorGood_[a] = 1;
+        });
         // Each frame's camera motion from the first frame of its shot (anchor jumps where they fitted, so it drifts
         // little), so the motion between any two frames of a shot is one composition.
         fromShotStart_.assign(n_, Motion());
@@ -1051,12 +1120,34 @@ public:
         bool still = true;
     };
 
-    /** How frame [u]'s fill is carried into its neighbour [t] (see kRepeatLevel). */
-    Carry carryOf(int t, int u) const {
+    /**
+     * A frame's covered area grown by the band where flow follows the logo (full resolution), and the ring outside
+     * that band where neighbours are compared (half resolution).
+     */
+    struct Around {
+        cv::Mat near;
+        cv::Mat ring;
+    };
+
+    Around aroundOf(int t) const {
+        Around around;
+        cv::dilate(cv::Mat(h_, w_, CV_8UC1, const_cast<uint8_t*>(holeOf(t))), around.near,
+                   cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(2 * kFlowHoleGrowPx + 1, 2 * kFlowHoleGrowPx + 1)));
+        const cv::Mat near = nearHole(t);
+        cv::dilate(near, around.ring, cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(9, 9)));
+        around.ring &= ~near;
+        return around;
+    }
+
+    /**
+     * How frame [u]'s fill is carried into its neighbour [t] (see kRepeatLevel); [here] and [there] are their
+     * half-resolution greys, [around] t's masks.
+     */
+    Carry carryOf(int t, int u, const cv::Mat& here, const cv::Mat& there, const Around& around) const {
         if (cutAfter_[std::min(t, u)]) return {};
-        if (repeatDifference(t, u) <= kRepeatLevel) return {1.0f, true};
-        const float still = ringMiss(t, u, true);
-        const float moved = ringMiss(t, u, false);
+        if (memeget::colourDifference(frameRgb(t), frameRgb(u), around.near.data, px_) <= kRepeatLevel) return {1.0f, true};
+        const float still = ringMiss(t, u, true, here, there, around.ring);
+        const float moved = ringMiss(t, u, false, here, there, around.ring);
         const float miss = std::min(still, moved);
         const float share = miss <= kCloseMiss ? kCloseShare : miss <= kFarMiss ? kFarShare : 0.0f;
         return {share, still <= moved};
@@ -1071,11 +1162,25 @@ public:
         if (offsets_[n_] == 0) return;
         std::vector<Carry> fromPrevious(n_);
         std::vector<Carry> fromNext(n_);
+        // Each frame's grey is made once (rolling over its neighbours), and its masks once per change of the
+        // covered area.
+        cv::Mat previousGrey;
+        cv::Mat grey = smallGrey(0);
+        Around around;
+        int aroundFrame = -1;
         for (int t = 0; t < n_; ++t) {
             if (cancelled && cancelled->load()) throw std::runtime_error("cancelled");
-            if (holeCount_[t] == 0) continue;
-            if (t > 0) fromPrevious[t] = carryOf(t, t - 1);
-            if (t + 1 < n_) fromNext[t] = carryOf(t, t + 1);
+            const cv::Mat nextGrey = t + 1 < n_ ? smallGrey(t + 1) : cv::Mat();
+            if (holeCount_[t] > 0) {
+                if (aroundFrame < 0 || std::memcmp(holeOf(aroundFrame), holeOf(t), px_) != 0) {
+                    around = aroundOf(t);
+                    aroundFrame = t;
+                }
+                if (t > 0) fromPrevious[t] = carryOf(t, t - 1, grey, previousGrey, around);
+                if (t + 1 < n_) fromNext[t] = carryOf(t, t + 1, grey, nextGrey, around);
+            }
+            previousGrey = grey;
+            grey = nextGrey;
         }
         // The forward pass's covered pixels, for the average.
         Scratch forward(dir_ + "/completion_smooth", offsets_[n_] * 3);
@@ -1145,28 +1250,12 @@ public:
     }
 
     /**
-     * Mean colour difference (of 255, full resolution) between frames [t] and [u] outside t's covered area and the
-     * band around it where flow follows the logo.
+     * How far (mean brightness, of 255, half resolution) frame [u] ([there]), carried to its neighbour [t] ([here])
+     * along the flow (or left where it is: [still]), misses the footage in [ring], a band just outside t's covered
+     * area.
      */
-    float repeatDifference(int t, int u) const {
-        cv::Mat near;
-        cv::dilate(cv::Mat(h_, w_, CV_8UC1, const_cast<uint8_t*>(holeOf(t))), near,
-                   cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(2 * kFlowHoleGrowPx + 1, 2 * kFlowHoleGrowPx + 1)));
-        return memeget::colourDifference(frameRgb(t), frameRgb(u), near.data, px_);
-    }
-
-    /**
-     * How far (mean brightness, of 255, half resolution) frame [u], carried to its neighbour [t] along the flow (or
-     * left where it is: [still]), misses the footage in a band just outside t's covered area.
-     */
-    float ringMiss(int t, int u, bool still) const {
-        const cv::Mat near = nearHole(t);
-        cv::Mat ring;
-        cv::dilate(near, ring, cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(9, 9)));
-        ring &= ~near;
+    float ringMiss(int t, int u, bool still, const cv::Mat& here, const cv::Mat& there, const cv::Mat& ring) const {
         const cv::Mat flow = still ? cv::Mat() : flowAt(t, u > t);
-        const cv::Mat here = smallGrey(t);
-        const cv::Mat there = smallGrey(u);
         double sum = 0;
         int count = 0;
         for (int y = 0; y < fh_; ++y) {
@@ -1251,13 +1340,15 @@ private:
     }
 
     /**
-     * Raw flow from frame [t] ([from], half resolution) to [to], with the camera motion fitted to its textured part
-     * (kept per slot). Around [t]'s covered area it also measures whether the footage moves with the camera or on
-     * its own (see completeHoleFlow, which rebuilds the flow there once every frame is measured).
+     * Raw flow from frame [t] ([from], half resolution) to [to] by [dis], with the camera motion fitted to its
+     * textured part (kept per slot). Around [t]'s covered area it also measures whether the footage moves with the
+     * camera or on its own, kept per slot as well (see completeHoleFlow, which rebuilds the flow there once every
+     * frame is measured). Writes only its own slot, so frame pairs can be worked in parallel.
      */
-    cv::Mat flowOf(int t, bool forward, const cv::Mat& from, const cv::Mat& to, Motion& motionOut, bool& goodOut, bool refine) {
+    cv::Mat flowOf(int t, bool forward, const cv::Mat& from, const cv::Mat& to, Motion& motionOut, bool& goodOut,
+                   bool refine, cv::DISOpticalFlow& dis) {
         cv::Mat flow;
-        flow_->calc(from, to, flow);
+        dis.calc(from, to, flow);
         const bool covered = !complete_[t] && holeCount_[t] > 0;
         cv::Mat near = cv::Mat::zeros(fh_, fw_, CV_8UC1);
         if (covered) {
@@ -1331,9 +1422,9 @@ private:
             }
         }
         if (!goodOut || (ringCount > 0 && cameraError > flowError * kOwnMotionRatio + kOwnMotionLevel * ringCount)) {
-            movesOnOwn_[t] = 1;
+            slotOwn_[slotOf(t, forward)] = 1;
         }
-        if (ringCount > 0) missedShare_[t] = std::max(missedShare_[t], static_cast<float>(missed) / ringCount);
+        if (ringCount > 0) slotMissed_[slotOf(t, forward)] = static_cast<float>(missed) / ringCount;
         return flow;
     }
 
@@ -1532,11 +1623,13 @@ private:
     std::vector<Motion> backwardMotion_;
     // Direct alignment of frame a onto a + kAnchorStride (full resolution), for a a multiple of the stride.
     std::vector<Motion> anchorMotion_;
-    std::vector<bool> anchorGood_;
-    std::vector<bool> forwardGood_;
-    std::vector<bool> backwardGood_;
+    // Flags as bytes, not std::vector<bool>: frames are worked in parallel, and packed bits of neighbouring frames
+    // share a word.
+    std::vector<uint8_t> anchorGood_;
+    std::vector<uint8_t> forwardGood_;
+    std::vector<uint8_t> backwardGood_;
     // Per frame, whether a hard cut follows it (frames t and t + 1 show different shots).
-    std::vector<bool> cutAfter_;
+    std::vector<uint8_t> cutAfter_;
     // Per frame, each one's camera motion from the first frame of its shot, and which shot it is in.
     std::vector<Motion> fromShotStart_;
     std::vector<int> shotOf_;
@@ -1550,10 +1643,13 @@ private:
     std::vector<float> missedShare_;
     // Per cached flow (see slotOf), the camera motion fitted to it at half resolution and whether it fitted.
     std::vector<Motion> slotMotion_;
-    std::vector<bool> slotGood_;
+    std::vector<uint8_t> slotGood_;
+    // Per cached flow, whether the footage around the covered area moved on its own that way, and the share of it
+    // the camera motion missed (merged per frame into movesOnOwn_ and missedShare_).
+    std::vector<uint8_t> slotOwn_;
+    std::vector<float> slotMissed_;
     int fw_ = 0;
     int fh_ = 0;
-    cv::Ptr<cv::DISOpticalFlow> flow_;
 };
 
 struct Job {
