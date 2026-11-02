@@ -235,15 +235,16 @@ internal object RenderPlanBuilder {
             is MemeEditLayer.Cover -> {
                 val corr = ProjectCore.interpolateCoverCorrections(layer.corrections, timeUs)
                 val mode = corr?.second ?: layer.mode
-                if (context == PlanContext.VIDEO_OVERLAY && mode == "pixelate") {
-                    JSONObject().apply {
+                when {
+                    mode == "off" -> null
+                    // Both read the frame under them; on video they run as GL passes, not overlay drawing.
+                    context == PlanContext.VIDEO_OVERLAY && (mode == "pixelate" || mode == "remove") -> JSONObject().apply {
                         put("kind", "unavailable")
                         put("id", layer.id)
                         put("layerKind", "cover")
-                        put("reason", "pixelate-video-overlay-unsupported")
+                        put("reason", "$mode-video-overlay-unsupported")
                     }
-                } else {
-                    coverPlan(layer, corr?.first ?: layer.rect, mode, outSize)
+                    else -> coverPlan(layer, corr?.first ?: layer.rect, mode, outSize, project.base)
                 }
             }
             is MemeEditLayer.Text -> {
@@ -268,7 +269,8 @@ internal object RenderPlanBuilder {
         layer: MemeEditLayer.Cover,
         rect: NormalizedRect,
         mode: String,
-        outSize: OutputSizePx
+        outSize: OutputSizePx,
+        base: BaseTransform
     ): JSONObject {
         val pxX = round1(rect.x * outSize.widthPx).toInt()
         val pxY = round1(rect.y * outSize.heightPx).toInt()
@@ -288,6 +290,12 @@ internal object RenderPlanBuilder {
             put("mode", mode)
             put("color", layer.color)
             put("pixelSizePx", cell)
+            if (mode == "remove" && (layer.maskUri != null || layer.patchUri != null)) {
+                layer.maskUri?.let { put("maskUri", it) }
+                layer.patchUri?.let { put("patchUri", it) }
+                // Masks and patches are in source coordinates; the renderer maps them like the picture.
+                put("maskBase", base.toJson())
+            }
         }
     }
 

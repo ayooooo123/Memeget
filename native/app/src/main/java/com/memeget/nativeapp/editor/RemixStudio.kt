@@ -72,6 +72,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
+import java.io.IOException
 import java.util.UUID
 import kotlin.math.max
 import kotlin.math.roundToInt
@@ -254,6 +255,9 @@ internal fun RemixStudio(
     var manualOcrRegion by remember {
         mutableStateOf(NormalizedRect(0.2f, 0.2f, 0.6f, 0.15f))
     }
+    var maskStrokes by remember { mutableStateOf<List<MaskStroke>>(emptyList()) }
+    var maskBrushWidth by remember { mutableFloatStateOf(0.04f) }
+    var maskErase by remember { mutableStateOf(false) }
 
     // Export dialog & state
     var showExportDialog by remember { mutableStateOf(false) }
@@ -621,7 +625,11 @@ internal fun RemixStudio(
                         history = applyProjectAction(liveHistory, ProjectAction.UpdateLayer(drawLayer.copy(elements = updatedElements)))
                     }
                 },
-                onUpdateManualOcrRegion = { manualOcrRegion = it }
+                onUpdateManualOcrRegion = { manualOcrRegion = it },
+                maskStrokes = if (activeTool == "remove") maskStrokes else null,
+                maskBrushWidth = maskBrushWidth,
+                maskErase = maskErase,
+                onAddMaskStroke = { maskStrokes = maskStrokes + it }
             )
         }
 
@@ -764,6 +772,105 @@ internal fun RemixStudio(
                             history = applyProjectAction(currentHistory, ProjectAction.AddLayers(listOf(cover, textLayer)))
                             selectedLayerId = textLayer.id
                             Toast.makeText(context, "Text replaced", Toast.LENGTH_SHORT).show()
+                        }
+                    )
+                }
+                "remove" -> {
+                    LogoRemoveToolPanel(
+                        isVideo = activeProject.source.kind == MediaEditKind.VIDEO,
+                        hasPaint = maskStrokes.any { !it.erase },
+                        brushWidth = maskBrushWidth,
+                        onBrushWidth = { maskBrushWidth = it },
+                        erase = maskErase,
+                        onErase = { maskErase = it },
+                        onClear = { maskStrokes = emptyList() },
+                        onFindLogo = {
+                            isPlaying = false
+                            val project = activeProject
+                            val uri = project.materializedSourceUri ?: project.source.uri
+                            val boxes = if (project.source.kind == MediaEditKind.VIDEO) {
+                                LogoFinder.inVideo(context, engine, uri, playheadUs)
+                            } else {
+                                LogoFinder.inImage(engine, uri)
+                            }
+                            val (workW, workH) = ProjectCore.visibleImageDimensions(project.source.width, project.source.height, project.base)
+                            val strokes = boxes.map { LogoMask.strokeCovering(LogoTracker.sourceRectToWorking(it, project.base), workW, workH) }
+                            maskStrokes = maskStrokes + strokes
+                            strokes.size
+                        },
+                        onRemove = { track, report ->
+                            isPlaying = false
+                            val project = activeProject
+                            val atUs = playheadUs
+                            val uri = project.materializedSourceUri ?: project.source.uri
+                            report("Finding the logo…", 0f)
+                            val built = LogoMask.build(context, project, maskStrokes, atUs)
+                                ?: throw IOException("Paint over the logo first")
+                            report("Getting the fill model…", 0f)
+                            var fallbackNote: String? = null
+                            val inpainter = try {
+                                MiganInpainter.open(engine.inpaintModel())
+                            } catch (cancelled: CancellationException) {
+                                throw cancelled
+                            } catch (failure: Exception) {
+                                fallbackNote = "Detailed fill unavailable (${failure.message ?: "model error"}); used the simple fill"
+                                null
+                            }
+                            val layer = try {
+                                if (project.source.kind == MediaEditKind.VIDEO) {
+                                    val followed = if (track) {
+                                        LogoTracker.track(
+                                            context = context,
+                                            uri = uri,
+                                            base = project.base,
+                                            sourceRect = built.sourceRect,
+                                            mask = built.trackPixels,
+                                            maskWidth = built.width,
+                                            maskHeight = built.height,
+                                            atSourceUs = atUs,
+                                            onProgress = { report("Tracking", it) }
+                                        )
+                                    } else {
+                                        LogoTracker.fixed(context, uri, built.sourceRect)
+                                    }
+                                    val patchUri = LogoFill.video(
+                                        context, uri, followed, built.pixels, built.width, built.height, inpainter
+                                    ) { report("Rebuilding the background", it) }
+                                    MemeEditLayer.Cover(
+                                        id = "remove_${System.currentTimeMillis()}",
+                                        rect = built.workingRect,
+                                        mode = "remove",
+                                        corrections = followed.corrections,
+                                        maskUri = built.uri,
+                                        patchUri = patchUri
+                                    )
+                                } else {
+                                    val patchUri = inpainter?.let {
+                                        report("Rebuilding the background", 0.5f)
+                                        val picture = withContext(Dispatchers.IO) {
+                                            VideoBackgroundEffect.decodeOrientedBitmap(context, uri, 4096)
+                                        }
+                                        try {
+                                            LogoFill.image(context, picture, built.sourceRect, built.pixels, built.width, built.height, it)
+                                        } finally {
+                                            picture.recycle()
+                                        }
+                                    }
+                                    MemeEditLayer.Cover(
+                                        id = "remove_${System.currentTimeMillis()}",
+                                        rect = built.workingRect,
+                                        mode = "remove",
+                                        maskUri = built.uri,
+                                        patchUri = patchUri
+                                    )
+                                }
+                            } finally {
+                                inpainter?.close()
+                            }
+                            // This takes a while; add to the history as it is now, not as it was at the start.
+                            history = applyProjectAction(checkNotNull(history), ProjectAction.AddLayer(layer))
+                            maskStrokes = emptyList()
+                            Toast.makeText(context, fallbackNote ?: "Logo removed", Toast.LENGTH_LONG).show()
                         }
                     )
                 }
@@ -991,6 +1098,7 @@ internal fun RemixStudio(
                     Pair("timeline", "⏱ Timeline"),
                     Pair("frames", "⊞ Frames"),
                     Pair("transform", "⌗ Crop"),
+                    Pair("remove", "⌫ Remove logo"),
                     Pair("text", "A Text"),
                     Pair("draw", "✎ Draw"),
                     Pair("motion", "➚ Motion"),
@@ -1003,6 +1111,7 @@ internal fun RemixStudio(
                     Pair("draw", "✎ Draw"),
                     Pair("transform", "⌗ Transform"),
                     Pair("replace-text", "▨ Replace"),
+                    Pair("remove", "⌫ Remove logo"),
                     Pair("subject", "✂ Cut out"),
                     Pair("layers", "▤ Layers")
                 )
@@ -1015,8 +1124,8 @@ internal fun RemixStudio(
                         .clip(RoundedCornerShape(8.dp))
                         .background(if (selected) Color(0xFFD8FF4A) else Color(0xFF21262D))
                         .clickable {
-                            // Cropping a moving frame is a fight; freeze it first.
-                            if (toolId == "transform") isPlaying = false
+                            // Cropping or painting over a moving frame is a fight; freeze it first.
+                            if (toolId == "transform" || toolId == "remove") isPlaying = false
                             activeTool = toolId
                         }
                         .padding(horizontal = 14.dp, vertical = 8.dp)

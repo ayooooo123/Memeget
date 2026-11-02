@@ -108,6 +108,27 @@ class ProjectCoreTest {
     }
 
     @Test
+    fun holdKeyframeEndsAtTheNextKeyframesOwnTimestamp() {
+        val left = NormalizedRect(0.05f, 0.05f, 0.2f, 0.1f)
+        val right = NormalizedRect(0.7f, 0.85f, 0.2f, 0.1f)
+        val corrections = listOf(
+            CoverCorrectionKeyframe(timeUs = 0L, rect = left, mode = "remove", easing = "hold"),
+            CoverCorrectionKeyframe(timeUs = 1_000_000L, rect = right, mode = "off", easing = "hold"),
+            CoverCorrectionKeyframe(timeUs = 2_000_000L, rect = right, mode = "remove", easing = "hold")
+        )
+        assertEquals(Pair(left, "remove"), ProjectCore.interpolateCoverCorrections(corrections, 999_999L))
+        assertEquals(Pair(right, "off"), ProjectCore.interpolateCoverCorrections(corrections, 1_000_000L))
+        assertEquals(Pair(right, "remove"), ProjectCore.interpolateCoverCorrections(corrections, 2_000_000L))
+
+        val keyframes = listOf(
+            TransformKeyframe(timeUs = 0L, center = NormalizedPoint(0.2f, 0.2f), easing = "hold"),
+            TransformKeyframe(timeUs = 1_000_000L, center = NormalizedPoint(0.8f, 0.8f), easing = "hold"),
+            TransformKeyframe(timeUs = 2_000_000L, center = NormalizedPoint(0.5f, 0.5f), easing = "linear")
+        )
+        assertEquals(0.8f, ProjectCore.interpolateTransformKeyframes(keyframes, 1_000_000L)!!.center.x, 0.001f)
+    }
+
+    @Test
     fun testProjectHistoryUndoRedo() {
         val source = MemeEditSource("file://test.png", "test.png", MediaEditKind.IMAGE, 100, 100)
         val initial = ProjectCore.createDefaultImageProject(source)

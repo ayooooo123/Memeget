@@ -95,6 +95,20 @@ android {
 }
 tasks.named("preBuild") { dependsOn(syncReusableMedia, syncReusableFonts) }
 
+// The OpenCV-free native code (logo removal's source choices and read checks) built for this machine and run.
+val nativeHostTest by tasks.registering(Exec::class) {
+    val source = file("src/test/cpp/NativeHostTest.cpp")
+    val binary = layout.buildDirectory.file("nativeHostTest/native_host_test").get().asFile
+    inputs.files(source, fileTree("src/main/cpp") { include("CompletionSource.hpp", "MatchPath.hpp", "SampleFootprint.hpp") })
+    outputs.file(binary)
+    doFirst { binary.parentFile.mkdirs() }
+    commandLine(
+        "sh", "-c",
+        "c++ -std=c++17 -O1 -Wall -I'${file("src/main/cpp")}' '$source' -o '$binary' && '$binary'"
+    )
+}
+tasks.matching { it.name.matches(Regex("test.*UnitTest")) }.configureEach { dependsOn(nativeHostTest) }
+
 kotlin { jvmToolchain(17) }
 
 dependencies {
@@ -122,6 +136,9 @@ dependencies {
     implementation("io.coil-kt:coil-video:2.7.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("com.facebook.fbjni:fbjni:0.7.0")
+    // MI-GAN runs on LiteRT's GPU accelerator, which 2.2 bundles. 2.3 is built with Kotlin 2.4 metadata, which this
+    // project's Kotlin 2.2 compiler can't read.
+    implementation("com.google.ai.edge.litert:litert:2.2.0")
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.robolectric:robolectric:4.15.1")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.2")

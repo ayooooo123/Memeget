@@ -224,6 +224,16 @@ internal object ProjectCore {
         return NormalizedRect(left, top, right - left, bottom - top)
     }
 
+    /**
+     * [rect] under [newBase] without clipping to the canvas: a masked cover's mask is stretched over its whole
+     * rectangle, so cutting the rectangle would stretch the mask over the part that is left.
+     */
+    fun remapRectUnclipped(rect: NormalizedRect, oldBase: BaseTransform, newBase: BaseTransform): NormalizedRect {
+        val a = remapPointRaw(NormalizedPoint(rect.x, rect.y), oldBase, newBase)
+        val b = remapPointRaw(NormalizedPoint(rect.x + rect.width, rect.y + rect.height), oldBase, newBase)
+        return NormalizedRect(min(a.x, b.x), min(a.y, b.y), kotlin.math.abs(a.x - b.x), kotlin.math.abs(a.y - b.y))
+    }
+
     fun remapVector(vector: NormalizedPoint, oldBase: BaseTransform, newBase: BaseTransform): NormalizedPoint {
         val origin = remapPointRaw(NormalizedPoint(0f, 0f), oldBase, newBase)
         val endpoint = remapPointRaw(vector, oldBase, newBase)
@@ -276,6 +286,18 @@ internal object ProjectCore {
         for (layer in layers) {
             when (layer) {
                 is MemeEditLayer.Cover -> {
+                    if (layer.maskUri != null) {
+                        // Clipping happens at render time; every keyframe stays, so tracked runs keep their timing.
+                        result.add(
+                            layer.copy(
+                                rect = remapRectUnclipped(layer.rect, oldBase, newBase),
+                                corrections = layer.corrections.map {
+                                    it.copy(rect = remapRectUnclipped(it.rect, oldBase, newBase))
+                                }
+                            )
+                        )
+                        continue
+                    }
                     val remappedRect = remapNormalizedRect(layer.rect, oldBase, newBase)
                     if (remappedRect != null) {
                         val remappedCorrections = layer.corrections.mapNotNull { corr ->
@@ -856,8 +878,9 @@ internal object ProjectCore {
             return InterpolatedTransform(last.center, last.scale, last.rotationDegrees, last.opacity)
         }
 
+        // At a keyframe's own timestamp that keyframe starts the segment; a hold before it must not win.
         var i = 0
-        while (i < sorted.size - 1 && sorted[i + 1].timeUs < timeUs) {
+        while (i < sorted.size - 1 && sorted[i + 1].timeUs <= timeUs) {
             i++
         }
         val kf0 = sorted[i]
@@ -886,7 +909,7 @@ internal object ProjectCore {
         if (timeUs >= sorted.last().timeUs) return Pair(sorted.last().rect, sorted.last().mode)
 
         var i = 0
-        while (i < sorted.size - 1 && sorted[i + 1].timeUs < timeUs) {
+        while (i < sorted.size - 1 && sorted[i + 1].timeUs <= timeUs) {
             i++
         }
         val c0 = sorted[i]

@@ -281,6 +281,8 @@ internal object NativeVideoComposition {
         val retainedBitmaps = mutableListOf<Bitmap>()
         val cutoutBitmaps = mutableMapOf<String, Bitmap>()
         val mediaBitmaps = mutableMapOf<String, Bitmap>()
+        val logoMasks = mutableMapOf<String, Triple<ByteArray, Int, Int>>()
+        val logoPatches = mutableMapOf<String, LogoPatches>()
         try {
             for (layer in project.layers) {
                 when (layer) {
@@ -299,6 +301,12 @@ internal object NativeVideoComposition {
                         val bmp = VideoBackgroundEffect.decodeOrientedBitmap(context, layer.assetUri, max(outputWidth, outputHeight))
                         mediaBitmaps[layer.id] = bmp
                         retainedBitmaps.add(bmp)
+                    }
+                    is MemeEditLayer.Cover -> {
+                        when {
+                            layer.patchUri != null -> logoPatches[layer.id] = LogoPatches.load(layer.patchUri)
+                            layer.maskUri != null -> logoMasks[layer.id] = LogoMask.loadOriented(context, layer.maskUri, project.base)
+                        }
                     }
                     else -> Unit
                 }
@@ -352,24 +360,23 @@ internal object NativeVideoComposition {
                     segments = compSegments,
                     speed = videoSpec.speed,
                     cutoutBitmaps = cutoutBitmaps,
-                    mediaBitmaps = mediaBitmaps
+                    mediaBitmaps = mediaBitmaps,
+                    logoPatches = logoPatches,
+                    base = project.base
                 )
                 overlay.setCanvasSize(outputWidth, outputHeight)
                 compositionVideoEffects.add(OverlayEffect(listOf(overlay)))
                 overlayLayers.clear()
             }
             for (layer in project.layers) {
-                if (layer is MemeEditLayer.Cover &&
-                    (layer.mode == "pixelate" || layer.corrections.any { it.mode == "pixelate" })) {
-                    flushOverlay()
-                    compositionVideoEffects.add(VideoPixelateEffect { outputUs, region ->
-                        val sourceUs = ProjectCore.mapOutputTimeToSourceTime(outputUs, compSegments, videoSpec.speed)
-                        if (sourceUs == null || !ProjectCore.isLayerActiveAt(layer, sourceUs)) {
-                            false
-                        } else {
-                            val correction = ProjectCore.interpolateCoverCorrections(layer.corrections, sourceUs)
-                            val rect = correction?.first ?: layer.rect
-                            if ((correction?.second ?: layer.mode) != "pixelate") {
+                if (layer is MemeEditLayer.Cover) {
+                    val modes = layer.corrections.map { it.mode } + layer.mode
+                    // Both passes read the frame under them, so they run on the texture in layer order.
+                    if ("pixelate" in modes) {
+                        flushOverlay()
+                        compositionVideoEffects.add(VideoPixelateEffect { outputUs, region ->
+                            val rect = coverRectAt(layer, outputUs, compSegments, videoSpec.speed, "pixelate")
+                            if (rect == null) {
                                 false
                             } else {
                                 region.left = rect.x
@@ -379,8 +386,24 @@ internal object NativeVideoComposition {
                                 region.cellPx = layer.pixelSize.toFloat()
                                 true
                             }
-                        }
-                    })
+                        })
+                    }
+                    // A rebuilt background is drawn by the overlay; only covers without one need the fill pass.
+                    if ("remove" in modes && layer.patchUri == null) {
+                        flushOverlay()
+                        compositionVideoEffects.add(VideoInpaintEffect(logoMasks[layer.id]) { outputUs, region ->
+                            val rect = coverRectAt(layer, outputUs, compSegments, videoSpec.speed, "remove")
+                            if (rect == null) {
+                                false
+                            } else {
+                                region.left = rect.x
+                                region.top = rect.y
+                                region.right = rect.x + rect.width
+                                region.bottom = rect.y + rect.height
+                                true
+                            }
+                        })
+                    }
                 }
                 overlayLayers.add(layer)
             }
@@ -517,6 +540,21 @@ internal object NativeVideoComposition {
 
     // --- helpers ------------------------------------------------------------
 
+    /** The cover's rectangle on the output frame at [outputUs] when the cover is in [mode] there, else null. */
+    private fun coverRectAt(
+        layer: MemeEditLayer.Cover,
+        outputUs: Long,
+        segments: List<ProjectCore.CompositionSegment>,
+        speed: Float,
+        mode: String
+    ): NormalizedRect? {
+        val sourceUs = ProjectCore.mapOutputTimeToSourceTime(outputUs, segments, speed) ?: return null
+        if (!ProjectCore.isLayerActiveAt(layer, sourceUs)) return null
+        val correction = ProjectCore.interpolateCoverCorrections(layer.corrections, sourceUs)
+        if ((correction?.second ?: layer.mode) != mode) return null
+        return correction?.first ?: layer.rect
+    }
+
     private fun mapSourceTimeToOutputTime(
         sourceTimeUs: Long,
         segments: List<ProjectCore.CompositionSegment>,
@@ -598,7 +636,9 @@ internal object NativeVideoComposition {
         private val segments: List<ProjectCore.CompositionSegment>,
         private val speed: Float,
         private val cutoutBitmaps: Map<String, Bitmap>,
-        private val mediaBitmaps: Map<String, Bitmap>
+        private val mediaBitmaps: Map<String, Bitmap>,
+        private val logoPatches: Map<String, LogoPatches>,
+        private val base: BaseTransform
     ) : CanvasOverlay(/* useInputFrameSize= */ false) {
 
         private val clearPaint = Paint().apply {
@@ -615,6 +655,7 @@ internal object NativeVideoComposition {
             } finally {
                 for (bitmap in alphaCache.values) bitmap.recycle()
                 alphaCache.clear()
+                for (layer in layers) logoPatches[layer.id]?.release()
             }
         }
 
@@ -627,7 +668,15 @@ internal object NativeVideoComposition {
             for (layer in layers) {
                 if (!ProjectCore.isLayerActiveAt(layer, sourceTimeUs)) continue
                 when (layer) {
-                    is MemeEditLayer.Cover -> drawSolidCover(canvas, layer, sourceTimeUs)
+                    is MemeEditLayer.Cover -> {
+                        val patches = logoPatches[layer.id]
+                        if (patches != null) {
+                            val mode = ProjectCore.interpolateCoverCorrections(layer.corrections, sourceTimeUs)?.second ?: layer.mode
+                            if (mode == "remove") patches.draw(canvas, patches.frameAt(sourceTimeUs), base, outputWidth, outputHeight)
+                        } else {
+                            drawSolidCover(canvas, layer, sourceTimeUs)
+                        }
+                    }
                     is MemeEditLayer.Text -> {
                         val transform = ProjectCore.interpolateTransformKeyframes(layer.keyframes, sourceTimeUs)
                             ?: InterpolatedTransform(NormalizedPoint.Center, 1f, 0f, 1f)
@@ -651,7 +700,7 @@ internal object NativeVideoComposition {
             val corr = ProjectCore.interpolateCoverCorrections(layer.corrections, sourceTimeUs)
             val rect = corr?.first ?: layer.rect
             val mode = corr?.second ?: layer.mode
-            if (mode == "pixelate") return
+            if (mode != "solid") return
             solidPaint.color = try {
                 Color.parseColor(layer.color)
             } catch (_: Exception) {

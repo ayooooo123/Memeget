@@ -245,7 +245,7 @@ internal data class DrawElement(
 internal data class CoverCorrectionKeyframe(
     val timeUs: Long = 0L,
     val rect: NormalizedRect,
-    val mode: String = "solid", // "solid", "pixelate"
+    val mode: String = "solid", // "solid", "pixelate", "remove", "off" (nothing drawn: a tracked logo is absent)
     val easing: String = "linear"
 ) {
     fun toJson(): JSONObject = JSONObject().apply {
@@ -299,11 +299,15 @@ internal sealed interface MemeEditLayer {
     data class Cover(
         override val id: String,
         val rect: NormalizedRect,
-        val mode: String = "solid", // "solid", "pixelate"
+        val mode: String = "solid", // "solid", "pixelate", "remove"
         val color: String = "#000000",
         val pixelSize: Int = 16,
         override val active: TimeRangeUs? = null,
-        val corrections: List<CoverCorrectionKeyframe> = emptyList()
+        val corrections: List<CoverCorrectionKeyframe> = emptyList(),
+        /** "remove" only: the logo's own pixels (see [LogoMask]), stretched over the rectangle; null fills it all. */
+        val maskUri: String? = null,
+        /** "remove" only: the rebuilt background behind the logo, frame by frame (see [LogoPatches]). */
+        val patchUri: String? = null
     ) : MemeEditLayer {
         override val kind: String get() = "cover"
 
@@ -316,6 +320,8 @@ internal sealed interface MemeEditLayer {
             put("pixelSize", pixelSize)
             if (active != null) put("active", active.toJson()) else put("active", JSONObject.NULL)
             put("corrections", JSONArray().apply { corrections.forEach { put(it.toJson()) } })
+            if (maskUri != null) put("maskUri", maskUri) else put("maskUri", JSONObject.NULL)
+            if (patchUri != null) put("patchUri", patchUri) else put("patchUri", JSONObject.NULL)
         }
     }
 
@@ -428,7 +434,9 @@ internal sealed interface MemeEditLayer {
                         color = json.optString("color", "#000000"),
                         pixelSize = json.optInt("pixelSize", 16),
                         active = active,
-                        corrections = corrs
+                        corrections = corrs,
+                        maskUri = if (json.isNull("maskUri")) null else json.optString("maskUri").ifBlank { null },
+                        patchUri = if (json.isNull("patchUri")) null else json.optString("patchUri").ifBlank { null }
                     )
                 }
                 "subject" -> {

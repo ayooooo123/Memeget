@@ -144,5 +144,16 @@ internal object ModelRegistry {
         expectedSizeBytes = 407203808L,
     )
 
+    // MI-GAN 512 (Picsart, ICCV 2023; MIT code and weights) as an fp16 LiteRT graph that runs whole on the GPU, for
+    // Remix Studio's logo removal: fills what the video never shows behind the logo. Pinned to
+    // litert-community/MI-GAN-512-Places2-LiteRT@179a35d8.
+    val MIGAN_INPAINT = ModelArtifact(
+        id = "migan-512-places2-fp16",
+        filename = "migan_fp16.tflite",
+        url = "https://huggingface.co/litert-community/MI-GAN-512-Places2-LiteRT/resolve/179a35d8e8a518f6253f9c42fc9b412c6438cf7c/migan_fp16.tflite",
+        sha256Hex = "ef53f8dca69e5ce29629441128322c4d9a0a527b2a043703e0ab497f2463c25f",
+        expectedSizeBytes = 16312640L,
+    )
+
     val RETIRED_DECISION_FILES: List<String> = emptyList()
 }

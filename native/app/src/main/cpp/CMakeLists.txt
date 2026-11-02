@@ -130,6 +130,9 @@ add_library(memeget_inference SHARED
   ImageProcessing.cpp
   VectorKernels.cpp
   GlobeKernels.cpp
+  LogoRemoval.cpp
+  LogoFill.cpp
+  VideoCompletion.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/../../../../core/MemeGateCore.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/../../../../core/LlamaDecisionRunner.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/../../../../core/ResidentSearchCore.cpp

@@ -12,6 +12,10 @@ import android.graphics.RectF
 import android.media.ExifInterface
 import android.net.Uri
 import android.text.TextPaint
+import com.memeget.nativeapp.editor.BaseTransform
+import com.memeget.nativeapp.editor.LogoMask
+import com.memeget.nativeapp.editor.LogoRemovalNative
+import com.memeget.nativeapp.editor.LogoPatches
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
@@ -171,7 +175,7 @@ internal object MemeImageRenderer {
         val layer = layers.optJSONObject(index) ?: continue
         when (layer.optString("kind")) {
           "unavailable" -> throw IOException("Layer ${layer.optString("id")} cannot render: ${layer.optString("reason")}")
-          "cover" -> drawCover(canvas, bitmap, layer)
+          "cover" -> drawCover(context, canvas, bitmap, layer)
           "text" -> drawText(context, canvas, layer)
           "media" -> drawMedia(context, canvas, layer)
           "subject" -> drawSubject(context, canvas, layer)
@@ -494,11 +498,30 @@ internal object MemeImageRenderer {
 
   // --- layers ---------------------------------------------------------------
 
-  private fun drawCover(canvas: Canvas, target: Bitmap, layer: JSONObject) {
+  private fun drawCover(context: Context, canvas: Canvas, target: Bitmap, layer: JSONObject) {
     val rect = readRect(layer.getJSONObject("rect")) ?: return
-    if (layer.optString("mode") == "pixelate") {
-      drawPixelateMosaic(canvas, target, rect, max(1, layer.optInt("pixelSizePx", 1)))
-      return
+    when (layer.optString("mode")) {
+      "pixelate" -> {
+        drawPixelateMosaic(canvas, target, rect, max(1, layer.optInt("pixelSizePx", 1)))
+        return
+      }
+      // The rebuilt background when the layer has one; otherwise a fill from the pixels already composited around
+      // the logo, like the mosaic reads them (only the logo's own pixels when the layer has a mask).
+      "remove" -> {
+        val base = layer.optJSONObject("maskBase")?.let { BaseTransform.fromJson(it) } ?: BaseTransform()
+        val patchUri = layer.optString("patchUri").takeIf { it.isNotBlank() && !layer.isNull("patchUri") }
+        val maskUri = layer.optString("maskUri").takeIf { it.isNotBlank() && !layer.isNull("maskUri") }
+        when {
+          patchUri != null -> LogoPatches.load(patchUri).also { it.draw(canvas, 0, base, target.width, target.height) }.release()
+          maskUri != null -> {
+            val (mask, w, h) = LogoMask.loadOriented(context, maskUri, base)
+            LogoRemovalNative.inpaint(target, rect, mask, w, h)
+          }
+          else -> LogoRemovalNative.inpaint(target, rect)
+        }
+        return
+      }
+      "off" -> return
     }
     canvas.drawRect(
       rect,
