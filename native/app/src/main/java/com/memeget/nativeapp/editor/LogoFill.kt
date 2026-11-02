@@ -17,8 +17,9 @@ import kotlin.math.min
 import kotlin.math.roundToInt
 
 /**
- * Rebuilds the background behind a removed logo. Video: real background carried from the frames that show it
- * (VideoCompletion.cpp), MI-GAN for what no frame shows, the plain fill for anything left. Still images: MI-GAN.
+ * Rebuilds the background behind a removed logo. Video: real background from the frames that show it, where it
+ * fits (VideoCompletion.cpp), MI-GAN on each frame for the rest, the plain fill without MI-GAN, all smoothed through
+ * time. Still images: MI-GAN.
  */
 internal object LogoFill {
     /**
@@ -30,9 +31,6 @@ internal object LogoFill {
     private const val MAX_REGION_EDGE = 1600
     private const val PATCH_MARGIN_PX = 6
     private const val FEATHER_PX = 3
-    // Keyframes inpainted until every frame has a source: what the plain directional fill leaves is ragged and
-    // flickers. The cap bounds the time on footage where flow carries keyframes poorly.
-    private const val MAX_INPAINT_ROUNDS = 8
 
     /**
      * Patches for every frame of [track] that shows the logo; [mask] ([maskW]×[maskH], source orientation) is the
@@ -120,35 +118,31 @@ internal object LogoFill {
                     for (gap in last + 1 until frameCount) VideoCompletionNative.nativeAddFrame(handle, gap, lastRgb, lastHole)
                     VideoCompletionNative.nativeSeal(handle)
                     onProgress(base + share * 0.45f)
-                    var open = VideoCompletionNative.nativePropagate(handle)
-                    onProgress(base + share * 0.6f)
+                    VideoCompletionNative.nativePropagate(handle)
+                    onProgress(base + share * 0.55f)
                     val rgb = ByteArray(cw * ch * 3)
                     val hole = ByteArray(cw * ch)
-                    var round = 0
-                    while (inpainter != null && round < MAX_INPAINT_ROUNDS && open.any { it > 0 }) {
-                        ensureActive()
-                        // What no frame shows is invented once, on the frame with the most of it, and carried
-                        // through time like real background, so it moves with the footage instead of flickering.
-                        val key = open.indices.maxBy { open[it] }
-                        VideoCompletionNative.nativeComposite(handle, key, rgb, hole)
-                        val filled = try {
-                            inpainter.inpaint(rgb, cw, ch, hole)
-                        } catch (failure: Exception) {
-                            break
+                    if (inpainter != null) {
+                        // Each frame's own invention, with its trusted real fill as context; a failure leaves this and
+                        // the remaining frames to the plain fill.
+                        for (frame in 0 until frameCount) {
+                            ensureActive()
+                            if (!VideoCompletionNative.nativeFillRequest(handle, frame, rgb, hole)) continue
+                            val filled = try {
+                                inpainter.inpaint(rgb, cw, ch, hole)
+                            } catch (failure: Exception) {
+                                break
+                            }
+                            VideoCompletionNative.nativeSetComplete(handle, frame, filled)
+                            onProgress(base + share * (0.55f + 0.3f * (frame + 1) / frameCount))
                         }
-                        VideoCompletionNative.nativeSetComplete(handle, key, filled)
-                        open = VideoCompletionNative.nativePropagate(handle)
-                        round++
                     }
                     VideoCompletionNative.nativeFinish(handle)
                     onProgress(base + share * 0.9f)
 
-                    val ownHole = ByteArray(cw * ch).also { union ->
-                        for (p in group) {
-                            val h = holes.getValue(p)
-                            for (i in union.indices) if (h[i].toInt() != 0) union[i] = h[i]
-                        }
-                    }
+                    // Where the frames are covered once each logo piece sits where it really is (see nativeSeal).
+                    // Frames of other groups add only places where this group's frames show their own pixels.
+                    val ownHole = ByteArray(cw * ch).also { VideoCompletionNative.nativeCoveredUnion(handle, it) }
                     val box = patchBox(ownHole, cw, ch)
                     val alpha = feather(ownHole, cw, ch, box)
                     val regionRect = NormalizedRect(
