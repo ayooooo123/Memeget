@@ -1004,6 +1004,12 @@ public:
                 Source shifted = src[i];
                 shifted.x16 = static_cast<int16_t>(shifted.x16 + kDx[d] * 16);
                 shifted.y16 = static_cast<int16_t>(shifted.y16 + kDy[d] * 16);
+                // The prediction must be real footage too: a shifted read that touches the donor's covered area
+                // would take the logo, or once the donor is finished its invented fill, and then depend on the
+                // order frames are finished in. Checked against the covered mask itself, which outlives completion.
+                if (!memeget::footprintClear(holeOf(shifted.frame), w_, h_, shifted.x16 / 16.0f, shifted.y16 / 16.0f)) {
+                    continue;
+                }
                 uint8_t predicted[3];
                 sample(shifted, predicted);
                 const uint8_t* actual = frame + (static_cast<size_t>(by) * w_ + bx) * 3;
