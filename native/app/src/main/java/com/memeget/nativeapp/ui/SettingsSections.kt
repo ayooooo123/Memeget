@@ -776,6 +776,7 @@ private val REGISTERED_MODELS = listOf(
     registered("Audio Tokenizer", ModelRegistry.WHISPER_TOKENIZER),
     registered("Subject Cutout", ModelRegistry.FAST_SAM),
     registered("AI Captions", ModelRegistry.MINICPM_V47_MODEL),
+    registered("Logo Removal Fill", ModelRegistry.MIGAN_INPAINT),
     RegisteredModelInfo(
         "AI Captions Visual Projector",
         ModelRegistry.MINICPM_V47_PROJECTOR.id,

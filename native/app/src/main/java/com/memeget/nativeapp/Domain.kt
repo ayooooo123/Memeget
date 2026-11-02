@@ -409,6 +409,8 @@ internal interface InferenceEngine : AutoCloseable {
     suspend fun warmTextEncoder() {}
     suspend fun evaluateD1Gate(renderedPrompt: String): D1GateOutcome = D1GateOutcome(true, 0.5f)
     suspend fun gateAndDescribe(uri: String, ocrHint: String, candidateHints: String): VlmGateOutcome = VlmGateOutcome(true, 0.5f)
+    /** The logo-removal fill model's file, downloaded on first use. */
+    suspend fun inpaintModel(): java.io.File = throw ModelUnavailableException("inpaint", "No fill model in this engine")
     fun cancel()
     override fun close()
 }

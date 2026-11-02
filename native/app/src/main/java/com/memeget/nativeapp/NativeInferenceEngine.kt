@@ -455,6 +455,8 @@ internal class NativeInferenceEngine(
         )
     }
 
+    override suspend fun inpaintModel(): File = ensureModel(ModelRegistry.MIGAN_INPAINT)
+
     /**
      * Downloads [artifact] or finds it verified on disk. A stop (Stop, the session limit, a screen closing) is not a
      * model error: the partial file stays and the next call resumes it. A failure is a [ModelUnavailableException] that

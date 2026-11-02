@@ -14,6 +14,7 @@ import java.util.UUID
 import android.net.Uri
 import android.widget.Toast
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -122,7 +123,8 @@ internal object EditorAssetStorage {
         val drafts = File(context.cacheDir, "meme_drafts").walkTopDown()
             .filter { it.isFile && it.name.startsWith("slot_") }
             .joinToString("\n") { runCatching { it.readText() }.getOrDefault("") }
-        old.forEach { if (!drafts.contains(it.name)) it.delete() }
+        // Logo-removal patches are directories of frames.
+        old.forEach { if (!drafts.contains(it.name)) it.deleteRecursively() }
     }
 
     private fun getFileExtension(context: Context, uri: Uri): String {
@@ -948,6 +950,180 @@ internal fun TextReplaceToolPanel(
                     Text("Replace", color = Color.Black, fontWeight = FontWeight.Bold)
                 }
             }
+        }
+    }
+}
+
+/**
+ * Removes a logo or watermark the user paints over. Only the painted pixels that stand out from their
+ * surroundings are replaced, so the picture around and between the logo's strokes stays as it was. On a video
+ * the logo is followed through every frame (watermarks that jump corners included); "This spot only" keeps it
+ * in place for the whole clip.
+ */
+@Composable
+internal fun LogoRemoveToolPanel(
+    isVideo: Boolean,
+    hasPaint: Boolean,
+    brushWidth: Float,
+    onBrushWidth: (Float) -> Unit,
+    erase: Boolean,
+    onErase: (Boolean) -> Unit,
+    onClear: () -> Unit,
+    onRemove: suspend (track: Boolean, report: (stage: String, fraction: Float) -> Unit) -> Unit,
+    /** Paints over the likely logos it finds; returns how many. */
+    onFindLogo: suspend () -> Int,
+    modifier: Modifier = Modifier
+) {
+    val scope = rememberCoroutineScope()
+    var job by remember { mutableStateOf<Job?>(null) }
+    var stage by remember { mutableStateOf("") }
+    var progress by remember { mutableFloatStateOf(0f) }
+    var errorMessage by remember { mutableStateOf<String?>(null) }
+    val busy = job != null
+
+    fun start(track: Boolean) {
+        errorMessage = null
+        progress = 0f
+        stage = ""
+        job = scope.launch {
+            try {
+                onRemove(track) { s, f ->
+                    stage = s
+                    progress = f
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                errorMessage = error.message ?: "The logo could not be removed"
+            } finally {
+                job = null
+            }
+        }
+    }
+
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 16.dp, vertical = 10.dp)
+    ) {
+        Text(
+            if (isVideo) "Pause on the logo, then Find logo or paint over it roughly." else "Find logo, or paint over it roughly.",
+            color = Color(0xFF8B949E),
+            fontSize = 12.sp
+        )
+        Spacer(modifier = Modifier.height(6.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            OutlinedButton(
+                onClick = {
+                    errorMessage = null
+                    job = scope.launch {
+                        try {
+                            stage = "Looking for the logo…"
+                            if (onFindLogo() == 0) errorMessage = "No logo found here; paint over it instead"
+                        } catch (cancelled: CancellationException) {
+                            throw cancelled
+                        } catch (error: Exception) {
+                            errorMessage = error.message ?: "Couldn't look for a logo"
+                        } finally {
+                            stage = ""
+                            job = null
+                        }
+                    }
+                },
+                enabled = !busy,
+                modifier = Modifier.weight(1.3f),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFD8FF4A))
+            ) {
+                Text("Find logo", maxLines = 1)
+            }
+            OutlinedButton(
+                onClick = { onErase(!erase) },
+                modifier = Modifier.weight(1f),
+                colors = ButtonDefaults.outlinedButtonColors(
+                    containerColor = if (erase) Color(0xFF21262D) else Color.Transparent,
+                    contentColor = if (erase) Color(0xFFD8FF4A) else Color.White
+                )
+            ) {
+                Text(if (erase) "Erasing" else "Erase", maxLines = 1)
+            }
+            OutlinedButton(
+                onClick = onClear,
+                enabled = hasPaint && !busy,
+                modifier = Modifier.weight(1f),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White)
+            ) {
+                Text("Clear", maxLines = 1)
+            }
+        }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("Brush", color = Color.White, fontSize = 13.sp, modifier = Modifier.width(52.dp))
+            Slider(
+                value = brushWidth,
+                onValueChange = onBrushWidth,
+                valueRange = 0.01f..0.12f,
+                modifier = Modifier.weight(1f),
+                colors = SliderDefaults.colors(thumbColor = Color(0xFFD8FF4A), activeTrackColor = Color(0xFFD8FF4A))
+            )
+        }
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Button(
+                onClick = { start(track = isVideo) },
+                enabled = hasPaint && !busy,
+                modifier = Modifier.weight(1.4f),
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFD8FF4A))
+            ) {
+                if (busy) {
+                    CircularProgressIndicator(color = Color.Black, modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        if (stage.isNotEmpty() && progress > 0f) "${(progress * 100).roundToInt()}%" else "Working…",
+                        color = Color.Black
+                    )
+                } else {
+                    Text(if (isVideo) "Track and remove" else "Remove", color = Color.Black, fontWeight = FontWeight.Bold)
+                }
+            }
+            if (busy) {
+                OutlinedButton(
+                    onClick = { job?.cancel() },
+                    modifier = Modifier.weight(1f),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White)
+                ) {
+                    Text("Stop")
+                }
+            } else if (isVideo) {
+                Button(
+                    onClick = { start(track = false) },
+                    enabled = hasPaint,
+                    modifier = Modifier.weight(1f),
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF21262D))
+                ) {
+                    Text("This spot only", color = Color.White)
+                }
+            }
+        }
+        if (busy && stage.isNotEmpty()) {
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(stage, color = Color(0xFF8B949E), fontSize = 12.sp)
+        }
+
+        if (errorMessage != null) {
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = errorMessage!!,
+                color = Color(0xFFFF5252),
+                fontSize = 12.sp,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth()
+            )
         }
     }
 }

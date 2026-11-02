@@ -42,7 +42,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.CompositingStrategy
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Fill
@@ -95,6 +100,11 @@ internal fun StudioCanvas(
     onStartDrawStroke: (NormalizedPoint) -> Unit = onAppendDrawPoint,
     onUpdateDrawStroke: (NormalizedPoint) -> Unit = onAppendDrawPoint,
     onUpdateManualOcrRegion: (NormalizedRect) -> Unit,
+    /** Remove-logo paint, shown and painted on while not null. */
+    maskStrokes: List<MaskStroke>? = null,
+    maskBrushWidth: Float = 0.04f,
+    maskErase: Boolean = false,
+    onAddMaskStroke: (MaskStroke) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -391,10 +401,13 @@ internal fun StudioCanvas(
                                             }
                                         }
                                         is MemeEditLayer.Cover -> {
-                                            val left = layer.rect.x * canvasWidth
-                                            val top = layer.rect.y * canvasHeight
-                                            val right = (layer.rect.x + layer.rect.width) * canvasWidth
-                                            val bottom = (layer.rect.y + layer.rect.height) * canvasHeight
+                                            // A tracked cover sits where its keyframes put it at this frame.
+                                            val rect = ProjectCore.interpolateCoverCorrections(layer.corrections, playheadUs)
+                                                ?.takeIf { it.second != "off" }?.first ?: layer.rect
+                                            val left = rect.x * canvasWidth
+                                            val top = rect.y * canvasHeight
+                                            val right = (rect.x + rect.width) * canvasWidth
+                                            val bottom = (rect.y + rect.height) * canvasHeight
                                             if (tapX in left..right && tapY in top..bottom) {
                                                 hitId = layer.id
                                                 break
@@ -1078,6 +1091,84 @@ internal fun StudioCanvas(
                             }
                     )
                 }
+            }
+
+            // -----------------------------------------------------------------
+            // 8b. Remove-logo paint: red where the logo will be replaced
+            // -----------------------------------------------------------------
+            if (maskStrokes != null && !beforeMode) {
+                var activeStroke by remember { mutableStateOf<MaskStroke?>(null) }
+                val brushState = rememberUpdatedState(maskBrushWidth to maskErase)
+                val addStrokeState = rememberUpdatedState(onAddMaskStroke)
+                Canvas(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .graphicsLayer(compositingStrategy = CompositingStrategy.Offscreen)
+                ) {
+                    val shortEdge = min(size.width, size.height)
+                    for (stroke in maskStrokes + listOfNotNull(activeStroke)) {
+                        if (stroke.points.isEmpty()) continue
+                        val width = max(2f, stroke.width * shortEdge)
+                        val color = Color(0x80FF3B30)
+                        val blend = if (stroke.erase) BlendMode.Clear else BlendMode.Src
+                        if (stroke.points.size == 1) {
+                            val p = stroke.points[0]
+                            drawCircle(color, width / 2f, Offset(p.x * size.width, p.y * size.height), blendMode = blend)
+                        } else {
+                            val path = Path().apply {
+                                moveTo(stroke.points[0].x * size.width, stroke.points[0].y * size.height)
+                                for (i in 1 until stroke.points.size) {
+                                    lineTo(stroke.points[i].x * size.width, stroke.points[i].y * size.height)
+                                }
+                            }
+                            drawPath(
+                                path,
+                                color,
+                                style = Stroke(width = width, cap = StrokeCap.Round, join = StrokeJoin.Round),
+                                blendMode = blend
+                            )
+                        }
+                    }
+                }
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .pointerInput(Unit) {
+                            detectTapGestures { offset ->
+                                val (width, erase) = brushState.value
+                                val p = NormalizedPoint(
+                                    (offset.x / size.width).coerceIn(0f, 1f),
+                                    (offset.y / size.height).coerceIn(0f, 1f)
+                                )
+                                addStrokeState.value(MaskStroke(listOf(p), width, erase))
+                            }
+                        }
+                        .pointerInput(Unit) {
+                            detectDragGestures(
+                                onDragStart = { offset ->
+                                    val (width, erase) = brushState.value
+                                    val p = NormalizedPoint(
+                                        (offset.x / size.width).coerceIn(0f, 1f),
+                                        (offset.y / size.height).coerceIn(0f, 1f)
+                                    )
+                                    activeStroke = MaskStroke(listOf(p), width, erase)
+                                },
+                                onDrag = { change, _ ->
+                                    change.consume()
+                                    val p = NormalizedPoint(
+                                        (change.position.x / size.width).coerceIn(0f, 1f),
+                                        (change.position.y / size.height).coerceIn(0f, 1f)
+                                    )
+                                    activeStroke = activeStroke?.let { it.copy(points = it.points + p) }
+                                },
+                                onDragEnd = {
+                                    activeStroke?.let { addStrokeState.value(it) }
+                                    activeStroke = null
+                                },
+                                onDragCancel = { activeStroke = null }
+                            )
+                        }
+                )
             }
 
             // -----------------------------------------------------------------
