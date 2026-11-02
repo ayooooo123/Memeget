@@ -239,7 +239,11 @@ public final class IosInferenceEngine: @unchecked Sendable {
         let gen = AVAssetImageGenerator(asset: asset)
         gen.appliesPreferredTrackTransform = true
         gen.maximumSize = CGSize(width: 768, height: 768)
-        let t = CMTime(seconds: 0.25, preferredTimescale: 600)
-        return try? gen.copyCGImage(at: t, actualTime: nil)
+        gen.requestedTimeToleranceBefore = .positiveInfinity
+        gen.requestedTimeToleranceAfter = .positiveInfinity
+        if let cg = try? gen.copyCGImage(at: CMTime(seconds: 0.25, preferredTimescale: 600), actualTime: nil) {
+            return cg
+        }
+        return try? gen.copyCGImage(at: .zero, actualTime: nil)
     }
 }

@@ -66,6 +66,7 @@ import androidx.compose.ui.unit.Velocity
 import androidx.compose.ui.unit.dp
 import com.memeget.nativeapp.inference.NativeBridge
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -171,7 +172,10 @@ internal class MemeGlobeState {
         return smoothstep((ln(s) - lo) / (hi - lo))
     }
 
-    val spinnable get() = !touching && !animating && gridMemes.isNotEmpty() && cell > 0f && flatness() < 0.25f
+    /** A search globe keeps its best matches facing the viewer, without idle spin, until it's touched. */
+    private var holdingFocus by mutableStateOf(false)
+
+    val spinnable get() = !touching && !animating && !holdingFocus && gridMemes.isNotEmpty() && cell > 0f && flatness() < 0.25f
 
     internal fun publish(grid: GlobeGrid, memes: List<Meme>, signature: String, key: Any?) {
         this.grid = grid
@@ -202,12 +206,18 @@ internal class MemeGlobeState {
         return fresh.indices.filter { GlobeThumbs.source(fresh[it]) != GlobeThumbs.source(old[it]) }
     }
 
-    /** The whole globe, slowly turning. */
+    /** The whole globe, slowly turning, its focal cell facing the viewer. */
     internal fun place() {
-        centerU = cols / 2f
-        centerV = rows / 2f
+        centerU = grid.focusCol + 0.5f
+        centerV = grid.focusRow + 0.5f
         cell = fitCell
         needsPlacement = false
+        holdingFocus = grid.ranked
+    }
+
+    /** Any touch hands a search globe over to the person: idle spin may start again once it's left alone. */
+    internal fun releaseFocus() {
+        if (holdingFocus) holdingFocus = false
     }
 
     internal fun transform(pan: Offset, zoomChange: Float, centroid: Offset) {
@@ -240,7 +250,8 @@ internal class MemeGlobeState {
         animating = true
         val job = scope.launch {
             try {
-                block()
+                // A fling runs each axis in its own child; the motion lasts until both have stopped.
+                coroutineScope(block)
             } finally {
                 // A motion cut short by the next one leaves the flag to it.
                 if (motionJob === coroutineContext[Job]) {
@@ -435,16 +446,23 @@ private class GlobeFrame {
     }
 }
 
+/** What the globe lays out: the results, whether more pages are coming, which results they are, and whether they're
+ *  a search (best first, laid out around the best match) or a filter (laid out by look-alike). */
+private data class GlobeResults(val memes: List<Meme>, val more: Boolean, val key: Any?, val ranked: Boolean)
+
 /**
  * The library as a globe: zoomed out, every meme on a ball you can spin; pinching in flattens it into a gallery
- * that goes on in every direction. Look-alikes sit together. Tap the globe to fly down to a spot; tap a meme in the
- * gallery to open it, long-press to copy.
+ * that goes on in every direction. Look-alikes sit together; a search's results sit around its best match, which
+ * the globe turns to face. Tap the globe to fly down to a spot; tap a meme in the gallery to open it, long-press to
+ * copy.
  */
 @Composable
 internal fun MemeGlobe(
     memes: List<Meme>,
     state: MemeGlobeState,
     resetKey: Any?,
+    /** [memes] are search results, best first. */
+    ranked: Boolean,
     hasMore: Boolean,
     isLoadingMore: Boolean,
     onLoadMore: () -> Unit,
@@ -465,6 +483,7 @@ internal fun MemeGlobe(
     val currentHasMore by rememberUpdatedState(hasMore)
     val currentLoading by rememberUpdatedState(isLoadingMore)
     val currentResetKey by rememberUpdatedState(resetKey)
+    val currentRanked by rememberUpdatedState(ranked)
     val currentOnLoadMore by rememberUpdatedState(onLoadMore)
     val currentLoadVectors by rememberUpdatedState(loadVectors)
     // The globe holds every result, so it keeps loading pages until there are none left. It waits for the list to
@@ -484,14 +503,15 @@ internal fun MemeGlobe(
     // Each complete result list is arranged once, to the end: a library reload arriving mid-layout waits its turn
     // instead of throwing the work away, and a list replaced while it settled is skipped for the newer one.
     LaunchedEffect(state) {
-        snapshotFlow { Triple(currentMemes, currentHasMore, currentResetKey) }
-            .filter { (_, more, _) -> !more }
+        snapshotFlow { GlobeResults(currentMemes, currentHasMore, currentResetKey, currentRanked) }
+            .filter { !it.more }
             .conflate()
-            .collect { (list, _, key) ->
+            .collect { results ->
+                val list = results.memes
                 delay(250)
                 // A newer list (different content; an equal copy is never emitted again) is next in line.
                 if (currentHasMore || list != currentMemes) return@collect
-                val signature = globeLayoutKey(list)
+                val signature = globeLayoutKey(list, results.ranked)
                 if (signature == state.layoutSignature) {
                     val changed = state.refresh(list)
                     if (changed != null) {
@@ -503,8 +523,11 @@ internal fun MemeGlobe(
                 val started = SystemClock.uptimeMillis()
                 val ids = list.map { it.id }
                 val file = java.io.File(context.cacheDir, "globe_layout/$signature.grid")
-                val saved = withContext(Dispatchers.IO) { readGlobeGrid(file, ids) }
-                val grid = saved ?: run {
+                // A search's layout is quick to make and different every time, so only look-alike layouts are saved.
+                val saved = if (results.ranked) null else withContext(Dispatchers.IO) { readGlobeGrid(file, ids) }
+                val grid = saved ?: if (results.ranked) {
+                    withContext(Dispatchers.Default) { layoutRankedGlobeGrid(list.size) }
+                } else {
                     if (list.any { it.id !in state.vectors }) {
                         state.vectors = runCatching { currentLoadVectors() }.getOrDefault(state.vectors)
                     }
@@ -512,11 +535,11 @@ internal fun MemeGlobe(
                     withContext(Dispatchers.Default) { layoutGlobeGrid(list.map { vectors[it.id] }) }
                         .also { withContext(Dispatchers.IO) { writeGlobeGrid(file, it, ids) } }
                 }
-                val how = if (saved != null) "read" else "laid out"
+                val how = if (saved != null) "read" else if (results.ranked) "ranked" else "laid out"
                 Log.i("MemeGlobe", "$how ${list.size} memes as ${grid.cols}x${grid.rows} in ${SystemClock.uptimeMillis() - started} ms")
-                // The results may have moved on while this ran (another search, a filter): the layout is saved for
-                // when they come back, but only the current results go on screen; theirs is next in line.
-                if (currentHasMore || globeLayoutKey(currentMemes) != signature) return@collect
+                // The results may have moved on while this ran (another search, a filter): only the current results
+                // go on screen, and theirs is next in line. A look-alike layout is still saved for when they return.
+                if (currentHasMore || globeLayoutKey(currentMemes, currentRanked) != signature) return@collect
                 state.publish(grid, list, signature, currentResetKey)
             }
     }
@@ -582,6 +605,7 @@ internal fun MemeGlobe(
                     awaitFirstDown(requireUnconsumed = false)
                     state.touchStoppedMotion = state.stopMotion()
                     state.touching = true
+                    state.releaseFocus()
                     try {
                         val tracker = VelocityTracker()
                         var pastSlop = false

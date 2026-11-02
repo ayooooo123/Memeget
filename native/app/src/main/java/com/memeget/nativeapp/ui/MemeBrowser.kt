@@ -23,11 +23,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Dashboard
-import androidx.compose.material.icons.filled.Folder
-import androidx.compose.material.icons.filled.GridView
+import com.memeget.nativeapp.ui.MemegetIcons
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -257,6 +253,8 @@ internal fun MemeBrowser(
     memesKey: Any?,
     canvasState: MemeCanvasState,
     globeState: MemeGlobeState,
+    /** [memes] answer a search, best first: the globe lays them out around the best match. */
+    rankedResults: Boolean,
     loadVectors: suspend () -> Map<Long, FloatArray>,
     hasMore: Boolean,
     isLoadingMore: Boolean,
@@ -379,6 +377,7 @@ internal fun MemeBrowser(
                 memes = memes,
                 state = globeState,
                 resetKey = memesKey,
+                ranked = rankedResults,
                 hasMore = hasMore,
                 isLoadingMore = isLoadingMore,
                 onLoadMore = onLoadMore,
@@ -411,7 +410,7 @@ internal fun MemeBrowser(
                         .clickable { onBackToFolders() }
                         .padding(start = 8.dp, end = 12.dp, top = 6.dp, bottom = 6.dp),
                 ) {
-                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back to folders", tint = MemegetColors.TextPrimary, modifier = Modifier.size(16.dp))
+                    Icon(MemegetIcons.ArrowBack, contentDescription = "Back to folders", tint = MemegetColors.TextPrimary, modifier = Modifier.size(16.dp))
                     Spacer(Modifier.width(6.dp))
                     Text(
                         text = folder?.let { if (it.count >= 0) "${it.label} · ${it.count}" else it.label } ?: "Folders",
@@ -624,9 +623,9 @@ internal fun BrowseModeSwitcher(mode: BrowseMode, onSelect: (BrowseMode) -> Unit
             ) {
                 Icon(
                     imageVector = when (entry) {
-                        BrowseMode.Grid -> Icons.Filled.GridView
-                        BrowseMode.Canvas -> Icons.Filled.Dashboard
-                        BrowseMode.Folders -> Icons.Filled.Folder
+                        BrowseMode.Grid -> MemegetIcons.GridView
+                        BrowseMode.Canvas -> MemegetIcons.Dashboard
+                        BrowseMode.Folders -> MemegetIcons.Folder
                     },
                     contentDescription = entry.name,
                     tint = if (selected) MemegetColors.Volt else MemegetColors.TextSecondary,

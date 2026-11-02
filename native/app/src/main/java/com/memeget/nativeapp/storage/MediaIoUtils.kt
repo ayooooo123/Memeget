@@ -440,32 +440,13 @@ internal object MediaIoUtils {
         context: Context,
         sourceUri: Uri,
         destFile: File,
-        maxBytes: Long = Long.MAX_VALUE,
     ) {
         destFile.parentFile?.mkdirs()
-        var failed = false
-        try {
-            context.contentResolver.openInputStream(sourceUri)?.use { input ->
-                destFile.outputStream().use { output ->
-                    val buf = ByteArray(65536)
-                    var total = 0L
-                    while (true) {
-                        val n = input.read(buf)
-                        if (n < 0) break
-                        total += n
-                        if (total > maxBytes) {
-                            failed = true
-                            throw java.io.IOException("Input exceeds maximum allowed size (${maxBytes / (1024 * 1024)} MiB)")
-                        }
-                        output.write(buf, 0, n)
-                    }
-                }
-            } ?: throw IllegalStateException("Could not open input stream for $sourceUri")
-        } catch (t: Throwable) {
-            if (failed) destFile.delete()
-            throw t
-        }
+        context.contentResolver.openInputStream(sourceUri)?.use { input ->
+            destFile.outputStream().use { output -> input.copyTo(output, 65536) }
+        } ?: throw IllegalStateException("Could not open input stream for $sourceUri")
     }
+
     fun shareableUriForFile(context: Context, file: File): Uri {
         val authority = "${context.packageName}.files"
         return FileProvider.getUriForFile(context, authority, file)

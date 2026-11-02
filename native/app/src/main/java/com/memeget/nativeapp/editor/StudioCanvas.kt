@@ -21,9 +21,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.systemGestureExclusion
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Pause
-import androidx.compose.material.icons.filled.PlayArrow
+import com.memeget.nativeapp.ui.MemegetIcons
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -1188,7 +1186,7 @@ internal fun StudioCanvas(
                             .background(Color(0xCC161B22))
                     ) {
                         Icon(
-                            if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                            if (isPlaying) MemegetIcons.Pause else MemegetIcons.PlayArrow,
                             contentDescription = if (isPlaying) "Pause" else "Play",
                             tint = Color(0xFFD8FF4A),
                             modifier = Modifier.size(20.dp)

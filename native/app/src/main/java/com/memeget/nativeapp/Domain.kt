@@ -130,6 +130,21 @@ internal fun WorkProgress.headline(): String = when {
     else -> "Preparing index: $stage"
 }
 
+/**
+ * An import started from Settings: [running] while it reads, then its [outcome]. [id] grows with each import, so the
+ * outcome of one can be told from the next.
+ */
+internal data class ImportStatus(
+    val id: Long = 0,
+    val running: Boolean = false,
+    /** Bytes of a ZIP read so far, and its size (-1 when the source doesn't say). */
+    val readBytes: Long = 0,
+    val totalBytes: Long = -1,
+    val saved: Int = 0,
+    val outcome: String? = null,
+    val failed: Boolean = false,
+)
+
 private val CAPTION_STAGES = setOf("local description", "caption embedding")
 /** An item the app was killed on: [retried] when it went back to the queue, false when it was its second kill. */
 internal data class KilledRecovery(val id: Long, val retried: Boolean)

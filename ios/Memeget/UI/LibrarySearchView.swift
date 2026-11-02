@@ -71,11 +71,34 @@ public struct LibrarySearchView: View {
                         .foregroundColor(MemegetPalette.textSecondary)
                         .font(.system(size: 15))
 
-                    TextField(totalCount > 0 ? "Search \(totalCount) memes, quotes, slang…" : "Search memes…", text: $query)
+                    TextField(totalCount > 0 ? "Search \(totalCount) memes or paste video link…" : "Search memes or paste video link…", text: $query)
                         .foregroundColor(MemegetPalette.textPrimary)
                         .autocorrectionDisabled()
                         .textInputAutocapitalization(.never)
+                        .submitLabel(.go)
+                        .onSubmit {
+                            if let link = UbitLinkDownloader.extractURL(from: query) {
+                                query = ""
+                                Task { _ = try? await coordinator.importSharedLink(link) }
+                            }
+                        }
                         .accessibilityIdentifier("meme_search_field")
+
+                    if let link = UbitLinkDownloader.extractURL(from: query) {
+                        Button(action: {
+                            query = ""
+                            Task { _ = try? await coordinator.importSharedLink(link) }
+                        }) {
+                            Text("⬇ Save")
+                                .font(.system(size: 12, weight: .bold))
+                                .foregroundColor(MemegetPalette.bg)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 5)
+                                .background(MemegetPalette.volt)
+                                .clipShape(Capsule())
+                        }
+                        .accessibilityIdentifier("download_link_button")
+                    }
 
                     if !query.isEmpty {
                         Button(action: { query = "" }) {
@@ -149,6 +172,35 @@ public struct LibrarySearchView: View {
                         Button("Stop") { coordinator.cancelScan() }
                             .font(.system(size: 12, weight: .bold))
                             .foregroundColor(MemegetPalette.danger)
+                    }
+                    .padding(10)
+                    .background(MemegetPalette.surface)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 4)
+                }
+                if coordinator.isDownloadingLink || !coordinator.linkDownloadStatus.isEmpty || !coordinator.linkDownloadError.isEmpty {
+                    HStack(spacing: 8) {
+                        if coordinator.isDownloadingLink {
+                            ProgressView()
+                                .tint(MemegetPalette.volt)
+                                .scaleEffect(0.8)
+                        }
+                        Text(!coordinator.linkDownloadError.isEmpty ? coordinator.linkDownloadError : coordinator.linkDownloadStatus)
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundColor(!coordinator.linkDownloadError.isEmpty ? MemegetPalette.danger : MemegetPalette.textPrimary)
+                            .lineLimit(2)
+                        Spacer()
+                        if !coordinator.isDownloadingLink {
+                            Button(action: {
+                                coordinator.linkDownloadStatus = ""
+                                coordinator.linkDownloadError = ""
+                            }) {
+                                Image(systemName: "xmark")
+                                    .font(.system(size: 11, weight: .bold))
+                                    .foregroundColor(MemegetPalette.textMuted)
+                            }
+                        }
                     }
                     .padding(10)
                     .background(MemegetPalette.surface)
@@ -282,21 +334,37 @@ public struct LibrarySearchView: View {
             }
             .buttonStyle(.plain)
 
-            // 1-Tap Fast-Draw Copy Pill
-            Button(action: {
-                if let img = MemeImageResolver.loadUIImage(for: meme, fullResolution: true) {
-                    UIPasteboard.general.image = img
-                    coordinator.store.recordCopy(id: meme.id)
-                    copiedId = meme.id
+            HStack(spacing: 4) {
+                if meme.kind == "video" {
+                    Text("▶")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundColor(MemegetPalette.textPrimary)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 3)
+                        .background(Color.black.opacity(0.65))
+                        .clipShape(Capsule())
                 }
-            }) {
-                Text(copiedId == meme.id ? "✓" : "⧉")
-                    .font(.system(size: 12, weight: .bold))
-                    .foregroundColor(copiedId == meme.id ? MemegetPalette.bg : MemegetPalette.textPrimary)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 3)
-                    .background(copiedId == meme.id ? MemegetPalette.volt : Color.black.opacity(0.65))
-                    .clipShape(Capsule())
+                Button(action: {
+                    if meme.kind == "video",
+                       let vidURL = MemeImageResolver.resolveLocalMediaURL(for: meme.uri),
+                       let data = try? Data(contentsOf: vidURL) {
+                        UIPasteboard.general.setData(data, forPasteboardType: "public.mpeg-4")
+                        coordinator.store.recordCopy(id: meme.id)
+                        copiedId = meme.id
+                    } else if let img = MemeImageResolver.loadUIImage(for: meme, fullResolution: true) {
+                        UIPasteboard.general.image = img
+                        coordinator.store.recordCopy(id: meme.id)
+                        copiedId = meme.id
+                    }
+                }) {
+                    Text(copiedId == meme.id ? "✓" : "⧉")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundColor(copiedId == meme.id ? MemegetPalette.bg : MemegetPalette.textPrimary)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
+                        .background(copiedId == meme.id ? MemegetPalette.volt : Color.black.opacity(0.65))
+                        .clipShape(Capsule())
+                }
             }
             .padding(5)
         }

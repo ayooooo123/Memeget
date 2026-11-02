@@ -35,24 +35,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.ArrowBack
-import androidx.compose.material.icons.filled.ArrowForward
-import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.Clear
-import androidx.compose.material.icons.filled.ContentCopy
-import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.FormatAlignCenter
-import androidx.compose.material.icons.filled.FormatAlignLeft
-import androidx.compose.material.icons.filled.FormatAlignRight
-import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.KeyboardArrowUp
-import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.RotateRight
-import androidx.compose.material.icons.filled.VolumeDown
-import androidx.compose.material.icons.filled.VolumeMute
-import androidx.compose.material.icons.filled.VolumeUp
+import com.memeget.nativeapp.ui.MemegetIcons
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -176,7 +159,7 @@ internal fun TextInspectorPanel(
                 onClick = onAddTextLayer,
                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFD8FF4A))
             ) {
-                Icon(Icons.Default.Add, contentDescription = null, tint = Color.Black)
+                Icon(MemegetIcons.Add, contentDescription = null, tint = Color.Black)
                 Spacer(modifier = Modifier.width(6.dp))
                 Text("Add Text Layer", color = Color.Black, fontWeight = FontWeight.Bold)
             }
@@ -313,7 +296,7 @@ internal fun TextInspectorPanel(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                listOf("left" to Icons.Default.FormatAlignLeft, "center" to Icons.Default.FormatAlignCenter, "right" to Icons.Default.FormatAlignRight).forEach { (align, icon) ->
+                listOf("left" to MemegetIcons.FormatAlignLeft, "center" to MemegetIcons.FormatAlignCenter, "right" to MemegetIcons.FormatAlignRight).forEach { (align, icon) ->
                     val selected = selectedLayer.style.align == align
                     IconButton(
                         onClick = { onUpdateLayer(selectedLayer.copy(style = selectedLayer.style.copy(align = align))) },
@@ -435,7 +418,7 @@ internal fun TextInspectorPanel(
                 modifier = Modifier.weight(1f),
                 colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White)
             ) {
-                Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
+                Icon(MemegetIcons.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
                 Spacer(modifier = Modifier.width(6.dp))
                 Text("Duplicate")
             }
@@ -445,7 +428,7 @@ internal fun TextInspectorPanel(
                 modifier = Modifier.weight(1f),
                 colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFFF5252))
             ) {
-                Icon(Icons.Default.Delete, contentDescription = null, modifier = Modifier.size(16.dp))
+                Icon(MemegetIcons.Delete, contentDescription = null, modifier = Modifier.size(16.dp))
                 Spacer(modifier = Modifier.width(6.dp))
                 Text("Delete")
             }
@@ -522,7 +505,7 @@ internal fun TransformInspectorPanel(
                 modifier = Modifier.weight(1f),
                 colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White)
             ) {
-                Icon(Icons.Default.RotateRight, contentDescription = null, modifier = Modifier.size(16.dp))
+                Icon(MemegetIcons.RotateRight, contentDescription = null, modifier = Modifier.size(16.dp))
                 Spacer(modifier = Modifier.width(6.dp))
                 Text("Rotate 90°")
             }
@@ -559,7 +542,7 @@ internal fun TransformInspectorPanel(
             modifier = Modifier.fillMaxWidth(),
             colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFF8B949E))
         ) {
-            Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+            Icon(MemegetIcons.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
             Spacer(modifier = Modifier.width(6.dp))
             Text("Reset Transform")
         }
@@ -1375,7 +1358,7 @@ internal fun SubjectCutoutToolPanel(
                 modifier = Modifier.fillMaxWidth(),
                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF3FB950))
             ) {
-                Icon(Icons.Default.Add, contentDescription = null, tint = Color.White)
+                Icon(MemegetIcons.Add, contentDescription = null, tint = Color.White)
                 Spacer(modifier = Modifier.width(6.dp))
                 Text("Add Cutout Sticker to Canvas", color = Color.White, fontWeight = FontWeight.Bold)
             }
@@ -1445,24 +1428,24 @@ internal fun LayersListPanel(
                         enabled = index > 0,
                         modifier = Modifier.size(28.dp)
                     ) {
-                        Icon(Icons.Default.KeyboardArrowUp, contentDescription = "Move up", tint = if (index > 0) Color.White else Color(0xFF484F58))
+                        Icon(MemegetIcons.KeyboardArrowUp, contentDescription = "Move up", tint = if (index > 0) Color.White else Color(0xFF484F58))
                     }
                     IconButton(
                         onClick = { if (index < layers.size - 1) onMoveLayer(layer.id, index + 1) },
                         enabled = index < layers.size - 1,
                         modifier = Modifier.size(28.dp)
                     ) {
-                        Icon(Icons.Default.KeyboardArrowDown, contentDescription = "Move down", tint = if (index < layers.size - 1) Color.White else Color(0xFF484F58))
+                        Icon(MemegetIcons.KeyboardArrowDown, contentDescription = "Move down", tint = if (index < layers.size - 1) Color.White else Color(0xFF484F58))
                     }
                     IconButton(
                         onClick = { onDuplicateLayer(layer.id) },
                         enabled = layers.size < ProjectLimits.MAX_LAYERS,
                         modifier = Modifier.size(28.dp)
                     ) {
-                        Icon(Icons.Default.ContentCopy, contentDescription = "Duplicate", tint = if (layers.size < ProjectLimits.MAX_LAYERS) Color.White else Color(0xFF484F58))
+                        Icon(MemegetIcons.ContentCopy, contentDescription = "Duplicate", tint = if (layers.size < ProjectLimits.MAX_LAYERS) Color.White else Color(0xFF484F58))
                     }
                     IconButton(onClick = { onDeleteLayer(layer.id) }, modifier = Modifier.size(28.dp)) {
-                        Icon(Icons.Default.Delete, contentDescription = "Delete", tint = Color(0xFFFF5252))
+                        Icon(MemegetIcons.Delete, contentDescription = "Delete", tint = Color(0xFFFF5252))
                     }
                 }
             }
@@ -1608,7 +1591,7 @@ internal fun VideoTimelinePanel(
                     )
                     if (retainedRanges.size > 1) {
                         IconButton(onClick = { onRemoveSegment(idx) }, modifier = Modifier.size(28.dp)) {
-                            Icon(Icons.Default.Delete, contentDescription = "Remove segment", tint = Color(0xFFFF5252))
+                            Icon(MemegetIcons.Delete, contentDescription = "Remove segment", tint = Color(0xFFFF5252))
                         }
                     }
                 }
@@ -1760,7 +1743,7 @@ internal fun VideoFrameStripPanel(
                     )
                 ) {
                     Icon(
-                        Icons.Default.ArrowBack,
+                        MemegetIcons.ArrowBack,
                         contentDescription = null,
                         tint = if (prevUs != null) Color.White else Color(0xFF484F58)
                     )
@@ -1779,7 +1762,7 @@ internal fun VideoFrameStripPanel(
                     Text("+1 Frame", color = if (nextUs != null) Color.White else Color(0xFF484F58))
                     Spacer(modifier = Modifier.width(4.dp))
                     Icon(
-                        Icons.Default.ArrowForward,
+                        MemegetIcons.ArrowForward,
                         contentDescription = null,
                         tint = if (nextUs != null) Color.White else Color(0xFF484F58)
                     )
@@ -2015,7 +1998,7 @@ internal fun VideoAudioToolPanel(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(if (audioSpec.muted) Icons.Default.VolumeMute else Icons.Default.VolumeUp, contentDescription = null, tint = Color.White)
+                Icon(if (audioSpec.muted) MemegetIcons.VolumeMute else MemegetIcons.VolumeUp, contentDescription = null, tint = Color.White)
                 Spacer(modifier = Modifier.width(8.dp))
                 Text("Mute Source Audio", color = Color.White, fontSize = 14.sp)
             }
@@ -2103,7 +2086,7 @@ internal fun VideoAudioToolPanel(
                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF21262D)),
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Icon(Icons.Default.Add, contentDescription = null, tint = Color.White)
+                Icon(MemegetIcons.Add, contentDescription = null, tint = Color.White)
                 Spacer(modifier = Modifier.width(6.dp))
                 Text("Select Music Track", color = Color.White)
             }
@@ -2112,7 +2095,7 @@ internal fun VideoAudioToolPanel(
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                     Text(musicSpec.uri.takeLast(30), color = Color.White, fontSize = 12.sp, modifier = Modifier.weight(1f))
                     IconButton(onClick = { onUpdateMusic(null) }) {
-                        Icon(Icons.Default.Delete, contentDescription = "Remove music", tint = Color(0xFFFF5252))
+                        Icon(MemegetIcons.Delete, contentDescription = "Remove music", tint = Color(0xFFFF5252))
                     }
                 }
                 Row(verticalAlignment = Alignment.CenterVertically) {

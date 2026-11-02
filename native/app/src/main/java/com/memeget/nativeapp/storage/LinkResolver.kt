@@ -1,5 +1,10 @@
 package com.memeget.nativeapp.storage
 
+import com.memeget.nativeapp.storage.ubit.UbitDownloader
+import com.memeget.nativeapp.storage.ubit.UbitExtractors
+import com.memeget.nativeapp.storage.ubit.UbitFormatSelector
+import com.memeget.nativeapp.storage.ubit.UbitHttpClient
+import com.memeget.nativeapp.storage.ubit.UbitMediaInfo
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
@@ -47,7 +52,8 @@ internal object LinkResolver {
     data class MediaRef(
         val url: String,
         val mimeType: String? = null,
-        val fileName: String? = null
+        val fileName: String? = null,
+        val ubitInfo: UbitMediaInfo? = null,
     )
 
     data class DownloadedMedia(
@@ -71,7 +77,7 @@ internal object LinkResolver {
             if (c.isNullOrBlank()) continue
             val m = URL_RE.matcher(c)
             if (m.find()) {
-                val candidate = m.group(1)?.replace(Regex("[)\\].,]+$"), "") ?: continue
+                val candidate = m.group(1)?.replace(Regex("[)\\].,!;]+$"), "") ?: continue
                 val sanitized = sanitizeUrl(candidate)
                 if (sanitized != null) return sanitized
             }
@@ -130,20 +136,33 @@ internal object LinkResolver {
     }
 
     private fun isShortlink(url: String): Boolean {
-        return Pattern.compile("""https?://t\.co/""", Pattern.CASE_INSENSITIVE).matcher(url).find()
+        return Pattern.compile(
+            """https?://(?:t\.co|vm\.tiktok\.com|vt\.tiktok\.com|redd\.it|dai\.ly|b23\.tv|pin\.it|xhslink\.com|fb\.watch|on\.soundcloud\.com)/""",
+            Pattern.CASE_INSENSITIVE
+        ).matcher(url).find()
     }
 
+    // Peels redirect wrappers off shortlinks (falling back to GET when CDNs block HEAD) before picking a site extractor.
     private fun unwrapShortlink(url: String, client: OkHttpClient): String {
         return try {
-            val req = Request.Builder()
-                .url(url)
-                .header("User-Agent", BROWSER_UA)
-                .head()
-                .build()
-            client.newCall(req).execute().use { resp ->
-                val finalUrl = resp.request.url.toString()
-                if (finalUrl.isNotBlank() && finalUrl != url) finalUrl else url
+            val noRedirect = client.newBuilder().followRedirects(false).followSslRedirects(false).build()
+            var current = url
+            for (hop in 0 until 6) {
+                if (!isShortlink(current) && hop > 0) break
+                val headReq = Request.Builder().url(current).header("User-Agent", BROWSER_UA).head().build()
+                var nextLoc = noRedirect.newCall(headReq).execute().use { resp ->
+                    if (resp.code in 300..399) resp.header("Location")?.let { absolutize(it, current) } else null
+                }
+                if (nextLoc == null) {
+                    val getReq = Request.Builder().url(current).header("User-Agent", BROWSER_UA).get().build()
+                    nextLoc = noRedirect.newCall(getReq).execute().use { resp ->
+                        if (resp.code in 300..399) resp.header("Location")?.let { absolutize(it, current) } else null
+                    }
+                }
+                if (nextLoc.isNullOrBlank() || nextLoc == current) break
+                current = nextLoc
             }
+            current
         } catch (_: Exception) {
             url
         }
@@ -162,7 +181,7 @@ internal object LinkResolver {
     }
 
     fun tweetId(url: String): String? {
-        val m = Pattern.compile("""(?:twitter|x)\.com/[^/]+/status(?:es)?/(\d+)""", Pattern.CASE_INSENSITIVE).matcher(url)
+        val m = Pattern.compile("""(?:(?:vx|fx)?twitter|x|fixupx)\.com/[^/]+/status(?:es)?/(\d+)""", Pattern.CASE_INSENSITIVE).matcher(url)
         return if (m.find()) m.group(1) else null
     }
 
@@ -406,6 +425,8 @@ internal object LinkResolver {
         return MediaRef(url = absolutize(decodeEntities(src), page), fileName = "imgflip_$id")
     }
 
+    // Routes Imgflip blank templates, Memedepot, Tenor, and raw static media directly, then hands every video/social
+    // platform over to uBit's 35-site extractor + HLS/DASH/MP4 muxer.
     fun resolveMediaRef(rawUrl: String, client: OkHttpClient = defaultClient): MediaRef {
         var url = sanitizeUrl(rawUrl) ?: throw IOException("Invalid web link: $rawUrl")
         if (isShortlink(url)) {
@@ -413,22 +434,77 @@ internal object LinkResolver {
         }
 
         return when {
-            MEDIA_EXT_RE.matcher(url).find() -> MediaRef(url = url)
-            isTwitter(url) -> resolveTwitter(url, client)
             Pattern.compile("""https?://(?:www\.)?imgflip\.com/""", Pattern.CASE_INSENSITIVE).matcher(url).find() ->
                 resolveImgflip(url, client)
             isTenor(url) -> resolveGeneric(url, client)
             isMemedepot(url) -> resolveMemedepot(url, client)
-            else -> resolveGeneric(url, client)
+            MEDIA_EXT_RE.matcher(url).find() -> MediaRef(url = url)
+            else -> resolveWithUbit(url, client)
         }
+    }
+
+    private fun resolveWithUbit(url: String, client: OkHttpClient): MediaRef {
+        val ubitClient = UbitHttpClient(okHttp = client)
+        val info = UbitExtractors.extract(url, ubitClient).copy(sessionCookies = ubitClient.snapshotCookies())
+        if (info.isDrm && info.formats.isEmpty()) {
+            throw IOException("This media is protected by DRM and can't be downloaded.")
+        }
+        if (info.isLive || (info.formats.isNotEmpty() && info.formats.all { it.isLive })) {
+            throw IOException("Live streams can't be saved as memes; share a clip or finished video link instead.")
+        }
+        if (info.formats.isEmpty() && !info.imageFallbackUrl.isNullOrBlank()) {
+            return MediaRef(
+                url = info.imageFallbackUrl,
+                mimeType = info.imageFallbackMime,
+                fileName = info.preferredFileStem,
+                ubitInfo = info,
+            )
+        }
+        val selected = UbitFormatSelector.select(
+            info.formats.filterNot { it.isLive }.ifEmpty { info.formats },
+            maxHeight = 1080,
+            preferCompatible = true,
+        )
+        val primaryMime = when (selected.primary.ext.lowercase(Locale.ROOT)) {
+            "webm" -> "video/webm"
+            "m4a" -> "audio/mp4"
+            "mp3" -> "audio/mpeg"
+            else -> "video/mp4"
+        }
+        return MediaRef(
+            url = selected.primary.url,
+            mimeType = primaryMime,
+            fileName = info.preferredFileStem,
+            ubitInfo = info,
+        )
+    }
+
+    fun downloadUrl(
+        rawUrl: String,
+        cacheDir: File,
+        client: OkHttpClient = defaultClient,
+        onProgress: ((downloadedBytes: Long, totalBytes: Long, stage: String) -> Unit)? = null,
+    ): DownloadedMedia {
+        onProgress?.invoke(0L, -1L, "Resolving link…")
+        return download(resolveMediaRef(rawUrl, client), cacheDir, client, onProgress)
     }
 
     fun download(
         ref: MediaRef,
         cacheDir: File,
-        client: OkHttpClient = defaultClient
+        client: OkHttpClient = defaultClient,
+        onProgress: ((downloadedBytes: Long, totalBytes: Long, stage: String) -> Unit)? = null,
     ): DownloadedMedia {
         cacheDir.mkdirs()
+        if (ref.ubitInfo != null && ref.ubitInfo.formats.isNotEmpty()) {
+            return UbitDownloader.download(
+                rawUrl = ref.ubitInfo.webpageUrl,
+                cacheDir = cacheDir,
+                okHttp = client,
+                preExtracted = ref.ubitInfo,
+                onProgress = onProgress,
+            )
+        }
         var mimeType = ref.mimeType ?: MediaIoUtils.mimeForName(ref.url)
         var ext = MediaIoUtils.extForMime(mimeType).ifBlank {
             MediaIoUtils.extOf(ref.url).ifBlank { "mp4" }
@@ -456,6 +532,7 @@ internal object LinkResolver {
             }
 
             val body = resp.body ?: throw IOException("Download body is empty")
+            val expectedLen = body.contentLength()
             val md = MessageDigest.getInstance("SHA-256")
             var totalBytes = 0L
 
@@ -471,6 +548,7 @@ internal object LinkResolver {
                         }
                         md.update(buffer, 0, read)
                         output.write(buffer, 0, read)
+                        onProgress?.invoke(totalBytes, expectedLen, "Downloading media…")
                     }
                 }
             }

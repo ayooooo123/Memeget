@@ -33,6 +33,8 @@ class MainActivity : ComponentActivity() {
     private var intakeError by mutableStateOf<String?>(null)
     private var incomingSearchQuery by mutableStateOf<String?>(null)
     private var handled = false
+    /** The last Settings import whose outcome was shown, so a screen rotation doesn't show it again. */
+    private var shownImport = 0L
     private var notificationsAsked = false
     private val notificationPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
 
@@ -41,6 +43,7 @@ class MainActivity : ComponentActivity() {
         if (BuildConfig.DEBUG) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         enableEdgeToEdge()
         handled = savedInstanceState?.getBoolean("intakeHandled") ?: false
+        shownImport = restoredShownImport(savedInstanceState?.getLong("shownImport"), graph.files.importStatus.value)
         // Rect tracking feeds only onLayoutRectChanged / onVisibilityChanged, which the app doesn't use, and it
         // re-measures every node under a layer whose transform changes: each frame of a canvas pinch or drag
         // re-walked every tile, about a third of the main thread on the 5a.
@@ -84,6 +87,18 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+        // A Settings import keeps running when Settings closes; its outcome shows on whatever screen is open.
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                graph.files.importStatus.collect { status ->
+                    val outcome = status.outcome
+                    if (status.running || outcome == null || status.id <= shownImport) return@collect
+                    shownImport = status.id
+                    if (status.failed) intakeError = outcome
+                    else Toast.makeText(this@MainActivity, outcome, Toast.LENGTH_LONG).show()
+                }
+            }
+        }
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -95,6 +110,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onSaveInstanceState(outState: Bundle) {
         outState.putBoolean("intakeHandled", handled)
+        outState.putLong("shownImport", shownImport)
         super.onSaveInstanceState(outState)
     }
 
@@ -111,37 +127,26 @@ class MainActivity : ComponentActivity() {
         if (incoming.action !in setOf(Intent.ACTION_SEND, Intent.ACTION_SEND_MULTIPLE)) return
         if (incoming.action == Intent.ACTION_SEND && incoming.type == "text/plain" && incoming.data == null && !incoming.hasExtra(Intent.EXTRA_STREAM)) {
             val sharedText = incoming.getStringExtra(Intent.EXTRA_TEXT)?.trim().orEmpty()
-            if (sharedText.isNotEmpty() && LinkResolver.extractUrl(sharedText) == null) {
+            val sharedSubject = incoming.getStringExtra(Intent.EXTRA_SUBJECT)?.trim().orEmpty()
+            if (sharedText.isNotEmpty() && LinkResolver.extractUrl(sharedText, sharedSubject) == null) {
                 handled = true
                 incomingSearchQuery = sharedText.take(400)
                 return
             }
         }
-        lifecycleScope.launch {
-            try {
-                val before = graph.store.countAll()
-                val ids = graph.files.importIntent(incoming)
-                handled = true
-                if (ids.isNotEmpty()) {
-                    val added = graph.store.countAll() - before
-                    Toast.makeText(this@MainActivity, intakeMessage(added, ids.distinct().size - added), Toast.LENGTH_LONG).show()
-                    graph.coordinator.start(ids)
-                }
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (failure: Exception) {
-                intakeError = failure.message ?: "The selected media could not be imported. Already saved items remain in the library."
-            }
+        handled = true
+        graph.files.startIntentIntake(incoming) { ids ->
+            graph.coordinator.start(ids)
         }
     }
+}
 
-    /** The original app's wording: a share that was all memes already here says so instead of "Saved 0". */
-    private suspend fun intakeMessage(added: Int, duplicates: Int): String {
-        if (added <= 0) {
-            return if (duplicates <= 1) "✓ Already in your library" else "✓ Already in your library ($duplicates duplicates)"
-        }
-        val place = graph.store.folders().firstOrNull()?.name?.let { "“$it”" } ?: "your library"
-        val note = if (duplicates > 0) " ($duplicates already saved)" else ""
-        return "✓ Saved $added to $place — indexing in background$note"
-    }
+/**
+ * The last Settings import whose outcome a new window should treat as shown. Import ids restart at 0 with the
+ * process while saved window state outlives it, so a saved id is capped at what this process has handed out. A new
+ * window still shows the outcome of an import that is running, but not one that already ended.
+ */
+internal fun restoredShownImport(saved: Long?, status: ImportStatus): Long {
+    val current = if (status.running) status.id - 1 else status.id
+    return minOf(saved ?: current, current)
 }

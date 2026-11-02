@@ -26,6 +26,19 @@
     <string>Memeget scans your photo library locally on your iPhone to organize memes for instant search without uploading your personal photos.</string>
     <key>NSPhotoLibraryAddUsageDescription</key>
     <string>Memeget saves exported memes to your photo library when requested.</string>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeRole</key>
+            <string>Editor</string>
+            <key>CFBundleURLName</key>
+            <string>com.memeget.iosapp.url</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>memeget</string>
+            </array>
+        </dict>
+    </array>
     <key>UIApplicationSceneManifest</key>
     <dict>
         <key>UIApplicationSupportsMultipleScenes</key>
