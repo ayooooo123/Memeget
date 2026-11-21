@@ -17,7 +17,6 @@ import androidx.annotation.OptIn
 import androidx.media3.common.Effect
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.audio.AudioProcessor
-import androidx.media3.common.audio.DefaultGainProvider
 import androidx.media3.common.audio.GainProcessor
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.effect.CanvasOverlay
@@ -177,6 +176,49 @@ internal object NativeVideoComposition {
             "No supported video output size for dimensions ${rawWidth}x${rawHeight} within encoder bounds (${maxW}x$maxH, align ${alignW}x$alignH, maxPx=$maxPx)"
         )
     }
+    /**
+     * Layers the overlay and cover passes read on every frame. The editor swaps them in place, so an edit
+     * that leaves [rebuildKey] unchanged shows on the next frame without rebuilding the player.
+     */
+    internal class LiveLayers(layers: List<MemeEditLayer>) {
+        @Volatile
+        var byId: Map<String, MemeEditLayer> = layers.associateBy { it.id }
+    }
+
+    /**
+     * What a prepared composition is built from. Everything else about a layer (text, position, keyframes,
+     * colours, drawn points, active range) is read live through [LiveLayers], and volumes through [LiveAudio].
+     */
+    fun rebuildKey(project: MemeEditProject): Any {
+        val video = project.video?.let { it.copy(audio = VideoAudioSpec(), music = it.music?.copy(volume = 1f)) }
+        return project.copy(layers = emptyList(), video = video) to project.layers.map { layer ->
+            when (layer) {
+                is MemeEditLayer.Text -> listOf("text", layer.id)
+                is MemeEditLayer.Draw -> listOf("draw", layer.id)
+                is MemeEditLayer.Subject -> listOf("subject", layer.id, layer.cutoutUri, layer.maskTrackId)
+                is MemeEditLayer.Media -> listOf("media", layer.id, layer.assetUri, layer.assetKind)
+                is MemeEditLayer.Cover -> {
+                    val modes = layer.corrections.map { it.mode } + layer.mode
+                    listOf("cover", layer.id, "pixelate" in modes, "remove" in modes, layer.patchUri, layer.maskUri)
+                }
+            }
+        }
+    }
+
+    /** The source's and the music's volume, changed in place like [LiveLayers]. */
+    internal class LiveAudio(video: VideoEditSpec) {
+        val source = LiveVolume(sourceLevel(video))
+        val music = LiveVolume(musicLevel(video))
+
+        fun update(video: VideoEditSpec) {
+            source.value = sourceLevel(video)
+            music.value = musicLevel(video)
+        }
+
+        private fun sourceLevel(video: VideoEditSpec) = if (video.audio.muted) 0f else video.audio.volume.coerceIn(0f, 2f)
+        private fun musicLevel(video: VideoEditSpec) = (video.music?.volume ?: 1f).coerceIn(0f, 2f)
+    }
+
     /** Media3 retains bitmap inputs until its render thread has released the composition. */
     internal class PreparedVideoComposition internal constructor(
         val composition: Composition,
@@ -184,20 +226,29 @@ internal object NativeVideoComposition {
         val outputHeight: Int,
         val durationUs: Long,
         private val compSegments: List<ProjectCore.CompositionSegment>,
-        private val speed: Float
+        private val speed: Float,
+        private val liveLayers: LiveLayers,
+        private val liveAudio: LiveAudio
     ) {
 
         fun outputToSourceTimeUs(outputUs: Long): Long? =
             ProjectCore.mapOutputTimeToSourceTime(outputUs, compSegments, speed)
 
         fun sourceToOutputTimeUs(sourceUs: Long): Long? =
-            mapSourceTimeToOutputTime(sourceUs, compSegments, speed)
+            ProjectCore.mapSourceTimeToOutputTime(sourceUs, compSegments, speed)
 
+        /** Only valid for a project with the same [rebuildKey] this composition was prepared from. */
+        fun updateLive(project: MemeEditProject) {
+            liveLayers.byId = project.layers.associateBy { it.id }
+            project.video?.let(liveAudio::update)
+        }
     }
 
     suspend fun prepare(
         context: Context,
-        project: MemeEditProject
+        project: MemeEditProject,
+        /** For the editor's player rather than an export; see [RetainedRangeComposition.buildTimeline]. */
+        forPlayer: Boolean
     ): PreparedVideoComposition = withContext(Dispatchers.IO) {
         val videoSpec = project.video
             ?: throw IllegalArgumentException("Project is not a video project")
@@ -348,6 +399,7 @@ internal object NativeVideoComposition {
 
             // Flush ordinary layers around each mosaic so a cover sees exactly the
             // layers below it. A later solid correction remains in the same z-order.
+            val liveLayers = LiveLayers(project.layers)
             val compositionVideoEffects = mutableListOf<Effect>()
             val overlayLayers = mutableListOf<MemeEditLayer>()
             fun flushOverlay() {
@@ -362,7 +414,8 @@ internal object NativeVideoComposition {
                     cutoutBitmaps = cutoutBitmaps,
                     mediaBitmaps = mediaBitmaps,
                     logoPatches = logoPatches,
-                    base = project.base
+                    base = project.base,
+                    liveLayers = liveLayers
                 )
                 overlay.setCanvasSize(outputWidth, outputHeight)
                 compositionVideoEffects.add(OverlayEffect(listOf(overlay)))
@@ -375,7 +428,8 @@ internal object NativeVideoComposition {
                     if ("pixelate" in modes) {
                         flushOverlay()
                         compositionVideoEffects.add(VideoPixelateEffect { outputUs, region ->
-                            val rect = coverRectAt(layer, outputUs, compSegments, videoSpec.speed, "pixelate")
+                            val live = liveLayers.byId[layer.id] as? MemeEditLayer.Cover ?: layer
+                            val rect = coverRectAt(live, outputUs, compSegments, videoSpec.speed, "pixelate")
                             if (rect == null) {
                                 false
                             } else {
@@ -383,7 +437,7 @@ internal object NativeVideoComposition {
                                 region.top = rect.y
                                 region.right = rect.x + rect.width
                                 region.bottom = rect.y + rect.height
-                                region.cellPx = layer.pixelSize.toFloat()
+                                region.cellPx = live.pixelSize.toFloat()
                                 true
                             }
                         })
@@ -392,7 +446,8 @@ internal object NativeVideoComposition {
                     if ("remove" in modes && layer.patchUri == null) {
                         flushOverlay()
                         compositionVideoEffects.add(VideoInpaintEffect(logoMasks[layer.id]) { outputUs, region ->
-                            val rect = coverRectAt(layer, outputUs, compSegments, videoSpec.speed, "remove")
+                            val live = liveLayers.byId[layer.id] as? MemeEditLayer.Cover ?: layer
+                            val rect = coverRectAt(live, outputUs, compSegments, videoSpec.speed, "remove")
                             if (rect == null) {
                                 false
                             } else {
@@ -409,15 +464,11 @@ internal object NativeVideoComposition {
             }
             flushOverlay()
 
-            val sourceGain = if (videoSpec.audio.muted) 0f else videoSpec.audio.volume.coerceIn(0f, 2f)
-            val audioProcessors: List<AudioProcessor> =
-                if (sourceGain == 1f) emptyList()
-                else listOf(GainProcessor(DefaultGainProvider.Builder(sourceGain).build()))
-
-            val musicUri = videoSpec.music?.uri
-            val musicVolume = (videoSpec.music?.volume ?: 1f).coerceIn(0f, 2f)
-            val musicStartUs = videoSpec.music?.startUs ?: 0L
-
+            val liveAudio = LiveAudio(videoSpec)
+            // Always present, even at 100%, so a volume change is heard without rebuilding.
+            val audioProcessors: List<AudioProcessor> = listOf(GainProcessor(LiveGain(liveAudio.source)))
+            val durationUs = RetainedRangeComposition.expectedOutputDurationUs(segments, videoSpec.speed)
+            val music = videoSpec.music?.let { spec -> musicTrack(context, spec, durationUs, liveAudio.music) }
 
             val composition = RetainedRangeComposition.buildTimeline(
                 uri = sourceUri,
@@ -429,13 +480,9 @@ internal object NativeVideoComposition {
                 audioProcessors = audioProcessors,
                 sourceVideoEffects = sourceVideoEffects,
                 videoEffects = compositionVideoEffects,
-                musicUri = musicUri,
-                musicVolume = musicVolume,
-                musicStartUs = musicStartUs
+                music = music,
+                forPlayer = forPlayer
             )
-
-
-            val durationUs = RetainedRangeComposition.expectedOutputDurationUs(segments, videoSpec.speed)
 
             PreparedVideoComposition(
                 composition = composition,
@@ -443,7 +490,9 @@ internal object NativeVideoComposition {
                 outputHeight = outputHeight,
                 durationUs = durationUs,
                 compSegments = compSegments,
-                speed = videoSpec.speed
+                speed = videoSpec.speed,
+                liveLayers = liveLayers,
+                liveAudio = liveAudio
             )
         } catch (error: Throwable) {
             for (bmp in retainedBitmaps) {
@@ -460,7 +509,7 @@ internal object NativeVideoComposition {
         exportId: String = "export_${System.currentTimeMillis()}",
         onProgress: (ExportProgress) -> Unit = {}
     ): ExportOutcome {
-        val prepared = prepare(context, project)
+        val prepared = prepare(context, project, forPlayer = false)
         val exportDir = File(context.cacheDir, "exports")
         if (!exportDir.exists()) exportDir.mkdirs()
         val outputFile = File(exportDir, "$exportId.mp4")
@@ -555,27 +604,13 @@ internal object NativeVideoComposition {
         return correction?.first ?: layer.rect
     }
 
-    private fun mapSourceTimeToOutputTime(
-        sourceTimeUs: Long,
-        segments: List<ProjectCore.CompositionSegment>,
-        speed: Float
-    ): Long? {
-        if (segments.isEmpty() || sourceTimeUs < 0L) return null
-        for (seg in segments) {
-            when (seg) {
-                is ProjectCore.CompositionSegment.Source -> {
-                    if (sourceTimeUs in seg.sourceStartUs..seg.sourceEndUs) {
-                        val srcOffset = sourceTimeUs - seg.sourceStartUs
-                        val outOffset = kotlin.math.round(srcOffset.toDouble() / speed.toDouble()).toLong()
-                        return seg.outputStartUs + outOffset
-                    }
-                }
-                is ProjectCore.CompositionSegment.Card -> Unit
-            }
-        }
-        return null
+    /** Null when none of the track would be heard. */
+    private fun musicTrack(context: Context, spec: VideoMusicSpec, videoDurationUs: Long, volume: LiveVolume): RetainedRangeComposition.Music? {
+        val trackUs = spec.durationUs?.takeIf { it > 0L } ?: probeAudioTrackUs(context, spec.uri)
+            ?: throw IOException("The music file has no sound")
+        val plan = MusicPlan.of(if (spec.durationUs == trackUs) spec else spec.copy(durationUs = trackUs), videoDurationUs) ?: return null
+        return RetainedRangeComposition.Music(spec.uri, trackUs, plan, volume)
     }
-
 
     private fun titleCardMime(declared: String, uri: String): String {
         if (declared in RetainedRangeComposition.CARD_MIME_TYPES) return declared
@@ -638,7 +673,8 @@ internal object NativeVideoComposition {
         private val cutoutBitmaps: Map<String, Bitmap>,
         private val mediaBitmaps: Map<String, Bitmap>,
         private val logoPatches: Map<String, LogoPatches>,
-        private val base: BaseTransform
+        private val base: BaseTransform,
+        private val liveLayers: LiveLayers
     ) : CanvasOverlay(/* useInputFrameSize= */ false) {
 
         private val clearPaint = Paint().apply {
@@ -665,7 +701,9 @@ internal object NativeVideoComposition {
             val sourceTimeUs = ProjectCore.mapOutputTimeToSourceTime(presentationTimeUs, segments, speed)
                 ?: return
 
-            for (layer in layers) {
+            val live = liveLayers.byId
+            for (prepared in layers) {
+                val layer = live[prepared.id] ?: prepared
                 if (!ProjectCore.isLayerActiveAt(layer, sourceTimeUs)) continue
                 when (layer) {
                     is MemeEditLayer.Cover -> {

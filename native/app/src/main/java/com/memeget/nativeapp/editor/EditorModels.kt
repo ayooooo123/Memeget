@@ -546,15 +546,36 @@ internal data class InsertedCard(
     }
 }
 
+/**
+ * A sound laid over the edited video. Times are in the edited video's own clock ([atUs], fades) or the track's
+ * ([startUs], [durationUs]); the video's speed never changes the track's tempo.
+ */
 internal data class VideoMusicSpec(
     val uri: String,
     val volume: Float = 1f,
-    val startUs: Long = 0L
+    /** In-point inside the track. */
+    val startUs: Long = 0L,
+    /** Edited-video time the track comes in at. */
+    val atUs: Long = 0L,
+    val fadeInUs: Long = 0L,
+    val fadeOutUs: Long = 0L,
+    /** Play again from the in-point when the track ends before the video does. */
+    val loop: Boolean = true,
+    /** Picked file's name; null for drafts made before names were kept. */
+    val name: String? = null,
+    /** Track length; null when unknown, which plays it as if it never ends. */
+    val durationUs: Long? = null
 ) {
     fun toJson(): JSONObject = JSONObject().apply {
         put("uri", uri)
         put("volume", volume.toDouble())
         put("startUs", startUs)
+        put("atUs", atUs)
+        put("fadeInUs", fadeInUs)
+        put("fadeOutUs", fadeOutUs)
+        put("loop", loop)
+        if (name != null) put("name", name)
+        if (durationUs != null) put("durationUs", durationUs)
     }
 
     companion object {
@@ -562,7 +583,13 @@ internal data class VideoMusicSpec(
             VideoMusicSpec(
                 uri = json.optString("uri", ""),
                 volume = json.optDouble("volume", 1.0).toFloat(),
-                startUs = json.optLong("startUs", 0L)
+                startUs = json.optLong("startUs", 0L),
+                atUs = json.optLong("atUs", 0L),
+                fadeInUs = json.optLong("fadeInUs", 0L),
+                fadeOutUs = json.optLong("fadeOutUs", 0L),
+                loop = json.optBoolean("loop", true),
+                name = if (json.has("name")) json.optString("name") else null,
+                durationUs = if (json.has("durationUs")) json.optLong("durationUs") else null
             )
     }
 }

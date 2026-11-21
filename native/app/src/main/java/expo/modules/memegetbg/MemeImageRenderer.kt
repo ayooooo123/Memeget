@@ -68,6 +68,16 @@ internal object MemeImageRenderer {
   // Match RenderPlanBuilder.MAX_MOSAIC_CELLS.
   private const val MAX_MOSAIC_CELLS = 65_536L
 
+  // Editor previews re-render on every edit; keep recent decodes instead of re-reading files each time.
+  // Export-sized decodes stay out so a 16 MP render does not pin a second large bitmap.
+  private const val DECODE_CACHE_BYTES = 32 * 1024 * 1024
+  private const val MAX_CACHED_DECODE_BYTES = 8 * 1024 * 1024
+  // shortcut: keyed by uri + target size, so a file rewritten in place at the same path shows stale until
+  // evicted; editor assets get fresh names, so add a modified-time to the key only if that changes.
+  private val decodeCache = object : android.util.LruCache<String, DecodedSource>(DECODE_CACHE_BYTES) {
+    override fun sizeOf(key: String, value: DecodedSource) = value.bitmap.allocationByteCount
+  }
+
   /**
    * Pixel budget for ONE decoded subject cutout.
    *
@@ -365,7 +375,7 @@ internal object MemeImageRenderer {
    * already draws through a Matrix, so the orientation rides along in that
    * draw and the copy never happens.
    */
-  private class DecodedSource(val bitmap: Bitmap, private val orientation: Int) {
+  private class DecodedSource(val bitmap: Bitmap, private val orientation: Int, private val shared: Boolean = false) {
     private val swapsAxes = orientation == ExifInterface.ORIENTATION_TRANSPOSE ||
       orientation == ExifInterface.ORIENTATION_ROTATE_90 ||
       orientation == ExifInterface.ORIENTATION_TRANSVERSE ||
@@ -401,7 +411,10 @@ internal object MemeImageRenderer {
       return matrix
     }
 
-    fun recycle() = bitmap.recycle()
+    // A cached decode is shared by later renders and left to the GC on eviction, never recycled.
+    fun recycle() {
+      if (!shared) bitmap.recycle()
+    }
   }
 
   private fun decodeSource(
@@ -411,6 +424,13 @@ internal object MemeImageRenderer {
     targetHeight: Double
   ): DecodedSource {
     val uri = readableUri(context, source)
+    // Keyed by the file's version, so an asset rewritten in place is decoded again. A content uri has no cheap,
+    // reliable version: it is decoded each time instead of cached.
+    val cacheKey = uri.path?.takeIf { uri.scheme == "file" }?.let { path ->
+      val file = File(path)
+      "$path|${file.lastModified()}|${file.length()}|${targetWidth.toLong()}x${targetHeight.toLong()}"
+    }
+    cacheKey?.let { decodeCache.get(it) }?.let { return it }
     val orientation = openStream(context, uri).use { input ->
       ExifInterface(input).getAttributeInt(
         ExifInterface.TAG_ORIENTATION,
@@ -436,7 +456,8 @@ internal object MemeImageRenderer {
         }
       )
     } ?: throw IOException("Could not decode $source")
-    return DecodedSource(decoded, orientation)
+    if (cacheKey == null || decoded.allocationByteCount > MAX_CACHED_DECODE_BYTES) return DecodedSource(decoded, orientation)
+    return DecodedSource(decoded, orientation, shared = true).also { decodeCache.put(cacheKey, it) }
   }
 
   /**

@@ -1,7 +1,6 @@
 package com.memeget.nativeapp.editor
 
 import android.content.Context
-import android.graphics.Bitmap
 import android.net.Uri
 import android.os.SystemClock
 import android.util.Log
@@ -46,6 +45,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -70,7 +70,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
-import java.io.FileOutputStream
 import java.io.IOException
 import java.util.UUID
 import kotlin.math.max
@@ -105,6 +104,11 @@ internal fun RemixStudio(
     var initialProject by remember { mutableStateOf<MemeEditProject?>(null) }
     var history by remember { mutableStateOf<ProjectHistory?>(null) }
     var sourceProbeResult by remember { mutableStateOf<MemeMediaProbe.Result?>(null) }
+    val panelMerge = remember { PanelEditMerger() }
+
+    fun panelEdit(control: String, action: ProjectAction) {
+        history = panelMerge.apply(checkNotNull(history), control, action, SystemClock.uptimeMillis())
+    }
 
 
     // Clean expired editor assets older than 8 days
@@ -159,8 +163,10 @@ internal fun RemixStudio(
         )
 
         val draftResult = DraftJournalStore.restoreDraft(context, sessionId, expectedIdentity)
-        if (draftResult.restored && draftResult.project != null && draftResult.project != defaultProj) {
-            loadingState = StudioLoadingState.PromptRestore(draftResult.project, defaultProj)
+        // Before the history exists, so the length the panels and the player share costs no undo step.
+        val restored = draftResult.project?.let { withContext(Dispatchers.IO) { withMusicLength(context, it) } }
+        if (draftResult.restored && restored != null && restored != defaultProj) {
+            loadingState = StudioLoadingState.PromptRestore(restored, defaultProj)
         } else {
             // A draft equal to a fresh project carries no edits; drop it instead of
             // ambushing the next open with a pointless restore prompt.
@@ -248,6 +254,18 @@ internal fun RemixStudio(
     var beforeMode by remember { mutableStateOf(false) }
     var playheadUs by remember { mutableLongStateOf(0L) }
     var isPlaying by remember { mutableStateOf(false) }
+    var scrubbing by remember { mutableStateOf(false) }
+    var trimPeekUs by remember { mutableStateOf<Long?>(null) }
+    val frameIndex by produceState<FrameTimelineIndex?>(null, activeProject.source.uri, activeProject.materializedSourceUri) {
+        if (activeProject.source.kind != MediaEditKind.VIDEO) return@produceState
+        value = try {
+            FrameTimelineIndex.load(context, activeProject.materializedSourceUri ?: activeProject.source.uri)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            null // Frame stepping falls back to 1/30 s and scrubs stay unsnapped.
+        }
+    }
     var drawSettings by remember { mutableStateOf(DrawSettings()) }
     var drawOpacity by remember { mutableFloatStateOf(1f) }
     var manualOcrMode by remember { mutableStateOf(false) }
@@ -328,6 +346,7 @@ internal fun RemixStudio(
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (failure: Exception) {
+                Log.w("RemixStudio", "Export failed", failure)
                 Toast.makeText(context, "Export failed: ${failure.message}", Toast.LENGTH_LONG).show()
             } finally {
                 withContext(NonCancellable + Dispatchers.IO) { renderedFile?.delete() }
@@ -550,6 +569,9 @@ internal fun RemixStudio(
                 .weight(1f)
                 .fillMaxWidth()
         ) {
+            val isVideoProject = activeProject.source.kind == MediaEditKind.VIDEO
+            val inCut = isVideoProject && !isPlaying &&
+                TimelineEdits.rangeIndexAt(TimelineEdits.ranges(activeProject), playheadUs) == null
             StudioCanvas(
                 project = activeProject,
                 playheadUs = playheadUs,
@@ -561,6 +583,9 @@ internal fun RemixStudio(
                 manualOcrRegion = if (manualOcrMode) manualOcrRegion else null,
                 isPlaying = isPlaying,
                 onTogglePlayback = { isPlaying = !isPlaying },
+                peekSourceUs = trimPeekUs ?: playheadUs.takeIf { inCut },
+                peekLabel = if (trimPeekUs != null) "Trim" else "Cut — not in the export",
+                scrubbing = scrubbing,
                 onSeekPlayhead = { playheadUs = it },
                 onBeginTransaction = { history = beginProjectTransaction(checkNotNull(history)) },
                 onCommitTransaction = { history = commitProjectTransaction(checkNotNull(history)) },
@@ -646,7 +671,10 @@ internal fun RemixStudio(
                     TextInspectorPanel(
                         selectedLayer = sel,
                         onUpdateLayer = { updated ->
-                            history = applyProjectAction(currentHistory, ProjectAction.UpdateLayer(updated))
+                            history = applyProjectAction(checkNotNull(history), ProjectAction.UpdateLayer(updated))
+                        },
+                        onLiveUpdate = { control, updated ->
+                            panelEdit("layer:${updated.id}:$control", ProjectAction.UpdateLayer(updated))
                         },
                         onAddTextLayer = {
                             val nextId = "text_${System.currentTimeMillis()}"
@@ -694,7 +722,7 @@ internal fun RemixStudio(
                             drawOpacity = newOp
                             val drawLayer = activeProject.layers.find { it is MemeEditLayer.Draw } as? MemeEditLayer.Draw
                             if (drawLayer != null) {
-                                history = applyProjectAction(currentHistory, ProjectAction.SetDrawOpacity(drawLayer.id, newOp))
+                                panelEdit("draw-opacity:${drawLayer.id}", ProjectAction.SetDrawOpacity(drawLayer.id, newOp))
                             }
                         },
                         onUndoLast = {
@@ -975,71 +1003,53 @@ internal fun RemixStudio(
                     VideoTimelinePanel(
                         project = activeProject,
                         playheadUs = playheadUs,
-                        onScrubPlayhead = { playheadUs = it },
-                        onSplitAtPlayhead = {
-                            val duration = activeProject.source.durationUs ?: 1_000_000L
-                            val ranges = activeProject.video?.retainedRanges ?: listOf(TimeRangeUs(0L, duration))
-                            val nextRanges = mutableListOf<TimeRangeUs>()
-                            for (r in ranges) {
-                                if (playheadUs > r.startUs + 50_000L && playheadUs < r.endUs - 50_000L) {
-                                    nextRanges.add(TimeRangeUs(r.startUs, playheadUs))
-                                    nextRanges.add(TimeRangeUs(playheadUs, r.endUs))
-                                } else {
-                                    nextRanges.add(r)
+                        frameIndex = frameIndex,
+                        selectedLayer = activeProject.layers.find { it.id == selectedLayerId },
+                        onSeek = { playheadUs = it },
+                        onScrubbing = { active ->
+                            if (active) isPlaying = false
+                            scrubbing = active
+                        },
+                        onTrimPeek = { trimPeekUs = it },
+                        onSetRanges = { ranges ->
+                            history = applyProjectAction(checkNotNull(history), ProjectAction.SetVideoRanges(ranges))
+                        },
+                        onUpdateLayer = { updated ->
+                            history = applyProjectAction(checkNotNull(history), ProjectAction.UpdateLayer(updated))
+                        },
+                        onAddCard = { text, bgColor, durUs ->
+                            val project = activeProject
+                            val atUs = ProjectCore.sourceTimeToOutputTimeUs(
+                                playheadUs, TimelineEdits.ranges(project), project.video?.speed ?: 1f
+                            )
+                            if (atUs != null) {
+                                scope.launch {
+                                    try {
+                                        val uri = withContext(Dispatchers.IO) { TitleCards.render(context, project, text, bgColor) }
+                                        val card = InsertedCard(uri = uri.toString(), atUs = atUs, durationUs = durUs)
+                                        history = applyProjectAction(checkNotNull(history), ProjectAction.AddInsertedCard(card))
+                                    } catch (cancelled: CancellationException) {
+                                        throw cancelled
+                                    } catch (e: Exception) {
+                                        Toast.makeText(context, "Could not make the card: ${e.message}", Toast.LENGTH_LONG).show()
+                                    }
                                 }
                             }
-                            history = applyProjectAction(currentHistory, ProjectAction.SetVideoRanges(nextRanges))
                         },
-                        onTrimRange = { idx, start, end ->
-                            val ranges = activeProject.video?.retainedRanges?.toMutableList() ?: mutableListOf()
-                            if (idx in ranges.indices) {
-                                ranges[idx] = TimeRangeUs(start, end)
-                                history = applyProjectAction(currentHistory, ProjectAction.SetVideoRanges(ranges))
-                            }
+                        onRemoveCard = { index ->
+                            history = applyProjectAction(checkNotNull(history), ProjectAction.RemoveInsertedCard(index))
                         },
-                        onRemoveSegment = { idx ->
-                            val ranges = activeProject.video?.retainedRanges?.toMutableList() ?: mutableListOf()
-                            if (idx in ranges.indices && ranges.size > 1) {
-                                ranges.removeAt(idx)
-                                history = applyProjectAction(currentHistory, ProjectAction.SetVideoRanges(ranges))
-                            }
-                        },
-                        onAddCardWithContent = { text, bgColor, durUs ->
-                            val cardFile = File(context.cacheDir, "card_${System.currentTimeMillis()}.png")
-                            val bmp = Bitmap.createBitmap(800, 600, Bitmap.Config.ARGB_8888)
-                            val canvas = android.graphics.Canvas(bmp)
-                            val bgPaint = android.graphics.Paint().apply {
-                                color = try { android.graphics.Color.parseColor(bgColor) } catch (_: Exception) { android.graphics.Color.BLACK }
-                                style = android.graphics.Paint.Style.FILL
-                            }
-                            canvas.drawRect(0f, 0f, 800f, 600f, bgPaint)
-                            val textPaint = android.text.TextPaint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
-                                color = android.graphics.Color.WHITE
-                                textSize = 52f
-                                textAlign = android.graphics.Paint.Align.CENTER
-                            }
-                            canvas.drawText(text, 400f, 320f, textPaint)
-                            FileOutputStream(cardFile).use { out ->
-                                bmp.compress(Bitmap.CompressFormat.PNG, 100, out)
-                            }
-                            bmp.recycle()
-                            val card = InsertedCard(
-                                uri = cardFile.toURI().toString(),
-                                atUs = playheadUs,
-                                durationUs = durUs
+                        onMusicAtPlayhead = {
+                            val project = activeProject
+                            val music = project.video?.music
+                            val atUs = ProjectCore.mapSourceTimeToOutputTime(
+                                playheadUs, TimelineEdits.segments(project), project.video?.speed ?: 1f
                             )
-                            history = applyProjectAction(currentHistory, ProjectAction.AddInsertedCard(card))
-                            Toast.makeText(context, "Title card added", Toast.LENGTH_SHORT).show()
-                        }
-                    )
-                }
-                "frames" -> {
-                    VideoFrameStripPanel(
-                        playheadUs = playheadUs,
-                        durationUs = activeProject.source.durationUs ?: 1_000_000L,
-                        sourceUri = activeProject.materializedSourceUri ?: activeProject.source.uri,
-                        sourceFrameRate = sourceProbeResult?.frameRate,
-                        onSeekFrame = { playheadUs = it }
+                            if (music != null && atUs != null) {
+                                history = applyProjectAction(checkNotNull(history), ProjectAction.SetVideoMusic(music.copy(atUs = atUs)))
+                            }
+                        },
+                        onOpenAudio = { activeTool = "audio" }
                     )
                 }
                 "motion" -> {
@@ -1067,25 +1077,40 @@ internal fun RemixStudio(
                             }
                         },
                         onUpdateLayer = { updated ->
-                            history = applyProjectAction(currentHistory, ProjectAction.UpdateLayer(updated))
+                            history = applyProjectAction(checkNotNull(history), ProjectAction.UpdateLayer(updated))
                         },
                         onSeekPlayhead = { playheadUs = it }
                     )
                 }
                 "audio" -> {
-                    val videoSpec = activeProject.video ?: VideoEditSpec()
-                    VideoAudioToolPanel(
-                        audioSpec = videoSpec.audio,
-                        speed = videoSpec.speed,
-                        musicSpec = videoSpec.music,
+                    VideoAudioPanel(
+                        project = activeProject,
+                        playheadUs = playheadUs,
                         onUpdateAudio = { newAudio ->
-                            history = applyProjectAction(currentHistory, ProjectAction.SetVideoAudio(newAudio.muted, newAudio.volume))
+                            history = applyProjectAction(checkNotNull(history), ProjectAction.SetVideoAudio(newAudio.muted, newAudio.volume))
+                        },
+                        onLiveAudio = { newAudio ->
+                            panelEdit("audio:volume", ProjectAction.SetVideoAudio(newAudio.muted, newAudio.volume))
                         },
                         onUpdateSpeed = { newSpeed ->
-                            history = applyProjectAction(currentHistory, ProjectAction.SetVideoSpeed(newSpeed))
+                            history = applyProjectAction(checkNotNull(history), ProjectAction.SetVideoSpeed(newSpeed))
                         },
                         onUpdateMusic = { newMusic ->
-                            history = applyProjectAction(currentHistory, ProjectAction.SetVideoMusic(newMusic))
+                            history = applyProjectAction(checkNotNull(history), ProjectAction.SetVideoMusic(newMusic))
+                        },
+                        onLiveMusic = { control, newMusic ->
+                            panelEdit("music:$control", ProjectAction.SetVideoMusic(newMusic))
+                        },
+                        onHearMusic = {
+                            val project = activeProject
+                            val segments = TimelineEdits.segments(project)
+                            val entryUs = project.video?.music?.atUs ?: 0L
+                            // The music may come in during a title card; start at the next frame of the clip.
+                            val sourceUs = segments.filterIsInstance<ProjectCore.CompositionSegment.Source>()
+                                .firstOrNull { it.outputEndUs > entryUs }
+                                ?.let { ProjectCore.mapOutputTimeToSourceTime(maxOf(entryUs, it.outputStartUs), segments, project.video?.speed ?: 1f) }
+                            if (sourceUs != null) playheadUs = sourceUs
+                            isPlaying = true
                         }
                     )
                 }
@@ -1104,13 +1129,12 @@ internal fun RemixStudio(
             val tools = if (activeProject.source.kind == MediaEditKind.VIDEO) {
                 listOf(
                     Pair("timeline", "⏱ Timeline"),
-                    Pair("frames", "⊞ Frames"),
+                    Pair("audio", "♪ Sound"),
+                    Pair("text", "A Text"),
+                    Pair("motion", "➚ Motion"),
+                    Pair("draw", "✎ Draw"),
                     Pair("transform", "⌗ Crop"),
                     Pair("remove", "⌫ Remove logo"),
-                    Pair("text", "A Text"),
-                    Pair("draw", "✎ Draw"),
-                    Pair("motion", "➚ Motion"),
-                    Pair("audio", "♪ Audio"),
                     Pair("layers", "▤ Layers")
                 )
             } else {

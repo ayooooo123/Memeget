@@ -8,7 +8,6 @@ val mediaSource = rootProject.file("../modules/memeget-bg/android/src/main")
 val reusableMediaFiles = listOf(
     "AudioExtractor.kt", "VideoFrameExtractor.kt",
     "MemeMediaProbe.kt", "MemeMediaEditor.kt",
-    "MemeVideoExporter.kt", "VideoExportPlan.kt",
     "MemeDynamicOverlay.kt", "MemeDrawPrimitives.kt", "MemeDrawPreviewView.kt",
     "MemeTextLayout.kt", "MemeTextDetector.kt", "MemeStillSubjectSegmenter.kt",
     "KeepAliveLease.kt", "KeepAliveService.kt", "MemeClipFileProvider.kt",
@@ -125,6 +124,8 @@ dependencies {
     implementation("androidx.documentfile:documentfile:1.1.0")
     implementation("androidx.media3:media3-exoplayer:1.9.0")
     implementation("androidx.media3:media3-ui:1.9.0")
+    // Already pulled in by transformer; declared because the editor reads per-track lengths with its MediaExtractorCompat.
+    implementation("androidx.media3:media3-inspector:1.9.0")
     // MemeDynamicOverlay uses BitmapOverlay, never LottieOverlay; strip Lottie + AppCompat + Fragment transitive bloat.
     implementation("androidx.media3:media3-transformer:1.9.0") {
         exclude(group = "com.airbnb.android", module = "lottie")

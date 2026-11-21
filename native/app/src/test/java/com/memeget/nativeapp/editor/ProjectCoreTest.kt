@@ -2,6 +2,7 @@ package com.memeget.nativeapp.editor
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -186,6 +187,146 @@ class ProjectCoreTest {
         history = undoProjectHistory(history)
         assertEquals(QuarterRotation.R0, history.present.base.rotation)
     }
+
+    @Test
+    fun panelEditsMergeOnlyWithinOneControlBurst() {
+        val source = MemeEditSource("file://test.png", "test.png", MediaEditKind.IMAGE, 100, 100)
+        var layer = MemeEditLayer.Text(id = "t1", text = "", fontSize = 0.10f, width = 0.50f)
+        var history = createProjectHistory(ProjectCore.createDefaultImageProject(source).copy(layers = listOf(layer)))
+        val merger = PanelEditMerger(windowMs = 750L)
+        fun edit(control: String, updated: MemeEditLayer.Text, atMs: Long) {
+            layer = updated
+            history = merger.apply(history, control, ProjectAction.UpdateLayer(updated), atMs)
+        }
+        fun present() = history.present.layers.single() as MemeEditLayer.Text
+
+        // A first tick that changes nothing must not fold the real change into the older layer-add step.
+        history = applyProjectAction(history, ProjectAction.UpdateLayer(layer.copy(text = "added")))
+        layer = present()
+        edit("size", layer, -32L)
+        edit("size", layer.copy(fontSize = 0.105f), -16L)
+        history = undoProjectHistory(history)
+        assertEquals("added", present().text)
+        assertEquals(0.10f, present().fontSize, 0.0001f)
+        history = undoProjectHistory(history)
+        layer = present()
+
+        // A Size drag, then Width moved straight after: two steps, so one undo cannot erase both.
+        edit("size", layer.copy(fontSize = 0.11f), 0L)
+        edit("size", layer.copy(fontSize = 0.12f), 16L)
+        edit("width", layer.copy(width = 0.60f), 32L)
+        assertEquals(2, history.past.size)
+        history = undoProjectHistory(history)
+        assertEquals(0.50f, present().width, 0.0001f)
+        assertEquals(0.12f, present().fontSize, 0.0001f)
+        history = undoProjectHistory(history)
+        assertEquals(0.10f, present().fontSize, 0.0001f)
+
+        // After an undo the same control starts a fresh step instead of rewriting the restored state.
+        layer = present()
+        edit("size", layer.copy(fontSize = 0.15f), 48L)
+        history = undoProjectHistory(history)
+        assertEquals(0.10f, present().fontSize, 0.0001f)
+
+        // A pause longer than the window splits one control into two steps.
+        layer = present()
+        edit("text", layer.copy(text = "he"), 1_000L)
+        edit("text", layer.copy(text = "hello"), 1_100L)
+        edit("text", layer.copy(text = "hello there"), 2_000L)
+        history = undoProjectHistory(history)
+        assertEquals("hello", present().text)
+        history = undoProjectHistory(history)
+        assertEquals("", present().text)
+    }
+
+    private class SizeSession {
+        val merger = PanelEditMerger(windowMs = 750L)
+        var history = createProjectHistory(
+            ProjectCore.createDefaultImageProject(MemeEditSource("file://test.png", "test.png", MediaEditKind.IMAGE, 100, 100))
+                .copy(layers = listOf(MemeEditLayer.Text(id = "t1", text = "hi", fontSize = 0.12f)))
+        )
+        val layer get() = history.present.layers.single() as MemeEditLayer.Text
+
+        fun size(value: Float, atMs: Long) {
+            history = merger.apply(history, "layer:t1:size", ProjectAction.UpdateLayer(layer.copy(fontSize = value)), atMs)
+        }
+    }
+
+    @Test
+    fun undoingAnActionBetweenTwoSizeDragsKeepsTheFirstDragItsOwnStep() {
+        val s = SizeSession()
+        s.size(0.16f, 1_000L)
+        s.history = applyProjectAction(s.history, ProjectAction.UpdateLayer(s.layer.copy(style = s.layer.style.copy(align = "left"))))
+        // Undo brings back the very project object the first Size drag left behind.
+        s.history = undoProjectHistory(s.history)
+        s.size(0.20f, 1_500L)
+
+        s.history = undoProjectHistory(s.history)
+
+        assertEquals(0.16f, s.layer.fontSize, 0.0001f)
+    }
+
+    @Test
+    fun undoThenRedoEndsASizeDragsUndoStep() {
+        val s = SizeSession()
+        s.size(0.16f, 1_000L)
+        s.history = redoProjectHistory(undoProjectHistory(s.history))
+        s.size(0.20f, 1_500L)
+
+        s.history = undoProjectHistory(s.history)
+
+        assertEquals(0.16f, s.layer.fontSize, 0.0001f)
+    }
+
+    @Test
+    fun cancelingACanvasGestureKeepsRedoAfterASliderBurstDuringIt() {
+        val s = SizeSession()
+        s.size(0.16f, 1_000L)
+        s.history = undoProjectHistory(s.history)
+        s.history = beginProjectTransaction(s.history)
+        s.size(0.18f, 2_000L)
+        s.size(0.20f, 2_100L)
+
+        s.history = redoProjectHistory(cancelProjectTransaction(s.history))
+
+        assertEquals(0.16f, s.layer.fontSize, 0.0001f)
+    }
+
+    @Test
+    fun aSizeBurstBackToItsStartLeavesNoUndoStepAndTheNextTickGetsItsOwn() {
+        val s = SizeSession()
+        s.history = applyProjectAction(s.history, ProjectAction.UpdateLayer(s.layer.copy(text = "typed")))
+        s.size(0.16f, 1_000L)
+        s.size(0.12f, 1_100L)
+        assertEquals(1, s.history.past.size)
+
+        s.size(0.20f, 1_200L)
+        s.history = undoProjectHistory(s.history)
+
+        assertEquals(0.12f, s.layer.fontSize, 0.0001f)
+        assertEquals("typed", s.layer.text)
+    }
+
+    @Test
+    fun videoRebuildKeyIgnoresOverlayEditsButNotStructure() {
+        val source = MemeEditSource("file://clip.mp4", "clip.mp4", MediaEditKind.VIDEO, 1000, 500, 2_000_000L)
+        val caption = MemeEditLayer.Text(id = "caption", text = "A")
+        val cover = MemeEditLayer.Cover(id = "c1", rect = NormalizedRect(0.1f, 0.1f, 0.2f, 0.2f))
+        val project = ProjectCore.createDefaultVideoProject(source).copy(layers = listOf(caption, cover))
+        val key = NativeVideoComposition.rebuildKey(project)
+
+        // Overlay edits: the running composition reads these live.
+        val moved = project.copy(layers = listOf(
+            caption.copy(text = "B", keyframes = listOf(TransformKeyframe(center = NormalizedPoint(0.2f, 0.8f)))),
+            cover.copy(rect = NormalizedRect(0.5f, 0.5f, 0.2f, 0.2f))
+        ))
+        assertEquals(key, NativeVideoComposition.rebuildKey(moved))
+
+        // Structural edits: a pixelate pass, a new layer, or a crop each need a new composition.
+        assertNotEquals(key, NativeVideoComposition.rebuildKey(project.copy(layers = listOf(caption, cover.copy(mode = "pixelate")))))
+        assertNotEquals(key, NativeVideoComposition.rebuildKey(project.copy(layers = listOf(caption, cover, caption.copy(id = "c2")))))
+        assertNotEquals(key, NativeVideoComposition.rebuildKey(project.copy(base = project.base.copy(crop = NormalizedRect(0f, 0f, 0.5f, 0.5f)))))
+    }
     @Test
     fun testPreserveTouchingRangesOnSplit() {
         // Splitting a 0..2s range at 1s produces two touching ranges: [0..1s] and [1s..2s]
@@ -244,6 +385,13 @@ class ProjectCoreTest {
         assertNull(ProjectCore.mapOutputTimeToSourceTime(2_000_000L, segments, speed))
         // At output 4s (1s into second piece: 1s + 1s = 2s) -> source 2s
         assertEquals(2_000_000L, ProjectCore.mapOutputTimeToSourceTime(4_000_000L, segments, speed))
+        // Boundaries are half-open: the card starts at output 1s and the clip resumes at output 3s.
+        assertNull(ProjectCore.mapOutputTimeToSourceTime(1_000_000L, segments, speed))
+        assertEquals(1_000_000L, ProjectCore.mapOutputTimeToSourceTime(3_000_000L, segments, speed))
+        assertEquals(3_000_000L, ProjectCore.mapSourceTimeToOutputTime(1_000_000L, segments, speed))
+        // The video's end still maps both ways.
+        assertEquals(4_000_000L, ProjectCore.mapOutputTimeToSourceTime(6_000_000L, segments, speed))
+        assertEquals(6_000_000L, ProjectCore.mapSourceTimeToOutputTime(4_000_000L, segments, speed))
     }
 
     @Test

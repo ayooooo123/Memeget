@@ -12,7 +12,6 @@ import java.io.FileOutputStream
 import java.io.IOException
 import java.util.UUID
 import android.net.Uri
-import android.widget.Toast
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import androidx.compose.foundation.background
@@ -36,7 +35,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import com.memeget.nativeapp.ui.MemegetIcons
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -50,8 +48,6 @@ import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -110,18 +106,17 @@ internal object EditorAssetStorage {
         old.forEach { if (!drafts.contains(it.name)) it.deleteRecursively() }
     }
 
+    /** The picked file's own name, for showing it; null when the provider gives none. */
+    fun displayName(context: Context, uri: Uri): String? = try {
+        context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst()) cursor.getString(0) else null
+        }
+    } catch (_: Exception) {
+        null
+    }
+
     private fun getFileExtension(context: Context, uri: Uri): String {
-        var ext: String? = null
-        try {
-            context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
-                if (cursor.moveToFirst()) {
-                    val name = cursor.getString(0)
-                    if (name != null && name.contains(".")) {
-                        ext = name.substringAfterLast('.').lowercase()
-                    }
-                }
-            }
-        } catch (_: Exception) {}
+        var ext: String? = displayName(context, uri)?.takeIf { it.contains(".") }?.substringAfterLast('.')?.lowercase()
         if (ext.isNullOrBlank()) {
             val type = context.contentResolver.getType(uri)
             if (type != null) {
@@ -141,6 +136,8 @@ internal object EditorAssetStorage {
 internal fun TextInspectorPanel(
     selectedLayer: MemeEditLayer.Text?,
     onUpdateLayer: (MemeEditLayer.Text) -> Unit,
+    /** Continuous controls (typing, sliders); quick repeats on one control undo as one step. */
+    onLiveUpdate: (control: String, MemeEditLayer.Text) -> Unit,
     onAddTextLayer: () -> Unit,
     onDuplicateLayer: () -> Unit,
     onDeleteLayer: () -> Unit,
@@ -207,7 +204,7 @@ internal fun TextInspectorPanel(
         // Text Input Field
         OutlinedTextField(
             value = selectedLayer.text,
-            onValueChange = { onUpdateLayer(selectedLayer.copy(text = it)) },
+            onValueChange = { onLiveUpdate("text", selectedLayer.copy(text = it)) },
             label = { Text("Meme Text") },
             modifier = Modifier.fillMaxWidth(),
             colors = OutlinedTextFieldDefaults.colors(
@@ -253,7 +250,7 @@ internal fun TextInspectorPanel(
             Text("Outline", color = Color.White, fontSize = 13.sp, modifier = Modifier.width(60.dp))
             Slider(
                 value = selectedLayer.style.outlineScale,
-                onValueChange = { onUpdateLayer(selectedLayer.copy(style = selectedLayer.style.copy(outlineScale = it))) },
+                onValueChange = { onLiveUpdate("outline", selectedLayer.copy(style = selectedLayer.style.copy(outlineScale = it))) },
                 valueRange = 0f..0.5f,
                 modifier = Modifier.weight(1f),
                 colors = SliderDefaults.colors(thumbColor = Color(0xFFD8FF4A), activeTrackColor = Color(0xFFD8FF4A))
@@ -266,7 +263,7 @@ internal fun TextInspectorPanel(
             Text("Size", color = Color.White, fontSize = 13.sp, modifier = Modifier.width(60.dp))
             Slider(
                 value = selectedLayer.fontSize,
-                onValueChange = { onUpdateLayer(selectedLayer.copy(fontSize = it)) },
+                onValueChange = { onLiveUpdate("size", selectedLayer.copy(fontSize = it)) },
                 valueRange = ProjectLimits.MIN_FONT_SIZE..ProjectLimits.MAX_FONT_SIZE,
                 modifier = Modifier.weight(1f),
                 colors = SliderDefaults.colors(thumbColor = Color(0xFFD8FF4A), activeTrackColor = Color(0xFFD8FF4A))
@@ -279,7 +276,7 @@ internal fun TextInspectorPanel(
             Text("Width", color = Color.White, fontSize = 13.sp, modifier = Modifier.width(60.dp))
             Slider(
                 value = selectedLayer.width,
-                onValueChange = { onUpdateLayer(selectedLayer.copy(width = it)) },
+                onValueChange = { onLiveUpdate("width", selectedLayer.copy(width = it)) },
                 valueRange = ProjectLimits.MIN_TEXT_WRAP_WIDTH..ProjectLimits.MAX_TEXT_WRAP_WIDTH,
                 modifier = Modifier.weight(1f),
                 colors = SliderDefaults.colors(thumbColor = Color(0xFFD8FF4A), activeTrackColor = Color(0xFFD8FF4A))
@@ -374,7 +371,7 @@ internal fun TextInspectorPanel(
             Text("Opacity", color = Color.White, fontSize = 13.sp, modifier = Modifier.width(60.dp))
             Slider(
                 value = selectedLayer.style.opacity,
-                onValueChange = { onUpdateLayer(selectedLayer.copy(style = selectedLayer.style.copy(opacity = it))) },
+                onValueChange = { onLiveUpdate("opacity", selectedLayer.copy(style = selectedLayer.style.copy(opacity = it))) },
                 valueRange = 0f..1f,
                 modifier = Modifier.weight(1f),
                 colors = SliderDefaults.colors(thumbColor = Color(0xFFD8FF4A), activeTrackColor = Color(0xFFD8FF4A))
@@ -708,6 +705,8 @@ internal fun DrawToolPanel(
                 Text("Clear All")
             }
         }
+        Spacer(modifier = Modifier.height(8.dp))
+        Text("Tap a shape to move it; drag its corner dot to resize.", color = Color(0xFF8B949E), fontSize = 11.sp)
     }
 }
 
@@ -1454,326 +1453,6 @@ internal fun LayersListPanel(
 }
 
 @Composable
-internal fun VideoTimelinePanel(
-    project: MemeEditProject,
-    playheadUs: Long,
-    onScrubPlayhead: (Long) -> Unit,
-    onSplitAtPlayhead: () -> Unit,
-    onTrimRange: (Int, Long, Long) -> Unit,
-    onRemoveSegment: (Int) -> Unit,
-    onAddCardWithContent: (String, String, Long) -> Unit,
-    modifier: Modifier = Modifier
-) {
-    val durationUs = project.source.durationUs ?: 1_000_000L
-    val retainedRanges = project.video?.retainedRanges ?: listOf(TimeRangeUs(0L, durationUs))
-    var showCardDialog by remember { mutableStateOf(false) }
-    var cardText by remember { mutableStateOf("Title") }
-    var cardBgColor by remember { mutableStateOf("#0A0B0E") }
-    var cardDurationSec by remember { mutableFloatStateOf(1f) }
-
-    if (showCardDialog) {
-        AlertDialog(
-            onDismissRequest = { showCardDialog = false },
-            title = { Text("Add Title Card", color = Color.White, fontWeight = FontWeight.Bold) },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    OutlinedTextField(
-                        value = cardText,
-                        onValueChange = { cardText = it },
-                        label = { Text("Title Card Text") },
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = OutlinedTextFieldDefaults.colors(focusedTextColor = Color.White, unfocusedTextColor = Color.White)
-                    )
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("Duration", color = Color.White, fontSize = 13.sp, modifier = Modifier.width(60.dp))
-                        Slider(
-                            value = cardDurationSec,
-                            onValueChange = { cardDurationSec = it },
-                            valueRange = 0.5f..5f,
-                            modifier = Modifier.weight(1f),
-                            colors = SliderDefaults.colors(thumbColor = Color(0xFFD8FF4A), activeTrackColor = Color(0xFFD8FF4A))
-                        )
-                        Text(String.format("%.1fs", cardDurationSec), color = Color(0xFF8B949E), fontSize = 12.sp, modifier = Modifier.width(40.dp))
-                    }
-                }
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        showCardDialog = false
-                        onAddCardWithContent(cardText, cardBgColor, (cardDurationSec * 1_000_000L).toLong())
-                    },
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFD8FF4A))
-                ) {
-                    Text("Add Card", color = Color.Black, fontWeight = FontWeight.Bold)
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showCardDialog = false }) {
-                    Text("Cancel", color = Color.White)
-                }
-            },
-            containerColor = Color(0xFF161B22)
-        )
-    }
-
-    Column(
-        modifier = modifier
-            .fillMaxWidth()
-            .verticalScroll(rememberScrollState())
-            .padding(16.dp)
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text("TIMELINE SCRUB", color = Color(0xFF8B949E), fontSize = 11.sp, fontWeight = FontWeight.Bold)
-            val sec = (playheadUs / 1_000_000.0)
-            val totalSec = (durationUs / 1_000_000.0)
-            Text(String.format("%.2fs / %.2fs", sec, totalSec), color = Color(0xFFD8FF4A), fontSize = 12.sp, fontWeight = FontWeight.Bold)
-        }
-
-        Slider(
-            value = playheadUs.toFloat(),
-            onValueChange = { onScrubPlayhead(it.toLong()) },
-            valueRange = 0f..durationUs.toFloat(),
-            modifier = Modifier.fillMaxWidth(),
-            colors = SliderDefaults.colors(thumbColor = Color(0xFFD8FF4A), activeTrackColor = Color(0xFFD8FF4A))
-        )
-
-        Spacer(modifier = Modifier.height(12.dp))
-
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            Button(
-                onClick = onSplitAtPlayhead,
-                modifier = Modifier.weight(1f),
-                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF21262D))
-            ) {
-                Text("Split at Playhead", color = Color.White)
-            }
-
-            Button(
-                onClick = { showCardDialog = true },
-                modifier = Modifier.weight(1f),
-                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF21262D))
-            ) {
-                Text("Add Title Card", color = Color.White)
-            }
-        }
-
-        Spacer(modifier = Modifier.height(16.dp))
-
-        Text("RETAINED RANGES (${retainedRanges.size})", color = Color(0xFF8B949E), fontSize = 11.sp, fontWeight = FontWeight.Bold)
-        Spacer(modifier = Modifier.height(6.dp))
-
-        for ((idx, r) in retainedRanges.withIndex()) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 4.dp)
-                    .background(Color(0xFF161B22), RoundedCornerShape(8.dp))
-                    .padding(10.dp)
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Text(
-                        String.format("Seg %d: %.2fs - %.2fs", idx + 1, r.startUs / 1_000_000.0, r.endUs / 1_000_000.0),
-                        color = Color.White,
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                    if (retainedRanges.size > 1) {
-                        IconButton(onClick = { onRemoveSegment(idx) }, modifier = Modifier.size(28.dp)) {
-                            Icon(MemegetIcons.Delete, contentDescription = "Remove segment", tint = Color(0xFFFF5252))
-                        }
-                    }
-                }
-                Spacer(modifier = Modifier.height(4.dp))
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(
-                        onClick = {
-                            val newStart = playheadUs.coerceIn(0L, r.endUs - 100_000L)
-                            onTrimRange(idx, newStart, r.endUs)
-                        },
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Text("Trim Start to Playhead", fontSize = 11.sp)
-                    }
-                    OutlinedButton(
-                        onClick = {
-                            val newEnd = playheadUs.coerceIn(r.startUs + 100_000L, durationUs)
-                            onTrimRange(idx, r.startUs, newEnd)
-                        },
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Text("Trim End to Playhead", fontSize = 11.sp)
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-internal fun VideoFrameStripPanel(
-    playheadUs: Long,
-    durationUs: Long,
-    sourceUri: String? = null,
-    sourceFrameRate: Double? = null,
-    onSeekFrame: (Long) -> Unit,
-    modifier: Modifier = Modifier
-) {
-    val context = LocalContext.current
-    var indexState by remember(sourceUri) { mutableStateOf<FrameTimelineIndex?>(null) }
-    var errorState by remember(sourceUri) { mutableStateOf<String?>(null) }
-    var isLoading by remember(sourceUri) { mutableStateOf(!sourceUri.isNullOrBlank()) }
-
-    LaunchedEffect(sourceUri) {
-        if (sourceUri.isNullOrBlank()) {
-            isLoading = false
-            errorState = "No video source available"
-            return@LaunchedEffect
-        }
-        isLoading = true
-        errorState = null
-        try {
-            val idx = FrameTimelineIndex.load(context, sourceUri)
-            indexState = idx
-        } catch (e: Exception) {
-            errorState = e.message ?: "Failed to index video frames"
-        } finally {
-            isLoading = false
-        }
-    }
-
-    Column(
-        modifier = modifier
-            .fillMaxWidth()
-            .padding(16.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        val index = indexState
-        val err = errorState
-
-        if (isLoading) {
-            Text(
-                "FRAME NAVIGATION",
-                color = Color(0xFF8B949E),
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Bold
-            )
-            Spacer(modifier = Modifier.height(12.dp))
-            CircularProgressIndicator(
-                color = Color(0xFFD8FF4A),
-                modifier = Modifier.size(24.dp),
-                strokeWidth = 2.dp
-            )
-            Spacer(modifier = Modifier.height(8.dp))
-            Text(
-                "Indexing frame timestamps from MediaExtractor PTS...",
-                color = Color(0xFF8B949E),
-                fontSize = 12.sp
-            )
-        } else if (err != null || index == null) {
-            Text(
-                "FRAME NAVIGATION",
-                color = Color(0xFF8B949E),
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Bold
-            )
-            Spacer(modifier = Modifier.height(8.dp))
-            Text(
-                "Cannot claim exact frames: ${err ?: "Video track not indexed"}",
-                color = Color(0xFFFF5252),
-                fontSize = 12.sp,
-                textAlign = TextAlign.Center
-            )
-        } else {
-            // Index is loaded from actual MediaExtractor PTS
-            val title = if (index.isVariableFrameRate) "EXACT FRAME NAVIGATION (VFR)" else "EXACT FRAME NAVIGATION"
-            Text(title, color = Color(0xFF8B949E), fontSize = 11.sp, fontWeight = FontWeight.Bold)
-            Spacer(modifier = Modifier.height(8.dp))
-
-            val currentIdx = index.findFrameIndex(playheadUs)
-            val currentFramePts = index.getTimestampUs(currentIdx)
-            val totalFrames = index.frameCount
-            val fpsInfo = if (index.isVariableFrameRate) {
-                "VFR"
-            } else if (index.nominalFps != null && index.nominalFps > 1.0) {
-                String.format("%.1ffps", index.nominalFps)
-            } else {
-                "CFR"
-            }
-
-            Text(
-                String.format("Frame #%d / %d  (%.3fs)  [%s]", currentIdx + 1, totalFrames, currentFramePts / 1_000_000.0, fpsInfo),
-                color = Color(0xFFD8FF4A),
-                fontSize = 15.sp,
-                fontWeight = FontWeight.Bold
-            )
-            Spacer(modifier = Modifier.height(2.dp))
-            Text(
-                String.format("%d μs", currentFramePts),
-                color = Color(0xFF8B949E),
-                fontSize = 11.sp
-            )
-
-            Spacer(modifier = Modifier.height(12.dp))
-
-            val prevUs = index.previousFrameTimeUs(playheadUs)
-            val nextUs = index.nextFrameTimeUs(playheadUs)
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceEvenly
-            ) {
-                Button(
-                    onClick = { prevUs?.let { onSeekFrame(it) } },
-                    enabled = prevUs != null,
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = Color(0xFF21262D),
-                        disabledContainerColor = Color(0xFF161B22)
-                    )
-                ) {
-                    Icon(
-                        MemegetIcons.ArrowBack,
-                        contentDescription = null,
-                        tint = if (prevUs != null) Color.White else Color(0xFF484F58)
-                    )
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text("-1 Frame", color = if (prevUs != null) Color.White else Color(0xFF484F58))
-                }
-
-                Button(
-                    onClick = { nextUs?.let { onSeekFrame(it) } },
-                    enabled = nextUs != null,
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = Color(0xFF21262D),
-                        disabledContainerColor = Color(0xFF161B22)
-                    )
-                ) {
-                    Text("+1 Frame", color = if (nextUs != null) Color.White else Color(0xFF484F58))
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Icon(
-                        MemegetIcons.ArrowForward,
-                        contentDescription = null,
-                        tint = if (nextUs != null) Color.White else Color(0xFF484F58)
-                    )
-                }
-            }
-        }
-    }
-}
-
-
-@Composable
 internal fun VideoMotionToolPanel(
     selectedLayer: MemeEditLayer?,
     playheadUs: Long,
@@ -1926,201 +1605,26 @@ internal fun VideoMotionToolPanel(
         }
 
         Spacer(modifier = Modifier.height(16.dp))
-
-        // Active Range on timeline
-        Text("ACTIVE TIME RANGE", color = Color(0xFF8B949E), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+        Text("SHOWN", color = Color(0xFF8B949E), fontSize = 11.sp, fontWeight = FontWeight.Bold)
         Spacer(modifier = Modifier.height(6.dp))
-
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("Start", color = Color.White, fontSize = 12.sp, modifier = Modifier.width(44.dp))
-            Slider(
-                value = (active.startUs / 1_000_000f),
-                onValueChange = {
-                    val newStart = (it * 1_000_000L).toLong().coerceIn(0L, active.endUs - 100_000L)
-                    val updated = when (selectedLayer) {
-                        is MemeEditLayer.Text -> selectedLayer.copy(active = TimeRangeUs(newStart, active.endUs))
-                        is MemeEditLayer.Subject -> selectedLayer.copy(active = TimeRangeUs(newStart, active.endUs))
-                        is MemeEditLayer.Media -> selectedLayer.copy(active = TimeRangeUs(newStart, active.endUs))
-                        else -> selectedLayer
-                    }
-                    onUpdateLayer(updated)
-                },
-                valueRange = 0f..(durationUs / 1_000_000f),
-                modifier = Modifier.weight(1f),
-                colors = SliderDefaults.colors(thumbColor = Color(0xFFD8FF4A), activeTrackColor = Color(0xFFD8FF4A))
-            )
-            Text(String.format("%.1fs", active.startUs / 1_000_000.0), color = Color(0xFF8B949E), fontSize = 12.sp, modifier = Modifier.width(40.dp))
-        }
-
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("End", color = Color.White, fontSize = 12.sp, modifier = Modifier.width(44.dp))
-            Slider(
-                value = (active.endUs / 1_000_000f),
-                onValueChange = {
-                    val newEnd = (it * 1_000_000L).toLong().coerceIn(active.startUs + 100_000L, durationUs)
-                    val updated = when (selectedLayer) {
-                        is MemeEditLayer.Text -> selectedLayer.copy(active = TimeRangeUs(active.startUs, newEnd))
-                        is MemeEditLayer.Subject -> selectedLayer.copy(active = TimeRangeUs(active.startUs, newEnd))
-                        is MemeEditLayer.Media -> selectedLayer.copy(active = TimeRangeUs(active.startUs, newEnd))
-                        else -> selectedLayer
-                    }
-                    onUpdateLayer(updated)
-                },
-                valueRange = 0f..(durationUs / 1_000_000f),
-                modifier = Modifier.weight(1f),
-                colors = SliderDefaults.colors(thumbColor = Color(0xFFD8FF4A), activeTrackColor = Color(0xFFD8FF4A))
-            )
-            Text(String.format("%.1fs", active.endUs / 1_000_000.0), color = Color(0xFF8B949E), fontSize = 12.sp, modifier = Modifier.width(40.dp))
-        }
-    }
-}
-
-@Composable
-internal fun VideoAudioToolPanel(
-    audioSpec: VideoAudioSpec,
-    speed: Float,
-    musicSpec: VideoMusicSpec?,
-    onUpdateAudio: (VideoAudioSpec) -> Unit,
-    onUpdateSpeed: (Float) -> Unit,
-    onUpdateMusic: (VideoMusicSpec?) -> Unit,
-    modifier: Modifier = Modifier
-) {
-    Column(
-        modifier = modifier
-            .fillMaxWidth()
-            .verticalScroll(rememberScrollState())
-            .padding(16.dp)
-    ) {
-        // Mute & Volume
+        Text(
+            if (selectedLayer.active == null) "The whole video"
+            else "${formatTimecode(active.startUs)} – ${formatTimecode(active.endUs)}",
+            color = Color.White,
+            fontSize = 13.sp
+        )
+        Spacer(modifier = Modifier.height(6.dp))
         Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
+            modifier = Modifier.horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(if (audioSpec.muted) MemegetIcons.VolumeMute else MemegetIcons.VolumeUp, contentDescription = null, tint = Color.White)
-                Spacer(modifier = Modifier.width(8.dp))
-                Text("Mute Source Audio", color = Color.White, fontSize = 14.sp)
-            }
-            Switch(
-                checked = audioSpec.muted,
-                onCheckedChange = { onUpdateAudio(audioSpec.copy(muted = it)) },
-                colors = SwitchDefaults.colors(checkedThumbColor = Color.Black, checkedTrackColor = Color(0xFFD8FF4A))
-            )
-        }
-
-        if (!audioSpec.muted) {
-            Spacer(modifier = Modifier.height(8.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("Volume", color = Color.White, fontSize = 13.sp, modifier = Modifier.width(60.dp))
-                Slider(
-                    value = audioSpec.volume,
-                    onValueChange = { onUpdateAudio(audioSpec.copy(volume = it)) },
-                    valueRange = 0f..2f,
-                    modifier = Modifier.weight(1f),
-                    colors = SliderDefaults.colors(thumbColor = Color(0xFFD8FF4A), activeTrackColor = Color(0xFFD8FF4A))
-                )
-                Text("${(audioSpec.volume * 100).roundToInt()}%", color = Color(0xFF8B949E), fontSize = 12.sp, modifier = Modifier.width(40.dp))
-            }
-        }
-
-        Spacer(modifier = Modifier.height(16.dp))
-
-        // Playback Speed
-        Text("PLAYBACK SPEED", color = Color(0xFF8B949E), fontSize = 11.sp, fontWeight = FontWeight.Bold)
-        Spacer(modifier = Modifier.height(6.dp))
-
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            val speeds = listOf(0.25f, 0.5f, 0.75f, 1f, 1.25f, 1.5f, 2f, 4f)
-            for (s in speeds) {
-                val selected = (speed - s) in -0.01f..0.01f
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(if (selected) Color(0xFFD8FF4A) else Color(0xFF21262D))
-                        .clickable { onUpdateSpeed(s) }
-                        .padding(horizontal = 12.dp, vertical = 8.dp)
-                ) {
-                    Text(
-                        "${s}x",
-                        color = if (selected) Color.Black else Color.White,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-            }
-        }
-
-        Spacer(modifier = Modifier.height(16.dp))
-
-        // Music Controls
-        Text("BACKGROUND MUSIC", color = Color(0xFF8B949E), fontSize = 11.sp, fontWeight = FontWeight.Bold)
-        Spacer(modifier = Modifier.height(6.dp))
-
-        val audioContext = LocalContext.current
-        val audioScope = rememberCoroutineScope()
-        val audioPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-            if (uri != null) {
-                audioScope.launch {
-                    try {
-                        val copiedUri = withContext(Dispatchers.IO) {
-                            EditorAssetStorage.copyAssetToEditorStorage(audioContext, uri)
-                        }
-                        onUpdateMusic(VideoMusicSpec(uri = copiedUri.toString(), volume = 1f, startUs = 0L))
-                    } catch (e: Exception) {
-                        if (e is CancellationException) throw e
-                        Toast.makeText(audioContext, "Could not add the music: ${e.message ?: e}", Toast.LENGTH_LONG).show()
-                    }
-                }
-            }
-        }
-
-        if (musicSpec == null) {
-            Button(
-                onClick = { audioPicker.launch("audio/*") },
-                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF21262D)),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Icon(MemegetIcons.Add, contentDescription = null, tint = Color.White)
-                Spacer(modifier = Modifier.width(6.dp))
-                Text("Select Music Track", color = Color.White)
-            }
-        } else {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                    Text(musicSpec.uri.takeLast(30), color = Color.White, fontSize = 12.sp, modifier = Modifier.weight(1f))
-                    IconButton(onClick = { onUpdateMusic(null) }) {
-                        Icon(MemegetIcons.Delete, contentDescription = "Remove music", tint = Color(0xFFFF5252))
-                    }
-                }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("Gain", color = Color.White, fontSize = 12.sp, modifier = Modifier.width(60.dp))
-                    Slider(
-                        value = musicSpec.volume,
-                        onValueChange = { onUpdateMusic(musicSpec.copy(volume = it)) },
-                        valueRange = 0f..2f,
-                        modifier = Modifier.weight(1f),
-                        colors = SliderDefaults.colors(thumbColor = Color(0xFFD8FF4A), activeTrackColor = Color(0xFFD8FF4A))
-                    )
-                    Text("${(musicSpec.volume * 100).roundToInt()}%", color = Color(0xFF8B949E), fontSize = 12.sp, modifier = Modifier.width(40.dp))
-                }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("In-point", color = Color.White, fontSize = 12.sp, modifier = Modifier.width(60.dp))
-                    Slider(
-                        value = (musicSpec.startUs / 1_000_000f),
-                        onValueChange = { onUpdateMusic(musicSpec.copy(startUs = (it * 1_000_000L).toLong())) },
-                        valueRange = 0f..30f,
-                        modifier = Modifier.weight(1f),
-                        colors = SliderDefaults.colors(thumbColor = Color(0xFFD8FF4A), activeTrackColor = Color(0xFFD8FF4A))
-                    )
-                    Text(String.format("%.1fs", musicSpec.startUs / 1_000_000.0), color = Color(0xFF8B949E), fontSize = 12.sp, modifier = Modifier.width(40.dp))
-                }
-            }
+            StudioChip("⇤ Starts at playhead", {
+                onUpdateLayer(TimelineEdits.setLayerTiming(selectedLayer, TimelineEdits.Edge.START, playheadUs, durationUs))
+            })
+            StudioChip("⇥ Ends at playhead", {
+                onUpdateLayer(TimelineEdits.setLayerTiming(selectedLayer, TimelineEdits.Edge.END, playheadUs, durationUs))
+            })
+            StudioChip("↔ Whole video", if (selectedLayer.active != null) ({ onUpdateLayer(TimelineEdits.withActive(selectedLayer, null)) }) else null)
         }
     }
 }

@@ -574,22 +574,43 @@ internal object ProjectCore {
         return segments
     }
 
+    /**
+     * Source time shown at edited-video time [outputTimeUs]; null during a card. Segments are half-open, so at a
+     * boundary this is the segment that starts there (the frame on screen); only the video's end counts as part
+     * of the last segment.
+     */
     fun mapOutputTimeToSourceTime(outputTimeUs: Long, segments: List<CompositionSegment>, speed: Float): Long? {
         if (segments.isEmpty() || outputTimeUs < 0L) return null
-        for (seg in segments) {
-            if (outputTimeUs in seg.outputStartUs..seg.outputEndUs) {
-                return when (seg) {
-                    is CompositionSegment.Source -> {
-                        val outOffset = outputTimeUs - seg.outputStartUs
-                        val srcOffset = (outOffset.toDouble() * speed.toDouble()).roundToLong()
-                        (seg.sourceStartUs + srcOffset).coerceIn(seg.sourceStartUs, seg.sourceEndUs)
-                    }
-                    is CompositionSegment.Card -> null
-                }
+        val seg = segments.firstOrNull { outputTimeUs >= it.outputStartUs && outputTimeUs < it.outputEndUs }
+            ?: segments.last().takeIf { outputTimeUs == it.outputEndUs }
+            ?: return null
+        return when (seg) {
+            is CompositionSegment.Source -> {
+                val srcOffset = ((outputTimeUs - seg.outputStartUs).toDouble() * speed.toDouble()).roundToLong()
+                (seg.sourceStartUs + srcOffset).coerceIn(seg.sourceStartUs, seg.sourceEndUs)
             }
+            is CompositionSegment.Card -> null
         }
-        return null
     }
+
+    /**
+     * Edited-video time of source time [sourceTimeUs], cards included; null inside a cut. Half-open like
+     * [mapOutputTimeToSourceTime]: a source time where a card was inserted maps to where the clip resumes, after
+     * the card.
+     */
+    fun mapSourceTimeToOutputTime(sourceTimeUs: Long, segments: List<CompositionSegment>, speed: Float): Long? {
+        if (segments.isEmpty() || sourceTimeUs < 0L) return null
+        var last: CompositionSegment.Source? = null
+        for (seg in segments) {
+            if (seg !is CompositionSegment.Source) continue
+            if (sourceTimeUs >= seg.sourceStartUs && sourceTimeUs < seg.sourceEndUs) return outputOf(sourceTimeUs, seg, speed)
+            last = seg
+        }
+        return last?.takeIf { sourceTimeUs == it.sourceEndUs }?.let { outputOf(sourceTimeUs, it, speed) }
+    }
+
+    private fun outputOf(sourceTimeUs: Long, seg: CompositionSegment.Source, speed: Float): Long =
+        seg.outputStartUs + ((sourceTimeUs - seg.sourceStartUs).toDouble() / speed.toDouble()).roundToLong()
 
     fun segmentEasingAt(keyframes: List<TransformKeyframe>, timeUs: Long): String {
         var easing = "linear"
@@ -1191,6 +1212,49 @@ internal fun applyProjectAction(history: ProjectHistory, action: ProjectAction):
     } else {
         val newPast = (history.past + history.present).takeLast(ProjectLimits.MAX_HISTORY_STATES)
         history.copy(past = newPast, present = nextPresent, future = emptyList())
+    }
+}
+
+/**
+ * Applies [action] to the present without a new undo step, so a burst from one control undoes as one. Like
+ * [applyProjectAction], it keeps redo while a transaction is open: a cancel then gives back the whole history.
+ */
+internal fun amendProjectAction(history: ProjectHistory, action: ProjectAction): ProjectHistory {
+    val nextPresent = reduceProject(history.present, action)
+    if (nextPresent == history.present) return history
+    return history.copy(present = nextPresent, future = if (history.transaction != null) history.future else emptyList())
+}
+
+/**
+ * Folds quick repeats from one control (typing, a slider drag) into one undo step. A different control, a pause
+ * of [windowMs], or anything else that touched the history in between starts a new step.
+ *
+ * "In between" is judged by the exact [ProjectHistory] object this merger's last edit returned, not by the project
+ * in it: undo, redo, transactions and other actions make a new history object whenever they change anything, but
+ * undo or undo-then-redo can bring back the very project object the last edit left. Matching on the project let the
+ * next edit fold into the old step, so one undo also took back an edit made before the action in between.
+ */
+internal class PanelEditMerger(private val windowMs: Long = 750L) {
+    private var control: String? = null
+    private var atMs = 0L
+    private var returned: ProjectHistory? = null
+
+    fun apply(history: ProjectHistory, control: String, action: ProjectAction, nowMs: Long): ProjectHistory {
+        val merge = control == this.control && nowMs - atMs < windowMs && history === returned
+        val next = if (merge) amendProjectAction(history, action) else applyProjectAction(history, action)
+        // A no-op made no step of its own; arming on it would fold the next edit into an older, unrelated step.
+        if (next === history) return history
+        if (merge && next.transaction == null && next.present == next.past.lastOrNull()) {
+            // The burst came back to where it started: an undo step there would undo nothing. Disarmed, so the
+            // next tick starts its own step instead of folding into the one before.
+            this.control = null
+            returned = null
+            return next.copy(past = next.past.dropLast(1))
+        }
+        this.control = control
+        atMs = nowMs
+        returned = next
+        return next
     }
 }
 
