@@ -239,6 +239,45 @@ class ProjectCoreTest {
         assertEquals("", present().text)
     }
 
+    private class SizeSession {
+        val merger = PanelEditMerger(windowMs = 750L)
+        var history = createProjectHistory(
+            ProjectCore.createDefaultImageProject(MemeEditSource("file://test.png", "test.png", MediaEditKind.IMAGE, 100, 100))
+                .copy(layers = listOf(MemeEditLayer.Text(id = "t1", text = "hi", fontSize = 0.12f)))
+        )
+        val layer get() = history.present.layers.single() as MemeEditLayer.Text
+
+        fun size(value: Float, atMs: Long) {
+            history = merger.apply(history, "layer:t1:size", ProjectAction.UpdateLayer(layer.copy(fontSize = value)), atMs)
+        }
+    }
+
+    @Test
+    fun undoingAnActionBetweenTwoSizeDragsKeepsTheFirstDragItsOwnStep() {
+        val s = SizeSession()
+        s.size(0.16f, 1_000L)
+        s.history = applyProjectAction(s.history, ProjectAction.UpdateLayer(s.layer.copy(style = s.layer.style.copy(align = "left"))))
+        // Undo brings back the very project object the first Size drag left behind.
+        s.history = undoProjectHistory(s.history)
+        s.size(0.20f, 1_500L)
+
+        s.history = undoProjectHistory(s.history)
+
+        assertEquals(0.16f, s.layer.fontSize, 0.0001f)
+    }
+
+    @Test
+    fun undoThenRedoEndsASizeDragsUndoStep() {
+        val s = SizeSession()
+        s.size(0.16f, 1_000L)
+        s.history = redoProjectHistory(undoProjectHistory(s.history))
+        s.size(0.20f, 1_500L)
+
+        s.history = undoProjectHistory(s.history)
+
+        assertEquals(0.16f, s.layer.fontSize, 0.0001f)
+    }
+
     @Test
     fun videoRebuildKeyIgnoresOverlayEditsButNotStructure() {
         val source = MemeEditSource("file://clip.mp4", "clip.mp4", MediaEditKind.VIDEO, 1000, 500, 2_000_000L)

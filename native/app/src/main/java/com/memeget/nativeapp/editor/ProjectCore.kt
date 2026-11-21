@@ -1215,22 +1215,26 @@ internal fun amendProjectAction(history: ProjectHistory, action: ProjectAction):
 
 /**
  * Folds quick repeats from one control (typing, a slider drag) into one undo step. A different control, a pause
- * of [windowMs], or anything else changing the project in between (undo, a canvas gesture, which leave the
- * present a different object) starts a new step.
+ * of [windowMs], or anything else that touched the history in between starts a new step.
+ *
+ * "In between" is judged by the exact [ProjectHistory] object this merger's last edit returned, not by the project
+ * in it: undo, redo, transactions and other actions make a new history object whenever they change anything, but
+ * undo or undo-then-redo can bring back the very project object the last edit left. Matching on the project let the
+ * next edit fold into the old step, so one undo also took back an edit made before the action in between.
  */
 internal class PanelEditMerger(private val windowMs: Long = 750L) {
     private var control: String? = null
     private var atMs = 0L
-    private var present: MemeEditProject? = null
+    private var returned: ProjectHistory? = null
 
     fun apply(history: ProjectHistory, control: String, action: ProjectAction, nowMs: Long): ProjectHistory {
-        val merge = control == this.control && nowMs - atMs < windowMs && history.present === present
+        val merge = control == this.control && nowMs - atMs < windowMs && history === returned
         val next = if (merge) amendProjectAction(history, action) else applyProjectAction(history, action)
         // A no-op made no step of its own; arming on it would fold the next edit into an older, unrelated step.
         if (next === history) return history
         this.control = control
         atMs = nowMs
-        present = next.present
+        returned = next
         return next
     }
 }
