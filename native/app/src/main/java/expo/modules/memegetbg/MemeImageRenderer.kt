@@ -423,9 +423,14 @@ internal object MemeImageRenderer {
     targetWidth: Double,
     targetHeight: Double
   ): DecodedSource {
-    val cacheKey = "$source|${targetWidth.toLong()}x${targetHeight.toLong()}"
-    decodeCache.get(cacheKey)?.let { return it }
     val uri = readableUri(context, source)
+    // Keyed by the file's version, so an asset rewritten in place is decoded again. A content uri has no cheap,
+    // reliable version: it is decoded each time instead of cached.
+    val cacheKey = uri.path?.takeIf { uri.scheme == "file" }?.let { path ->
+      val file = File(path)
+      "$path|${file.lastModified()}|${file.length()}|${targetWidth.toLong()}x${targetHeight.toLong()}"
+    }
+    cacheKey?.let { decodeCache.get(it) }?.let { return it }
     val orientation = openStream(context, uri).use { input ->
       ExifInterface(input).getAttributeInt(
         ExifInterface.TAG_ORIENTATION,
@@ -451,7 +456,7 @@ internal object MemeImageRenderer {
         }
       )
     } ?: throw IOException("Could not decode $source")
-    if (decoded.allocationByteCount > MAX_CACHED_DECODE_BYTES) return DecodedSource(decoded, orientation)
+    if (cacheKey == null || decoded.allocationByteCount > MAX_CACHED_DECODE_BYTES) return DecodedSource(decoded, orientation)
     return DecodedSource(decoded, orientation, shared = true).also { decodeCache.put(cacheKey, it) }
   }
 

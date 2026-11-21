@@ -210,7 +210,7 @@ object RetainedRangeComposition {
     val sequence = sequenceBuilder.build()
 
     val musicSequence = music?.let {
-      musicSequence(it, expectedOutputDurationUs(segments, speed), if (mixSpeed != null) speed else 1f)
+      musicSequence(it, expectedOutputDurationUs(segments, speed), if (mixSpeed != null) speed else 1f, forPlayer)
     }
     val builder = if (musicSequence == null) {
       Composition.Builder(sequence)
@@ -230,11 +230,14 @@ object RetainedRangeComposition {
    * speed the composition later applies to the whole mix: each piece is first slowed by it, and its gaps
    * lengthened, so the music comes out at its own tempo and in place.
    */
-  private fun musicSequence(music: Music, outputUs: Long, mixSpeed: Float): EditedMediaItemSequence {
+  private fun musicSequence(music: Music, outputUs: Long, mixSpeed: Float, forPlayer: Boolean): EditedMediaItemSequence {
     val builder = EditedMediaItemSequence.Builder(setOf(C.TRACK_TYPE_AUDIO))
     fun mixUs(us: Long) = (us * mixSpeed.toDouble()).roundToLong()
-    if (music.plan.leadInUs > 0L) builder.addGap(mixUs(music.plan.leadInUs))
-    for (piece in music.plan.pieces) {
+    val leadInUs = mixUs(music.plan.leadInUs)
+    if (leadInUs > 0L) builder.addGap(leadInUs)
+    for ((index, piece) in music.plan.pieces.withIndex()) {
+      // The player's first item keeps its clip's own clock (see ExactLengthAudioProcessor); export starts at 0.
+      val streamStartUs = if (forPlayer && index == 0 && leadInUs == 0L) piece.clipStartUs else 0L
       val item = MediaItem.Builder()
         .setUri(music.uri)
         .setClippingConfiguration(
@@ -245,14 +248,14 @@ object RetainedRangeComposition {
         )
         .build()
       // The slowed piece reaches the gain processor stretched by mixSpeed; it maps that back to the video's clock.
-      val gain = LiveGain(music.volume, piece.outputStartUs, music.plan, outputUsPerStreamUs = 1.0 / mixSpeed)
+      val gain = LiveGain(music.volume, piece.outputStartUs, music.plan, outputUsPerStreamUs = 1.0 / mixSpeed, streamStartUs = streamStartUs)
       val edited = EditedMediaItem.Builder(item)
         .setRemoveVideo(true)
         .setDurationUs(music.trackDurationUs)
         .setEffects(
           Effects(
             // The trim sees the piece after the slowdown too: mixSpeed times as long in its own clock.
-            listOf(ExactLengthAudioProcessor(mixUs(piece.durationUs)), GainProcessor(gain)),
+            listOf(ExactLengthAudioProcessor(mixUs(piece.durationUs), streamStartUs), GainProcessor(gain)),
             emptyList()
           )
         )

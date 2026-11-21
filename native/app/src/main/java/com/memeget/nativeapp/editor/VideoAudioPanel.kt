@@ -139,7 +139,10 @@ internal fun VideoAudioPanel(
                 StudioChip("At start", if (music.atUs != 0L) ({ onUpdateMusic(music.copy(atUs = 0L)) }) else null)
             }
             if (plan == null) {
-                Text("It comes in after the video ends, so nothing is heard.", color = StudioColors.Danger, fontSize = 11.sp)
+                val reason = if ((music.durationUs ?: Long.MAX_VALUE) < MusicPlan.MIN_PIECE_US)
+                    "This sound is shorter than 0.05 s. Replace it with a longer sound."
+                else "Less than 0.05 s of video remains at this start time."
+                Text(reason, color = StudioColors.Danger, fontSize = 11.sp)
             } else if (plan.loopCut) {
                 Text(
                     "Too short to loop to the end (at most ${MusicPlan.MAX_PIECES} loops): it stops at ${formatTimecode(plan.endUs)}.",
@@ -187,6 +190,9 @@ internal fun VideoAudioPanel(
     }
 }
 
+/** An in-point being dragged on the sound at [uri]; once the sound is replaced, it is stale. */
+private data class InPointDraft(val uri: String, val us: Long)
+
 /**
  * The track's waveform under a fixed line: drag it to choose the in-point, pinch to zoom. The bright part is
  * what plays (to the video's end, or the track's); the rest is dimmed.
@@ -221,12 +227,16 @@ private fun MusicWaveformStrip(music: VideoMusicSpec, plan: MusicPlan?, onInPoin
         // A sound shorter than about 0.1 s already fills the strip zoomed out; its range then is that one zoom.
         val maxPxPerUs = maxOf(with(density) { 40.dp.toPx() } / 20_000.0, minPxPerUs)
         var pxPerUs by remember(music.uri, widthPx) { mutableDoubleStateOf(startPxPerUs.coerceIn(minPxPerUs, maxPxPerUs)) }
-        var draft by remember { mutableStateOf<Long?>(null) }
-        val inPoint = draft ?: music.startUs
+        var draft by remember { mutableStateOf<InPointDraft?>(null) }
+        val inPoint = draft?.takeIf { it.uri == music.uri }?.us ?: music.startUs
         val scale = StripScale(inPoint, pxPerUs, widthPx)
+        val maxInPoint = (trackUs - MusicPlan.MIN_PIECE_US).coerceAtLeast(0L)
+        // Gestures outlive recompositions; they read the newest values through these.
+        val latestUri by rememberUpdatedState(music.uri)
         val latestScale by rememberUpdatedState(scale)
         val latestCommit by rememberUpdatedState(onInPoint)
-        val maxInPoint = (trackUs - MusicPlan.MIN_PIECE_US).coerceAtLeast(0L)
+        val latestMaxInPoint by rememberUpdatedState(maxInPoint)
+        val zoomBy by rememberUpdatedState { factor: Float -> pxPerUs = (pxPerUs * factor).coerceIn(minPxPerUs, maxPxPerUs) }
         val rulerPx = with(density) { 14.dp.toPx() }
         val heightDp = WAVE_HEIGHT + 14.dp
 
@@ -237,13 +247,15 @@ private fun MusicWaveformStrip(music: VideoMusicSpec, plan: MusicPlan?, onInPoin
                 .scrubGestures(
                     pxPerUs = { latestScale.pxPerUs },
                     grabAt = { null },
-                    onScrubStart = { draft = latestScale.centerUs },
-                    onScrubBy = { delta -> draft = ((draft ?: latestScale.centerUs) + delta).coerceIn(0L, maxInPoint) },
-                    onZoom = { pxPerUs = (pxPerUs * it).coerceIn(minPxPerUs, maxPxPerUs) },
+                    onScrubStart = { draft = InPointDraft(latestUri, latestScale.centerUs) },
+                    onScrubBy = { delta ->
+                        draft = draft?.takeIf { it.uri == latestUri }?.let { it.copy(us = (it.us + delta).coerceIn(0L, latestMaxInPoint)) }
+                    },
+                    onZoom = { zoomBy(it) },
                     onHandleMove = { _, _ -> },
-                    onTap = { p -> latestCommit(latestScale.us(p.x).coerceIn(0L, maxInPoint)) },
+                    onTap = { p -> latestCommit(latestScale.us(p.x).coerceIn(0L, latestMaxInPoint)) },
                     onEnd = {
-                        draft?.let(latestCommit)
+                        draft?.takeIf { it.uri == latestUri }?.let { latestCommit(it.us) }
                         draft = null
                     }
                 )
@@ -290,9 +302,15 @@ private suspend fun importSound(context: android.content.Context, picked: Uri, p
             File(copied.path!!).delete()
             throw e
         }
-        if (trackUs == null) {
+        val unusable = when {
+            trackUs == null -> "That file has no sound"
+            // A shorter sound could never be planned (see MusicPlan.MIN_PIECE_US), so it would never be heard.
+            trackUs < MusicPlan.MIN_PIECE_US -> "That sound is too short: it must last at least 0.05 s"
+            else -> null
+        }
+        if (unusable != null) {
             File(copied.path!!).delete()
-            throw java.io.IOException("That file has no sound")
+            throw java.io.IOException(unusable)
         }
         val name = EditorAssetStorage.displayName(context, picked)
         (previous ?: VideoMusicSpec(uri = "")).copy(

@@ -68,6 +68,39 @@ class VideoAudioMixTest {
     }
 
     @Test
+    fun clippedPreviewUsesTimeSinceTheInPointForLengthAndFades() {
+        val trim = ExactLengthAudioProcessor(2_000_000L, streamStartUs = 3_000_000L)
+        trim.configure(AudioProcessor.AudioFormat(1_000, 1, C.ENCODING_PCM_16BIT))
+        trim.flush(AudioProcessor.StreamMetadata(3_000_000L))
+        trim.queueInput(ByteBuffer.allocateDirect(5_000))
+        assertEquals(4_000, trim.output.remaining())
+        trim.flush(AudioProcessor.StreamMetadata(4_500_000L))
+        trim.queueInput(ByteBuffer.allocateDirect(5_000))
+        assertEquals(1_000, trim.output.remaining())
+
+        val plan = MusicPlan.of(spec(fadeInUs = 1_000_000L), 2_000_000L)!!
+        val gain = LiveGain(LiveVolume(1f), fades = plan, streamStartUs = 3_000_000L)
+        assertEquals(0f, gain.getGainFactorAtSamplePosition(3_000L, 1_000), 0f)
+        assertEquals(0.5f, gain.getGainFactorAtSamplePosition(3_500L, 1_000), 0f)
+    }
+
+    @Test
+    fun missingAudioIsPaddedInBoundedChunksThroughTheLastFrame() {
+        val trim = ExactLengthAudioProcessor(1_015_000L)
+        trim.configure(AudioProcessor.AudioFormat(1_000, 2, C.ENCODING_PCM_16BIT))
+        trim.flush(AudioProcessor.StreamMetadata.DEFAULT)
+        trim.queueEndOfStream()
+        var bytes = 0
+        while (!trim.isEnded) {
+            val chunk = trim.output
+            assertTrue(chunk.remaining() in 4..400)
+            bytes += chunk.remaining()
+            while (chunk.hasRemaining()) assertEquals(0, chunk.get().toInt())
+        }
+        assertEquals(4_060, bytes)
+    }
+
+    @Test
     fun loopPieceTheDecoderCutShortIsPaddedToItsPlannedLength() {
         // Seen on a Pixel 5a: a 1.000 s AAC track decoded to 44,034 samples.
         val trim = ExactLengthAudioProcessor(1_000_000L)
@@ -222,6 +255,8 @@ class VideoAudioMixTest {
 
         // The track ends at 3 s, so the fade-out starts at 2 s: sample 96,000 at 48 kHz.
         assertEquals(96_000L, gain.isUnityUntil(95_000L, 48_000))
+        assertEquals(96_001L, gain.isUnityUntil(96_000L, 48_000))
+        assertTrue(gain.getGainFactorAtSamplePosition(96_001L, 48_000) < 1f)
     }
 
     @Test

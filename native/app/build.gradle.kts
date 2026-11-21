@@ -124,6 +124,8 @@ dependencies {
     implementation("androidx.documentfile:documentfile:1.1.0")
     implementation("androidx.media3:media3-exoplayer:1.9.0")
     implementation("androidx.media3:media3-ui:1.9.0")
+    // Already pulled in by transformer; declared because the editor reads per-track lengths with its MediaExtractorCompat.
+    implementation("androidx.media3:media3-inspector:1.9.0")
     // MemeDynamicOverlay uses BitmapOverlay, never LottieOverlay; strip Lottie + AppCompat + Fragment transitive bloat.
     implementation("androidx.media3:media3-transformer:1.9.0") {
         exclude(group = "com.airbnb.android", module = "lottie")

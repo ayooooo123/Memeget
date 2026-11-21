@@ -279,6 +279,35 @@ class ProjectCoreTest {
     }
 
     @Test
+    fun cancelingACanvasGestureKeepsRedoAfterASliderBurstDuringIt() {
+        val s = SizeSession()
+        s.size(0.16f, 1_000L)
+        s.history = undoProjectHistory(s.history)
+        s.history = beginProjectTransaction(s.history)
+        s.size(0.18f, 2_000L)
+        s.size(0.20f, 2_100L)
+
+        s.history = redoProjectHistory(cancelProjectTransaction(s.history))
+
+        assertEquals(0.16f, s.layer.fontSize, 0.0001f)
+    }
+
+    @Test
+    fun aSizeBurstBackToItsStartLeavesNoUndoStepAndTheNextTickGetsItsOwn() {
+        val s = SizeSession()
+        s.history = applyProjectAction(s.history, ProjectAction.UpdateLayer(s.layer.copy(text = "typed")))
+        s.size(0.16f, 1_000L)
+        s.size(0.12f, 1_100L)
+        assertEquals(1, s.history.past.size)
+
+        s.size(0.20f, 1_200L)
+        s.history = undoProjectHistory(s.history)
+
+        assertEquals(0.12f, s.layer.fontSize, 0.0001f)
+        assertEquals("typed", s.layer.text)
+    }
+
+    @Test
     fun videoRebuildKeyIgnoresOverlayEditsButNotStructure() {
         val source = MemeEditSource("file://clip.mp4", "clip.mp4", MediaEditKind.VIDEO, 1000, 500, 2_000_000L)
         val caption = MemeEditLayer.Text(id = "caption", text = "A")
@@ -356,6 +385,13 @@ class ProjectCoreTest {
         assertNull(ProjectCore.mapOutputTimeToSourceTime(2_000_000L, segments, speed))
         // At output 4s (1s into second piece: 1s + 1s = 2s) -> source 2s
         assertEquals(2_000_000L, ProjectCore.mapOutputTimeToSourceTime(4_000_000L, segments, speed))
+        // Boundaries are half-open: the card starts at output 1s and the clip resumes at output 3s.
+        assertNull(ProjectCore.mapOutputTimeToSourceTime(1_000_000L, segments, speed))
+        assertEquals(1_000_000L, ProjectCore.mapOutputTimeToSourceTime(3_000_000L, segments, speed))
+        assertEquals(3_000_000L, ProjectCore.mapSourceTimeToOutputTime(1_000_000L, segments, speed))
+        // The video's end still maps both ways.
+        assertEquals(4_000_000L, ProjectCore.mapOutputTimeToSourceTime(6_000_000L, segments, speed))
+        assertEquals(6_000_000L, ProjectCore.mapSourceTimeToOutputTime(4_000_000L, segments, speed))
     }
 
     @Test

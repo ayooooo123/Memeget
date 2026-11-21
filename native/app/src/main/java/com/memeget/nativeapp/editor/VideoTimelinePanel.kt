@@ -65,7 +65,8 @@ private val HANDLE_REACH = 22.dp
 private val MAX_FRAME_WIDTH = 56.dp
 private const val FALLBACK_FRAME_US = 33_333L
 
-private data class TrimHandle(val index: Int, val edge: Edge)
+/** A kept range's edge, on the [ranges] it was grabbed on: once those change (an undo mid-drag), it is stale. */
+private class TrimHandle(val index: Int, val edge: Edge, val ranges: List<TimeRangeUs>)
 
 /**
  * The video timeline: the whole source as a filmstrip under a fixed playhead line. Drag to scrub, pinch to zoom
@@ -99,13 +100,12 @@ internal fun VideoTimelinePanel(
     var showCardDialog by remember { mutableStateOf(false) }
 
     fun snap(us: Long): Long = frameIndex?.let { it.getTimestampUs(it.findFrameIndex(us)) } ?: us
-    fun stepFrame(forward: Boolean) {
-        val next = if (forward) {
-            frameIndex?.nextFrameTimeUs(playheadUs) ?: (playheadUs + FALLBACK_FRAME_US)
-        } else {
-            frameIndex?.previousFrameTimeUs(playheadUs) ?: (playheadUs - FALLBACK_FRAME_US)
-        }
-        onSeek(next.coerceIn(0L, durationUs))
+    /** The frame before or after the playhead, or null at that end. Before the index is ready, a nominal frame. */
+    fun frameStepUs(forward: Boolean): Long? {
+        val index = frameIndex
+        if (index != null) return if (forward) index.nextFrameTimeUs(playheadUs) else index.previousFrameTimeUs(playheadUs)
+        return if (forward) (playheadUs + FALLBACK_FRAME_US).coerceAtMost(durationUs).takeIf { playheadUs < durationUs }
+        else (playheadUs - FALLBACK_FRAME_US).coerceAtLeast(0L).takeIf { playheadUs > 0L }
     }
 
     if (showCardDialog) {
@@ -131,8 +131,8 @@ internal fun VideoTimelinePanel(
                 fontSize = 11.sp,
                 modifier = Modifier.weight(1f)
             )
-            RepeatChip("◀ 1f", enabled = playheadUs > 0L) { stepFrame(forward = false) }
-            RepeatChip("1f ▶", enabled = playheadUs < durationUs) { stepFrame(forward = true) }
+            RepeatChip("◀ 1f", enabled = frameStepUs(forward = false) != null) { frameStepUs(forward = false)?.let(onSeek) }
+            RepeatChip("1f ▶", enabled = frameStepUs(forward = true) != null) { frameStepUs(forward = true)?.let(onSeek) }
         }
         Spacer(Modifier.height(6.dp))
 
@@ -237,7 +237,8 @@ private fun TimelineStrip(
         val scale = StripScale(playheadUs, pxPerUs, widthPx)
 
         // Gestures outlive recompositions; they read the newest values through these.
-        val latest by rememberUpdatedState(TimelineGestureState(scale, ranges, durationUs, snap, onSeek, onScrubbing, onTrimPeek, onSetRanges, onTapMusicLane, frameIndex))
+        val zoomBy = { factor: Float -> pxPerUs = (pxPerUs * factor).coerceIn(fitPxPerUs * 0.5, max(maxPxPerUs, fitPxPerUs)) }
+        val latest by rememberUpdatedState(TimelineGestureState(scale, ranges, durationUs, snap, zoomBy, onSeek, onScrubbing, onTrimPeek, onSetRanges, onTapMusicLane, frameIndex))
         var scrubUs by remember { mutableStateOf(0L) }
 
         val rulerPx = with(density) { RULER_HEIGHT.toPx() }
@@ -256,25 +257,30 @@ private fun TimelineStrip(
                 .scrubGestures(
                     pxPerUs = { latest.scale.pxPerUs },
                     grabAt = { p -> if (p.y in stripTop..stripBottom) handleAt(latest.scale, latest.ranges, p.x, density) else null },
-                    onScrubStart = {
-                        scrubUs = latest.scale.centerUs
+                    onScrubStart = { handle ->
+                        if (handle == null) scrubUs = latest.scale.centerUs
                         latest.onScrubbing(true)
                     },
                     onScrubBy = { delta ->
                         scrubUs = (scrubUs + delta).coerceIn(0L, latest.durationUs)
                         latest.onSeek(scrubUs)
                     },
-                    onZoom = { factor -> pxPerUs = (pxPerUs * factor).coerceIn(fitPxPerUs * 0.5, max(maxPxPerUs, fitPxPerUs)) },
+                    onZoom = { factor -> latest.zoomBy(factor) },
                     onHandleMove = { handle, x ->
                         handle as TrimHandle
-                        val toUs = latest.snap(latest.scale.us(x).coerceIn(0L, latest.durationUs))
-                        val moved = TimelineEdits.trimEdge(latest.ranges, handle.index, handle.edge, toUs, latest.durationUs)
-                        draft = moved
-                        val edge = moved[handle.index]
-                        latest.onTrimPeek(
-                            if (handle.edge == Edge.START) edge.startUs
-                            else latest.frameIndex?.previousFrameTimeUs(edge.endUs) ?: (edge.endUs - 1)
-                        )
+                        if (latest.ranges != handle.ranges) {
+                            draft = null
+                            latest.onTrimPeek(null)
+                        } else {
+                            val toUs = latest.snap(latest.scale.us(x).coerceIn(0L, latest.durationUs))
+                            val moved = TimelineEdits.trimEdge(handle.ranges, handle.index, handle.edge, toUs, latest.durationUs)
+                            draft = moved
+                            val edge = moved[handle.index]
+                            latest.onTrimPeek(
+                                if (handle.edge == Edge.START) edge.startUs
+                                else latest.frameIndex?.previousFrameTimeUs(edge.endUs) ?: (edge.endUs - 1)
+                            )
+                        }
                     },
                     onTap = { p ->
                         if (p.y > musicLaneTop) latest.onTapMusicLane()
@@ -282,7 +288,8 @@ private fun TimelineStrip(
                     },
                     onEnd = { handle ->
                         if (handle is TrimHandle) {
-                            val moved = draft
+                            // Ranges changed under the drag (undo, redo): drop it rather than undo that change.
+                            val moved = draft?.takeIf { latest.ranges == handle.ranges }
                             draft = null
                             latest.onTrimPeek(null)
                             if (moved != null) {
@@ -295,8 +302,8 @@ private fun TimelineStrip(
                             }
                         } else {
                             latest.onSeek(latest.snap(scrubUs))
-                            latest.onScrubbing(false)
                         }
+                        latest.onScrubbing(false)
                     }
                 )
         ) {
@@ -319,6 +326,7 @@ private class TimelineGestureState(
     val ranges: List<TimeRangeUs>,
     val durationUs: Long,
     val snap: (Long) -> Long,
+    val zoomBy: (Float) -> Unit,
     val onSeek: (Long) -> Unit,
     val onScrubbing: (Boolean) -> Unit,
     val onTrimPeek: (Long?) -> Unit,
@@ -340,11 +348,11 @@ private fun handleAt(scale: StripScale, ranges: List<TimeRangeUs>, x: Float, den
         if (end - start < minWidth) return@forEachIndexed
         // Each handle reaches inward, so where two ranges touch the finger's side picks the range.
         if (x in (start - outside)..(start + reach) && abs(x - start) < bestDistance) {
-            best = TrimHandle(i, Edge.START)
+            best = TrimHandle(i, Edge.START, ranges)
             bestDistance = abs(x - start)
         }
         if (x in (end - reach)..(end + outside) && abs(x - end) < bestDistance) {
-            best = TrimHandle(i, Edge.END)
+            best = TrimHandle(i, Edge.END, ranges)
             bestDistance = abs(x - end)
         }
     }

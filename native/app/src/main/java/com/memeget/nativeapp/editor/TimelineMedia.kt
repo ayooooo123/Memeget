@@ -25,10 +25,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
-import java.io.File
-import java.io.RandomAccessFile
-import java.nio.ByteOrder
-import java.nio.channels.FileChannel
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.roundToInt
@@ -134,38 +130,40 @@ internal class Waveform(val peaks: FloatArray) {
 
     companion object {
         const val PEAKS_PER_SECOND = 50
-        /** Decoding keeps the whole track in memory first; past this, the rest of a long track draws flat. */
+        /** Decoding takes time; past this, the rest of a long track draws flat. */
         private const val MAX_SECONDS = 300.0
         private val cache = LruCache<String, Waveform>(6)
 
+        /**
+         * Peaks as the decoder hands out samples, at the track's own rate: nothing but the peaks is kept, so a
+         * long or high-rate track costs no more memory than a short one.
+         */
         suspend fun load(context: Context, uri: String): Waveform = cache.get(uri) ?: withContext(Dispatchers.Default) {
-            val extracted = AudioExtractor.extract(context, uri, MAX_SECONDS) ?: return@withContext Waveform(FloatArray(0))
-            val pcm = File(Uri.parse(extracted["path"] as String).path!!)
-            try {
-                Waveform(peaksOf(pcm, AudioExtractor.TARGET_RATE / PEAKS_PER_SECOND))
-            } finally {
-                pcm.delete()
-            }
+            val peaks = PeakAccumulator()
+            AudioExtractor.decodeMono(context, uri, MAX_SECONDS, peaks)
+            Waveform(peaks.normalized())
         }.also { cache.put(uri, it) }
+    }
+}
 
-        /** Max |sample| per bucket of a raw little-endian float file, scaled so the loudest bucket is 1. */
-        private fun peaksOf(pcm: File, samplesPerPeak: Int): FloatArray {
-            RandomAccessFile(pcm, "r").use { file ->
-                val samples = file.channel.map(FileChannel.MapMode.READ_ONLY, 0, file.length())
-                    .order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer()
-                val peaks = FloatArray((samples.remaining() + samplesPerPeak - 1) / samplesPerPeak)
-                var loudest = 0f
-                for (i in peaks.indices) {
-                    var peak = 0f
-                    val end = minOf(samples.limit(), (i + 1) * samplesPerPeak)
-                    for (s in i * samplesPerPeak until end) peak = max(peak, abs(samples.get(s)))
-                    peaks[i] = peak
-                    loudest = max(loudest, peak)
-                }
-                if (loudest > 0f) for (i in peaks.indices) peaks[i] /= loudest
-                return peaks
-            }
-        }
+/** Max |sample| per 1/[Waveform.PEAKS_PER_SECOND] s bucket; [normalized] scales the loudest bucket to 1. */
+private class PeakAccumulator : AudioExtractor.MonoSink {
+    private var peaks = FloatArray(Waveform.PEAKS_PER_SECOND * 60)
+    private var count = 0
+    private var samples = 0L
+
+    override fun accept(sample: Float, sampleRate: Int) {
+        val bucket = (samples++ * Waveform.PEAKS_PER_SECOND / sampleRate).toInt()
+        if (bucket >= peaks.size) peaks = peaks.copyOf(max(peaks.size * 2, bucket + 1))
+        if (bucket >= count) count = bucket + 1
+        peaks[bucket] = max(peaks[bucket], abs(sample))
+    }
+
+    fun normalized(): FloatArray {
+        val out = peaks.copyOf(count)
+        val loudest = out.maxOrNull() ?: 0f
+        if (loudest > 0f) for (i in out.indices) out[i] /= loudest
+        return out
     }
 }
 

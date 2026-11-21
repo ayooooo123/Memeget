@@ -57,14 +57,19 @@ internal fun formatTimecode(us: Long): String {
 
 /**
  * Drag to move the strip under its middle line (one finger), pinch to zoom, press on a handle to drag it, tap
- * to jump. The strip itself does not move: callers own the time under the line and the zoom.
+ * to jump. The strip itself does not move: callers own the time under the line and the zoom. A press that moves
+ * up or down before sideways is the page scrolling: it ends with no call at all.
+ *
+ * The gesture keeps the callbacks it was first given, so they must read anything that changes (scale, ranges,
+ * bounds, other callbacks) through rememberUpdatedState.
  *
  * @param grabAt the handle a press at a point lands on, or null to scrub.
+ * @param onScrubStart a drag began, of [handle] or (null) of the strip; [onEnd] follows.
  */
 internal fun Modifier.scrubGestures(
     pxPerUs: () -> Double,
     grabAt: (Offset) -> Any?,
-    onScrubStart: () -> Unit,
+    onScrubStart: (handle: Any?) -> Unit,
     onScrubBy: (deltaUs: Long) -> Unit,
     onZoom: (factor: Float) -> Unit,
     onHandleMove: (handle: Any, x: Float) -> Unit,
@@ -72,19 +77,23 @@ internal fun Modifier.scrubGestures(
     onEnd: (handle: Any?) -> Unit
 ): Modifier = pointerInput(Unit) {
     awaitEachGesture {
-        val down = awaitFirstDown(requireUnconsumed = false)
+        val down = awaitFirstDown()
         val handle = grabAt(down.position)
         var travel = 0f
+        var travelY = 0f
         var started = false
         while (true) {
             val event = awaitPointerEvent()
+            if (!started && event.changes.any { it.isConsumed }) return@awaitEachGesture
             val pressed = event.changes.filter { it.pressed }
             if (pressed.isEmpty()) break
             val pan = event.calculatePan()
             travel += abs(pan.x)
+            travelY += abs(pan.y)
+            if (!started && pressed.size == 1 && travelY > viewConfiguration.touchSlop && travelY > travel) return@awaitEachGesture
             if (!started && (travel > viewConfiguration.touchSlop || pressed.size > 1)) {
                 started = true
-                if (handle == null) onScrubStart()
+                onScrubStart(handle)
             }
             if (!started) continue
             if (handle != null) {

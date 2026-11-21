@@ -163,8 +163,10 @@ internal fun RemixStudio(
         )
 
         val draftResult = DraftJournalStore.restoreDraft(context, sessionId, expectedIdentity)
-        if (draftResult.restored && draftResult.project != null && draftResult.project != defaultProj) {
-            loadingState = StudioLoadingState.PromptRestore(draftResult.project, defaultProj)
+        // Before the history exists, so the length the panels and the player share costs no undo step.
+        val restored = draftResult.project?.let { withContext(Dispatchers.IO) { withMusicLength(context, it) } }
+        if (draftResult.restored && restored != null && restored != defaultProj) {
+            loadingState = StudioLoadingState.PromptRestore(restored, defaultProj)
         } else {
             // A draft equal to a fresh project carries no edits; drop it instead of
             // ambushing the next open with a pointless restore prompt.
