@@ -606,8 +606,9 @@ internal object NativeVideoComposition {
 
     /** Null when none of the track would be heard. */
     private fun musicTrack(context: Context, spec: VideoMusicSpec, videoDurationUs: Long, volume: LiveVolume): RetainedRangeComposition.Music? {
-        val trackUs = probeAudioTrackUs(context, spec.uri) ?: throw IOException("The music file has no sound")
-        val plan = MusicPlan.of(spec.copy(durationUs = trackUs), videoDurationUs) ?: return null
+        val trackUs = spec.durationUs?.takeIf { it > 0L } ?: probeAudioTrackUs(context, spec.uri)
+            ?: throw IOException("The music file has no sound")
+        val plan = MusicPlan.of(if (spec.durationUs == trackUs) spec else spec.copy(durationUs = trackUs), videoDurationUs) ?: return null
         return RetainedRangeComposition.Music(spec.uri, trackUs, plan, volume)
     }
 

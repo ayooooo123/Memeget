@@ -37,11 +37,11 @@ object AudioExtractor {
   fun extract(ctx: Context, source: String, maxSeconds: Double): Map<String, Any>? {
     val mono = FloatAcc()
     var sampleRate = 0
-    val hasAudio = decodeMono(ctx, source, maxSeconds) { sample, rate ->
+    val endUs = decodeMono(ctx, source, maxSeconds) { sample, rate ->
       mono.add(sample)
       sampleRate = rate
     }
-    if (!hasAudio) return null
+    if (endUs == null) return null
 
     val resampled = resample(mono.data, mono.size, sampleRate, TARGET_RATE)
     val outFile = File.createTempFile("audio_pcm_", ".f32", ctx.cacheDir)
@@ -59,17 +59,15 @@ object AudioExtractor {
     fun accept(sample: Float, sampleRate: Int)
   }
 
-  // Decodes the first audio track to mono, at most [maxSeconds], handing each
-  // sample to [sink] instead of keeping it: memory stays flat however long or
-  // high-rate the track is. False when the source has no audio track; throws on
-  // decode errors.
-  fun decodeMono(ctx: Context, source: String, maxSeconds: Double, sink: MonoSink): Boolean {
+  /** End of the selected audio track on the presentation clock, or null if absent.
+   * With a sink, also delivers each downmixed sample up to the requested cap. */
+  fun decodeMono(ctx: Context, source: String, maxSeconds: Double, sink: MonoSink? = null): Long? {
     val extractor = MediaExtractor()
     try {
-      if (source.startsWith("content://")) {
+      if (source.startsWith("content://") || source.startsWith("file://")) {
         extractor.setDataSource(ctx, Uri.parse(source), null)
       } else {
-        extractor.setDataSource(source.removePrefix("file://"))
+        extractor.setDataSource(source)
       }
 
       var trackIndex = -1
@@ -83,7 +81,7 @@ object AudioExtractor {
           break
         }
       }
-      if (trackIndex < 0 || format == null) return false
+      if (trackIndex < 0 || format == null) return null
 
       extractor.selectTrack(trackIndex)
       val mime = format.getString(MediaFormat.KEY_MIME)!!
@@ -91,14 +89,13 @@ object AudioExtractor {
       try {
         codec.configure(format, null, null, 0)
         codec.start()
-        decodeToMono(extractor, codec, format, maxSeconds, sink)
+        return decodeToMono(extractor, codec, format, maxSeconds, sink)
       } finally {
         try {
           codec.stop()
         } catch (_: Exception) {}
         codec.release()
       }
-      return true
     } finally {
       extractor.release()
     }
@@ -112,12 +109,13 @@ object AudioExtractor {
     codec: MediaCodec,
     inputFormat: MediaFormat,
     maxSeconds: Double,
-    sink: MonoSink
-  ) {
+    sink: MonoSink?
+  ): Long {
     var sampleRate = inputFormat.getInteger(MediaFormat.KEY_SAMPLE_RATE)
     var channels = inputFormat.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
     var pcmFloat = false
     var decoded = 0L
+    var endUs = 0L
     val maxInputUs = (maxSeconds * 1_000_000).toLong()
     val info = MediaCodec.BufferInfo()
     var sawInputEOS = false
@@ -156,14 +154,15 @@ object AudioExtractor {
           buf.limit(info.offset + info.size)
           val ch = if (channels > 0) channels else 1
           val frames = info.size / ((if (pcmFloat) 4 else 2) * ch)
-          if (pcmFloat) {
+          if (frames > 0) endUs = maxOf(endUs, info.presentationTimeUs + frames * 1_000_000L / sampleRate)
+          if (sink != null && pcmFloat) {
             val fb = buf.order(ByteOrder.nativeOrder()).asFloatBuffer()
             for (i in 0 until frames) {
               var s = 0f
               for (c in 0 until ch) s += fb.get(i * ch + c)
               sink.accept(s / ch, sampleRate)
             }
-          } else {
+          } else if (sink != null) {
             val sb = buf.order(ByteOrder.nativeOrder()).asShortBuffer()
             for (i in 0 until frames) {
               var s = 0f
@@ -179,6 +178,7 @@ object AudioExtractor {
         }
       }
     }
+    return endUs
   }
 
   // Linear-interpolation resample. Plenty for feeding a speech model at 16 kHz;

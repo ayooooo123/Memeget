@@ -1,13 +1,16 @@
 package com.memeget.nativeapp.editor
 
 import android.content.Context
+import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.net.Uri
+import androidx.media3.common.MimeTypes
 import androidx.media3.common.audio.AudioProcessor
 import androidx.media3.common.audio.BaseAudioProcessor
 import androidx.media3.common.audio.GainProcessor
 import androidx.media3.common.util.Util
 import androidx.media3.inspector.MediaExtractorCompat
+import expo.modules.memegetbg.AudioExtractor
 import java.io.IOException
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -30,26 +33,37 @@ internal fun probeAudioTrackUs(context: Context, uri: String): Long? {
         } catch (e: Exception) {
             throw IOException("The file could not be read: ${e.message}", e)
         }
-        val audio = (0 until extractor.trackCount).map { extractor.getTrackFormat(it) }
-            .firstOrNull { it.getString(MediaFormat.KEY_MIME).orEmpty().startsWith("audio/") }
-            ?: return null
-        val durationUs = if (audio.containsKey(MediaFormat.KEY_DURATION)) audio.getLong(MediaFormat.KEY_DURATION) else 0L
-        return durationUs.takeIf { it > 0L } ?: throw IOException("The sound's length is unknown")
+        for (i in 0 until extractor.trackCount) {
+            val audio = extractor.getTrackFormat(i)
+            if (!audio.getString(MediaFormat.KEY_MIME).orEmpty().startsWith("audio/")) continue
+            val container = extractor.metrics.getString(MediaExtractor.MetricsConstants.MIME_TYPE)
+            val endUs = when (container) {
+                // Media3's Matroska extractor supplies only the container duration, even for a short audio track.
+                MimeTypes.VIDEO_WEBM, MimeTypes.VIDEO_MATROSKA ->
+                    AudioExtractor.decodeMono(context, uri, Double.POSITIVE_INFINITY)
+                else -> if (audio.containsKey(MediaFormat.KEY_DURATION)) audio.getLong(MediaFormat.KEY_DURATION) else null
+            }
+            return endUs?.takeIf { it > 0L } ?: throw IOException("The sound's length is unknown")
+        }
+        return null
+    } catch (e: RuntimeException) {
+        throw IOException("The sound could not be read", e)
     } finally {
         extractor.release()
     }
 }
 
-/** [project] with its music's length filled in, for drafts saved before [VideoMusicSpec.durationUs] existed. */
+/** Older drafts can contain the container length instead of the audio length. Correct it once on restore. */
 internal fun withMusicLength(context: Context, project: MemeEditProject): MemeEditProject {
     val video = project.video ?: return project
-    val music = video.music?.takeIf { it.durationUs == null } ?: return project
-    // Unreadable now: left unknown, and building the preview reports the file.
+    val music = video.music ?: return project
+    // Preserve the draft if its audio is unavailable; the preview reports playback errors.
     val trackUs = try {
         probeAudioTrackUs(context, music.uri)
     } catch (_: IOException) {
         null
     } ?: return project
+    if (music.durationUs == trackUs) return project
     return project.copy(video = video.copy(music = music.copy(durationUs = trackUs)))
 }
 
