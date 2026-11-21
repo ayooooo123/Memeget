@@ -1,7 +1,6 @@
 package expo.modules.memegetbg
 
 import android.content.Context
-import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.media.MediaCodecList
 import android.media.MediaExtractor
@@ -14,25 +13,27 @@ import androidx.media3.common.Effect
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.audio.AudioProcessor
-import androidx.media3.common.audio.DefaultGainProvider
 import androidx.media3.common.audio.GainProcessor
 import androidx.media3.common.audio.SpeedChangingAudioProcessor
 import androidx.media3.common.audio.SpeedProvider
 import androidx.media3.common.util.SpeedProviderUtil
 import androidx.media3.common.util.UnstableApi
-import androidx.media3.effect.BitmapOverlay
 import androidx.media3.effect.GlEffect
 import androidx.media3.effect.GlShaderProgram
 import androidx.media3.effect.OverlayEffect
 import androidx.media3.effect.Presentation
-import androidx.media3.effect.StaticOverlaySettings
 import androidx.media3.effect.TimestampAdjustment
 import androidx.media3.effect.TimestampAdjustmentShaderProgram
 import androidx.media3.transformer.Composition
 import androidx.media3.transformer.EditedMediaItem
 import androidx.media3.transformer.EditedMediaItemSequence
 import androidx.media3.transformer.Effects
+import com.memeget.nativeapp.editor.ExactLengthAudioProcessor
+import com.memeget.nativeapp.editor.LiveGain
+import com.memeget.nativeapp.editor.LiveVolume
+import com.memeget.nativeapp.editor.MusicPlan
 import java.io.IOException
+import kotlin.math.roundToLong
 
 /**
  * Native override of RetainedRangeComposition supporting HDR tone-mapping when
@@ -113,23 +114,23 @@ object RetainedRangeComposition {
       TimestampAdjustmentShaderProgram(timestampMap)
   }
 
-  fun build(
-    uri: String,
-    sourceDurationUs: Long,
-    ranges: List<Range>,
-    speed: Float = 1f,
-    audioProcessors: List<AudioProcessor> = emptyList(),
-    videoEffects: List<Effect> = emptyList()
-  ): Composition = buildTimeline(
-    uri = uri,
-    sourceDurationUs = sourceDurationUs,
-    segments = ranges,
-    speed = speed,
-    audioProcessors = audioProcessors,
-    videoEffects = videoEffects
+  /** An added sound: the track, where it plays ([MusicPlan], edited-video time) and its live volume. */
+  internal class Music(
+    val uri: String,
+    /** Whole track length, which Media3 needs to clip it. */
+    val trackDurationUs: Long,
+    val plan: MusicPlan,
+    val volume: LiveVolume
   )
 
-  fun buildTimeline(
+  /**
+   * @param forPlayer build for [androidx.media3.transformer.CompositionPlayer]. Media3 1.9 has no speed that both
+   *   preview and export accept (Pixel 5a): the player only takes speed per item, made by
+   *   [Effects.createExperimentalSpeedChangingEffect], and Transformer stalls on any per-item speed ("no output
+   *   sample written in the last 10000 milliseconds"). So the player gets per-item speed and the export speeds up
+   *   the whole mix, with the music slowed by the same factor first. Either way the music keeps its own tempo.
+   */
+  internal fun buildTimeline(
     uri: String,
     sourceDurationUs: Long,
     segments: List<Segment>,
@@ -139,10 +140,8 @@ object RetainedRangeComposition {
     sourceVideoEffects: List<Effect> = emptyList(),
     audioProcessors: List<AudioProcessor> = emptyList(),
     videoEffects: List<Effect> = emptyList(),
-    overlay: Bitmap? = null,
-    musicUri: String? = null,
-    musicVolume: Float = 1f,
-    musicStartUs: Long = 0
+    music: Music? = null,
+    forPlayer: Boolean
   ): Composition {
     require(segments.isNotEmpty()) { "At least one segment is required" }
     require(segments.size <= MAX_SEGMENTS) {
@@ -171,32 +170,33 @@ object RetainedRangeComposition {
       require(it.width > 0 && it.height > 0) { "outputSize must be positive, was $it" }
     }
 
-    val speedProcessor = if (speed == 1f) null else {
-      SpeedChangingAudioProcessor(ConstantSpeedProvider(speed))
-    }
     val presentation = outputSize?.let {
       Presentation.createForWidthAndHeight(it.width, it.height, Presentation.LAYOUT_SCALE_TO_FIT)
     }
+    val mixSpeed = if (forPlayer || speed == 1f) null else SpeedChangingAudioProcessor(ConstantSpeedProvider(speed))
 
-    val mixMusic = musicUri != null
-    val sourceItemAudioProcessors = if (mixMusic) audioProcessors else emptyList()
     val items = segments.map { segment ->
-      val itemEffects = buildList(2 + sourceVideoEffects.size) {
-        if (speedProcessor != null) {
-          add(SequenceSpeedTimestampEffect(speedProcessor::getSpeedAdjustedTimeAsync))
-        }
+      val itemSpeed = if (forPlayer && speed != 1f) Effects.createExperimentalSpeedChangingEffect(ConstantSpeedProvider(speed)) else null
+      val itemAudio = buildList {
+        itemSpeed?.let { add(it.first) }
+        // The source's own processors (its volume) stay on its items, away from the music.
+        if (segment is Range) addAll(audioProcessors)
+      }
+      val itemVideo = buildList(2 + sourceVideoEffects.size) {
+        itemSpeed?.let { add(it.second) }
+        if (mixSpeed != null) add(SequenceSpeedTimestampEffect(mixSpeed::getSpeedAdjustedTimeAsync))
         if (segment is Range) addAll(sourceVideoEffects)
         if (presentation != null) add(presentation)
       }
       when (segment) {
         is Range -> EditedMediaItem.Builder(clip(uri, segment))
           .setDurationUs(sourceDurationUs)
-          .setEffects(Effects(sourceItemAudioProcessors, itemEffects))
+          .setEffects(Effects(itemAudio, itemVideo))
           .build()
         is Card -> EditedMediaItem.Builder(cardItem(segment))
           .setDurationUs(segment.durationUs)
           .setFrameRate(segment.frameRate)
-          .setEffects(Effects(emptyList(), itemEffects))
+          .setEffects(Effects(itemAudio, itemVideo))
           .build()
       }
     }
@@ -209,69 +209,60 @@ object RetainedRangeComposition {
     }
     val sequence = sequenceBuilder.build()
 
-    val musicSequence = musicUri?.let { source ->
-      val gain = GainProcessor(DefaultGainProvider.Builder(musicVolume).build())
-      val mediaItem = if (musicStartUs > 0L) {
-        MediaItem.Builder()
-          .setUri(source)
-          .setClippingConfiguration(
-            MediaItem.ClippingConfiguration.Builder().setStartPositionMs(musicStartUs / 1000L).build()
-          )
-          .build()
-      } else {
-        MediaItem.fromUri(source)
-      }
-      val musicItem = EditedMediaItem.Builder(mediaItem)
-        .setRemoveVideo(true)
-        .setEffects(Effects(listOf(gain), emptyList()))
-        .build()
-      @Suppress("DEPRECATION")
-      EditedMediaItemSequence.Builder(musicItem)
-        .setIsLooping(true)
-        .build()
+    val musicSequence = music?.let {
+      musicSequence(it, expectedOutputDurationUs(segments, speed), if (mixSpeed != null) speed else 1f)
     }
-
-    val compositionSourceProcessors = if (mixMusic) emptyList() else audioProcessors
-    val compositionAudioProcessors = if (speedProcessor == null) compositionSourceProcessors else {
-      buildList(compositionSourceProcessors.size + 1) {
-        add(speedProcessor)
-        addAll(compositionSourceProcessors)
-      }
-    }
-
-    val compositionVideoEffects = if (overlay == null) videoEffects else {
-      buildList(videoEffects.size + 1) {
-        addAll(videoEffects)
-        add(overlayEffect(overlay, outputSize))
-      }
-    }
-
     val builder = if (musicSequence == null) {
       Composition.Builder(sequence)
     } else {
       Composition.Builder(sequence, musicSequence)
-    }.setEffects(Effects(compositionAudioProcessors, compositionVideoEffects))
+    }.setEffects(Effects(listOfNotNull(mixSpeed), videoEffects))
 
-    // Tone-map HDR down to SDR whenever an overlay bitmap OR OverlayEffect is present
-    if (overlay != null || videoEffects.any { it is OverlayEffect }) {
+    // Tone-map HDR down to SDR whenever an OverlayEffect is present
+    if (videoEffects.any { it is OverlayEffect }) {
       builder.setHdrMode(Composition.HDR_MODE_TONE_MAP_HDR_TO_SDR_USING_OPEN_GL)
     }
     return builder.build()
   }
 
-  private fun overlayEffect(bitmap: Bitmap, outputSize: Size?): OverlayEffect {
-    val overlay = if (outputSize == null) {
-      BitmapOverlay.createStaticBitmapOverlay(bitmap)
-    } else {
-      val settings = StaticOverlaySettings.Builder()
-        .setScale(
-          outputSize.width.toFloat() / bitmap.width.toFloat(),
-          outputSize.height.toFloat() / bitmap.height.toFloat()
+  /**
+   * The music as its own audio sequence, exactly as long as the edited video ([outputUs]). [mixSpeed] is the
+   * speed the composition later applies to the whole mix: each piece is first slowed by it, and its gaps
+   * lengthened, so the music comes out at its own tempo and in place.
+   */
+  private fun musicSequence(music: Music, outputUs: Long, mixSpeed: Float): EditedMediaItemSequence {
+    val builder = EditedMediaItemSequence.Builder(setOf(C.TRACK_TYPE_AUDIO))
+    fun mixUs(us: Long) = (us * mixSpeed.toDouble()).roundToLong()
+    if (music.plan.leadInUs > 0L) builder.addGap(mixUs(music.plan.leadInUs))
+    for (piece in music.plan.pieces) {
+      val item = MediaItem.Builder()
+        .setUri(music.uri)
+        .setClippingConfiguration(
+          MediaItem.ClippingConfiguration.Builder()
+            .setStartPositionUs(piece.clipStartUs)
+            .setEndPositionUs(piece.clipEndUs)
+            .build()
         )
         .build()
-      BitmapOverlay.createStaticBitmapOverlay(bitmap, settings)
+      // The slowed piece reaches the gain processor stretched by mixSpeed; it maps that back to the video's clock.
+      val gain = LiveGain(music.volume, piece.outputStartUs, music.plan, outputUsPerStreamUs = 1.0 / mixSpeed)
+      val edited = EditedMediaItem.Builder(item)
+        .setRemoveVideo(true)
+        .setDurationUs(music.trackDurationUs)
+        .setEffects(
+          Effects(
+            // The trim sees the piece after the slowdown too: mixSpeed times as long in its own clock.
+            listOf(ExactLengthAudioProcessor(mixUs(piece.durationUs)), GainProcessor(gain)),
+            emptyList()
+          )
+        )
+      if (mixSpeed != 1f) edited.setSpeed(ConstantSpeedProvider(1f / mixSpeed))
+      builder.addItem(edited.build())
     }
-    return OverlayEffect(listOf(overlay))
+    // Silence to the end, so the music sequence never decides the export's length.
+    val tailUs = mixUs(outputUs - music.plan.endUs)
+    if (tailUs >= MusicPlan.MIN_PIECE_US) builder.addGap(tailUs)
+    return builder.build()
   }
 
   private fun clip(uri: String, range: Range): MediaItem =

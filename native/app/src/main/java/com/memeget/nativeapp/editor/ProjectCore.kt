@@ -591,6 +591,18 @@ internal object ProjectCore {
         return null
     }
 
+    /** Edited-video time of source time [sourceTimeUs], cards included; null inside a cut. */
+    fun mapSourceTimeToOutputTime(sourceTimeUs: Long, segments: List<CompositionSegment>, speed: Float): Long? {
+        if (segments.isEmpty() || sourceTimeUs < 0L) return null
+        for (seg in segments) {
+            if (seg is CompositionSegment.Source && sourceTimeUs in seg.sourceStartUs..seg.sourceEndUs) {
+                val outOffset = ((sourceTimeUs - seg.sourceStartUs).toDouble() / speed.toDouble()).roundToLong()
+                return seg.outputStartUs + outOffset
+            }
+        }
+        return null
+    }
+
     fun segmentEasingAt(keyframes: List<TransformKeyframe>, timeUs: Long): String {
         var easing = "linear"
         for (kf in keyframes.sortedBy { it.timeUs }) {
@@ -1191,6 +1203,35 @@ internal fun applyProjectAction(history: ProjectHistory, action: ProjectAction):
     } else {
         val newPast = (history.past + history.present).takeLast(ProjectLimits.MAX_HISTORY_STATES)
         history.copy(past = newPast, present = nextPresent, future = emptyList())
+    }
+}
+
+/** Applies [action] to the present without a new undo step, so a burst from one control undoes as one. */
+internal fun amendProjectAction(history: ProjectHistory, action: ProjectAction): ProjectHistory {
+    val nextPresent = reduceProject(history.present, action)
+    if (nextPresent == history.present) return history
+    return history.copy(present = nextPresent, future = emptyList())
+}
+
+/**
+ * Folds quick repeats from one control (typing, a slider drag) into one undo step. A different control, a pause
+ * of [windowMs], or anything else changing the project in between (undo, a canvas gesture, which leave the
+ * present a different object) starts a new step.
+ */
+internal class PanelEditMerger(private val windowMs: Long = 750L) {
+    private var control: String? = null
+    private var atMs = 0L
+    private var present: MemeEditProject? = null
+
+    fun apply(history: ProjectHistory, control: String, action: ProjectAction, nowMs: Long): ProjectHistory {
+        val merge = control == this.control && nowMs - atMs < windowMs && history.present === present
+        val next = if (merge) amendProjectAction(history, action) else applyProjectAction(history, action)
+        // A no-op made no step of its own; arming on it would fold the next edit into an older, unrelated step.
+        if (next === history) return history
+        this.control = control
+        atMs = nowMs
+        present = next.present
+        return next
     }
 }
 

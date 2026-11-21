@@ -2,6 +2,9 @@ package com.memeget.nativeapp.editor
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.util.Log
+import android.view.SurfaceHolder
+import android.view.SurfaceView
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import androidx.annotation.OptIn
@@ -20,6 +23,8 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.foundation.systemGestureExclusion
 import com.memeget.nativeapp.ui.MemegetIcons
 import androidx.compose.material3.CircularProgressIndicator
@@ -35,6 +40,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -65,6 +71,7 @@ import androidx.media3.ui.PlayerView
 import com.memeget.nativeapp.editor.NativeVideoComposition.PreparedVideoComposition
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.conflate
 import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.cos
@@ -73,6 +80,7 @@ import kotlin.math.min
 import kotlin.math.sin
 
 private const val PREVIEW_MAX_PIXELS = 1_000_000L
+private const val MAX_PLAYER_RECOVERIES = 3
 
 @OptIn(UnstableApi::class)
 @Composable
@@ -103,6 +111,11 @@ internal fun StudioCanvas(
     maskBrushWidth: Float = 0.04f,
     maskErase: Boolean = false,
     onAddMaskStroke: (MaskStroke) -> Unit = {},
+    /** Source time whose exact frame covers the preview (a trim edge, or a playhead in a cut); null shows the edit. */
+    peekSourceUs: Long? = null,
+    peekLabel: String = "",
+    /** A finger is dragging the playhead: the player favours keeping up over finishing every frame. */
+    scrubbing: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -148,17 +161,21 @@ internal fun StudioCanvas(
     var rasterError by remember { mutableStateOf<String?>(null) }
     val isRenderingPreview = !isVideo && rasterError == null && renderedProject != previewProject
 
-    LaunchedEffect(previewProject, isVideo) {
+    // Latest-wins: a render in flight always finishes and shows, then the newest project renders next. Restarting
+    // per change starved the preview during drags, typing and slider moves, which change the project every frame.
+    val previewProjectState = rememberUpdatedState(previewProject)
+    LaunchedEffect(isVideo) {
         if (isVideo) return@LaunchedEffect
-        rasterError = null
-        delay(16)
-        try {
-            displayedBitmap = NativeImagePreview.render(context, previewProject, PREVIEW_MAX_PIXELS)
-            renderedProject = previewProject
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (error: Exception) {
-            rasterError = error.message ?: "Image preview failed"
+        snapshotFlow { previewProjectState.value }.conflate().collect { next ->
+            rasterError = null
+            try {
+                displayedBitmap = NativeImagePreview.render(context, next, PREVIEW_MAX_PIXELS)
+                renderedProject = next
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                rasterError = error.message ?: "Image preview failed"
+            }
         }
     }
 
@@ -168,11 +185,14 @@ internal fun StudioCanvas(
     var preparedComp by remember { mutableStateOf<PreparedVideoComposition?>(null) }
     var compositionPlayer by remember { mutableStateOf<CompositionPlayer?>(null) }
     var compositionError by remember { mutableStateOf<String?>(null) }
-    var preparedProject by remember { mutableStateOf<MemeEditProject?>(null) }
-    val isPreparingComposition = isVideo && compositionError == null && preparedProject != previewProject
+    var preparedKey by remember { mutableStateOf<Any?>(null) }
+    val rebuildKey = remember(previewProject, isVideo) { if (isVideo) NativeVideoComposition.rebuildKey(previewProject) else null }
+    val isPreparingComposition = isVideo && compositionError == null && preparedKey != rebuildKey
+    val isPlayingState = rememberUpdatedState(isPlaying)
 
-    // Prepare Composition off-main whenever project changes
-    LaunchedEffect(previewProject, isVideo) {
+    // Rebuild the player only when the video itself changes (trim, speed, crop, background, covers that
+    // read the frame, layer set). Overlay edits go through the live-layer effect below.
+    LaunchedEffect(rebuildKey, isVideo) {
         if (!isVideo) {
             compositionPlayer?.release()
             compositionPlayer = null
@@ -185,7 +205,7 @@ internal fun StudioCanvas(
         try {
             compositionError = null
             delay(120)
-            val prepared = NativeVideoComposition.prepare(context, previewProject)
+            val prepared = NativeVideoComposition.prepare(context, previewProjectState.value, forPlayer = true)
 
             // Media3 owns its render-thread inputs through asynchronous release.
             compositionPlayer?.release()
@@ -193,20 +213,33 @@ internal fun StudioCanvas(
 
             preparedComp = prepared
 
-            val newPlayer = CompositionPlayer.Builder(context).build()
+            val newPlayer = CompositionPlayer.Builder(context)
+                // Lets an overlay edit repaint the paused frame without a seek.
+                .experimentalSetEnableReplayableCache(true)
+                .build()
             candidatePlayer = newPlayer
             newPlayer.addListener(object : Player.Listener {
+                private var recoveries = 0
+
                 override fun onPlayerError(error: PlaybackException) {
-                    if (compositionPlayer === newPlayer) compositionError = error.message ?: "Video preview failed"
+                    if (compositionPlayer !== newPlayer) return
+                    // Media3's frame processor can trip over a seek that lands mid-frame while scrubbing
+                    // (NoSuchElementException in ExternalTextureManager); preparing again recovers it.
+                    if (recoveries++ < MAX_PLAYER_RECOVERIES) {
+                        Log.w("StudioCanvas", "Preview player failed, preparing again", error)
+                        newPlayer.prepare()
+                    } else {
+                        compositionError = error.message ?: "Video preview failed"
+                    }
                 }
             })
             newPlayer.setComposition(prepared.composition)
             newPlayer.repeatMode = Player.REPEAT_MODE_ALL
-            newPlayer.seekTo((prepared.sourceToOutputTimeUs(playheadUs) ?: 0L) / 1000L)
-            newPlayer.playWhenReady = isPlaying
+            newPlayer.seekTo((prepared.sourceToOutputTimeUs(playheadState.value) ?: 0L) / 1000L)
+            newPlayer.playWhenReady = isPlayingState.value
             newPlayer.prepare()
             compositionPlayer = newPlayer
-            preparedProject = previewProject
+            preparedKey = rebuildKey
             candidatePlayer = null
         } catch (ce: CancellationException) {
             candidatePlayer?.release()
@@ -214,6 +247,16 @@ internal fun StudioCanvas(
         } catch (e: Exception) {
             candidatePlayer?.release()
             compositionError = e.message ?: "Failed to build video composition"
+        }
+    }
+
+    // Overlay and volume edits: swap them into the running composition and repaint the paused frame.
+    LaunchedEffect(preparedComp) {
+        val comp = preparedComp ?: return@LaunchedEffect
+        snapshotFlow { previewProjectState.value }.collect { next ->
+            if (NativeVideoComposition.rebuildKey(next) != preparedKey) return@collect
+            comp.updateLive(next)
+            if (!isPlayingState.value) compositionPlayer?.experimentalRedrawLastFrame()
         }
     }
 
@@ -229,6 +272,10 @@ internal fun StudioCanvas(
     // Play / Pause synchronization
     LaunchedEffect(compositionPlayer, isPlaying) {
         compositionPlayer?.playWhenReady = isPlaying
+    }
+
+    LaunchedEffect(compositionPlayer, scrubbing) {
+        compositionPlayer?.isScrubbingModeEnabled = scrubbing
     }
 
     // Active playback loop updating playhead (advances during play)
@@ -312,6 +359,15 @@ internal fun StudioCanvas(
                                 ViewGroup.LayoutParams.MATCH_PARENT,
                                 ViewGroup.LayoutParams.MATCH_PARENT
                             )
+                            // A paused player keeps the frame it drew for the old size (the keyboard resizes the
+                            // canvas); repaint once the player has taken the new size, posted after its callback.
+                            (videoSurfaceView as? SurfaceView)?.holder?.addCallback(object : SurfaceHolder.Callback {
+                                override fun surfaceCreated(holder: SurfaceHolder) = Unit
+                                override fun surfaceDestroyed(holder: SurfaceHolder) = Unit
+                                override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
+                                    post { (player as? CompositionPlayer)?.takeIf { !it.isPlaying }?.experimentalRedrawLastFrame() }
+                                }
+                            })
                         }
                     },
                     update = { view ->
@@ -453,6 +509,12 @@ internal fun StudioCanvas(
             // -----------------------------------------------------------------
             if (activeTool == "draw" && !beforeMode) {
                 var activePoints by remember { mutableStateOf<List<NormalizedPoint>>(emptyList()) }
+                val drawLayers = project.layers.filterIsInstance<MemeEditLayer.Draw>()
+                val drawLayersState = rememberUpdatedState(drawLayers)
+                // (draw layer id, element index); tap a shape to select it for move/resize.
+                val selectedDraw = remember { mutableStateOf<Pair<String, Int>?>(null) }
+                LaunchedEffect(drawLayers.map { it.id to it.elements.size }) { selectedDraw.value = null }
+                val drawHitPadPx = with(density) { 16.dp.toPx() }
 
                 // Live stroke visualization Canvas during active finger drag
                 if (activePoints.isNotEmpty()) {
@@ -529,9 +591,22 @@ internal fun StudioCanvas(
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
+                        .pointerInput(canvasWidth, canvasHeight) {
+                            detectTapGestures { offset ->
+                                val pt = NormalizedPoint(offset.x / canvasWidth, offset.y / canvasHeight)
+                                // Topmost active draw layer first, so a duplicated drawing wins over its original.
+                                selectedDraw.value = drawLayersState.value.asReversed()
+                                    .filter { ProjectCore.isLayerActiveAt(it, playheadState.value) }
+                                    .firstNotNullOfOrNull { layer ->
+                                        DrawToolCore.hitTestElement(layer.elements, pt, drawHitPadPx / canvasWidth, drawHitPadPx / canvasHeight)
+                                            ?.let { layer.id to it }
+                                    }
+                            }
+                        }
                         .pointerInput(drawSettings) {
                             detectDragGestures(
                                 onDragStart = { offset ->
+                                    selectedDraw.value = null
                                     onBeginTransaction()
                                     val pt = NormalizedPoint(
                                         (offset.x / canvasWidth).coerceIn(0f, 1f),
@@ -565,13 +640,99 @@ internal fun StudioCanvas(
                             )
                         }
                 )
+
+                val selection = selectedDraw.value
+                val selectedElementOf: (List<MemeEditLayer.Draw>) -> DrawElement? = { layers ->
+                    selection?.let { (id, i) -> layers.find { it.id == id }?.elements?.getOrNull(i) }
+                }
+                val selBounds = selectedElementOf(drawLayers)?.let(DrawToolCore::elementBounds)
+                if (selection != null && selBounds != null) {
+                    val (selLayerId, selIndex) = selection
+                    val updateSelected: (DrawElement) -> Unit = { elem ->
+                        drawLayersState.value.find { it.id == selLayerId }?.takeIf { selIndex in it.elements.indices }?.let { layer ->
+                            onUpdateLayer(layer.copy(elements = layer.elements.toMutableList().also { it[selIndex] = elem }))
+                        }
+                    }
+                    Box(
+                        modifier = Modifier
+                            .offset(
+                                with(density) { (selBounds.x * canvasWidth - drawHitPadPx).toDp() },
+                                with(density) { (selBounds.y * canvasHeight - drawHitPadPx).toDp() }
+                            )
+                            .size(
+                                with(density) { (selBounds.width * canvasWidth + 2 * drawHitPadPx).toDp() },
+                                with(density) { (selBounds.height * canvasHeight + 2 * drawHitPadPx).toDp() }
+                            )
+                            .border(1.5.dp, Color(0xFFD8FF4A))
+                            .pointerInput(selection, canvasWidth, canvasHeight) {
+                                var start: DrawElement? = null
+                                var accumX = 0f
+                                var accumY = 0f
+                                detectDragGestures(
+                                    onDragStart = {
+                                        onBeginTransaction()
+                                        start = selectedElementOf(drawLayersState.value)
+                                        accumX = 0f
+                                        accumY = 0f
+                                    },
+                                    onDrag = { change, dragAmount ->
+                                        change.consume()
+                                        accumX += dragAmount.x
+                                        accumY += dragAmount.y
+                                        start?.let { updateSelected(DrawToolCore.moveElement(it, accumX / canvasWidth, accumY / canvasHeight)) }
+                                    },
+                                    onDragEnd = { onCommitTransaction() },
+                                    onDragCancel = { onCancelTransaction() }
+                                )
+                            }
+                    ) {
+                        // Sits in the hit padding past the shape's corner, so it stays touchable inside its parent.
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.BottomEnd)
+                                .size(24.dp)
+                                .clip(CircleShape)
+                                .background(Color(0xFFD8FF4A))
+                                .pointerInput(selection, canvasWidth, canvasHeight) {
+                                    var start: DrawElement? = null
+                                    var startBounds: NormalizedRect? = null
+                                    var accumX = 0f
+                                    var accumY = 0f
+                                    detectDragGestures(
+                                        onDragStart = {
+                                            onBeginTransaction()
+                                            start = selectedElementOf(drawLayersState.value)
+                                            startBounds = start?.let(DrawToolCore::elementBounds)
+                                            accumX = 0f
+                                            accumY = 0f
+                                        },
+                                        onDrag = { change, dragAmount ->
+                                            change.consume()
+                                            accumX += dragAmount.x
+                                            accumY += dragAmount.y
+                                            val s = start
+                                            val b = startBounds
+                                            if (s != null && b != null) {
+                                                updateSelected(
+                                                    DrawToolCore.resizeElement(s, b.width + accumX / canvasWidth, b.height + accumY / canvasHeight)
+                                                )
+                                            }
+                                        },
+                                        onDragEnd = { onCommitTransaction() },
+                                        onDragCancel = { onCancelTransaction() }
+                                    )
+                                }
+                        )
+                    }
+                }
             }
 
             // -----------------------------------------------------------------
             // 6. Interactive Selected Layer Handles (Move, Resize, Rotate)
             // -----------------------------------------------------------------
+            // Draw mode owns the canvas gestures; a selected text/cover layer's handles would steal shape drags.
             val selectedLayerState = rememberUpdatedState(
-                if (!beforeMode && selectedLayerId != null) project.layers.find { it.id == selectedLayerId } else null
+                if (!beforeMode && activeTool != "draw" && selectedLayerId != null) project.layers.find { it.id == selectedLayerId } else null
             )
             val selectedLayer = selectedLayerState.value
 
@@ -1167,6 +1328,32 @@ internal fun StudioCanvas(
                             )
                         }
                 )
+            }
+
+            // -----------------------------------------------------------------
+            // 8b. Exact source frame while trimming or parked in a cut
+            // -----------------------------------------------------------------
+            val peekFrame = if (isVideo) rememberSourceFrame(project.materializedSourceUri ?: project.source.uri, peekSourceUs) else null
+            if (peekFrame != null) {
+                Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
+                    Image(
+                        bitmap = peekFrame,
+                        contentDescription = peekLabel,
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                    Text(
+                        peekLabel,
+                        color = Color.Black,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier
+                            .align(Alignment.TopCenter)
+                            .padding(8.dp)
+                            .background(Color(0xFFD8FF4A), RoundedCornerShape(6.dp))
+                            .padding(horizontal = 8.dp, vertical = 3.dp)
+                    )
+                }
             }
 
             // -----------------------------------------------------------------

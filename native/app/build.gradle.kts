@@ -8,7 +8,6 @@ val mediaSource = rootProject.file("../modules/memeget-bg/android/src/main")
 val reusableMediaFiles = listOf(
     "AudioExtractor.kt", "VideoFrameExtractor.kt",
     "MemeMediaProbe.kt", "MemeMediaEditor.kt",
-    "MemeVideoExporter.kt", "VideoExportPlan.kt",
     "MemeDynamicOverlay.kt", "MemeDrawPrimitives.kt", "MemeDrawPreviewView.kt",
     "MemeTextLayout.kt", "MemeTextDetector.kt", "MemeStillSubjectSegmenter.kt",
     "KeepAliveLease.kt", "KeepAliveService.kt", "MemeClipFileProvider.kt",

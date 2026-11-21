@@ -65,6 +65,46 @@ internal object DrawToolCore {
         return existing + newPoint
     }
 
+    private const val MIN_ELEMENT_SIZE = 0.02f
+
+    /** Axis-aligned bounds of an element's points, or null when it has none. */
+    fun elementBounds(elem: DrawElement): NormalizedRect? {
+        if (elem.points.isEmpty()) return null
+        val minX = elem.points.minOf { it.x }
+        val minY = elem.points.minOf { it.y }
+        return NormalizedRect(minX, minY, elem.points.maxOf { it.x } - minX, elem.points.maxOf { it.y } - minY)
+    }
+
+    /** Index of the topmost element whose bounds, grown by the padding, contain [pt]. */
+    fun hitTestElement(elements: List<DrawElement>, pt: NormalizedPoint, padX: Float, padY: Float): Int? {
+        for (i in elements.indices.reversed()) {
+            val b = elementBounds(elements[i]) ?: continue
+            if (pt.x in (b.x - padX)..(b.x + b.width + padX) && pt.y in (b.y - padY)..(b.y + b.height + padY)) return i
+        }
+        return null
+    }
+
+    /** Translates an element, clamped so its bounds stay on the canvas. */
+    fun moveElement(elem: DrawElement, dx: Float, dy: Float): DrawElement {
+        val b = elementBounds(elem) ?: return elem
+        val cx = dx.coerceIn(-b.x, max(-b.x, 1f - b.x - b.width))
+        val cy = dy.coerceIn(-b.y, max(-b.y, 1f - b.y - b.height))
+        return elem.copy(points = elem.points.map { NormalizedPoint((it.x + cx).coerceIn(0f, 1f), (it.y + cy).coerceIn(0f, 1f)) })
+    }
+
+    /**
+     * Scales an element about its bounds' top-left corner to [width] x [height], clamped to the
+     * canvas. An axis with no extent (a straight horizontal or vertical line) keeps it.
+     */
+    fun resizeElement(elem: DrawElement, width: Float, height: Float): DrawElement {
+        val b = elementBounds(elem) ?: return elem
+        val sx = if (b.width > 0f) max(min(width, 1f - b.x), min(MIN_ELEMENT_SIZE, b.width)) / b.width else 1f
+        val sy = if (b.height > 0f) max(min(height, 1f - b.y), min(MIN_ELEMENT_SIZE, b.height)) / b.height else 1f
+        return elem.copy(points = elem.points.map {
+            NormalizedPoint((b.x + (it.x - b.x) * sx).coerceIn(0f, 1f), (b.y + (it.y - b.y) * sy).coerceIn(0f, 1f))
+        })
+    }
+
     fun parseColor(hex: String, fallback: Int = Color.RED): Int = try {
         Color.parseColor(hex)
     } catch (_: Exception) {
