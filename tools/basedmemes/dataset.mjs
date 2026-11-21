@@ -20,12 +20,13 @@
 // assumes ("seen on >=2 memes").
 
 import { readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
 import { jsonTerm } from '../memedepot/harvest.mjs';
 
 // Convenience default so `npm run mine:basedmemes` works with no args on the
 // machine that holds the archive. Override with --data-dir anywhere else.
-export const DEFAULT_DATA_DIR = '~/projects/basedmemes_archive/www.basedmemes.lol';
+export const DEFAULT_DATA_DIR = join(homedir(), 'projects/basedmemes_archive/www.basedmemes.lol');
 
 // Read a file, treating "not found" as "no data" (return null) so a partial
 // archive still yields what exists. Any other error is real and rethrown.
