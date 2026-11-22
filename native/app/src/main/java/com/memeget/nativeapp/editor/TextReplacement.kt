@@ -4,7 +4,10 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Paint
+import android.graphics.Path
 import android.graphics.Rect
+import android.graphics.Region
+import android.graphics.RegionIterator
 import com.memeget.nativeapp.InferenceEngine
 import expo.modules.memegetbg.MemeTextLayout
 import kotlinx.coroutines.CancellationException
@@ -40,6 +43,24 @@ private fun fitLines(text: String, lines: List<Rect>): String {
 }
 
 internal object TextReplacement {
+    private val fontPresets = arrayOf("plain", "subtitle", "impact")
+
+    /** A run is an unbroken row of ink. Its average width measures strokes without counting gaps between letters. */
+    private fun strokeWidth(paint: Paint, text: String, bounds: Rect, path: Path, clip: Region, glyphs: Region, span: Rect): Float {
+        path.rewind()
+        paint.getTextPath(text, 0, text.length, 0f, 0f, path)
+        clip.set(bounds.left - 1, bounds.top - 1, bounds.right + 1, bounds.bottom + 1)
+        glyphs.setPath(path, clip)
+        val runs = RegionIterator(glyphs)
+        var area = 0
+        var rows = 0
+        while (runs.next(span)) {
+            rows += span.height()
+            area += span.width() * span.height()
+        }
+        return area.toFloat() / rows.coerceAtLeast(1) / bounds.height()
+    }
+
     suspend fun layers(context: Context, project: MemeEditProject, rect: NormalizedRect, replacement: String,
                        original: String?, engine: InferenceEngine): Pair<MemeEditLayer.Cover, MemeEditLayer.Text> = withContext(Dispatchers.IO) {
         val picture = VideoBackgroundEffect.decodeOrientedBitmap(context, project.materializedSourceUri ?: project.source.uri, 4096)
@@ -82,7 +103,8 @@ internal object TextReplacement {
                           selection: NormalizedRect, old: String?, replacement: String): MemeEditLayer.Text {
         val (ink, w, h) = LogoMask.orient(letters.ink, mw, mh, base)
         val lines = mutableListOf<Rect>()
-        var count = 0; var edges = 0
+        var count = 0
+        var edges = 0
         for (y in 0 until h) {
             var left = w; var right = 0
             for (x in 0 until w) if (ink[y * w + x] != 0.toByte()) {
@@ -94,11 +116,10 @@ internal object TextReplacement {
             if (last == null || y - last.bottom > 2) lines += Rect(left, y, right, y + 1)
             else last.union(left, y, right, y + 1)
         }
-        val bounds = Rect(lines.first()).apply { lines.drop(1).forEach { union(it) } }
+        val bounds = Rect(lines.first()).apply { for (i in 1 until lines.size) union(lines[i]) }
         val line = lines.maxBy { it.width() }
-        val originalLine = old?.lines()?.maxByOrNull { it.length }.orEmpty()
-        // Match the proportions of a known line to one of the faces the renderer actually has.
-        // Without a transcript, stroke width distinguishes regular from bold but not the original typeface.
+        val transcript = old?.lines().orEmpty()
+        val originalLine = if (transcript.size == lines.size) transcript[lines.indexOf(line)] else transcript.maxByOrNull { it.length }.orEmpty()
         val weight = count.toFloat() / edges.coerceAtLeast(1) / line.height()
         val strokePreset = if (weight >= 0.12f) "subtitle" else "plain"
         var preset = strokePreset
@@ -107,13 +128,20 @@ internal object TextReplacement {
         var capHeight = 72
         if (originalLine.isNotBlank()) {
             val aspect = line.width().toFloat() / line.height()
+            val path = Path()
+            val clip = Region()
+            val glyphs = Region()
+            val span = Rect()
             var best = Float.MAX_VALUE
-            for (key in listOf("plain", "subtitle", "impact")) {
+            for (key in fontPresets) {
                 val spec = TextLayoutBridge.getPresetSpec(key)
                 paint.typeface = MemeTextLayout.weightedTypeface(context, spec.fontFamily, spec.fontWeight)
                 paint.getTextBounds(originalLine, 0, originalLine.length, measured)
                 if (measured.height() == 0) continue
-                val difference = abs(measured.width().toFloat() / measured.height() - aspect)
+                val stroke = strokeWidth(paint, originalLine, measured, path, clip, glyphs, span)
+                if (stroke == 0f) continue
+                val spacedWidth = measured.width() + 100f * spec.letterSpacingEm * (originalLine.length - 1)
+                val difference = abs(spacedWidth / measured.height() / aspect - 1f) + abs(stroke / weight - 1f)
                 if (difference < best || (difference == best && key == strokePreset)) {
                     best = difference
                     preset = key

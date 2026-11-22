@@ -2,7 +2,10 @@ package com.memeget.nativeapp.editor
 
 import android.app.Application
 import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.Rect
 import android.net.Uri
 import android.os.Looper
 import androidx.activity.ComponentActivity
@@ -23,6 +26,7 @@ import com.memeget.nativeapp.Meme
 import com.memeget.nativeapp.NativeInferenceEngine
 import com.memeget.nativeapp.SqliteLibraryStore
 import com.memeget.nativeapp.TextRegion
+import expo.modules.memegetbg.MemeTextLayout
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -116,6 +120,38 @@ class ReplaceTextTest {
         autoDetect()
         ui.onNodeWithText("NO").performScrollTo().performClick()
         assertReplacementStyle(replace("Ack"), hex(FILL_BLUE), hex(OUTLINE_YELLOW))
+    }
+
+    @Test fun replaceKeepsBoldStrokesWhenWordWidthsMatch() {
+        val context = RuntimeEnvironment.getApplication()
+        val original = "TYPE"
+        val bounds = Rect()
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { textSize = 80f; color = Color.BLACK }
+        fun aspect(weight: Int): Float {
+            paint.typeface = MemeTextLayout.weightedTypeface(context, "NotoSans", weight)
+            paint.getTextBounds(original, 0, original.length, bounds)
+            return bounds.width().toFloat() / bounds.height()
+        }
+        // A bold source with regular proportions: width and height alone cannot tell the weights apart.
+        paint.textScaleX = aspect(400) / aspect(700)
+        paint.getTextBounds(original, 0, original.length, bounds)
+        val w = 400
+        val h = 160
+        val bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val source = File.createTempFile("bold_text", ".png", context.cacheDir)
+        try {
+            bitmap.eraseColor(Color.WHITE)
+            Canvas(bitmap).drawText(original, 32f, 110f, paint)
+            source.outputStream().use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
+        } finally { bitmap.recycle() }
+        bounds.offset(32, 110)
+        bounds.inset(-3, -3)
+        val region = TextRegion(original, 1f, bounds.left.toFloat() / w, bounds.top.toFloat() / h,
+            bounds.width().toFloat() / w, bounds.height().toFloat() / h)
+        openStudio(source, listOf(region))
+        autoDetect()
+        val text = replace("NEW").layers.last() as MemeEditLayer.Text
+        assertEquals("The replacement must keep bold strokes", 700, TextLayoutBridge.getPresetSpec(text.style.preset).fontWeight)
     }
 
     @Test fun replaceKeepsAnOffsetShadowInsteadOfDrawingAnOutline() {
