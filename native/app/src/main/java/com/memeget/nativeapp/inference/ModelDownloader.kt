@@ -103,6 +103,11 @@ internal class ModelDownloader(
         }
     }
 
+    suspend fun verifiedFile(artifact: ModelArtifact, modelsDir: File): File? = withContext(Dispatchers.IO) {
+        val file = File(modelsDir, artifact.filename)
+        file.takeIf { isVerified(it, requireNotNull(artifact.expectedSizeBytes), requireNotNull(artifact.sha256Hex)) }
+    }
+
     private suspend fun isVerified(target: File, expectedSize: Long, sha256: String): Boolean {
         val stamp = VerifiedFile(target.lastModified(), target.length(), sha256)
         if (!target.isFile || stamp.size != expectedSize) return false

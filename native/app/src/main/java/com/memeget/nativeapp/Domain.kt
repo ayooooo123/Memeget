@@ -426,6 +426,8 @@ internal interface InferenceEngine : AutoCloseable {
     suspend fun gateAndDescribe(uri: String, ocrHint: String, candidateHints: String): VlmGateOutcome = VlmGateOutcome(true, 0.5f)
     /** The logo-removal fill model's file, downloaded on first use. */
     suspend fun inpaintModel(): java.io.File = throw ModelUnavailableException("inpaint", "No fill model in this engine")
+    /** Replace uses an installed, verified model, but does not start a download. */
+    suspend fun installedInpaintModel(): java.io.File? = null
     fun cancel()
     override fun close()
 }

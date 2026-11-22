@@ -352,6 +352,10 @@ internal object RenderPlanBuilder {
                     put("color", layer.style.outlineColor)
                     put("widthDip", strokeWidthPx.toDouble())
                 })
+                layer.style.shadow?.let {
+                    put("shadow", JSONObject().put("color", it.color)
+                        .put("xDip", (it.xEm * fontSizePx).toDouble()).put("yDip", (it.yEm * fontSizePx).toDouble()))
+                }
                 put("backing", JSONObject().apply {
                     if (layer.style.backgroundColor != null) {
                         put("color", layer.style.backgroundColor)

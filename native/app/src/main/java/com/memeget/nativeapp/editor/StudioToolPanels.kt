@@ -75,7 +75,6 @@ import expo.modules.memegetbg.SubjectCutoutResult
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 import kotlin.math.roundToLong
-import kotlin.math.max
 
 /**
  * Pictures and music picked in the editor, copied into app storage: a draft lasts up to a week, and a picker's
@@ -719,20 +718,19 @@ internal fun TextReplaceToolPanel(
     manualMode: Boolean,
     manualRegion: NormalizedRect,
     onToggleManualMode: (Boolean) -> Unit,
-    onUpdateManualRegion: (NormalizedRect) -> Unit,
     onApplyCover: (NormalizedRect, String) -> Unit,
     onApplyPixelate: (NormalizedRect, Int) -> Unit,
-    onApplyReplace: (NormalizedRect, String, String, ProjectCore.InferredTextStyle?) -> Unit,
+    onApplyReplace: suspend (NormalizedRect, String, String?) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val scope = rememberCoroutineScope()
     var isDetecting by remember { mutableStateOf(false) }
+    var isReplacing by remember { mutableStateOf(false) }
     var detectedRegions by remember { mutableStateOf<List<TextRegion>>(emptyList()) }
     var selectedRegion by remember { mutableStateOf<TextRegion?>(null) }
     var replaceText by remember { mutableStateOf("") }
     var pixelSize by remember { mutableFloatStateOf(16f) }
     var coverColor by remember { mutableStateOf("#000000") }
-    var inferredStyle by remember { mutableStateOf<ProjectCore.InferredTextStyle?>(null) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
 
     Column(
@@ -753,12 +751,14 @@ internal fun TextReplaceToolPanel(
                         try {
                             val regions = engine.recognize(sourceUri)
                             detectedRegions = regions
-                            if (regions.isNotEmpty()) {
-                                selectedRegion = regions.first()
-                                if (replaceText.isBlank()) {
-                                    replaceText = regions.first().text
-                                }
+                            val first = regions.firstOrNull()
+                            if (first != null) {
+                                onToggleManualMode(false)
+                                if (replaceText.isBlank() || replaceText == selectedRegion?.text) replaceText = first.text
+                            } else {
+                                errorMessage = "No text found. Use Manual Box to select the letters."
                             }
+                            selectedRegion = first
                         } catch (ce: CancellationException) {
                             throw ce
                         } catch (e: Exception) {
@@ -821,14 +821,6 @@ internal fun TextReplaceToolPanel(
                             .clickable {
                                 selectedRegion = region
                                 replaceText = region.text
-                                val style = ProjectCore.inferOriginalTextStyle(
-                                    sampledColors = listOf(coverColor, "#FFFFFF", "#000000", coverColor),
-                                    originalText = region.text,
-                                    regionHeight = region.height,
-                                    lineCount = max(1, region.text.split("\n").size)
-                                )
-                                inferredStyle = style
-                                coverColor = style.backgroundColor
                             }
                             .padding(8.dp)
                     ) {
@@ -841,10 +833,7 @@ internal fun TextReplaceToolPanel(
 
         // Active Target Rect mapped through base transform
         val activeRect = if (manualMode) manualRegion else selectedRegion?.let {
-            ProjectCore.transformRectToWorkingCanvas(
-                NormalizedRect(it.x, it.y, it.width, it.height),
-                base
-            )
+            ProjectCore.remapNormalizedRect(NormalizedRect(it.x, it.y, it.width, it.height), BaseTransform.Default, base)
         }
 
         if (activeRect != null) {
@@ -864,6 +853,42 @@ internal fun TextReplaceToolPanel(
                     unfocusedBorderColor = Color(0xFF30363D)
                 )
             )
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            Button(
+                onClick = replace@{
+                    if (isReplacing) return@replace
+                    val rect = activeRect
+                    val replacement = replaceText
+                    val originalText = if (manualMode) null else selectedRegion?.text
+                    isReplacing = true
+                    errorMessage = null
+                    scope.launch {
+                        try {
+                            onApplyReplace(rect, replacement, originalText)
+                            errorMessage = null
+                        } catch (cancelled: CancellationException) {
+                            throw cancelled
+                        } catch (error: Exception) {
+                            errorMessage = error.message ?: "The text could not be replaced"
+                        } finally {
+                            isReplacing = false
+                        }
+                    }
+                },
+                modifier = Modifier.fillMaxWidth(),
+                enabled = !isReplacing,
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFD8FF4A))
+            ) {
+                if (isReplacing) {
+                    CircularProgressIndicator(color = Color.Black, modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Replacing...", color = Color.Black)
+                } else {
+                    Text("Replace", color = Color.Black, fontWeight = FontWeight.Bold)
+                }
+            }
 
             Spacer(modifier = Modifier.height(10.dp))
 
@@ -904,7 +929,7 @@ internal fun TextReplaceToolPanel(
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            // Action Buttons: Cover, Pixelate, Replace
+            // Action Buttons: Cover, Pixelate
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -923,14 +948,6 @@ internal fun TextReplaceToolPanel(
                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF21262D))
                 ) {
                     Text("Pixelate", color = Color.White)
-                }
-
-                Button(
-                    onClick = { onApplyReplace(activeRect, coverColor, replaceText, inferredStyle) },
-                    modifier = Modifier.weight(1.2f),
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFD8FF4A))
-                ) {
-                    Text("Replace", color = Color.Black, fontWeight = FontWeight.Bold)
                 }
             }
         }

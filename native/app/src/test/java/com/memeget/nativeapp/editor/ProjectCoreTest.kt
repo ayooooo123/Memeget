@@ -301,28 +301,6 @@ class ProjectCoreTest {
     }
 
     @Test
-    fun testStyleInferenceFromColorSamples() {
-        val darkBg = "#101010"
-        val lightGlyph = "#F0F0F0"
-        // 16 samples representing a text box: 4 glyph points, 12 background points
-        val samples = listOf(
-            lightGlyph, lightGlyph, lightGlyph, lightGlyph,
-            darkBg, darkBg, darkBg, darkBg,
-            darkBg, darkBg, darkBg, darkBg,
-            darkBg, darkBg, darkBg, darkBg
-        )
-        val style = ProjectCore.inferOriginalTextStyle(
-            sampledColors = samples,
-            originalText = "CAPTION TEXT",
-            regionHeight = 0.15f,
-            lineCount = 1
-        )
-        assertTrue(style.uppercase)
-        assertEquals("impact", style.preset)
-        assertTrue("Contrast ratio should be high", style.contrast >= 4.0f)
-    }
-
-    @Test
     fun cropEditingPreviewShowsFullFrameAndKeepsLayersGrounded() {
         val source = MemeEditSource("file://clip.mp4", "clip.mp4", MediaEditKind.VIDEO, 1000, 500, 2_000_000L)
         val croppedBase = BaseTransform(

@@ -720,7 +720,6 @@ internal fun RemixStudio(
                         manualMode = manualOcrMode,
                         manualRegion = manualOcrRegion,
                         onToggleManualMode = { manualOcrMode = it },
-                        onUpdateManualRegion = { manualOcrRegion = it },
                         onApplyCover = { rect, color ->
                             val layer = MemeEditLayer.Cover(
                                 id = "cover_${System.currentTimeMillis()}",
@@ -741,36 +740,17 @@ internal fun RemixStudio(
                             history = applyProjectAction(currentHistory, ProjectAction.AddLayer(layer))
                             Toast.makeText(context, "Pixelation applied", Toast.LENGTH_SHORT).show()
                         },
-                        onApplyReplace = { rect, coverCol, repText, inferred ->
-                            val cover = MemeEditLayer.Cover(
-                                id = "cover_${System.currentTimeMillis()}",
-                                rect = rect,
-                                mode = "solid",
-                                color = coverCol
-                            )
-                            val textStyle = inferred?.let {
-                                TextStyle(
-                                    preset = it.preset,
-                                    color = it.color,
-                                    outlineColor = it.outlineColor,
-                                    outlineScale = it.outlineScale,
-                                    uppercase = it.uppercase
-                                )
-                            } ?: TextStyle(preset = "impact")
-
-                            val textLayer = MemeEditLayer.Text(
-                                id = "text_${System.currentTimeMillis()}",
-                                text = repText,
-                                width = rect.width.coerceIn(ProjectLimits.MIN_TEXT_WRAP_WIDTH, ProjectLimits.MAX_TEXT_WRAP_WIDTH),
-                                fontSize = inferred?.fontSize ?: 0.08f,
-                                style = textStyle,
-                                keyframes = listOf(TransformKeyframe(
-                                    center = NormalizedPoint(rect.x + rect.width / 2f, rect.y + rect.height / 2f)
-                                ))
-                            )
-                            history = applyProjectAction(currentHistory, ProjectAction.AddLayers(listOf(cover, textLayer)))
-                            selectedLayerId = textLayer.id
-                            Toast.makeText(context, "Text replaced", Toast.LENGTH_SHORT).show()
+                        onApplyReplace = { rect, replacement, original ->
+                            check(activeProject.layers.size <= ProjectLimits.MAX_LAYERS - 2) {
+                                "Replace needs two free layers. Remove layers until two slots are free."
+                            }
+                            val (repair, text) = TextReplacement.layers(context, activeProject, rect, replacement, original, engine)
+                            val live = checkNotNull(history)
+                            check(live.present === activeProject) { "The picture changed. Select the text again." }
+                            history = applyProjectAction(live, ProjectAction.AddLayers(listOf(repair, text)))
+                            selectedLayerId = text.id
+                            val message = if (repair.patchUri == null) "Text replaced using nearby pixels" else "Text replaced"
+                            Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
                         }
                     )
                 }
@@ -864,13 +844,7 @@ internal fun RemixStudio(
                                             picture.recycle()
                                         }
                                     }
-                                    MemeEditLayer.Cover(
-                                        id = "remove_${System.currentTimeMillis()}",
-                                        rect = built.workingRect,
-                                        mode = "remove",
-                                        maskUri = built.uri,
-                                        patchUri = patchUri
-                                    )
+                                    built.stillLayer(patchUri)
                                 }
                             } finally {
                                 inpainter?.close()

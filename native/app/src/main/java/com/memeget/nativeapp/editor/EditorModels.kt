@@ -128,6 +128,9 @@ internal data class BaseTransform(
     }
 }
 
+/** An offset from the text, in units of its font size. */
+internal data class TextShadow(val color: String, val xEm: Float, val yEm: Float)
+
 internal data class TextStyle(
     val preset: String = "impact", // "impact", "subtitle", "label", "news", "bubble", "plain"
     val color: String = "#f2f4f8",
@@ -136,7 +139,8 @@ internal data class TextStyle(
     val backgroundColor: String? = null,
     val opacity: Float = 1f,
     val align: String = "center", // "left", "center", "right"
-    val uppercase: Boolean = true
+    val uppercase: Boolean = true,
+    val shadow: TextShadow? = null,
 ) {
     fun toJson(): JSONObject = JSONObject().apply {
         put("preset", preset)
@@ -147,6 +151,9 @@ internal data class TextStyle(
         put("opacity", opacity.toDouble())
         put("align", align)
         put("uppercase", uppercase)
+        shadow?.let {
+            put("shadow", JSONObject().put("color", it.color).put("xEm", it.xEm.toDouble()).put("yEm", it.yEm.toDouble()))
+        }
     }
 
     companion object {
@@ -159,7 +166,10 @@ internal data class TextStyle(
                 backgroundColor = if (json.isNull("backgroundColor")) null else json.optString("backgroundColor"),
                 opacity = json.optDouble("opacity", 1.0).toFloat(),
                 align = json.optString("align", "center"),
-                uppercase = json.optBoolean("uppercase", true)
+                uppercase = json.optBoolean("uppercase", true),
+                shadow = json.optJSONObject("shadow")?.let {
+                    TextShadow(it.getString("color"), it.getDouble("xEm").toFloat(), it.getDouble("yEm").toFloat())
+                },
             )
     }
 }

@@ -456,6 +456,7 @@ internal class NativeInferenceEngine(
     }
 
     override suspend fun inpaintModel(): File = ensureModel(ModelRegistry.MIGAN_INPAINT)
+    override suspend fun installedInpaintModel(): File? = downloader.verifiedFile(ModelRegistry.MIGAN_INPAINT, modelsDir)
 
     /**
      * Downloads [artifact] or finds it verified on disk. A stop (Stop, the session limit, a screen closing) is not a

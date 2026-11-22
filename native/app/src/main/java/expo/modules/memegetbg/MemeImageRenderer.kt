@@ -705,6 +705,13 @@ internal object MemeImageRenderer {
         )
       }
       canvas.translate(-contentWidth / 2f, -contentHeight / 2f)
+      spec.optJSONObject("shadow")?.let { shadow ->
+        canvas.save()
+        canvas.translate(finiteFloat(shadow, "xDip", 0.0), finiteFloat(shadow, "yDip", 0.0))
+        paint.color = parseColor(shadow.optString("color"), Color.BLACK)
+        staticLayout.draw(canvas)
+        canvas.restore()
+      }
       if (strokeWidth > 0f) {
         paint.style = Paint.Style.STROKE
         paint.strokeWidth = strokeWidth

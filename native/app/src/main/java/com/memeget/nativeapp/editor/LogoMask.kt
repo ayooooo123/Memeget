@@ -45,7 +45,11 @@ internal object LogoMask {
         val width: Int,
         val height: Int,
         val uri: String,
-    )
+    ) {
+        fun stillLayer(patch: String?) =
+            MemeEditLayer.Cover(id = "remove_${System.nanoTime()}", rect = workingRect,
+                mode = "remove", maskUri = uri, patchUri = patch)
+    }
 
     /** Footage moving under the paint by more than this (median temporal spread of the unpainted margin, of 255). */
     private const val MOTION_LEVEL = 3f
@@ -502,7 +506,7 @@ internal object LogoMask {
     /** Long side (pixels) of the whole picture the paint's colours are compared with. */
     private const val WHOLE_EDGE = 320
 
-    private fun save(context: Context, mask: ByteArray, w: Int, h: Int): String {
+    fun save(context: Context, mask: ByteArray, w: Int, h: Int): String {
         val dir = File(context.filesDir, "editor_assets")
         if (!dir.exists()) dir.mkdirs()
         val file = File(dir, "mask_${UUID.randomUUID()}.png")

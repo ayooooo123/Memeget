@@ -4,7 +4,6 @@ import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToLong
-import kotlin.math.pow
 
 internal object ProjectCore {
 
@@ -712,148 +711,10 @@ internal object ProjectCore {
         }
     }
 
-    data class InferredTextStyle(
-        val color: String,
-        val outlineColor: String,
-        val outlineScale: Float,
-        val backgroundColor: String,
-        val preset: String,
-        val uppercase: Boolean,
-        val fontSize: Float,
-        val contrast: Float
-    )
-
-    fun relativeLuminance(hexColor: String): Float {
-        val clean = hexColor.trim().removePrefix("#")
-        if (clean.length < 6) return 0.5f
-        val r = clean.substring(0, 2).toIntOrNull(16)?.div(255f) ?: 0f
-        val g = clean.substring(2, 4).toIntOrNull(16)?.div(255f) ?: 0f
-        val b = clean.substring(4, 6).toIntOrNull(16)?.div(255f) ?: 0f
-        fun adjust(c: Float) = if (c <= 0.03928f) c / 12.92f else ((c + 0.055f) / 1.055f).toDouble().pow(2.4).toFloat()
-        return 0.2126f * adjust(r) + 0.7152f * adjust(g) + 0.0722f * adjust(b)
-    }
-
-    fun contrastRatio(c1: String, c2: String): Float {
-        val l1 = relativeLuminance(c1)
-        val l2 = relativeLuminance(c2)
-        val lighter = max(l1, l2)
-        val darker = min(l1, l2)
-        return (lighter + 0.05f) / (darker + 0.05f)
-    }
-
     fun looksAllCaps(text: String): Boolean {
         val letters = text.filter { it.isLetter() }
         if (letters.length < 2) return false
         return letters == letters.uppercase()
-    }
-
-    fun averageHexColor(colors: List<String>): String {
-        if (colors.isEmpty()) return "#000000"
-        var sumR = 0
-        var sumG = 0
-        var sumB = 0
-        var count = 0
-        for (c in colors) {
-            val clean = c.trim().removePrefix("#")
-            if (clean.length >= 6) {
-                val r = clean.substring(0, 2).toIntOrNull(16) ?: 0
-                val g = clean.substring(2, 4).toIntOrNull(16) ?: 0
-                val b = clean.substring(4, 6).toIntOrNull(16) ?: 0
-                sumR += r
-                sumG += g
-                sumB += b
-                count++
-            }
-        }
-        if (count == 0) return "#000000"
-        return String.format("#%02X%02X%02X", sumR / count, sumG / count, sumB / count)
-    }
-
-    fun splitGlyphAndBackground(colors: List<String>): Triple<String, String, Float>? {
-        val usable = colors.filter { it.trim().removePrefix("#").length >= 6 }
-        if (usable.size < 4) return null
-        data class Point(val color: String, val luminance: Float)
-        val points = usable.map { Point(it, relativeLuminance(it)) }
-        var low = points.minOf { it.luminance }
-        var high = points.maxOf { it.luminance }
-        if (high - low < 0.02f) return null
-
-        for (pass in 0 until 12) {
-            val lowGroup = mutableListOf<Float>()
-            val highGroup = mutableListOf<Float>()
-            for (p in points) {
-                if (abs(p.luminance - low) <= abs(p.luminance - high)) lowGroup.add(p.luminance)
-                else highGroup.add(p.luminance)
-            }
-            if (lowGroup.isEmpty() || highGroup.isEmpty()) break
-            val nextLow = lowGroup.sum() / lowGroup.size
-            val nextHigh = highGroup.sum() / highGroup.size
-            if (abs(nextLow - low) < 1e-5f && abs(nextHigh - high) < 1e-5f) {
-                low = nextLow
-                high = nextHigh
-                break
-            }
-            low = nextLow
-            high = nextHigh
-        }
-
-        val lowMembers = points.filter { abs(it.luminance - low) <= abs(it.luminance - high) }
-        val highMembers = points.filter { abs(it.luminance - low) > abs(it.luminance - high) }
-        if (lowMembers.isEmpty() || highMembers.isEmpty()) return null
-
-        val glyphMembers = if (lowMembers.size <= highMembers.size) lowMembers else highMembers
-        val bgMembers = if (glyphMembers === lowMembers) highMembers else lowMembers
-
-        val glyph = averageHexColor(glyphMembers.map { it.color })
-        val background = averageHexColor(bgMembers.map { it.color })
-        return Triple(glyph, background, contrastRatio(glyph, background))
-    }
-
-    fun inferOriginalTextStyle(
-        sampledColors: List<String>,
-        originalText: String,
-        regionHeight: Float,
-        lineCount: Int
-    ): InferredTextStyle {
-        val lines = max(1, lineCount)
-        val uppercase = looksAllCaps(originalText)
-        val fontSize = ((regionHeight / lines) * 0.72f).coerceIn(ProjectLimits.MIN_FONT_SIZE, ProjectLimits.MAX_FONT_SIZE)
-        val split = splitGlyphAndBackground(sampledColors)
-
-        if (split == null || split.third < 1.6f) {
-            val fallbackBg = split?.second ?: "#000000"
-            val darkContrast = contrastRatio("#000000", fallbackBg)
-            val lightContrast = contrastRatio("#FFFFFF", fallbackBg)
-            val glyphColor = if (darkContrast >= lightContrast) "#000000" else "#FFFFFF"
-            val outlineColor = if (glyphColor == "#000000") "#FFFFFF" else "#000000"
-            return InferredTextStyle(
-                color = glyphColor,
-                outlineColor = outlineColor,
-                outlineScale = 0.04f,
-                backgroundColor = fallbackBg,
-                preset = if (uppercase) "impact" else "plain",
-                uppercase = uppercase,
-                fontSize = fontSize,
-                contrast = split?.third ?: 1f
-            )
-        }
-
-        val glyph = split.first
-        val bg = split.second
-        val contrast = split.third
-        val preset = if (uppercase && contrast >= 4f) "impact" else if (uppercase) "label" else "plain"
-        val outlineColor = if (contrastRatio(glyph, "#000000") >= contrastRatio(glyph, "#FFFFFF")) "#000000" else "#FFFFFF"
-        val outlineScale = if (preset == "impact") 0.06f else 0.02f
-        return InferredTextStyle(
-            color = glyph,
-            outlineColor = outlineColor,
-            outlineScale = outlineScale,
-            backgroundColor = bg,
-            preset = preset,
-            uppercase = uppercase,
-            fontSize = fontSize,
-            contrast = contrast
-        )
     }
 
     fun isLayerActiveAt(layer: MemeEditLayer, timeUs: Long): Boolean {
@@ -1039,8 +900,8 @@ internal fun reduceProject(project: MemeEditProject, action: ProjectAction): Mem
         }
         is ProjectAction.AddLayers -> {
             val remaining = ProjectLimits.MAX_LAYERS - project.layers.size
-            if (remaining <= 0) project
-            else project.copy(layers = project.layers + action.layers.take(remaining))
+            if (action.layers.isEmpty() || action.layers.size > remaining) project
+            else project.copy(layers = project.layers + action.layers)
         }
         is ProjectAction.SetLayers -> project.copy(layers = action.layers.take(ProjectLimits.MAX_LAYERS))
         is ProjectAction.AddLayer -> {
