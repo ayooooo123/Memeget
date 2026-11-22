@@ -27,7 +27,7 @@ Requires JDK 17 and the Android SDK/NDK versions listed in [`native/README.md`](
 - [`native/`](native/): Android app and shared C++ inference/search core.
 - [`ios/`](ios/): standalone native iOS app and tests.
 - [`modules/memeget-bg/android/src/main/`](modules/memeget-bg/android/src/main/): reusable Android media utilities and fonts compiled directly into `native/`. The historical Kotlin package name remains, but no Expo module or React Native app is built.
-- [`tools/`](tools/): standalone dataset, export, and local extraction tools. [`docs/`](docs/) contains research and historical design notes; older documents mentioning Expo describe the retired app, not the maintained build.
+- [`tools/`](tools/): standalone dataset, export, and local extraction tools.
 - [`signing/debug.keystore`](signing/debug.keystore): pinned Android release signing key; keep it unchanged to preserve in-place updates and users' libraries.
 
 The Expo/React Native application and its build workflow have been retired. Existing installations remain separate packages; removing their source from this repository does not uninstall an app or migrate its private storage. For moving an existing collection into the native Android app, follow [Local use and migration](native/README.md#local-use-and-migration).

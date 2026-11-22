@@ -6,8 +6,7 @@ files to the `models-v1` GitHub release; the APK build points the app's
 `EXPO_PUBLIC_MEMEGET_*` model sources at those assets.
 
 The interface contract these exports satisfy (verified against the native code
-in react-native-executorch 0.9.2) is documented at the top of each script and
-in `docs/embedding-roadmap.md`:
+in react-native-executorch 0.9.2) is documented at the top of each script:
 
 - image models: `[1,3,H,W]` float32 RGB in `[0,1]`, resized by the runtime to
   the model's declared size, **no runtime mean/std** — normalization is baked

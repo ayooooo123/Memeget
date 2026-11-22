@@ -1,7 +1,7 @@
 """Shared loader for the local basedmemes.lol + KnowYourMeme archive.
 
 The archive is NOT in the repo (it's a local, developer-only corpus of scraped
-memes — see docs/memedepot-corpus.md on why raw memes stay local). Point
+memes: raw memes stay local, never shipped). Point
 `--data-dir` at it. Default matches where it currently lives on this machine.
 
 Two source files, merged by image *filename*:
@@ -13,7 +13,7 @@ its image file actually exists on disk.
 
 Train/eval split is a deterministic hash of the image id, so the eval golden set
 is provably DISJOINT from the fine-tune training set (the accept-gate must never
-see a meme it trained on — docs/memedepot-finetune.md).
+see a meme it trained on).
 """
 from __future__ import annotations
 

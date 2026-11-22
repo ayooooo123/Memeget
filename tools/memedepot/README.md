@@ -135,9 +135,9 @@ becomes a zero-shot label:
 
 On the first real harvest this removed ~half the raw tags. The residue is
 community-specific in-group slang (vowel-having, non-English) that generic rules
-can't catch without overfitting — that's what the **eval harness**
-(`docs/memedepot-corpus.md`) is for: measure which harvested labels actually help
-tagging precision, then set the cap and denylist from data, not eyeballing.
+can't catch without overfitting — that's what a search-quality eval is for
+(`tools/eval/`): measure which harvested labels actually help tagging
+precision, then set the cap and denylist from data, not eyeballing.
 
 ## Caveats
 
@@ -156,6 +156,6 @@ tagging precision, then set the cap and denylist from data, not eyeballing.
   Settings → Actions → General → Workflow permissions → *Allow GitHub Actions to
   create and approve pull requests*. Without it the run still pushes the
   `automation/memedepot-tags` branch — a PR just has to be opened manually.
-- Raising the label cap should be gated on the search-quality eval harness
-  (`docs/memedepot-corpus.md`) — more zero-shot classes means more chances at a
+- Raising the label cap should be gated on the search-quality eval
+  (`tools/eval/`) — more zero-shot classes means more chances at a
   false-positive tag.
