@@ -1,7 +1,6 @@
 """Fine-tune MobileCLIP-S2 on the local meme corpus (Apple MPS).
 
-Strategy (the doc's cheaper, safer first experiment — docs/memedepot-finetune.md
-"Cheaper alternatives"): FREEZE the image tower, fine-tune the TEXT tower with
+Strategy (the cheaper, safer first experiment): FREEZE the image tower, fine-tune the TEXT tower with
 symmetric InfoNCE against precomputed frozen image features. This shifts meme
 *descriptions* toward the right meme image (the retrieval objective) while making
 it impossible to drift/forget the image space, and it's cheap: images are encoded

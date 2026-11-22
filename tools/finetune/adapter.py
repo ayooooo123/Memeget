@@ -1,6 +1,6 @@
 """Linear-adapter fine-tune of MobileCLIP-S2's text->image alignment (fast path).
 
-The doc's cheapest, safest tuning (docs/memedepot-finetune.md "Linear adapter"):
+The cheapest, safest tuning (the "linear adapter" option):
 freeze BOTH towers, precompute their features ONCE, then learn a single 512x512
 projection W on the cached vectors so meme *descriptions* land nearer the right
 meme image. Training is pure matmul on cached 512-d features — seconds, not the

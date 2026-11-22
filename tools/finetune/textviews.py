@@ -2,8 +2,7 @@
 so train/eval text construction can't drift.
 
 Retrieval eval uses ONE canonical caption per meme (`primary_caption`). Training
-uses several views per image (`training_views`) for contrastive augmentation, per
-docs/memedepot-finetune.md ("Build several text views per image").
+uses several views per image (`training_views`) for contrastive augmentation.
 """
 from __future__ import annotations
 
