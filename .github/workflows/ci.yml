@@ -49,4 +49,7 @@ jobs:
           packages: platform-tools
 
       - name: Host tests
+        env:
+          # Robolectric fetches the instrumented SDK outside Gradle. This mirror serves Maven Central's jars and checksums.
+          JAVA_TOOL_OPTIONS: -Drobolectric.dependency.repo.url=https://maven-central.storage-download.googleapis.com/maven2
         run: ./gradlew :app:testDebugUnitTest --no-daemon --stacktrace
