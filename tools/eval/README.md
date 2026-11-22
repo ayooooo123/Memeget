@@ -1,323 +1,184 @@
-# Search-quality eval harness
+# Format-tag score
 
-Measures whether a change makes Memeget's search **better or worse**, instead of
-guessing. The core (`src/evalCore.ts`) scores a golden set with the app's *own*
-ranking function — `scoreEntry` from `src/searchCore.ts`, the exact code the
-on-device DB scan uses — and reports **Recall@k** and **MRR**, plus an A/B
-**regression gate**.
-
-This is the yardstick the rest of the memedepot work needs: it's how you set the
-harvested-label cap and denylist from data (not eyeballing), and it's the
-accept-gate for the CLIP fine-tune (`docs/memedepot-finetune.md`).
+`score_formats.py` asks: **given the pixels of a held-out image, where does the
+correct format rank among the app's format prompts?** It runs the released
+MobileCLIP-S2 image and text towers on the CPU. Use `--text-weights FILE.pte` to
+replace only the text tower. It does not run the app's search or recognition
+pipeline.
 
 ## Run
 
-```bash
-npm run eval        # runs the eval tests + prints a sample metrics report
+From the repository root, set `CORPUS` to the directory with both corpus
+annotation files and the image directories. Keep the corpus and models outside
+git. No image download, device, or GPU is required.
+
+```sh
+WORK=$(mktemp -d)
+for tag in models-v1 models-memeft; do
+  gh release download "$tag" -p 'mobileclip_s2_*' -p SHA256SUMS -D "$WORK/$tag" || exit 1
+  (cd "$WORK/$tag" && grep '  mobileclip_s2_' SHA256SUMS | shasum -a 256 -c -) || exit 1
+done
 ```
 
-Today that prints metrics for a tiny **synthetic** golden set (proving the
-plumbing). To get a *real* number you supply a real golden set — see below.
+`models-v1` contains the stock image tower, stock text tower, and tokenizer.
+`models-memeft` contains the earlier fine-tuned text tower. Both releases use
+the same tokenizer. `--text-weights` accepts a compatible ExecuTorch text
+program, not a training state dictionary.
 
-## How it's wired (and why it can't drift)
+The following setup is for Python 3.11 on Apple silicon. It installs the wheel
+for CPU inference without the training, export, and test dependencies of the
+full ExecuTorch package. On Linux, install the matching CPU wheel for PyTorch.
 
-`src/evalCore.ts` is pure and model-free: it takes **precomputed vectors** and
-ranks with `scoreEntry`. It deliberately does not embed anything itself, so the
-benchmark is deterministic and has no native/CLIP dependency. The only rule that
-matters: the vectors you feed it must come from **the same encoder the app ships** (MobileCLIP-S2, `PRIMARY_EMBEDDING_MODEL`), or the scores are measuring
-the wrong space.
-
-```
-golden.json ──▶ rankQuery (scoreEntry) ──▶ rankOfExpected ──▶ Recall@k / MRR
-                                                          └──▶ regressions(baseline, candidate)
-```
-
-## Golden set
-
-Shape (`golden.sample.json` is a runnable schema example):
-
-```jsonc
-{
-  "memes":   [{ "id": "...", "imageVec": [...], "captionVec": [...]|null, "searchText": "caption tags ocr" }],
-  "queries": [{ "query": "gigachad coding", "queryVec": [...], "expectedId": "..." }]
+```sh
+python3.11 -m venv "$WORK/venv"
+PY="$WORK/venv/bin/python"
+"$PY" -m pip install 'torch==2.9.1' 'numpy==2.4.6' 'pillow==13.0.0' \
+  'tokenizers==0.23.3' 'ijson==3.6.0' flatbuffers packaging pyyaml ruamel.yaml tabulate
+"$PY" -m pip install --only-binary=:all: --no-deps 'executorch==1.0.0'
+export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 VECLIB_MAXIMUM_THREADS=1 TOKENIZERS_PARALLELISM=false
+score() {
+  "$PY" tools/eval/score_formats.py --data-dir "${CORPUS:?set CORPUS to the local corpus directory}" \
+    --models-dir "$WORK/models-v1" "$@"
 }
+score
 ```
 
-Building a real one is automated by **`build_golden.py`** + the **Build eval
-golden set** workflow — it runs in CI (needs memedepot access + a torch/CLIP
-toolchain, both unavailable in the dev sandbox):
+The scorer uses one XNNPACK thread and one image per forward pass. It resizes RGB
+pixels to 256 × 256 with Pillow's bilinear filter, converts them to planar
+float32 in `[0,1]`, and applies no extra normalization to the pixels. It uses
+the release tokenizer with zero padding to 77 IDs and an `ids != 0` mask, as in
+the Android text path. The IDs matched all 15 cases in the native tokenizer
+fixture. This is not a test of a phone's image decoder.
 
-1. Actions → **Build eval golden set** → Run workflow (`depots`, `per_depot`
-   inputs). It pulls memes from N memedepot depots, embeds each **image** + the
-   depot **name** (the query) with MobileCLIP-S2, and opens a PR with
-   `tools/eval/golden.json`. The encoded eval: *does searching a format's name
-   retrieve that format's memes?* **Vectors + ids only — never images.**
-2. Merge the PR → `npm run eval` now scores the real set and prints Recall@k /
-   MRR (see `src/evalCore.golden.test.ts`).
+## What counts as correct
 
-Run locally instead (Colab or any box with network + torch):
+* **Images:** `golden.json` supplies only `memes[].id`, the filenames in the
+  existing holdout. The scorer uses the full source tags from `dataset.jsonl`
+  and `meme_dataset_kym.json` in the local corpus, joined by filename with
+  `tools/finetune/dataset.py`. It looks in `images_only/` and then `images/`.
+  It does not use saved image, query, or label vectors.
+* **Candidates:** every entry with `category: "format"` in
+  [`label-prompts.json`](../../native/app/src/main/assets/knowledge/label-prompts.json).
+  The text tower encodes the **prompt**, not the target tag. The image tower sees
+  only pixels. An exact, case-insensitive match between a source tag and a
+  **label name** supplies the target. Associations such as “dog” for “This Is
+  Fine” do not establish a format. The scorer does not turn the 595 different
+  tag captions into 595 invented formats.
+* **Ranks:** sort cosine similarities in descending order. Break ties by label
+  name. Count one trial per distinct image–format pair. Top-*k* is the fraction
+  of those pairs whose label ranks in the first *k*. MRR is the mean of
+  `1 / rank` over the same pairs. An image can contribute more than one pair.
+* **Coverage:** print the ID of each missing image, and of each labelled image
+  that cannot be decoded. Exclude those images from the denominator, **not**
+  their labels from the candidate list. An image with no exact format tag is
+  unscored, not a negative. If there are no usable pairs, exit with an error
+  rather than report a zero.
 
-```bash
-pip install open_clip_torch timm torch pillow requests
-python tools/eval/build_golden.py --out tools/eval/golden.json --depots 25 --per-depot 8
+## Recorded CPU runs
+
+Apple silicon, macOS 26.5.2, Python 3.11.9, package versions above. For the
+golden membership and format prompts, the git blob IDs at the time of the run
+were `cbb04631715c77de21579fd1bab77cc906c7c97e` and
+`c94970c12f870111f1aeceda447f6d4a17155c99`, respectively.
+
+Release checksums (SHA-256 of the files, not the tag names):
+
+```text
+models-v1       image       dd6a357fea3199b00eff17cd0898023213cf176e7566f7cbdf8dab9f0a1fe7f5
+models-v1       text        e7576174e756d5579179df4c76ea136123db0a66ee222974a3cf8e2a590ff488
+models-memeft   text        fce2095910293f579947171d16ffeb15d7290769a8c7d1499eeaf323607ed229
+both releases   tokenizer   8e019f9349caf5f9bb92514b0e4fc00c92841aef6ae8df9d833d975c623b7c72
 ```
 
-Note: `build_golden.py`'s `meme_image_url()` guesses the memedepot meme-image
-field; if the first run writes 0 memes, the log names the keys it saw — adjust
-and re-run (same diagnostic pattern as the harvester).
+**Stock prediction:** all 595 files present; 16 scorable images, 17 pairs,
+21 candidate formats. Top-1 and MRR should exceed uniform chance.
 
-## Accept-gate usage
-
-Before a change to `memeLabels.ts`, the `searchCore` weights, `MAX_BASELINE_LABELS`,
-or the embedding model merges:
-
-```ts
-const before = evaluateRetrieval(golden);   // on main
-// …apply the change, re-embed if the model changed…
-const after = evaluateRetrieval(golden);
-const bad = regressions(before, after);      // [] = safe to ship
+```text
+$ score | tee "$WORK/stock.out"
+golden=595 missing=0 no_format_tag=579
+image=mobileclip_s2_image_xnnpack_fp32.pte text=mobileclip_s2_text_xnnpack_fp32.pte device=cpu
+images=16 pairs=17 labels=21 unreadable=0
+rank: top-1=41.18% top-3=76.47% top-5=82.35% MRR=0.5927
 ```
 
-## Tagging eval (zero-shot format)
+**Shuffle prediction:** top-1 near `1/21` (4.76%), top-3 near `3/21`
+(14.29%), top-5 near `5/21` (23.81%), MRR near `sum(1/r, r=1..21)/21`
+(0.1736). A shuffle assigns the prompt vectors to different label names using
+one permutation for the entire cohort. The images and their targets stay fixed.
+The first draw can vary substantially, so the scorer also reports the mean of
+256 uniform permutations from a fixed seed.
 
-Retrieval routes a query straight to an image, so it never touches the label
-prompts — it can't tell you whether the labels/prompts are any good. The
-**tagging** eval is the dual that does: given a meme **image**, does zero-shot
-classification put its right **format** at the top? That's the metric that moves
-when you add labels, fix a prompt, or retune the harvested baseline — and it's
-the one that tracks the north star (*every aspect of a meme searchable*), since
-aspect search is classification against a label vocabulary.
-
-Ground truth is free and needs no extra annotation: each golden meme's **depot
-is its format**, and every depot already contributes a text vector (its name
-query), so the depots *are* the label set. `evaluateTagging(golden)` ranks each
-meme's image against every label vector and reports top-1/3/5 + MRR
-(`formatTagging`). `npm run eval` prints it right under retrieval.
-
-```ts
-const t = evaluateTagging(golden);   // { n, labels, recallAt1/3/5, mrr }
+```text
+$ score --shuffle-labels
+golden=595 missing=0 no_format_tag=579
+image=mobileclip_s2_image_xnnpack_fp32.pte text=mobileclip_s2_text_xnnpack_fp32.pte device=cpu
+images=16 pairs=17 labels=21 unreadable=0
+shuffle first (seed=0): top-1=0.00% top-3=11.76% top-5=17.65% MRR=0.1501
+shuffle mean (256 draws, seed=0): top-1=4.57% top-3=14.59% top-5=25.16% MRR=0.1753
 ```
 
-Baseline on the current 180-meme / 24-format golden set (MobileCLIP-S2, the app's
-real model): **top-1 33%, top-3 42%, top-5 47%, MRR 0.41** — the number a
-labels/prompt change has to beat.
+**Repeat prediction:** the same stock command in a new process should print the
+same numbers from fresh embeddings. These transcripts show stdout.
 
-## Aspect search (single-word queries — how the app is really searched)
-
-Nobody types a full sentence to find a meme; they type **one word** — an emotion
-(`smug`), an action (`pointing`), a character (`wojak`), a format — and expect
-every meme carrying that aspect to surface. That's the north star (*any aspect
-findable by a plain-word description*), and it runs through the **lexical
-`searchText` channel** (`scoreEntry`'s `.includes`), which retrieval and tagging
-never touch. So it's the eval that actually moves when tags get deeper or a
-caption changes.
-
-A one-word query has **many** correct answers, so this is multi-relevant
-retrieval. `evaluateAspectSearch(golden)` scores every meme and reports **MAP**
-(the headline), **precision@5** ("are my top 5 on-topic"), **recall@10**, and
-**MRR** of the first hit. Ground truth is free: each memedepot meme's own
-per-meme **tags** are its aspects — a meme tagged `smug` is a labeled positive
-for the query `smug`. No hand-annotation.
-
-`build_golden.py` emits the substrate: it walks each meme for tag fields,
-lowercases `name + tags` into `searchText` (mirroring `db.ts`'s `rowSearchText`),
-embeds `name + tags` as `captionVec`, and turns every tag on ≥ `--min-tag-memes`
-memes into an `aspects[]` query. `npm run eval` prints aspect metrics under
-retrieval + tagging once the golden set carries `aspects[]` (re-run the **Build
-eval golden set** workflow to refresh an older set that lacks them).
-
-```ts
-const a = evaluateAspectSearch(golden);   // { n, avgRelevant, precisionAt5, recallAt10, map, mrr }
+```text
+$ score | tee "$WORK/repeat.out"
+golden=595 missing=0 no_format_tag=579
+image=mobileclip_s2_image_xnnpack_fp32.pte text=mobileclip_s2_text_xnnpack_fp32.pte device=cpu
+images=16 pairs=17 labels=21 unreadable=0
+rank: top-1=41.18% top-3=76.47% top-5=82.35% MRR=0.5927
+$ cmp "$WORK/stock.out" "$WORK/repeat.out" && echo 'stock stdout: identical'
+stock stdout: identical
 ```
 
-Two modes: the default runs through the lexical `searchText` channel; `{ lexical:
-false }` is **dense-only** (image + caption, no text match). The gap is the
-finding — on the real set (MobileCLIP-S2) MAP is **0.841 with text** vs **0.239
-dense-only**: single-word aspect search rides mostly on the aspect word being
-written into the meme's tags (dense image/caption understanding recovers ~¼ of it
-on its own). **So tag generation is the dominant lever**, which is what
-the loop below tunes.
+**Memeft prediction:** changing only the text program should change some ranks,
+but an improvement on format tags is not guaranteed. The cohort must stay
+fixed. The B0 decision rule for this run was to consider a warm start only if
+both top-1 and MRR increased.
 
-## Getting a real library out of a device (adb)
-
-Every loop below wants real data. The app writes its whole index to one SQLite
-file, and a debug build lets `run-as` read it without root — no in-app export,
-no tapping through Settings:
-
-```bash
-adb exec-out run-as com.memeget.app cat files/SQLite/memeget.db     > /tmp/mg/memeget.db
-adb exec-out run-as com.memeget.app cat files/SQLite/memeget.db-wal > /tmp/mg/memeget.db-wal
-adb exec-out run-as com.memeget.app cat files/SQLite/memeget.db-shm > /tmp/mg/memeget.db-shm
+```text
+$ score --text-weights "$WORK/models-memeft/mobileclip_s2_text_memeft_xnnpack_fp32.pte"
+golden=595 missing=0 no_format_tag=579
+image=mobileclip_s2_image_xnnpack_fp32.pte text=mobileclip_s2_text_memeft_xnnpack_fp32.pte device=cpu
+images=16 pairs=17 labels=21 unreadable=0
+rank: top-1=29.41% top-3=58.82% top-5=70.59% MRR=0.4773
 ```
 
-Pull all three: expo-sqlite runs in WAL mode, so the newest tags and captions
-live in `-wal` until a checkpoint — copying `memeget.db` alone gives you a stale
-library. `memes.tags` is JSON (`label`, `category`, `score`, `source`),
-`memes.embedding` is a float32 blob (512-d, MobileCLIP-S2), and `exemplars`
-holds what the user taught. That's everything `described.json`, a coverage run,
-or a fresh calibration needs.
+**B0 verdict: drop memeft as the replacement for stock on format tagging.**
+It got 5 rather than 7 pairs right at top-1, 10 rather than 13 at top-3, and
+12 rather than 14 at top-5. MRR also fell. This comparison gives no reason to
+use it as a warm start for this task. It does not measure caption retrieval,
+generic queries, or recognition of unknown formats. The downloaded models and
+temporary environment can be removed with `rm -r -- "$WORK"` once the runs end.
 
-A release build blocks `run-as`; there, use Settings → *Export collection (zip)*
-and pull the zip out of `/sdcard/Download`.
+Only five candidate formats have a known positive here. Nine of the 17 pairs
+are “Reaction Image”; always guessing that label would get 52.94% top-1. The
+shuffle checks that label alignment matters, not that the stock model is a good
+classifier. One pair changes top-1 by 5.88 percentage points.
 
-## VLM prompt-tuning loop (facet coverage)
+## Historical comparison
 
-Since search depends on the facet word being *in the tags*, the question every
-prompt change must answer is: **of the memes the model describes, what fraction
-get a tag in each facet** (an action, an emotion, the situation, …)? That's what
-`src/facetCoverage.ts` scores — it classifies each free tag into a facet using
-the app's `MEME_LABELS` taxonomy plus a small everyday-word lexicon, and reports
-per-facet coverage. A prompt tweak that finally makes the model emit
-situation/action tags shows up as coverage going **up**, measured.
+The retired evaluator ranked saved image vectors against saved depot-name
+vectors. Its original [golden file at `0c75d71`](https://github.com/ayooooo123/Memeget/blob/0c75d71/tools/eval/golden.json)
+has 180 images and 24 depot names. Replaying those dot products gives 59/180
+top-1 (32.78%), 75/180 top-3 (41.67%), 85/180 top-5 (47.22%), and MRR 0.4120.
+These are the **historical 33% / 42% / 47% / 0.41**, not a baseline for today's
+task. A depot could name a character, a collection, or a topic. The current
+holdout comes from different sources; the app's format labels, prompts, and
+positive pairs also differ. A change in these scores is not a gain or loss on
+the old benchmark.
 
-The model only runs on-device, so the loop is human-in-the-loop but tight:
+The native [`GoldenSearchRecallTest`](../../native/app/src/test/java/com/memeget/nativeapp/data/GoldenSearchRecallTest.kt)
+still exercises search with saved `imageVec` and `queryVec` values. Changing a
+text checkpoint alone cannot change those inputs. Do not use that test to
+compare the two releases.
 
-1. **Export** a sample of described memes from a device to
-   `tools/eval/described.json` — an array of `{ "id"?: string, "tags": [...] }`
-   (the tags the VLM produced). Even 20–50 memes is enough to see the shape.
-2. **Score:** `npm run coverage` prints per-facet coverage (weakest facets last —
-   those are the targets). With no export it prints a synthetic sample + this how-to.
-3. **Read the weak facets.** Low `situation`/`action`/`tone` = the prompt isn't
-   eliciting them; high `unclassified` = the model emits words the taxonomy
-   doesn't know (candidates to add to `MEME_LABELS` or `FACET_LEXICON`).
-4. **Tune** the `USER_PROMPT` / `TAGS` line in `src/visionCore.ts` to push the
-   weak facets, rebuild the APK (push to `main`), re-describe, re-export.
-5. **Compare** the new coverage to the last run. Ship the prompt that lifts the
-   weak facets without dropping the strong ones.
+## Before spending GPU time
 
-```ts
-const c = facetCoverage(describedMemes);   // { n, perFacet, avgFacetsPerMeme, unclassifiedRate }
-```
-
-Note the metric is bounded by the classifier's vocabulary (`MEME_LABELS`
-associations + `FACET_LEXICON`); it's for **relative** comparison across prompt
-versions with the same classifier, not an absolute truth. Expanding the lexicon
-tightens it.
-
-## Tagging test (findable-by-search gate)
-
-The coverage loop measures *how much* the model tags; this measures whether it
-tags a meme with the words you'd actually **search**. A hand-labeled set states,
-per meme, the search terms it must be findable by and the facets it must carry:
-
-```jsonc
-// tools/eval/tagging-cases.json   (see tagging-cases.sample.json)
-{ "id": "shush", "file": "images/shush.jpg",
-  "mustFind": ["shush", "quiet", "be quiet"],   // findable by ANY of these
-  "expectFacets": ["situation", "action"] }      // and tagged in these facets
-```
-
-`scoreTagging(cases, predictions)` (`src/taggingEval.ts`) joins those against
-predicted tags — a device export (`described.json`) or a CI proxy-VLM run — and
-reports **findable %** (a search term hits the meme, matched with the app's own
-lexical `.includes`), **facet recall**, and a per-meme list of what failed. The
-shush meme becomes a literal pass/fail. `taggingRegressions(base, cand)` is the
-A/B gate so a prompt change can't silently make tagging worse.
-
-```bash
-npm run tagtest    # scores tools/eval/tagging-cases.json vs described.json
-```
-
-Model-free and deterministic — it scores *given* predictions. Producing the
-predictions is the model step: either a device export, or (planned) a CI action
-that runs the app's prompt through a proxy VLM on the committed test images so
-the prompt can be A/B'd in a PR without a device.
-
-## Recognition (npm run recognition) — does the classifier know when it doesn't know?
-
-Every eval above asks whether the right label ranks first. This one asks the
-question that decides how a **non-standard** meme is handled: given an image,
-can we tell "I recognize this format" from "I have never seen this"? Most of a
-real library is the second case — there is no enumerable set of templates
-(`docs/composite-meme-understanding.md`) — and a classifier that names something
-anyway does real damage: the guess becomes the VLM's grounding, and the VLM
-writes it into the caption, the tags and the search text.
-
-```bash
-npm run recognition   # scores golden.json against label-vectors.json
-```
-
-Ground truth is free, as everywhere else here: each golden meme carries its own
-corpus tags, and a predicted label counts as correct when the label or one of
-its associations appears among them. Both inputs are committed
-(`label-vectors.json` = the app's 399 label prompts + 14 negative anchors,
-embedded with MobileCLIP-S2 by `build_label_vectors.py`), so it runs in CI with
-no torch and no device. Re-run the builder after editing a prompt or an anchor —
-the eval refuses to grade a stale vocabulary rather than measuring the wrong one.
-
-What it prints, on the 595-meme holdout:
-
-```
-rule (up to 3 labels emitted per meme):
-  calibrated (shipped)       coverage  75.5%   top-1  45.7%   tag-precision  46.3%   546 right / 632 wrong
-  softmax + 3 anchors (was)  coverage  92.6%   top-1  38.1%   tag-precision  43.3%   510 right / 669 wrong
-  softmax + all anchors      coverage  88.2%   top-1  39.4%   tag-precision  45.4%   503 right / 604 wrong
-
-ranking signal (AUC: orders a correct top-1 above a wrong one):
-  cos - 0.5*anchor (shipped) 0.853
-  cos alone                  0.834
-  cos - anchor               0.829
-  softmax probability        0.732
-  cos top1 - top2            0.495
-
-tiers (what the app tells the VLM):
-  recognized   26.2% of memes   top label right 80.8%   (n=156)
-  weak         49.2% of memes   top label right 27.0%   (n=293)
-  unknown      24.5% of memes   top label right 4.8%   (n=146)
-```
-
-(plus a calibration table: claimed confidence vs measured precision per band.)
-
-Read it as: a quarter of a real library matches nothing, and on that quarter we
-would have been right 5% of the time — so `src/recognition.ts` abstains there and
-`formatGrounding` tells the VLM outright that nothing matched. The tier
-thresholds and the score→probability calibration in that file were read straight
-off this table; the assertions in `src/recognitionEval.test.ts` are the A/B gate
-that keeps a future change from quietly going back to naming everything.
-
-## Emergent templates (npm run templates)
-
-There is no list of meme templates — anything can become one
-(`docs/composite-meme-understanding.md`). So templates are **discovered, not
-enumerated**: `src/templateClusters.ts` single-links the collection by embedding
-cosine (primary space — the same vectors the collection zip carries), and a
-cluster of visually-linked memes with **different overlay text** is a learned
-template: the same base media reused to convey different ideas. Clusters are
-named from the dominant shared tag when one exists.
-
-```bash
-npm run templates   # clusters tools/eval/collection-manifest.json when present
-```
-
-Drop the `manifest.json` from a Settings → "Export collection (zip)" export at
-`tools/eval/collection-manifest.json` to see a real library's learned formats.
-Tunables: link threshold (default 0.86 — above noise, below the 0.99 twin-dedup
-bar), min size 2 ("the second variation is the moment a template is born"),
-min distinct texts 2 (a dupe pile is not a template).
-
-## Tag agreement (npm run agreement) — free ground truth from your own tags
-
-Coverage measures the *shape* of the model's output; it can't know what's TRUE.
-But every manual tag and taught exemplar is a labeled example: the user asserted
-"this meme IS X." `src/tagAgreement.ts` grades the model against those — on any
-meme carrying a user-truth tag (source `manual`/`exemplar`), does the model's
-OWN description (its `vision` tags + caption) surface that label? Agreement =
-the model sees what you see; each miss is a named recognition gap. Zero labeling
-effort — the user already did the work by using the app.
-
-```bash
-npm run agreement   # grades tools/eval/collection-manifest.json when present
-```
-
-Scope, honestly: user truth skews toward IDENTITY labels (characters, people,
-formats), so this grades **recognition**; the hand-labeled tagging cases grade
-**recall-by-meaning** (situations, reactions). Complements, not substitutes.
-Memes the model never described are reported as `undescribed` and skipped — a
-coverage gap, not a wrong answer.
-
-## Next (not yet built)
-
-- A CI-backed **tag-precision** eval: score our produced tags against memedepot's
-  ground-truth `extracted_labels`, embedding-matched to bridge the two
-  vocabularies (needs our label vectors embedded in CI).
-- A standalone `npm run eval -- path/to/golden.json` CLI.
+Freeze a larger test set before comparing more checkpoints. Sample distinct
+image families across **each** format, with a separate slice for memes that
+match no known format. Have two people label the images without seeing model
+predictions. Resolve disagreements and allow multiple correct formats. Keep
+duplicates, crops, and reposts on the same side of the train/test split.
+Keep the images private. Report the number of examples and results per format,
+as well as the overall score and uncertainty on the paired change. Evaluate
+abstention separately on the no-format slice.
