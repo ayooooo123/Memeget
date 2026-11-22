@@ -4,6 +4,7 @@ import android.app.Application
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.net.Uri
+import android.os.Looper
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.ui.test.hasContentDescription
@@ -38,6 +39,7 @@ import org.junit.runner.RunWith
 import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
+import org.robolectric.Shadows.shadowOf
 import org.robolectric.android.controller.ActivityController
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
@@ -182,7 +184,11 @@ class ReplaceTextTest {
         }
         ui.onNodeWithContentDescription("Close").performClick()
         ui.onNodeWithText("Keep Draft & Exit").performClick()
-        ui.waitUntil(10_000) { closed }
+        ui.waitUntil(10_000) {
+            // The journal writes on IO, then posts the close callback to Android's main looper.
+            shadowOf(Looper.getMainLooper()).idle()
+            closed
+        }
         val saved = CoroutineScope(Dispatchers.IO).async { DraftJournalStore.restoreDraft(activity, session, uri).project }
         ui.waitUntil(10_000) { saved.isCompleted }
         return checkNotNull(runBlocking { saved.await() })
