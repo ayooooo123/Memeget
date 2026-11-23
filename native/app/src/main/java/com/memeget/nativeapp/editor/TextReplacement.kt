@@ -63,6 +63,7 @@ internal object TextReplacement {
 
     suspend fun layers(context: Context, project: MemeEditProject, rect: NormalizedRect, replacement: String,
                        original: String?, engine: InferenceEngine): Pair<MemeEditLayer.Cover, MemeEditLayer.Text> = withContext(Dispatchers.IO) {
+        if (replacement.isBlank()) throw IOException("Enter replacement text before replacing the letters.")
         val picture = VideoBackgroundEffect.decodeOrientedBitmap(context, project.materializedSourceUri ?: project.source.uri, 4096)
         try {
             val source = ProjectCore.remapRectUnclipped(rect, project.base, BaseTransform())
@@ -83,12 +84,49 @@ internal object TextReplacement {
                     small.getPixels(pixels, 0, mw, 0, 0, mw, mh)
                 } finally { small.recycle() }
             }
-            val target = Rect(((selection.left - crop.left) * scale).roundToInt(), ((selection.top - crop.top) * scale).roundToInt(),
-                ((selection.right - crop.left) * scale).roundToInt(), ((selection.bottom - crop.top) * scale).roundToInt())
-            val letters = LetterMask.find(pixels, mw, mh, target) ?: throw IOException("Could not separate the letters. Select the text more closely.")
+            fun maskRect(box: NormalizedRect) = Rect(
+                floor((box.x * w - crop.left) * scale).toInt(), floor((box.y * h - crop.top) * scale).toInt(),
+                ceil(((box.x + box.width) * w - crop.left) * scale).toInt(),
+                ceil(((box.y + box.height) * h - crop.top) * scale).toInt()
+            ).apply { if (!intersect(0, 0, mw, mh)) throw IOException("Select letters inside the picture") }
+            fun find(target: Rect) = LetterMask.find(pixels, mw, mh, target)
+                ?: throw IOException("Could not separate the letters. Select the text more closely.")
+            fun orient(mask: ByteArray) = if (project.base.rotation == QuarterRotation.R0 && !project.base.flipX && !project.base.flipY)
+                Triple(mask, mw, mh) else LogoMask.orient(mask, mw, mh, project.base)
+            var letters = find(maskRect(source))
+            var ink = orient(letters.ink)
+            var lines = inkLines(ink.first, ink.second, ink.third)
+            val align = alignment(lines)
             val area = NormalizedRect(crop.left.toFloat() / w, crop.top.toFloat() / h, crop.width().toFloat() / w, crop.height().toFloat() / h)
             val work = LogoTracker.sourceRectToWorking(area, project.base)
-            val text = textLayer(context, letters, mw, mh, work, project.base, rect, original, replacement)
+            var box = rect
+            var old = original
+            var words = replacement
+            if (original != null && (lines.size > 1 || '\n' in original)) {
+                val before = original.lines()
+                val after = replacement.lines()
+                val changed = changedLines(before, after, lines.size)
+                val first = changed.first
+                val last = changed.last
+                if (first != 0 || last != before.lastIndex) {
+                    // Keep the selected lines' horizontal margins and split vertically in the gap.
+                    // A short word must not inherit the width of a longer line that will stay in the picture.
+                    val chosen = first..last
+                    val left = rect.x + (chosen.minOf { lines[it].left } - lines.minOf { it.left }) * work.width / ink.second
+                    val right = rect.x + rect.width - (lines.maxOf { it.right } - chosen.maxOf { lines[it].right }) * work.width / ink.second
+                    fun between(a: Int, b: Int) = work.y + (lines[a].bottom + lines[b].top) * 0.5f * work.height / ink.third
+                    val top = if (first == 0) rect.y else between(first - 1, first)
+                    val bottom = if (last == lines.lastIndex) rect.y + rect.height else between(last, last + 1)
+                    box = NormalizedRect(left, top, right - left, bottom - top)
+                    letters = find(maskRect(ProjectCore.remapRectUnclipped(box, project.base, BaseTransform())))
+                    ink = orient(letters.ink)
+                    lines = inkLines(ink.first, ink.second, ink.third)
+                    if (lines.size != last - first + 1) ambiguousLines()
+                    old = before.subList(first, last + 1).joinToString("\n")
+                    words = after.subList(first, last + 1).joinToString("\n")
+                }
+            }
+            val text = textLayer(context, letters, ink, lines, work, project.base, box, old, words, align)
             val built = LogoMask.Built(work, area, letters.hole, letters.ink, mw, mh, LogoMask.save(context, letters.hole, mw, mh))
             val model = try { engine.installedInpaintModel()?.let(MiganInpainter::open) }
                 catch (stop: CancellationException) { throw stop }
@@ -98,82 +136,172 @@ internal object TextReplacement {
         } finally { picture.recycle() }
     }
 
-    /** Measure the actual ink, not the height of a loose selection. Multiline starts/ends tell us the alignment. */
-    private fun textLayer(context: Context, letters: LetterMask, mw: Int, mh: Int, work: NormalizedRect, base: BaseTransform,
-                          selection: NormalizedRect, old: String?, replacement: String): MemeEditLayer.Text {
-        val (ink, w, h) = LogoMask.orient(letters.ink, mw, mh, base)
+    private fun inkLines(ink: ByteArray, w: Int, h: Int): List<Rect> {
         val lines = mutableListOf<Rect>()
-        var count = 0
-        var edges = 0
         for (y in 0 until h) {
             var left = w; var right = 0
             for (x in 0 until w) if (ink[y * w + x] != 0.toByte()) {
-                left = minOf(x, left); right = x + 1; count++
-                if (x == 0 || ink[y * w + x - 1] == 0.toByte()) edges++
+                left = minOf(x, left); right = x + 1
             }
             if (left >= right) continue
             val last = lines.lastOrNull()
-            if (last == null || y - last.bottom > 2) lines += Rect(left, y, right, y + 1)
+            if (last == null || y > last.bottom) lines += Rect(left, y, right, y + 1)
             else last.union(left, y, right, y + 1)
         }
-        val bounds = Rect(lines.first()).apply { for (i in 1 until lines.size) union(lines[i]) }
-        val line = lines.maxBy { it.width() }
-        val transcript = old?.lines().orEmpty()
-        val originalLine = if (transcript.size == lines.size) transcript[lines.indexOf(line)] else transcript.maxByOrNull { it.length }.orEmpty()
-        val weight = count.toFloat() / edges.coerceAtLeast(1) / line.height()
-        val strokePreset = if (weight >= 0.12f) "subtitle" else "plain"
-        var preset = strokePreset
-        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { textSize = 100f }
-        val measured = Rect()
-        var capHeight = 72
-        if (originalLine.isNotBlank()) {
-            val aspect = line.width().toFloat() / line.height()
-            val path = Path()
-            val clip = Region()
-            val glyphs = Region()
-            val span = Rect()
-            var best = Float.MAX_VALUE
-            for (key in fontPresets) {
-                val spec = TextLayoutBridge.getPresetSpec(key)
-                paint.typeface = MemeTextLayout.weightedTypeface(context, spec.fontFamily, spec.fontWeight)
-                paint.getTextBounds(originalLine, 0, originalLine.length, measured)
-                if (measured.height() == 0) continue
-                val stroke = strokeWidth(paint, originalLine, measured, path, clip, glyphs, span)
-                if (stroke == 0f) continue
-                val spacedWidth = measured.width() + 100f * spec.letterSpacingEm * (originalLine.length - 1)
-                val difference = abs(spacedWidth / measured.height() / aspect - 1f) + abs(stroke / weight - 1f)
-                if (difference < best || (difference == best && key == strokePreset)) {
-                    best = difference
-                    preset = key
-                    capHeight = measured.height()
-                }
-            }
+        // A dot or accent may sit above its letter. Keep it with the nearest full-height band,
+        // but do not merge two full lines just because only one clear row separates them.
+        var i = 0
+        while (i < lines.lastIndex) {
+            val a = lines[i]
+            val b = lines[i + 1]
+            val larger = maxOf(a.height(), b.height())
+            if (minOf(a.height(), b.height()) * 3 <= larger && b.top - a.bottom <= larger / 2) {
+                a.union(b)
+                lines.removeAt(i + 1)
+                if (i > 0) i--
+            } else i++
         }
-        val em = line.height() * 100f / capHeight
-        val fontSize = em * work.height / h
+        if (lines.isEmpty()) throw IOException("Could not separate the letters. Select the text more closely.")
+        return lines
+    }
+
+    private fun ambiguousLines(): Nothing = throw IOException("Use Manual Box to select the line you want to replace.")
+
+    private fun changedLines(before: List<String>, after: List<String>, visible: Int): IntRange {
+        if (before.size != visible || after.size != visible) ambiguousLines()
+        val first = before.indices.firstOrNull { before[it] != after[it] } ?: return before.indices
+        val last = before.indices.last { before[it] != after[it] }
+        val changed = first..last
+        // One editable text layer cannot span two edits on opposite sides of an untouched line.
+        if (changed.any { before[it] == after[it] }) ambiguousLines()
+        return changed
+    }
+
+    private fun alignment(lines: List<Rect>): String {
+        if (lines.size == 1) return "center"
         fun spread(value: (Rect) -> Int) = lines.maxOf(value) - lines.minOf(value)
-        val align = when {
-            lines.size < 2 -> "center"
-            spread { it.left } < spread { it.centerX() } && spread { it.left } < spread { it.right } -> "left"
-            spread { it.right } < spread { it.centerX() } -> "right"
+        val left = spread { it.left }; val middle = spread { it.centerX() }; val right = spread { it.right }
+        return when {
+            left < middle && left < right -> "left"
+            right < middle -> "right"
             else -> "center"
         }
+    }
+
+    private fun medianWidth(widths: IntArray, count: Int): Float {
+        widths.sort(0, count)
+        return (widths[(count - 1) / 2] + widths[count / 2]) * 0.5f
+    }
+
+    /** Only distinct letter widths give useful evidence of condensation. A row of I's or joined script does not. */
+    private fun glyphAspect(columns: BooleanArray, height: Int): Float? {
+        val widths = IntArray((columns.size + 1) / 2)
+        var glyphs = 0; var width = 0
+        var narrowest = Int.MAX_VALUE; var widest = 0
+        for (x in 0..columns.size) {
+            if (x < columns.size && columns[x]) { width++; continue }
+            if (width == 0) continue
+            widths[glyphs++] = width
+            narrowest = minOf(narrowest, width); widest = maxOf(widest, width)
+            width = 0
+        }
+        if (glyphs < 3 || widest - narrowest < maxOf(2, height / 10) || widest > height * 2) return null
+        // Occasional I's and narrow punctuation should not make a wide font look condensed.
+        return medianWidth(widths, glyphs) / height
+    }
+
+    /** Fit the actual ink, not the size of a loose selection. Manual selections have no transcription. */
+    private fun textLayer(context: Context, letters: LetterMask, oriented: Triple<ByteArray, Int, Int>,
+                          lines: List<Rect>, work: NormalizedRect, base: BaseTransform,
+                          selection: NormalizedRect, old: String?, replacement: String, align: String): MemeEditLayer.Text {
+        val (ink, w, h) = oriented
+        val bounds = Rect(lines.first()).apply { for (i in 1 until lines.size) union(lines[i]) }
+        val line = lines.maxBy { it.width() }
+        val originalLine = old?.lineSequence()?.elementAt(lines.indexOf(line))?.takeIf { it.isNotBlank() }
+        val occupiedColumns = if (originalLine == null) BooleanArray(line.width()) else null
+        var count = 0
+        var runs = 0
+        for (y in line.top until line.bottom) for (x in line.left until line.right) {
+            if (ink[y * w + x] == 0.toByte()) continue
+            count++
+            if (occupiedColumns != null) occupiedColumns[x - line.left] = true
+            if (x == line.left || ink[y * w + x - 1] == 0.toByte()) runs++
+        }
+        val weight = count.toFloat() / runs / line.height()
+        val aspect = line.width().toFloat() / line.height()
+        // An unknown word has no meaningful total width. Separate letter bodies can still
+        // distinguish condensed and wide faces whose strokes happen to have the same thickness.
+        val manualAspect = occupiedColumns?.let { glyphAspect(it, line.height()) }
+        val shape = LetteringMetrics.measure(ink, w, line)
+        val sample = originalLine ?: "HAMBURGEFONTS"
+        val widths = if (manualAspect != null) IntArray(sample.length) else null
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { textSize = 100f }
+        val measured = Rect()
+        val path = Path()
+        val clip = Region()
+        val glyphs = Region()
+        val span = Rect()
+        var best = Float.MAX_VALUE
+        var preset = "plain"
+        var capHeight = 0
+        for (key in fontPresets) {
+            val spec = TextLayoutBridge.getPresetSpec(key)
+            paint.typeface = MemeTextLayout.weightedTypeface(context, spec.fontFamily, spec.fontWeight)
+            paint.getTextBounds(sample, 0, sample.length, measured)
+            if (measured.height() == 0) continue
+            val referenceStem = if (originalLine == null && shape != null) LetteringMetrics.manualStem(key, paint, sample) else null
+            var difference = if (referenceStem != null && shape != null) {
+                abs(referenceStem * shape.height / shape.stem - 1f)
+            } else {
+                val stroke = strokeWidth(paint, sample, measured, path, clip, glyphs, span)
+                if (stroke == 0f) continue
+                abs(stroke / weight - 1f)
+            }
+            if (originalLine != null) {
+                val spacedWidth = measured.width() + 100f * spec.letterSpacingEm * (sample.length - 1)
+                difference += abs(spacedWidth / measured.height() / aspect - 1f)
+            } else if (manualAspect != null && widths != null) {
+                for (i in sample.indices) {
+                    paint.getTextBounds(sample, i, i + 1, span)
+                    widths[i] = span.width()
+                }
+                difference += abs(medianWidth(widths, sample.length) / measured.height() / manualAspect - 1f)
+            }
+            if (difference < best) {
+                best = difference
+                preset = key
+                capHeight = measured.height()
+            }
+        }
+        if (capHeight == 0) throw IOException("Could not fit a font to the selected letters.")
+        val nominalEm = line.height() * 100f / capHeight
         val words = fitLines(replacement, lines)
         val uppercase = old != null && ProjectCore.looksAllCaps(old)
         val spec = TextLayoutBridge.getPresetSpec(preset)
         paint.typeface = MemeTextLayout.weightedTypeface(context, spec.fontFamily, spec.fontWeight)
+        val lettering = if (originalLine != null || manualAspect != null)
+            LetteringMetrics.fit(context, shape, paint, nominalEm, sample, originalLine != null, spec) else null
+        val em = if (lettering != null) paint.textSize else nominalEm
+        val fittedSize = em * work.height / h
+        val fontSize = fittedSize.coerceIn(ProjectLimits.MIN_FONT_SIZE, ProjectLimits.MAX_FONT_SIZE)
+        // A small caption on a tall image can still extend all the way across the picture.
+        // Keep the slider in range and scale only the font, never its wrapping box.
+        val sizeScale = fittedSize / fontSize
+        paint.textScaleX = lettering?.widthScale ?: 1f
         paint.textSize = em
         val display = if (uppercase) words.uppercase() else words
         // A tight OCR box fits the OLD words. Keep a longer replacement on its line if the canvas has room.
         val needed = display.lineSequence().maxOf {
-            paint.measureText(it) + em * spec.letterSpacingEm * (it.length - 1).coerceAtLeast(0) + 2f
+            paint.measureText(it) + em * paint.textScaleX * (lettering?.spacingEm ?: spec.letterSpacingEm) *
+                (it.length - 1).coerceAtLeast(0) + 2f
         } * work.width / w
         val width = maxOf(selection.width, needed).coerceIn(ProjectLimits.MIN_TEXT_WRAP_WIDTH, ProjectLimits.MAX_TEXT_WRAP_WIDTH)
+        val halfWidth = width / 2
         val cx = when (align) {
-            "left" -> work.x + bounds.left * work.width / w + width / 2
-            "right" -> work.x + bounds.right * work.width / w - width / 2
+            "left" -> work.x + bounds.left * work.width / w + halfWidth
+            "right" -> work.x + bounds.right * work.width / w - halfWidth
             else -> work.x + bounds.exactCenterX() * work.width / w
-        }.coerceIn(width / 2f, 1f - width / 2f)
+        }.coerceIn(halfWidth, 1f - halfWidth)
         fun hex(rgb: Int) = "#%06X".format(rgb and 0xffffff)
         val shadow = letters.shadowOffset?.let {
             val (x, y) = when (base.rotation) {
@@ -187,7 +315,7 @@ internal object TextReplacement {
         }
         val style = TextStyle(preset = preset, color = hex(letters.color), outlineColor = hex(letters.edgeColor ?: letters.color),
             outlineScale = 2f * letters.outlinePx / em, backgroundColor = null, align = align,
-            uppercase = uppercase, shadow = shadow)
+            uppercase = uppercase, shadow = shadow, lettering = lettering, fittedSizeScale = sizeScale)
         return MemeEditLayer.Text("text_${System.nanoTime()}", words, width, fontSize, style,
             keyframes = listOf(TransformKeyframe(center = NormalizedPoint(cx, work.y + bounds.exactCenterY() * work.height / h))))
     }

@@ -131,6 +131,9 @@ internal data class BaseTransform(
 /** An offset from the text, in units of its font size. */
 internal data class TextShadow(val color: String, val xEm: Float, val yEm: Float)
 
+/** Shape of the editable glyphs relative to the bundled face, fitted only by Replace. */
+internal data class TextLettering(val widthScale: Float, val spacingEm: Float, val weight: Int? = null)
+
 internal data class TextStyle(
     val preset: String = "impact", // "impact", "subtitle", "label", "news", "bubble", "plain"
     val color: String = "#f2f4f8",
@@ -141,6 +144,8 @@ internal data class TextStyle(
     val align: String = "center", // "left", "center", "right"
     val uppercase: Boolean = true,
     val shadow: TextShadow? = null,
+    val lettering: TextLettering? = null,
+    val fittedSizeScale: Float = 1f,
 ) {
     fun toJson(): JSONObject = JSONObject().apply {
         put("preset", preset)
@@ -154,6 +159,11 @@ internal data class TextStyle(
         shadow?.let {
             put("shadow", JSONObject().put("color", it.color).put("xEm", it.xEm.toDouble()).put("yEm", it.yEm.toDouble()))
         }
+        lettering?.let {
+            put("lettering", JSONObject().put("widthScale", it.widthScale.toDouble())
+                .put("spacingEm", it.spacingEm.toDouble()).apply { it.weight?.let { weight -> put("weight", weight) } })
+        }
+        if (fittedSizeScale != 1f) put("fittedSizeScale", fittedSizeScale.toDouble())
     }
 
     companion object {
@@ -170,6 +180,11 @@ internal data class TextStyle(
                 shadow = json.optJSONObject("shadow")?.let {
                     TextShadow(it.getString("color"), it.getDouble("xEm").toFloat(), it.getDouble("yEm").toFloat())
                 },
+                lettering = json.optJSONObject("lettering")?.let {
+                    TextLettering(it.getDouble("widthScale").toFloat(), it.getDouble("spacingEm").toFloat(),
+                        if (it.has("weight")) it.getInt("weight") else null)
+                },
+                fittedSizeScale = json.optDouble("fittedSizeScale", 1.0).toFloat(),
             )
     }
 }
@@ -293,6 +308,7 @@ internal sealed interface MemeEditLayer {
         val keyframes: List<TransformKeyframe> = listOf(TransformKeyframe())
     ) : MemeEditLayer {
         override val kind: String get() = "text"
+        val visibleFontSize: Float get() = fontSize * style.fittedSizeScale
 
         override fun toJson(): JSONObject = JSONObject().apply {
             put("id", id)

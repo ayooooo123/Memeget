@@ -745,8 +745,11 @@ internal fun RemixStudio(
                                 "Replace needs two free layers. Remove layers until two slots are free."
                             }
                             val (repair, text) = TextReplacement.layers(context, activeProject, rect, replacement, original, engine)
-                            val live = checkNotNull(history)
-                            check(live.present === activeProject) { "The picture changed. Select the text again." }
+                            val live = history
+                            if (live == null || live.present !== activeProject) {
+                                EditorAssetStorage.discardUnappliedRepair(context, repair)
+                                error("The edit changed. Select the text again.")
+                            }
                             history = applyProjectAction(live, ProjectAction.AddLayers(listOf(repair, text)))
                             selectedLayerId = text.id
                             val message = if (repair.patchUri == null) "Text replaced using nearby pixels" else "Text replaced"

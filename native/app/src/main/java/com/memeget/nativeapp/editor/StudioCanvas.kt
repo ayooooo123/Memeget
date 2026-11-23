@@ -392,7 +392,7 @@ internal fun StudioCanvas(
                                             val cx = t.center.x * canvasWidth
                                             val cy = t.center.y * canvasHeight
                                             val bw = layer.width * canvasWidth * t.scale
-                                            val bh = (layer.fontSize * min(canvasWidth, canvasHeight) * 2.5f) * t.scale
+                                            val bh = (layer.visibleFontSize * min(canvasWidth, canvasHeight) * 2.5f) * t.scale
                                             if (tapX in (cx - bw / 2f)..(cx + bw / 2f) && tapY in (cy - bh / 2f)..(cy + bh / 2f)) {
                                                 hitId = layer.id
                                                 break

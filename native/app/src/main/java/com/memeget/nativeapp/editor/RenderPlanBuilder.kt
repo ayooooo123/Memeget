@@ -307,7 +307,7 @@ internal object RenderPlanBuilder {
     ): JSONObject {
         val spec = TextLayoutBridge.getPresetSpec(layer.style.preset)
         // fontSize is normalized against canvas height (memeTextLayoutCore.ts).
-        val fontSizePx = max(1f, layer.fontSize * outH.toFloat())
+        val fontSizePx = max(1f, layer.visibleFontSize * outH.toFloat())
         val wrapWidthPx = max(1f, layer.width * outW.toFloat())
         val centerX = transform.center.x.coerceIn(0f, 1f) * outW.toFloat()
         val centerY = transform.center.y.coerceIn(0f, 1f) * outH.toFloat()
@@ -337,7 +337,9 @@ internal object RenderPlanBuilder {
                 put("font", JSONObject().apply {
                     put("family", spec.fontFamily)
                     put("weight", spec.fontWeight.toString())
-                    put("letterSpacingEm", spec.letterSpacingEm.toDouble())
+                    put("letterSpacingEm", (layer.style.lettering?.spacingEm ?: spec.letterSpacingEm).toDouble())
+                    layer.style.lettering?.let { put("widthScale", it.widthScale.toDouble()) }
+                    layer.style.lettering?.weight?.let { put("measuredWeight", it) }
                 })
                 put("transform", JSONObject().apply {
                     put("scale", transform.scale.toDouble())

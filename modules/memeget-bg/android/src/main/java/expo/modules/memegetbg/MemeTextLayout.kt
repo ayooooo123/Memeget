@@ -95,7 +95,7 @@ internal object MemeTextLayout {
   const val TOLERANCE_DIP = 2f
   private const val ANTON_ASSET = "fonts/Anton-Regular.ttf"
   private const val NOTO_SANS_ASSET = "fonts/NotoSans.ttf"
-  private data class TypefaceKey(val asset: String, val style: Int)
+  private data class TypefaceKey(val asset: String, val style: Int, val explicitAxis: Boolean = false)
   private val typefaceCache = HashMap<TypefaceKey, Typeface>()
 
   fun measure(
@@ -162,8 +162,16 @@ internal object MemeTextLayout {
   }
 
   @Synchronized
-  internal fun weightedTypeface(context: Context, fontFamily: String, fontWeight: Int): Typeface {
+  internal fun weightedTypeface(context: Context, fontFamily: String, fontWeight: Int, measuredWeight: Int? = null): Typeface {
     val asset = if (fontFamily == "Anton") ANTON_ASSET else NOTO_SANS_ASSET
+    // The default Android weight selector may synthesize a bold face. Only a
+    // fitted replacement asks for a particular instance of the bundled variable font.
+    if (asset == NOTO_SANS_ASSET && measuredWeight != null) {
+      val weight = (measuredWeight.coerceIn(100, 900) + 12) / 25 * 25
+      return typefaceCache.getOrPut(TypefaceKey(asset, weight, explicitAxis = true)) {
+        Typeface.Builder(context.assets, asset).setFontVariationSettings("'wght' $weight").setWeight(weight).build()
+      }
+    }
     val style = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) fontWeight.coerceIn(100, 900) else if (fontWeight >= 700) Typeface.BOLD else Typeface.NORMAL
     return typefaceCache.getOrPut(TypefaceKey(asset, style)) {
       val base = Typeface.createFromAsset(context.assets, asset)

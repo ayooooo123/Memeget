@@ -28,16 +28,6 @@ internal object ProjectCore {
             QuarterRotation.R270 -> NormalizedPoint(point.y, 1f - point.x)
         }
 
-    fun rotateNormalizedRect(rect: NormalizedRect, rotation: QuarterRotation): NormalizedRect {
-        val p1 = rotateNormalizedPoint(NormalizedPoint(rect.x, rect.y), rotation)
-        val p2 = rotateNormalizedPoint(NormalizedPoint(rect.x + rect.width, rect.y + rect.height), rotation)
-        val minX = min(p1.x, p2.x)
-        val minY = min(p1.y, p2.y)
-        val maxX = max(p1.x, p2.x)
-        val maxY = max(p1.y, p2.y)
-        return NormalizedRect(minX, minY, maxX - minX, maxY - minY)
-    }
-
     fun mapPointToCroppedCanvas(point: NormalizedPoint, crop: NormalizedRect): NormalizedPoint {
         val safeW = if (crop.width > 0.0001f) crop.width else 1f
         val safeH = if (crop.height > 0.0001f) crop.height else 1f
@@ -47,30 +37,12 @@ internal object ProjectCore {
         )
     }
 
-    fun mapRectToCroppedCanvas(rect: NormalizedRect, crop: NormalizedRect): NormalizedRect {
-        val safeW = if (crop.width > 0.0001f) crop.width else 1f
-        val safeH = if (crop.height > 0.0001f) crop.height else 1f
-        val x = clampUnit((rect.x - crop.x) / safeW)
-        val y = clampUnit((rect.y - crop.y) / safeH)
-        val width = min(rect.width / safeW, 1f - x)
-        val height = min(rect.height / safeH, 1f - y)
-        return NormalizedRect(x, y, max(0.001f, width), max(0.001f, height))
-    }
-
     fun transformPointToWorkingCanvas(point: NormalizedPoint, base: BaseTransform): NormalizedPoint {
         var p = point
         if (base.flipX) p = NormalizedPoint(1f - p.x, p.y)
         if (base.flipY) p = NormalizedPoint(p.x, 1f - p.y)
         p = rotateNormalizedPoint(p, base.rotation)
         return mapPointToCroppedCanvas(p, base.crop)
-    }
-
-    fun transformRectToWorkingCanvas(rect: NormalizedRect, base: BaseTransform): NormalizedRect {
-        var r = rect
-        if (base.flipX) r = NormalizedRect(1f - (r.x + r.width), r.y, r.width, r.height)
-        if (base.flipY) r = NormalizedRect(r.x, 1f - (r.y + r.height), r.width, r.height)
-        r = rotateNormalizedRect(r, base.rotation)
-        return mapRectToCroppedCanvas(r, base.crop)
     }
 
     const val MIN_NORMALIZED_CROP_EDGE = 0.05f

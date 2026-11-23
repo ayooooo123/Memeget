@@ -94,6 +94,20 @@ internal object EditorAssetStorage {
         return Uri.fromFile(targetFile)
     }
 
+    /** Only for a newly built repair which the editor has never added to history. */
+    suspend fun discardUnappliedRepair(context: Context, repair: MemeEditLayer.Cover) = withContext(Dispatchers.IO) {
+        val dir = File(context.filesDir, "editor_assets").canonicalFile
+        fun local(uri: String?, prefix: String): File? {
+            val parsed = uri?.let(Uri::parse) ?: return null
+            if (parsed.scheme != "file") return null
+            val file = parsed.path?.let(::File) ?: return null
+            return file.takeIf { it.name.startsWith(prefix) && it.canonicalFile.parentFile == dir }
+        }
+        local(repair.maskUri, "mask_")?.delete()
+        local(repair.patchUri, "patch_")?.deleteRecursively()
+        Unit
+    }
+
     fun cleanExpiredAssets(context: Context) {
         val dir = File(context.filesDir, "editor_assets")
         if (!dir.exists()) return
@@ -265,12 +279,16 @@ internal fun TextInspectorPanel(
             Text("Size", color = Color.White, fontSize = 13.sp, modifier = Modifier.width(60.dp))
             Slider(
                 value = selectedLayer.fontSize,
-                onValueChange = { onUpdateLayer(selectedLayer.copy(fontSize = it)) },
+                onValueChange = { size ->
+                    val style = selectedLayer.style
+                    onUpdateLayer(selectedLayer.copy(fontSize = size,
+                        style = if (style.fittedSizeScale == 1f) style else style.copy(fittedSizeScale = 1f)))
+                },
                 valueRange = ProjectLimits.MIN_FONT_SIZE..ProjectLimits.MAX_FONT_SIZE,
                 modifier = Modifier.weight(1f),
                 colors = SliderDefaults.colors(thumbColor = Color(0xFFD8FF4A), activeTrackColor = Color(0xFFD8FF4A))
             )
-            Text("${(selectedLayer.fontSize * 100).roundToInt()}%", color = Color(0xFF8B949E), fontSize = 12.sp, modifier = Modifier.width(40.dp))
+            Text("${(selectedLayer.visibleFontSize * 100).roundToInt()}%", color = Color(0xFF8B949E), fontSize = 12.sp, modifier = Modifier.width(40.dp))
         }
 
         // Text Width Slider
@@ -878,7 +896,7 @@ internal fun TextReplaceToolPanel(
                     }
                 },
                 modifier = Modifier.fillMaxWidth(),
-                enabled = !isReplacing,
+                enabled = !isReplacing && replaceText.isNotBlank(),
                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFD8FF4A))
             ) {
                 if (isReplacing) {

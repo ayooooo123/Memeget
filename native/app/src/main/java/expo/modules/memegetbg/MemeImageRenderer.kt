@@ -644,11 +644,13 @@ internal object MemeImageRenderer {
     // The plan already speaks in output pixels, so dip == px for this render.
     val paint = TextPaint(TextPaint.ANTI_ALIAS_FLAG).apply {
       textSize = max(1f, finiteFloat(canvasSpec, "fontSizeDip", 1.0))
+      textScaleX = finiteFloat(font, "widthScale", 1.0)
       letterSpacing = finiteFloat(font, "letterSpacingEm", 0.0)
       typeface = MemeTextLayout.weightedTypeface(
         context,
         font.optString("family", "NotoSans"),
-        font.optString("weight", "400").toIntOrNull() ?: 400
+        font.optString("weight", "400").toIntOrNull() ?: 400,
+        if (font.has("measuredWeight")) font.getInt("measuredWeight") else null
       )
     }
     val staticLayout = MemeTextLayout.buildStaticLayout(

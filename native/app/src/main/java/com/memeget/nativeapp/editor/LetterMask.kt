@@ -49,7 +49,12 @@ internal class LetterMask(
                 }
                 return best
             }
-            val primary = pigment(inside, area, requireEdge = true)
+            var primary = pigment(inside, area, requireEdge = true)
+            if (primary < 0 || inside[primary] > area * 0.8f) {
+                // A dense neighbouring line can put more letter colour in one margin than in the
+                // selected line. Discount that side only if the other margins agree it is not background.
+                primary = pigmentBesideLine(argb, w, h, target, inside, outside, edges)
+            }
             if (primary < 0) return null
             fun sample(bucket: Int, region: Rect, rim: ByteArray? = null): Int {
                 // Median within the bin: antialiasing need not move a solid ink colour by a shade.
@@ -95,7 +100,9 @@ internal class LetterMask(
                 edgeSize++
             }
             val second = pigment(inside, edgeSize)
-            if (second < 0 || inside[second] < edgeSize * 0.18f) return LetterMask(ink, edge, color)
+            if (second < 0 || inside[second] < edgeSize * 0.18f) {
+                return LetterMask(ink, protectNeighbourInk(edge, argb, w, h, target, color, 2, ink), color)
+            }
             var edgeColor = sample(second, Rect(0, 0, w, h), edge)
             // A thick outline can contain more pixels than the fill. The inner colour borders the
             // outer colour on nearly every side; the outer colour also borders the background.
@@ -117,21 +124,38 @@ internal class LetterMask(
                 }
             }
             val reach = (minOf(target.height(), target.width()) / 7).coerceIn(2, 8)
-            val depth = distanceFromInk(ink, w, h, reach + 3)
+            // A tight box can end in the middle of a thick outline. Look beyond the
+            // repair budget for its outer edge, without extending the repair there.
+            val evidenceReach = reach + 2
+            val depth = distanceFromInk(ink, w, h, evidenceReach + 3)
             val rings = IntArray(reach + 1)
             val matches = IntArray(reach + 1)
+            var outerEdges = 0
+            val requiredEdges = maxOf(3, edgeSize / 16)
             for (i in depth.indices) {
                 val d = depth[i].toInt()
-                if (d !in 1..reach) continue
-                rings[d]++
-                if (distance(argb[i], edgeColor) <= 24) matches[d]++
+                if (d !in 1..evidenceReach) continue
+                if (d <= reach) rings[d]++
+                if (distance(argb[i], edgeColor) > 24) continue
+                if (d <= reach) matches[d]++
+                // A real outline or shadow ends at a visible transition away from the ink.
+                // On a smooth gradient the adjoining background continues past the putative border.
+                if (outerEdges < requiredEdges) {
+                    val x = i % w
+                    fun changesOutside(j: Int) = depth[j] > d && distance(argb[i], argb[j]) > 32
+                    if ((x >= 2 && changesOutside(i - 2)) || (x + 2 < w && changesOutside(i + 2)) ||
+                        (i >= 2 * w && changesOutside(i - 2 * w)) || (i + 2 * w < argb.size && changesOutside(i + 2 * w))) outerEdges++
+                }
             }
+            val hasEdge = outerEdges >= requiredEdges
             var thickness = 0
-            for (d in 1..reach) {
+            if (hasEdge) for (d in 1..reach) {
                 if (rings[d] == 0 || matches[d] < rings[d] * 0.2f) break
                 thickness = d
             }
-            val shadow = fitShadow(argb, depth, thickness, edgeColor, w, reach)
+            // A colour that fills most of the margin is not evidence of an outline in a gap.
+            val decoration = edgeColor.takeIf { hasEdge && outside[bin(it)] * 2 < margin }
+            val shadow = if (hasEdge) fitShadow(argb, depth, thickness, edgeColor, w, reach) else null
             if (shadow != null) {
                 val decorated = ink.copyOf()
                 for (y in maxOf(0, -shadow.y) until minOf(h, h - shadow.y)) {
@@ -139,16 +163,103 @@ internal class LetterMask(
                         if (ink[y * w + x] != 0.toByte()) decorated[(y + shadow.y) * w + x + shadow.x] = -1
                     }
                 }
-                return LetterMask(ink, LogoMask.squareFilter(decorated, w, h, 2, all = false),
+                return LetterMask(ink,
+                    protectNeighbourInk(LogoMask.squareFilter(decorated, w, h, 2, all = false),
+                        argb, w, h, target, color, 2, ink, decoration),
                     color, edgeColor, shadowOffset = shadow)
             }
             for (i in depth.indices) depth[i] = if (depth[i] <= thickness + 2) -1 else 0
-            return LetterMask(ink, depth, color, edgeColor, thickness)
+            return LetterMask(ink, protectNeighbourInk(depth, argb, w, h, target, color, thickness + 2, ink, decoration),
+                color, edgeColor.takeIf { hasEdge }, thickness)
         }
 
-        /** Distance in eight directions. Two passes give all stroke widths without growing a new mask per radius. */
+        private fun pigmentBesideLine(argb: IntArray, w: Int, h: Int, box: Rect, inside: IntArray,
+                                      outside: IntArray, edges: IntArray): Int {
+            if (edges.none { it >= 2 }) return -1
+            val area = box.width() * box.height()
+            val margin = argb.size - area
+            val side = IntArray(inside.size)
+            var best = -1
+            var score = max(3.0, area * 0.014)
+            fun consider(left: Int, top: Int, right: Int, bottom: Int) {
+                val size = (bottom - top) * (right - left)
+                val remaining = margin - size
+                if (size == 0 || remaining < maxOf(1, margin / 3)) return
+                side.fill(0)
+                for (y in top until bottom) for (x in left until right) side[bin(argb[y * w + x])]++
+                for (i in inside.indices) {
+                    if (inside[i] < 4 || inside[i] > area * 0.8f || edges[i] < max(2, inside[i] / 20)) continue
+                    if (side[i] < 4 || side[i] * 10 < outside[i] * 9) continue
+                    val excess = inside[i] - (outside[i] - side[i]).toDouble() * area / remaining
+                    if (excess > score) { score = excess; best = i }
+                }
+            }
+            consider(0, 0, w, box.top)
+            consider(0, box.bottom, w, h)
+            consider(0, box.top, box.left, box.bottom)
+            consider(box.right, box.top, w, box.bottom)
+            return best
+        }
+
+        /** Protect nearby runs of the fill colour outside the box, unless they connect to a selected glyph. */
+        private fun protectNeighbourInk(
+            hole: ByteArray, argb: IntArray, w: Int, h: Int, target: Rect, fill: Int, reach: Int, ink: ByteArray,
+            decoration: Int? = null,
+        ): ByteArray {
+            var outside: ByteArray? = null
+            var count = 0
+            for (y in 0 until h) for (x in 0 until w) {
+                if (target.contains(x, y)) continue
+                val i = y * w + x
+                if (distance(argb[i], fill) > 32) continue
+                val labels = outside ?: ByteArray(argb.size).also { outside = it }
+                labels[i] = -1
+                count++
+            }
+            val labels = outside ?: return hole
+            val queue = IntArray(count)
+            var tail = 0
+            fun connect(x: Int, y: Int) {
+                for (row in maxOf(0, y - 1)..minOf(h - 1, y + 1)) for (col in maxOf(0, x - 1)..minOf(w - 1, x + 1)) {
+                    val i = row * w + col
+                    if (labels[i] < 0) {
+                        labels[i] = 1
+                        queue[tail++] = i
+                    }
+                }
+            }
+            // Only fill on the four edges can extend outside. Traverse its connected exterior pixels.
+            fun seed(x: Int, y: Int) { if (ink[y * w + x] != 0.toByte()) connect(x, y) }
+            for (x in target.left until target.right) { seed(x, target.top); seed(x, target.bottom - 1) }
+            for (y in target.top + 1 until target.bottom - 1) { seed(target.left, y); seed(target.right - 1, y) }
+            var head = 0
+            while (head < tail) {
+                val i = queue[head++]
+                connect(i % w, i / w)
+            }
+            if (tail == count) return hole
+            val near = distanceFromInk(labels, w, h, reach + 1)
+            fun nearerSelectedInk(x: Int, y: Int, otherDistance: Int): Boolean {
+                val r = otherDistance - 1
+                for (row in maxOf(target.top, y - r)..minOf(target.bottom - 1, y + r))
+                    for (col in maxOf(target.left, x - r)..minOf(target.right - 1, x + r))
+                        if (ink[row * w + col] != 0.toByte()) return true
+                return false
+            }
+            for (y in 0 until h) for (x in 0 until w) {
+                val i = y * w + x
+                if (hole[i] == 0.toByte() || target.contains(x, y) || labels[i] > 0 || near[i] > reach) continue
+                // Where the bands meet, keep a real outline pixel only on the selected glyph's side.
+                if (decoration != null && near[i] > 0 && distance(argb[i], decoration) <= 32 &&
+                    nearerSelectedInk(x, y, near[i].toInt())) continue
+                hole[i] = 0
+            }
+            return hole
+        }
+
+        /** Eight-way distance to a negative (ink) pixel. Positive labels are not seeds. */
         private fun distanceFromInk(ink: ByteArray, w: Int, h: Int, cap: Int): ByteArray {
-            val depth = ByteArray(ink.size) { if (ink[it] != 0.toByte()) 0 else cap.toByte() }
+            val depth = ByteArray(ink.size) { if (ink[it] < 0) 0 else cap.toByte() }
             fun sweep(xs: IntProgression, ys: IntProgression, step: Int) {
                 for (y in ys) for (x in xs) {
                     val i = y * w + x
