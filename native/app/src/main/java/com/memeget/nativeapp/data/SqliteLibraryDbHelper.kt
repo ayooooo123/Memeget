@@ -266,6 +266,7 @@ internal class SqliteLibraryDbHelper(context: Context, dbName: String = DATABASE
         fun addCol(name: String, ddl: String) {
             if (!existingCols.contains(name)) {
                 try {
+                    // ast-grep-ignore: kt-no-raw-sql-interpolation -- static schema migration column/DDL table
                     db.execSQL("ALTER TABLE memes ADD COLUMN $name $ddl;")
                 } catch (_: Exception) {}
             }

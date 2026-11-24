@@ -1,0 +1,9 @@
+id: kt-no-run-blocking-prod
+valid:
+  - |
+    suspend fun load() = withContext(Dispatchers.IO) { fetch() }
+invalid:
+  - |
+    fun load() = runBlocking { fetch() }
+  - |
+    fun load() = runBlocking(Dispatchers.IO) { fetch() }

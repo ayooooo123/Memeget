@@ -1,0 +1,12 @@
+id: kt-no-run-blocking-prod
+language: kotlin
+severity: error
+message: Avoid runBlocking in production code; it blocks the calling thread and can cause ANRs.
+note: |
+  Use suspend functions and structured CoroutineScope launches instead of runBlocking in src/main.
+files:
+  - native/app/src/main/**/*.kt
+rule:
+  any:
+    - pattern: runBlocking { $$$ }
+    - pattern: runBlocking($$$) { $$$ }

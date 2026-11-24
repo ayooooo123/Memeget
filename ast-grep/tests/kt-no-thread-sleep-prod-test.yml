@@ -1,0 +1,7 @@
+id: kt-no-thread-sleep-prod
+valid:
+  - |
+    suspend fun pause() { delay(50) }
+invalid:
+  - |
+    fun pause() { Thread.sleep(50) }

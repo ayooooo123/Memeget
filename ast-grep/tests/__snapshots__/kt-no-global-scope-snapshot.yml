@@ -1,0 +1,16 @@
+id: kt-no-global-scope
+snapshots:
+  ? |
+    GlobalScope.async(Dispatchers.IO) { sync() }
+  : labels:
+    - source: GlobalScope.async(Dispatchers.IO) { sync() }
+      style: primary
+      start: 0
+      end: 44
+  ? |
+    GlobalScope.launch { sync() }
+  : labels:
+    - source: GlobalScope.launch { sync() }
+      style: primary
+      start: 0
+      end: 29

@@ -1,7 +1,6 @@
 name: CI
 
-# Native Android host tests on pull requests and pushes. The retired Expo app
-# no longer needs Node, TypeScript, or Jest in this workflow.
+# Native Android host tests, Detekt Kotlin lint, and ast-grep code rules.
 
 on:
   pull_request:
@@ -16,15 +15,18 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  format-score:
+  code-rules:
+    name: ast-grep rules
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-node@v4
         with:
-          python-version: '3.11'
-      - run: python -m pip install numpy ijson pillow
-      - run: python -m unittest discover -s tools/eval -p test_score_formats.py
+          node-version: 22.x
+      - run: npm install --global @ast-grep/cli@0.50.0
+      - run: ast-grep test
+      - run: ast-grep scan
 
   native:
     runs-on: ubuntu-latest
@@ -47,6 +49,9 @@ jobs:
         uses: android-actions/setup-android@v3
         with:
           packages: platform-tools
+
+      - name: Kotlin Detekt
+        run: ./gradlew :app:detekt --no-daemon
 
       - name: Host tests
         run: ./gradlew :app:testDebugUnitTest --no-daemon --stacktrace

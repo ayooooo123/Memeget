@@ -1,0 +1,9 @@
+id: kt-no-global-scope
+valid:
+  - |
+    viewModelScope.launch { sync() }
+invalid:
+  - |
+    GlobalScope.launch { sync() }
+  - |
+    GlobalScope.async(Dispatchers.IO) { sync() }

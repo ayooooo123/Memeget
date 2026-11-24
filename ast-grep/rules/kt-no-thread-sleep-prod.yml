@@ -1,0 +1,10 @@
+id: kt-no-thread-sleep-prod
+language: kotlin
+severity: error
+message: Avoid Thread.sleep in production code; use coroutine delay() instead.
+note: |
+  Thread.sleep blocks OS threads and risks ANRs or worker pool starvation.
+files:
+  - native/app/src/main/**/*.kt
+rule:
+  pattern: Thread.sleep($$$)

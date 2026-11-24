@@ -1,0 +1,18 @@
+id: kt-no-raw-sql-interpolation
+language: kotlin
+severity: error
+message: Avoid string interpolation ($) inside rawQuery or execSQL; use ? bind parameters instead.
+note: |
+  Interpolated SQL invites quoting bugs and SQL injection. Pass values via the selectionArgs / bindArgs array.
+  For safe static DDL or validated internal identifiers, annotate the line above with:
+  // ast-grep-ignore: kt-no-raw-sql-interpolation -- <reason>
+files:
+  - native/app/src/main/**/*.kt
+rule:
+  any:
+    - pattern: $DB.rawQuery($SQL, $$$)
+    - pattern: $DB.execSQL($SQL, $$$)
+    - pattern: $DB.execSQL($SQL)
+constraints:
+  SQL:
+    regex: \$[A-Za-z_{]

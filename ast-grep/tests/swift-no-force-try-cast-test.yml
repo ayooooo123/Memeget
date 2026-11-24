@@ -1,0 +1,11 @@
+id: swift-no-force-try-cast
+valid:
+  - |
+    let store = try? loadStore()
+  - |
+    guard let img = obj as? UIImage else { return }
+invalid:
+  - |
+    let store = try! loadStore()
+  - |
+    let img = obj as! UIImage

@@ -1,0 +1,14 @@
+id: kt-no-global-scope
+language: kotlin
+severity: error
+message: Avoid GlobalScope; launch coroutines in a lifecycle-bound CoroutineScope instead.
+note: |
+  GlobalScope coroutines leak past Activity/ViewModel/service lifecycles and bypass structured cancellation.
+files:
+  - native/app/src/main/**/*.kt
+rule:
+  any:
+    - pattern: GlobalScope.launch($$$) { $$$ }
+    - pattern: GlobalScope.launch { $$$ }
+    - pattern: GlobalScope.async($$$) { $$$ }
+    - pattern: GlobalScope.async { $$$ }

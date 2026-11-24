@@ -1,0 +1,16 @@
+id: swift-no-force-try-cast
+snapshots:
+  ? |
+    let img = obj as! UIImage
+  : labels:
+    - source: obj as! UIImage
+      style: primary
+      start: 10
+      end: 25
+  ? |
+    let store = try! loadStore()
+  : labels:
+    - source: try! loadStore()
+      style: primary
+      start: 12
+      end: 28
