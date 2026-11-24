@@ -2,6 +2,14 @@ plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
+    id("io.gitlab.arturbosch.detekt")
+}
+
+detekt {
+    config.setFrom(files("$rootDir/detekt.yml"))
+    baseline = file("detekt-baseline.xml")
+    buildUponDefaultConfig = true
+    parallel = true
 }
 
 val mediaSource = rootProject.file("../modules/memeget-bg/android/src/main")

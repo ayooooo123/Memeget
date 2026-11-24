@@ -763,6 +763,7 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
 
         // Pass 1: compact metadata columns only (omitting large cloud_observation JSON to avoid 2 MB CursorWindow faults).
         val memesById = LinkedHashMap<Long, Meme>(onlyIds?.size ?: 2500)
+        // ast-grep-ignore: kt-no-raw-sql-interpolation -- internal WHERE clause over validated Long IDs
         db.rawQuery(
             """
             SELECT id, uri, name, kind, ocr_text, vlm_ocr, caption, transcript, tags, extra_terms,
@@ -791,6 +792,7 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
             "WHERE model IN (?, ?)"
         }
         val vecsById = HashMap<Long, Triple<FloatArray, FloatArray?, FloatArray?>>(memesById.size * 2)
+        // ast-grep-ignore: kt-no-raw-sql-interpolation -- internal WHERE clause with bound fingerprint args
         db.rawQuery(
             "SELECT id, image, caption, scenes FROM vectors $vecWhere",
             arrayOf(ModelRegistry.PRIMARY_MODEL_FINGERPRINT, ModelRegistry.LEGACY_S2_MODEL_FINGERPRINT),
@@ -1409,6 +1411,7 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
                     args.add(kind)
                     " AND m.kind = ?"
                 }
+                // ast-grep-ignore: kt-no-raw-sql-interpolation -- static optional kind filter clause with bound args
                 useFts = db.rawQuery(
                     "SELECT m.tags FROM meme_search_fts JOIN memes m ON m.id = meme_search_fts.rowid WHERE meme_search_fts MATCH ?$kindClause",
                     args.toTypedArray(), signal,
@@ -1864,6 +1867,7 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
         }
         args.add(limit.coerceIn(1, 256).toString())
         val out = ArrayList<Meme>()
+        // ast-grep-ignore: kt-no-raw-sql-interpolation -- static optional kind filter clause with bound args
         db.rawQuery(
             "SELECT * FROM memes WHERE copy_count > 0$kindSql ORDER BY last_copied_at DESC, copy_count DESC, id DESC LIMIT ?",
             args.toTypedArray(),
@@ -2083,6 +2087,7 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
             db.beginTransaction()
             try {
                 val idList = ids.joinToString(",")
+                // ast-grep-ignore: kt-no-raw-sql-interpolation -- comma-joined Long IDs only
                 db.execSQL("UPDATE memes SET pending = 1, index_error = '' WHERE id IN ($idList)")
                 db.setTransactionSuccessful()
             } finally {
@@ -2233,12 +2238,14 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
                     val id = read(inFlightKey)?.toLongOrNull()
                     val recovery = if (id == null) null else {
                         write(inFlightKey, "")
+                        // ast-grep-ignore: kt-no-raw-sql-interpolation -- static internal column name with bound id arg
                         val stranded = db.rawQuery("SELECT 1 FROM memes WHERE id = ? AND $column = 'failed'", arrayOf(id.toString())).use { it.moveToNext() }
                         val once = read(onceKey).orEmpty().split(',').mapNotNull(String::toLongOrNull).toSet()
                         when {
                             !stranded -> null
                             id in once -> KilledRecovery(id, retried = false)
                             else -> {
+                                // ast-grep-ignore: kt-no-raw-sql-interpolation -- static internal column name with bound id arg
                                 db.execSQL("UPDATE memes SET $column = 'pending' WHERE id = ?", arrayOf<Any>(id))
                                 write(onceKey, (once + id).joinToString(","))
                                 KilledRecovery(id, retried = true)
@@ -3079,9 +3086,13 @@ internal class SqliteLibraryStore(val context: Context) : LibraryStore {
             db.beginTransaction()
             try {
                 val idList = ids.joinToString(",")
+                // ast-grep-ignore: kt-no-raw-sql-interpolation -- comma-joined Long IDs only
                 db.execSQL("DELETE FROM copy_queries WHERE meme_id IN ($idList)")
+                // ast-grep-ignore: kt-no-raw-sql-interpolation -- comma-joined Long IDs only
                 db.execSQL("DELETE FROM vectors WHERE id IN ($idList)")
+                // ast-grep-ignore: kt-no-raw-sql-interpolation -- comma-joined Long IDs only
                 db.execSQL("DELETE FROM meme_search_fts WHERE rowid IN ($idList)")
+                // ast-grep-ignore: kt-no-raw-sql-interpolation -- comma-joined Long IDs only
                 db.execSQL("DELETE FROM memes WHERE id IN ($idList)")
                 db.setTransactionSuccessful()
             } finally {

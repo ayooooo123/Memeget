@@ -21,6 +21,7 @@ struct MemegetIosApp: App {
     @Environment(\.scenePhase) private var scenePhase
     init() {
         let engine = IosInferenceEngine()
+        // ast-grep-ignore: swift-no-force-try-cast -- app cannot boot without opening its SQLite library store
         let store = try! SqliteMemeStore(bridge: engine.bridge)
         let cloud = IosCloudAssistant(store: store)
         let coord = MemeLibraryCoordinator(store: store, engine: engine, cloud: cloud)

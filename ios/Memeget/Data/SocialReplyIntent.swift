@@ -73,6 +73,7 @@ public enum SocialReplyIntent {
 
     public static func wordTokens(_ text: String) -> [String] {
         let lower = text.lowercased()
+        // ast-grep-ignore: swift-no-force-try-cast -- compile-time constant alphanumeric token regex
         let regex = try! NSRegularExpression(pattern: "[a-z0-9]{2,}", options: [])
         let ns = lower as NSString
         var out: [String] = []

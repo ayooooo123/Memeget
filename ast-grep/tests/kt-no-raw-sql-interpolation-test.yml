@@ -1,0 +1,11 @@
+id: kt-no-raw-sql-interpolation
+valid:
+  - |
+    db.rawQuery("SELECT * FROM memes WHERE id = ?", arrayOf(id.toString()))
+  - |
+    db.execSQL("DELETE FROM memes WHERE id = ?", arrayOf<Any>(id))
+invalid:
+  - |
+    db.rawQuery("SELECT * FROM memes WHERE id = $id", null)
+  - |
+    db.execSQL("DELETE FROM memes WHERE id IN ($ids)")

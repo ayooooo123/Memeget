@@ -1,0 +1,16 @@
+id: kt-no-raw-sql-interpolation
+snapshots:
+  ? |
+    db.execSQL("DELETE FROM memes WHERE id IN ($ids)")
+  : labels:
+    - source: db.execSQL("DELETE FROM memes WHERE id IN ($ids)")
+      style: primary
+      start: 0
+      end: 50
+  ? |
+    db.rawQuery("SELECT * FROM memes WHERE id = $id", null)
+  : labels:
+    - source: db.rawQuery("SELECT * FROM memes WHERE id = $id", null)
+      style: primary
+      start: 0
+      end: 55

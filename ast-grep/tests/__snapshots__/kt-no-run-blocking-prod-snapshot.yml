@@ -1,0 +1,16 @@
+id: kt-no-run-blocking-prod
+snapshots:
+  ? |
+    fun load() = runBlocking { fetch() }
+  : labels:
+    - source: runBlocking { fetch() }
+      style: primary
+      start: 13
+      end: 36
+  ? |
+    fun load() = runBlocking(Dispatchers.IO) { fetch() }
+  : labels:
+    - source: runBlocking(Dispatchers.IO) { fetch() }
+      style: primary
+      start: 13
+      end: 52

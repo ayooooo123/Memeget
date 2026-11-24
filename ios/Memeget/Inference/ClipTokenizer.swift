@@ -36,6 +36,7 @@ public final class ClipTokenizer: @unchecked Sendable {
 
     private static let wordRegex: NSRegularExpression = {
         let pattern = "<\\|startoftext\\|>|<\\|endoftext\\|>|'s|'t|'re|'ve|'m|'ll|'d|[\\p{L}]+|[\\p{N}]|[^\\s\\p{L}\\p{N}]+"
+        // ast-grep-ignore: swift-no-force-try-cast -- compile-time constant tokenizer regex
         return try! NSRegularExpression(pattern: pattern, options: [])
     }()
 

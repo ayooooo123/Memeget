@@ -1,0 +1,35 @@
+included:
+  - ios/Memeget
+
+disabled_rules:
+  - line_length
+  - trailing_whitespace
+  - identifier_name
+  - type_name
+
+opt_in_rules:
+  - empty_count
+  - force_unwrapping
+
+force_try: error
+force_cast: error
+
+file_length:
+  warning: 500
+  error: 900
+  ignore_comment_only_lines: true
+
+function_body_length:
+  warning: 80
+  error: 140
+
+cyclomatic_complexity:
+  warning: 15
+  error: 25
+
+nesting:
+  type_level:
+    warning: 3
+  function_level:
+    warning: 4
+    error: 6
